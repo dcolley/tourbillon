@@ -1,20 +1,6 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
-
-const API_URL = () => process.env.INTERNAL_API_URL ?? 'http://localhost:3000';
-
-function headers(apiKey: string, runId?: string): Record<string, string> {
-  const h: Record<string, string> = {
-    Authorization: `Bearer ${apiKey}`,
-    'Content-Type': 'application/json',
-  };
-  if (runId) h['X-Paperclip-Run-Id'] = runId;
-  return h;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// TIER 1 — UNIVERSAL: every agent always receives these tools
-// ─────────────────────────────────────────────────────────────────────────────
+import { extractToolRuntimeContext, tracedAgentFetch } from './api-client';
 
 export const getIdentityTool = createTool({
   id: 'getIdentity',
@@ -22,11 +8,8 @@ export const getIdentityTool = createTool({
     'Get your agent identity, role, budget status, and chain of command. ' +
     'Call at start of heartbeat if not already in context.',
   inputSchema: z.object({}),
-  execute: async (_input, { context }) => {
-    const { apiKey } = context as { apiKey: string };
-    const res = await fetch(`${API_URL()}/api/agents/me`, {
-      headers: headers(apiKey),
-    });
+  execute: async (_inputData, { requestContext }) => {
+    const res = await tracedAgentFetch('getIdentity', requestContext, '/api/agents/me');
     if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
     return res.json();
   },
@@ -38,11 +21,8 @@ export const getInboxTool = createTool({
     'Get your compact assignment list. Returns todo, in_progress, in_review, ' +
     'and blocked tasks assigned to you. Use this to pick work at the start of a heartbeat.',
   inputSchema: z.object({}),
-  execute: async (_input, { context }) => {
-    const { apiKey } = context as { apiKey: string };
-    const res = await fetch(`${API_URL()}/api/agents/me/inbox-lite`, {
-      headers: headers(apiKey),
-    });
+  execute: async (_inputData, { requestContext }) => {
+    const res = await tracedAgentFetch('getInbox', requestContext, '/api/agents/me/inbox-lite');
     if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
     return res.json();
   },
@@ -56,11 +36,11 @@ export const checkoutIssueTool = createTool({
   inputSchema: z.object({
     issueId: z.string().describe('The issue UUID to checkout'),
   }),
-  execute: async ({ issueId }, { context }) => {
-    const { apiKey, runId, agentId } = context as { apiKey: string; runId: string; agentId: string };
-    const res = await fetch(`${API_URL()}/api/issues/${issueId}/checkout`, {
+  execute: async (inputData, { requestContext }) => {
+    const { issueId } = inputData;
+    const { agentId } = extractToolRuntimeContext(requestContext);
+    const res = await tracedAgentFetch('checkoutIssue', requestContext, `/api/issues/${issueId}/checkout`, {
       method: 'POST',
-      headers: headers(apiKey, runId),
       body: JSON.stringify({
         agentId,
         expectedStatuses: ['todo', 'backlog', 'blocked', 'in_review'],
@@ -80,11 +60,9 @@ export const getHeartbeatContextTool = createTool({
     'Get compact context for a task: state, ancestors, goal info, and comment cursor. ' +
     'Always call this before reading the full comment thread.',
   inputSchema: z.object({ issueId: z.string() }),
-  execute: async ({ issueId }, { context }) => {
-    const { apiKey } = context as { apiKey: string };
-    const res = await fetch(`${API_URL()}/api/issues/${issueId}/heartbeat-context`, {
-      headers: headers(apiKey),
-    });
+  execute: async (inputData, { requestContext }) => {
+    const { issueId } = inputData;
+    const res = await tracedAgentFetch('getHeartbeatContext', requestContext, `/api/issues/${issueId}/heartbeat-context`);
     if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
     return res.json();
   },
@@ -97,11 +75,12 @@ export const getCommentsTool = createTool({
     issueId: z.string(),
     after: z.string().optional().describe('Last seen comment ID for incremental fetch'),
   }),
-  execute: async ({ issueId, after }, { context }) => {
-    const { apiKey } = context as { apiKey: string };
-    const url = new URL(`${API_URL()}/api/issues/${issueId}/comments`);
-    if (after) { url.searchParams.set('after', after); url.searchParams.set('order', 'asc'); }
-    const res = await fetch(url.toString(), { headers: headers(apiKey) });
+  execute: async (inputData, { requestContext }) => {
+    const { issueId, after } = inputData;
+    const path = after
+      ? `/api/issues/${issueId}/comments?after=${encodeURIComponent(after)}&order=asc`
+      : `/api/issues/${issueId}/comments`;
+    const res = await tracedAgentFetch('getComments', requestContext, path);
     if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
     return res.json();
   },
@@ -123,13 +102,63 @@ export const updateIssueTool = createTool({
     assigneeUserId: z.string().optional(),
     blockedByIssueIds: z.array(z.string()).optional().describe('Replaces current blockers. Send [] to clear all.'),
   }),
-  execute: async ({ issueId, ...body }, { context }) => {
-    const { apiKey, runId } = context as { apiKey: string; runId: string };
-    const res = await fetch(`${API_URL()}/api/issues/${issueId}`, {
+  execute: async (inputData, { requestContext }) => {
+    const { issueId, ...body } = inputData;
+    const res = await tracedAgentFetch('updateIssue', requestContext, `/api/issues/${issueId}`, {
       method: 'PATCH',
-      headers: headers(apiKey, runId),
       body: JSON.stringify(body),
     });
+    if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
+    return res.json();
+  },
+});
+
+export const listGoalsTool = createTool({
+  id: 'listGoals',
+  description:
+    'List company goals with issue stats and needsAttention flag. ' +
+    'CEO: call when inbox is empty to find goals requiring planning or follow-up.',
+  inputSchema: z.object({
+    status: z
+      .enum(['active', 'completed', 'archived', 'all'])
+      .default('active')
+      .describe('Filter goals by status — default active'),
+  }),
+  execute: async (inputData, { requestContext }) => {
+    const { companyId } = extractToolRuntimeContext(requestContext);
+    if (!companyId) {
+      return { error: 'missing_company', message: 'companyId not present in tool runtime context' };
+    }
+    const query = inputData.status !== 'active' ? `?status=${encodeURIComponent(inputData.status)}` : '?status=active';
+    const res = await tracedAgentFetch(
+      'listGoals',
+      requestContext,
+      `/api/companies/${companyId}/goals${query}`
+    );
+    if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
+    return res.json();
+  },
+});
+
+export const getGoalDetailTool = createTool({
+  id: 'getGoalDetail',
+  description:
+    'Get full goal context: description, linked issues, stats, and needsAttention. ' +
+    'Call before decomposing a goal into tasks.',
+  inputSchema: z.object({
+    goalId: z.string().describe('Goal UUID'),
+  }),
+  execute: async (inputData, { requestContext }) => {
+    const { companyId } = extractToolRuntimeContext(requestContext);
+    if (!companyId) {
+      return { error: 'missing_company', message: 'companyId not present in tool runtime context' };
+    }
+    const { goalId } = inputData;
+    const res = await tracedAgentFetch(
+      'getGoalDetail',
+      requestContext,
+      `/api/companies/${companyId}/goals/${goalId}`
+    );
     if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
     return res.json();
   },
@@ -151,22 +180,25 @@ export const createSubtaskTool = createTool({
     billingCode: z.string().optional(),
     inheritExecutionWorkspaceFromIssueId: z.string().optional(),
   }),
-  execute: async (body, { context }) => {
-    const { apiKey, runId, companyId } = context as { apiKey: string; runId: string; companyId: string };
-    const res = await fetch(`${API_URL()}/api/companies/${companyId}/issues`, {
+  execute: async (inputData, { requestContext }) => {
+    const { companyId } = extractToolRuntimeContext(requestContext);
+    if (!companyId) {
+      return { error: 'missing_company', message: 'companyId not present in tool runtime context' };
+    }
+    const res = await tracedAgentFetch('createSubtask', requestContext, `/api/companies/${companyId}/issues`, {
       method: 'POST',
-      headers: headers(apiKey, runId),
-      body: JSON.stringify(body),
+      body: JSON.stringify(inputData),
     });
     if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
     return res.json();
   },
 });
 
-// Bundle export — Tier 1 tools
 export const CONTROL_PLANE_TOOLS = {
   getIdentityTool,
   getInboxTool,
+  listGoalsTool,
+  getGoalDetailTool,
   checkoutIssueTool,
   getHeartbeatContextTool,
   getCommentsTool,

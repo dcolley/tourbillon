@@ -8,7 +8,7 @@
  * Prototype: decode and trust the payload directly.
  */
 
-interface RunTokenPayload {
+export interface RunTokenPayload {
   runId: string;
   agentId: string;
   companyId: string;

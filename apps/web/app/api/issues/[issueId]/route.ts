@@ -1,13 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db, issues, activityLog } from '@paperclip-mastra/db';
+import { db, issues, activityLog } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
 import { validateRunToken } from '@/lib/auth/run-token';
+import { logAgentApiRequest, logAgentApiResponse, summarizeBody } from '@/lib/agent-api-trace';
 import { enqueueHeartbeat } from '@/lib/queue';
 
 export async function PATCH(
   req: NextRequest,
-  { params }: { params: { issueId: string } }
+  { params }: { params: Promise<{ issueId: string }> }
 ) {
+  const { issueId } = await params;
   const token = req.headers.get('authorization')?.replace('Bearer ', '');
   if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   const runCtx = validateRunToken(token);
@@ -22,9 +24,21 @@ export async function PATCH(
     blockedByIssueIds?: string[];
   };
 
-  const issue = await db.query.issues.findFirst({ where: eq(issues.id, params.issueId) });
-  if (!issue) return NextResponse.json({ error: 'Not found' }, { status: 404 });
-  if (issue.companyId !== runCtx.companyId) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+  logAgentApiRequest(`/api/issues/${issueId}`, 'PATCH', runCtx, {
+    issueId: issueId,
+    headerRunId: runId,
+    body: summarizeBody(body),
+  });
+
+  const issue = await db.query.issues.findFirst({ where: eq(issues.id, issueId) });
+  if (!issue) {
+    logAgentApiResponse(`/api/issues/${issueId}`, 'PATCH', runCtx, 404, { issueId: issueId });
+    return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  }
+  if (issue.companyId !== runCtx.companyId) {
+    logAgentApiResponse(`/api/issues/${issueId}`, 'PATCH', runCtx, 403, { issueId: issueId });
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+  }
 
   const updates: Record<string, unknown> = { updatedAt: new Date() };
   if (body.status) updates.status = body.status;
@@ -40,7 +54,7 @@ export async function PATCH(
     updates.executionAgentNameKey = null;
   }
 
-  const [updated] = await db.update(issues).set(updates).where(eq(issues.id, params.issueId)).returning();
+  const [updated] = await db.update(issues).set(updates).where(eq(issues.id, issueId)).returning();
 
   await db.insert(activityLog).values({
     companyId: runCtx.companyId,
@@ -48,7 +62,7 @@ export async function PATCH(
     actorId: runCtx.agentId,
     action: 'issue.updated',
     entityType: 'issue',
-    entityId: params.issueId,
+    entityId: issueId,
     details: { ...updates, comment: body.comment, runId },
   });
 
@@ -59,9 +73,18 @@ export async function PATCH(
       companyId: runCtx.companyId,
       invocationSource: 'assignment',
       wakeReason: 'assignment',
-      taskId: params.issueId,
+      taskId: issueId,
     });
   }
+
+  logAgentApiResponse(`/api/issues/${issueId}`, 'PATCH', runCtx, 200, {
+    issueId: issueId,
+    identifier: updated.identifier,
+    status: updated.status,
+    priority: updated.priority,
+    assigneeAgentId: updated.assigneeAgentId,
+    updates,
+  });
 
   return NextResponse.json(updated);
 }

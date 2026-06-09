@@ -1,5 +1,7 @@
+export * from './memory-keys';
 export * from './provider';
 export * from './agent-factory';
+export * from './tools/api-client';
 export * from './tools/control-plane-tools';
 export * from './tools/role-tools';
 export * from './workflows/approval-flow';

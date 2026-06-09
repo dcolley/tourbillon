@@ -1,7 +1,10 @@
 import { Worker, type Job } from 'bullmq';
-import { connection } from './redis';
+import { createConnection } from './redis';
+
+const workerConnection = createConnection();
 import { enqueueHeartbeat } from './heartbeat-queue';
-import { QUEUE_APPROVAL_WAKES } from '@paperclip-mastra/shared';
+import { QUEUE_APPROVAL_WAKES } from '@tourbillon/shared';
+import { createJobTracer } from './job-trace';
 
 interface ApprovalWakeJobData {
   approvalId: string;
@@ -14,12 +17,21 @@ interface ApprovalWakeJobData {
 export const approvalWakeWorker = new Worker<ApprovalWakeJobData>(
   QUEUE_APPROVAL_WAKES,
   async (job: Job<ApprovalWakeJobData>) => {
-    await enqueueHeartbeat({
-      agentId: job.data.agentId, companyId: job.data.companyId,
-      invocationSource: 'approval_resolved', wakeReason: 'approval_resolved',
-      approvalId: job.data.approvalId, approvalStatus: job.data.status,
-      linkedIssueIds: job.data.linkedIssueIds,
+    const { approvalId, agentId, status, companyId, linkedIssueIds } = job.data;
+    const tracer = createJobTracer('approval-wake', { jobId: job.id, agentId, companyId }, job);
+    tracer.info('processing approval wake', { approvalId, status, linkedIssueIds });
+
+    const { jobId: heartbeatJobId } = await enqueueHeartbeat({
+      agentId,
+      companyId,
+      invocationSource: 'approval_resolved',
+      wakeReason: 'approval_resolved',
+      approvalId,
+      approvalStatus: status,
+      linkedIssueIds,
     }, { deduplicate: false, priority: 1 });
+
+    tracer.info('heartbeat enqueued from approval wake', { heartbeatJobId });
   },
-  { connection, concurrency: 10 }
+  { connection: workerConnection, concurrency: 10 }
 );

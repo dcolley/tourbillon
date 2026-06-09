@@ -1,6 +1,6 @@
 # SKILL: Control Plane Operations
 
-This skill governs how you interact with the Paperclip-Mastra control plane. Follow every rule here precisely. Deviations cause duplicate work, budget overruns, and task conflicts.
+This skill governs how you interact with the Tourbillon control plane. Follow every rule here precisely. Deviations cause duplicate work, budget overruns, and task conflicts.
 
 ---
 
@@ -12,11 +12,40 @@ You wake, you work, you exit. Every heartbeat follows these 9 steps exactly:
 2. **Check budget** — If `spentMonthlyTokens >= budgetMonthlyTokens`, call `updateIssue` with status `blocked`, comment `Pausing: monthly token budget exhausted`, then EXIT
 3. **Fetch inbox** — Call `getInbox`. Review all `in_progress`, `in_review`, `todo`, and `blocked` items
 4. **Select task** — Priority: in_progress > in_review > critical/high todo > medium/low todo > blocked
-5. **Checkout** — Call `checkoutIssue`. If 409 → pick next task. If no tasks, EXIT cleanly
+5. **Checkout** — Call `checkoutIssue`. If 409 → pick next task. If no tasks:
+   - **CEO only:** run the Goal Review Fallback (§1a), then EXIT
+   - **All other roles:** EXIT cleanly
 6. **Understand context** — Call `getHeartbeatContext` for the checked-out issue. Then call `getComments` with `after: lastSeenCommentId`
 7. **Do work** — Act on the task. Use all available tools. Create subtasks to delegate. Update status and add a comment at every material checkpoint
 8. **Hand off or complete** — Set status to `done`, `in_review`, or `blocked`. Always include a comment explaining what is complete, what remains, and who acts next
 9. **EXIT** — The scheduler re-wakes you as needed. Do not poll or loop
+
+### §1a — CEO Goal Review Fallback (empty inbox only)
+
+When your inbox is empty and your role is `ceo`:
+
+1. Call `listGoals` with `status: active`
+2. For each goal where `needsAttention` is true, call `getGoalDetail`
+3. Apply **SKILL: Plan to Tasks** — identify gaps, create issues via `createIssue` (set `goalId`, assign via `listAgents`, use `blockedByIssueIds` for sequencing)
+4. Add a comment on each created issue summarizing the plan and next owner
+5. Do not create more than 15 issues per goal per heartbeat — break into phases if needed
+6. EXIT — assignment wakes will handle downstream agents
+
+Skip goals where `needsAttention` is false (work is already in progress).
+
+---
+
+## §1b — Context Sources (Three Lanes)
+
+| Lane | Tools | When |
+|---|---|---|
+| **Control plane (source of truth)** | `getInbox`, `getHeartbeatContext`, `getComments`, `updateIssue` | Every heartbeat — steps 3–8 |
+| **Mastra memory (private accelerator)** | Automatic — your turns persist per issue thread | Across heartbeats on the same task |
+| **Reference search** | MCP / web search tools | On demand during work — not for task history |
+
+**Task history lives in issue comments**, not in memory or RAG. Always write material decisions to comments so other agents can read them.
+
+At step 6: `getHeartbeatContext` returns `lastSeenCommentId`. Pass it to `getComments` as `after` for incremental fetch. Omit `after` only on cold start when you need the full thread.
 
 ---
 

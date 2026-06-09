@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db, issues } from '@paperclip-mastra/db';
+import { db, issues, type IssueStatus } from '@tourbillon/db';
 import { eq, and, inArray } from 'drizzle-orm';
 import { validateRunToken } from '@/lib/auth/run-token';
-import { ISSUE_STATUS_WORK_PRIORITY } from '@paperclip-mastra/shared';
+import { logAgentApiRequest, logAgentApiResponse } from '@/lib/agent-api-trace';
+import { ISSUE_STATUS_WORK_PRIORITY } from '@tourbillon/shared';
 
 export async function GET(req: NextRequest) {
   const token = req.headers.get('authorization')?.replace('Bearer ', '');
@@ -11,7 +12,9 @@ export async function GET(req: NextRequest) {
   const runCtx = validateRunToken(token);
   if (!runCtx) return NextResponse.json({ error: 'Invalid token' }, { status: 401 });
 
-  const workableStatuses = ['in_progress', 'in_review', 'todo', 'blocked'];
+  logAgentApiRequest('/api/agents/me/inbox-lite', 'GET', runCtx);
+
+  const workableStatuses: IssueStatus[] = ['in_progress', 'in_review', 'todo', 'blocked'];
 
   const myIssues = await db
     .select()
@@ -30,6 +33,12 @@ export async function GET(req: NextRequest) {
     const statusDiff = (ISSUE_STATUS_WORK_PRIORITY[a.status] ?? 99) - (ISSUE_STATUS_WORK_PRIORITY[b.status] ?? 99);
     if (statusDiff !== 0) return statusDiff;
     return (priorityOrder[a.priority] ?? 99) - (priorityOrder[b.priority] ?? 99);
+  });
+
+  logAgentApiResponse('/api/agents/me/inbox-lite', 'GET', runCtx, 200, {
+    issueCount: myIssues.length,
+    issueIds: myIssues.map((i) => i.id),
+    identifiers: myIssues.map((i) => i.identifier),
   });
 
   return NextResponse.json({

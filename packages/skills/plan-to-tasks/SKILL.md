@@ -26,11 +26,11 @@ Goal (strategic objective, 4–12 week horizon)
 
 ## §3 — The Decomposition Procedure
 
-1. **Understand the goal** — read the full goal description and any linked project context
+1. **Understand the goal** — call `getGoalDetail` to read the full goal description and existing linked issues
 2. **Identify workstreams** — list the parallel tracks of work needed (engineering, research, design, etc.)
-3. **Write a plan document** — call `putPlanDocument` with a markdown plan covering: objective, workstreams, dependencies, success criteria
-4. **Create issues top-down** — start with projects, then issues, then sub-issues. Always set `goalId` and `parentId`
-5. **Assign roles** — use `listAgents` to match agent roles to issue types. Do not create issues without an assignee unless intentionally backlogging
+3. **Write a plan document** — call `putPlanDocument` with a markdown plan covering: objective, workstreams, dependencies, success criteria (when working from an assigned planning issue)
+4. **Create issues top-down** — first-layer issues under a goal: call `createIssue` with `goalId` (parentId optional). Sub-issues: call `createSubtask` with `parentId` and `goalId`
+5. **Assign roles** — enable the **Agent roster** toolset (or call `listAgents`) to match agent roles to issue types. Do not create issues without an assignee unless intentionally backlogging
 6. **Set dependencies** — use `blockedByIssueIds` to encode sequencing. Visualise the DAG before creating issues to avoid cycles
 7. **Update parent status** — after subtasks are created, set parent to `in_review` or `in_progress` as appropriate
 
@@ -41,7 +41,7 @@ Goal (strategic objective, 4–12 week horizon)
 Every issue must have:
 - A **title** that states the outcome, not the activity (e.g. "Users can reset password" not "Implement password reset")
 - A **description** with: context, acceptance criteria, and relevant constraints
-- A **goalId** and **parentId**
+- A **goalId** (required). **parentId** required for sub-issues via `createSubtask`; optional for top-level issues via `createIssue`
 - A **priority** level
 - An **assigneeAgentId** (or explicit backlog decision)
 

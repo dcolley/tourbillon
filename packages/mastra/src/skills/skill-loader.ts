@@ -1,6 +1,6 @@
 import { readFile } from 'fs/promises';
 import path from 'path';
-import type { Agent as AgentRecord } from '@paperclip-mastra/db';
+import type { Agent as AgentRecord } from '@tourbillon/db';
 
 const SKILLS_DIR = path.join(process.cwd(), 'packages/skills');
 

@@ -6,7 +6,7 @@ services:
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: paperclip_mastra
+      POSTGRES_DB: tourbillon
     ports:
       - '5432:5432'
     volumes:
@@ -19,15 +19,15 @@ services:
     volumes:
       - redis_data:/data
 
-  # Optional: local web search (open-source, no API key needed)
-  searxng:
-    image: searxng/searxng:latest
-    ports:
-      - '8888:8080'
-    environment:
-      SEARXNG_SECRET: changeme-in-production
-    volumes:
-      - ./docker/searxng:/etc/searxng
+  # # Optional: local web search (open-source, no API key needed)
+  # searxng:
+  #   image: searxng/searxng:latest
+  #   ports:
+  #     - '8888:8080'
+  #   environment:
+  #     SEARXNG_SECRET: changeme-in-production
+  #   volumes:
+  #     - ./docker/searxng:/etc/searxng
 
 volumes:
   postgres_data:

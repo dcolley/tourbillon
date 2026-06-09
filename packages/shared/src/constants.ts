@@ -30,11 +30,43 @@ export const ROLE_DEFAULT_SKILLS: Record<string, string[]> = {
   designer: ['control-plane', 'para-memory'],
 };
 
+export const TOOLSET_CATALOG = [
+  {
+    id: 'roster',
+    label: 'Agent roster',
+    description: 'See other agents in the company (listAgents) — needed to assign work.',
+  },
+  {
+    id: 'comments',
+    label: 'Comments',
+    description: 'Post markdown comments on issues.',
+  },
+  {
+    id: 'planning',
+    label: 'Planning',
+    description: 'Plan documents and confirmation requests.',
+  },
+  {
+    id: 'approvals',
+    label: 'Approvals',
+    description: 'Submit governance approval requests.',
+  },
+  {
+    id: 'web-search',
+    label: 'Web search',
+    description: 'Search the web via MCP (when configured).',
+  },
+] as const;
+
+export type ToolsetId = (typeof TOOLSET_CATALOG)[number]['id'];
+
+export const VALID_TOOLSET_IDS = new Set<string>(TOOLSET_CATALOG.map((t) => t.id));
+
 export const ROLE_DEFAULT_TOOLSETS: Record<string, string[]> = {
-  ceo:      ['comments', 'approvals', 'agent-management', 'web-search'],
-  cto:      ['comments', 'approvals', 'planning'],
+  ceo:      ['comments', 'approvals', 'roster', 'planning', 'web-search'],
+  cto:      ['comments', 'approvals', 'planning', 'roster'],
   engineer: ['comments', 'planning'],
-  pm:       ['comments', 'approvals', 'planning', 'web-search'],
+  pm:       ['comments', 'approvals', 'planning', 'roster', 'web-search'],
   qa:       ['comments'],
   designer: ['comments'],
 };

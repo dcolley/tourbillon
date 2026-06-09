@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db, approvals } from '@paperclip-mastra/db';
+import { db, approvals } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
 import { enqueueApprovalWake } from '@/lib/queue';
 
 export async function POST(
   req: NextRequest,
-  { params }: { params: { approvalId: string } }
+  { params }: { params: Promise<{ approvalId: string }> }
 ) {
+  const { approvalId } = await params;
   // This route is called by human board members from the dashboard.
   // In production, add session-based auth check here.
   const body = await req.json().catch(() => null) ||
@@ -20,7 +21,7 @@ export async function POST(
   }
 
   const approval = await db.query.approvals.findFirst({
-    where: eq(approvals.id, params.approvalId),
+    where: eq(approvals.id, approvalId),
   });
 
   if (!approval) return NextResponse.json({ error: 'Not found' }, { status: 404 });
@@ -29,13 +30,13 @@ export async function POST(
   const [updated] = await db
     .update(approvals)
     .set({ status: decision, note, decidedAt: new Date(), updatedAt: new Date() })
-    .where(eq(approvals.id, params.approvalId))
+    .where(eq(approvals.id, approvalId))
     .returning();
 
   // Enqueue wake for the requesting agent
   if (approval.requestedByAgentId) {
     await enqueueApprovalWake({
-      approvalId: params.approvalId,
+      approvalId: approvalId,
       agentId: approval.requestedByAgentId,
       companyId: approval.companyId,
       status: decision,
@@ -46,7 +47,7 @@ export async function POST(
   // If dashboard form POST, redirect back
   const accept = req.headers.get('accept') ?? '';
   if (accept.includes('text/html')) {
-    return NextResponse.redirect(new URL('/dashboard/approvals', req.url));
+    return NextResponse.redirect(new URL('/approval', req.url));
   }
 
   return NextResponse.json(updated);

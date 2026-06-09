@@ -1,7 +1,12 @@
-import { db } from '@paperclip-mastra/db';
-import { agents, issues, heartbeatRuns } from '@paperclip-mastra/db';
-import { eq, count, desc } from 'drizzle-orm';
+import { db } from '@tourbillon/db';
+import { agents, issues } from '@tourbillon/db';
+import { eq, count } from 'drizzle-orm';
 import Link from 'next/link';
+import { PageHeader } from '@/components/page-header';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { StatusBadge } from '@/lib/status-badges';
+import { heartbeatJobHref, listHeartbeatRuns } from '@/lib/heartbeats';
 
 export default async function DashboardPage() {
   const [agentCount] = await db.select({ count: count() }).from(agents);
@@ -11,45 +16,55 @@ export default async function DashboardPage() {
     .from(issues)
     .where(eq(issues.status, 'in_progress'));
 
-  const recentRuns = await db
-    .select()
-    .from(heartbeatRuns)
-    .orderBy(desc(heartbeatRuns.startedAt))
-    .limit(10);
+  const recentRuns = await listHeartbeatRuns({ limit: 10 });
 
   return (
-    <div className="p-6 space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>
-        <p className="text-muted-foreground">Company overview</p>
-      </div>
+    <div className="space-y-6">
+      <PageHeader title="Dashboard" description="Company overview" />
 
-      {/* Stats */}
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid gap-4 sm:grid-cols-3">
         <StatCard label="Total Agents" value={agentCount.count} />
         <StatCard label="Total Issues" value={issueCount.count} />
         <StatCard label="In Progress" value={activeIssueCount.count} />
       </div>
 
-      {/* Recent heartbeat runs */}
-      <div>
-        <h2 className="text-lg font-semibold mb-3">Recent Heartbeats</h2>
-        <div className="border rounded-lg divide-y">
-          {recentRuns.length === 0 ? (
-            <p className="p-4 text-sm text-muted-foreground">No heartbeats yet.</p>
-          ) : recentRuns.map((run) => (
-            <div key={run.id} className="flex items-center justify-between p-3 text-sm">
-              <div className="space-y-0.5">
-                <p className="font-mono text-xs text-muted-foreground">{run.id.slice(0, 8)}...</p>
-                <p className="font-medium">{run.agentId.slice(0, 16)}...</p>
-              </div>
-              <div className="flex items-center gap-3">
-                <span className="text-xs text-muted-foreground">{run.invocationSource}</span>
-                <StatusBadge status={run.status} />
-              </div>
-            </div>
-          ))}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-semibold tracking-tight">Recent Heartbeats</h2>
+          {recentRuns.length > 0 && (
+            <Button variant="ghost" size="sm" render={<Link href="/jobs/heartbeat" />}>
+              View all
+            </Button>
+          )}
         </div>
+        <Card>
+          <CardContent className="p-0">
+            {recentRuns.length === 0 ? (
+              <p className="p-4 text-sm text-muted-foreground">No heartbeats yet.</p>
+            ) : (
+              <div className="divide-y">
+                {recentRuns.map(({ run, agent }) => (
+                  <Link
+                    key={run.id}
+                    href={heartbeatJobHref(run) ?? `/heartbeat/${run.id}`}
+                    className="flex items-center justify-between p-4 text-sm transition-colors hover:bg-muted/50"
+                  >
+                    <div className="min-w-0 space-y-0.5">
+                      <p className="truncate font-medium">
+                        {agent?.name ?? `${run.agentId.slice(0, 16)}…`}
+                      </p>
+                      <p className="font-mono text-xs text-muted-foreground">{run.id.slice(0, 8)}…</p>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-3">
+                      <span className="text-xs text-muted-foreground">{run.invocationSource}</span>
+                      <StatusBadge status={run.status} />
+                    </div>
+                  </Link>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
       </div>
     </div>
   );
@@ -57,23 +72,13 @@ export default async function DashboardPage() {
 
 function StatCard({ label, value }: { label: string; value: number }) {
   return (
-    <div className="border rounded-lg p-4">
-      <p className="text-sm text-muted-foreground">{label}</p>
-      <p className="text-3xl font-bold mt-1">{value}</p>
-    </div>
-  );
-}
-
-function StatusBadge({ status }: { status: string }) {
-  const styles: Record<string, string> = {
-    succeeded: 'bg-green-100 text-green-700',
-    failed: 'bg-red-100 text-red-700',
-    running: 'bg-blue-100 text-blue-700',
-    queued: 'bg-yellow-100 text-yellow-700',
-  };
-  return (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${styles[status] ?? 'bg-muted text-muted-foreground'}`}>
-      {status}
-    </span>
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-medium text-muted-foreground">{label}</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <p className="text-3xl font-bold tracking-tight">{value}</p>
+      </CardContent>
+    </Card>
   );
 }

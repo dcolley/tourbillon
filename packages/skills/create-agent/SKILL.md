@@ -41,6 +41,8 @@ Before calling the agents API:
 | qa | control-plane, para-memory | test standards |
 | designer | control-plane, para-memory | brand guidelines |
 
+**Reference docs** (architecture, brand, strategy) are Lane 3 — searched on demand via MCP or web search during work. They are not indexed into issue comment history and are not stored in Mastra memory. Attach MCP servers in Tier 3 when a role needs searchable reference corpora.
+
 ---
 
 ## §4 — Tool Tier Assignment by Role

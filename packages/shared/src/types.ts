@@ -29,7 +29,7 @@ export interface HeartbeatJobData {
 export type IssueStatus = 'backlog' | 'todo' | 'in_progress' | 'in_review' | 'done' | 'blocked' | 'cancelled';
 export type IssuePriority = 'critical' | 'high' | 'medium' | 'low';
 export type AgentStatus = 'active' | 'paused' | 'archived' | 'pending_approval';
-export type AdapterType = 'lmstudio' | 'process' | 'http';
+export type AdapterType = 'lmstudio' | 'ollama' | 'process' | 'http';
 
 export interface WakePayload {
   issue: {

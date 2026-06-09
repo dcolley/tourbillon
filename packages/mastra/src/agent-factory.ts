@@ -1,25 +1,50 @@
 import { Agent } from '@mastra/core/agent';
 import { Memory } from '@mastra/memory';
-import { PostgresStore } from '@mastra/pg';
-import type { Agent as AgentRecord } from '@paperclip-mastra/db';
-import { lmstudio, getModelId } from './provider';
+import { PostgresStore, PgVector } from '@mastra/pg';
+import type { Agent as AgentRecord } from '@tourbillon/db';
+import { formatTrace, modelProviderOverridesFromAgent, resolveModelProviderConfig } from '@tourbillon/shared';
+import { getEmbeddingModel, getLanguageModelForAgent } from './provider';
 import { CONTROL_PLANE_TOOLS } from './tools/control-plane-tools';
 import { ROLE_TOOLS } from './tools/role-tools';
 import { loadSkillsForAgent } from './skills/skill-loader';
 import { buildMCPTools } from './tools/mcp-tools';
+import { getInternalApiUrl } from './tools/api-client';
 
-const memory = new Memory({
-  storage: new PostgresStore({
-    connectionString: process.env.DATABASE_URL!,
-  }),
-  options: {
-    lastMessages: 20,
-    semanticRecall: {
-      topK: 5,
-      messageRange: { before: 2, after: 2 },
-    },
-  },
-});
+const globalForMastra = globalThis as unknown as {
+  mastraMemory?: Memory;
+};
+
+function getAgentMemory(): Memory {
+  if (!globalForMastra.mastraMemory) {
+    const connectionString = process.env.DATABASE_URL!;
+    const semanticRecallEnabled = process.env.MEMORY_SEMANTIC_RECALL === 'true';
+    const embeddingModel = process.env.MEMORY_EMBEDDING_MODEL;
+
+    const config: ConstructorParameters<typeof Memory>[0] = {
+      storage: new PostgresStore({ id: 'tourbillon-memory', connectionString }),
+      options: {
+        lastMessages: 20,
+        ...(semanticRecallEnabled && embeddingModel
+          ? {
+              semanticRecall: {
+                topK: 5,
+                messageRange: 2,
+                scope: 'resource' as const,
+              },
+            }
+          : {}),
+      },
+    };
+
+    if (semanticRecallEnabled && embeddingModel) {
+      config.vector = new PgVector({ id: 'tourbillon-vector', connectionString });
+      config.embedder = getEmbeddingModel(embeddingModel);
+    }
+
+    globalForMastra.mastraMemory = new Memory(config);
+  }
+  return globalForMastra.mastraMemory;
+}
 
 /**
  * Create a fully-equipped Mastra Agent for a given agent DB record.
@@ -50,12 +75,32 @@ export async function createAgentWithSkills(
   const skillContents = await loadSkillsForAgent(agentRecord);
   const systemPrompt = assembleSystemPrompt(agentRecord, skillContents);
 
+  const providerOverrides = modelProviderOverridesFromAgent(
+    agentRecord.adapterType,
+    agentRecord.adapterConfig,
+  );
+  const providerConfig = resolveModelProviderConfig(providerOverrides, agentRecord.modelId);
+
+  console.log(
+    formatTrace('agent-factory', { agentId: agentRecord.id, agentName: agentRecord.name }, 'agent ready', {
+      urlKey: agentRecord.urlKey,
+      modelId: agentRecord.modelId,
+      provider: providerConfig.provider,
+      apiMode: providerConfig.apiMode,
+      modelBaseURL: providerConfig.baseURL,
+      apiBase: getInternalApiUrl(),
+      toolCount: Object.keys(tools).length,
+      tools: Object.keys(tools),
+      skillCount: skillContents.length,
+    })
+  );
+
   return new Agent({
     name: agentRecord.name,
     instructions: systemPrompt,
-    model: lmstudio(getModelId(agentRecord.modelId)),
+    model: getLanguageModelForAgent(agentRecord),
     tools: tools as Parameters<typeof Agent>[0]['tools'],
-    memory,
+    memory: getAgentMemory(),
   });
 }
 

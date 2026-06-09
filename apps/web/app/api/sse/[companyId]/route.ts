@@ -1,4 +1,5 @@
 import { NextRequest } from 'next/server';
+import { getSseSubscribers } from '@/lib/sse';
 
 /**
  * Server-Sent Events endpoint for real-time dashboard updates.
@@ -7,20 +8,11 @@ import { NextRequest } from 'next/server';
  * Production: replace with Redis pub/sub.
  */
 
-const subscribers = new Map<string, Set<(data: string) => void>>();
-
-export function broadcastSSE(companyId: string, event: object): void {
-  const subs = subscribers.get(companyId);
-  if (!subs) return;
-  const message = `data: ${JSON.stringify(event)}\n\n`;
-  subs.forEach((send) => send(message));
-}
-
 export async function GET(
   req: NextRequest,
-  { params }: { params: { companyId: string } }
+  { params }: { params: Promise<{ companyId: string }> }
 ) {
-  const { companyId } = params;
+  const { companyId } = await params;
 
   const stream = new ReadableStream({
     start(controller) {
@@ -32,15 +24,12 @@ export async function GET(
         }
       };
 
-      if (!subscribers.has(companyId)) subscribers.set(companyId, new Set());
-      subscribers.get(companyId)!.add(send);
+      getSseSubscribers(companyId).add(send);
 
-      // Send initial connection event
       send(`data: ${JSON.stringify({ type: 'connected', companyId })}\n\n`);
 
-      // Cleanup on disconnect
       req.signal.addEventListener('abort', () => {
-        subscribers.get(companyId)?.delete(send);
+        getSseSubscribers(companyId).delete(send);
       });
     },
   });

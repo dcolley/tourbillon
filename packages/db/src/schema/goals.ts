@@ -1,10 +1,12 @@
 import { pgTable, text, timestamp } from 'drizzle-orm/pg-core';
 import { companies } from './companies';
+import { agents } from './agents';
 import { createId } from '../utils';
 
 export const goals = pgTable('goals', {
   id: text('id').primaryKey().$defaultFn(createId),
   companyId: text('company_id').notNull().references(() => companies.id, { onDelete: 'cascade' }),
+  ownerAgentId: text('owner_agent_id').references(() => agents.id, { onDelete: 'set null' }),
   title: text('title').notNull(),
   description: text('description'),
   status: text('status', { enum: ['active', 'completed', 'archived'] }).notNull().default('active'),

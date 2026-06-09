@@ -1,86 +1,232 @@
 import { Worker, type Job } from 'bullmq';
-import { connection } from './redis';
-import { db, agents, heartbeatRuns, companies, costEvents } from '@paperclip-mastra/db';
+import { createConnection } from './redis';
+
+const workerConnection = createConnection();
+import { db, agents, heartbeatRuns, companies, costEvents, issues } from '@tourbillon/db';
 import { eq, and, sql } from 'drizzle-orm';
-import { createAgentWithSkills } from '@paperclip-mastra/mastra';
-import type { HeartbeatJobData } from '@paperclip-mastra/shared';
-import { QUEUE_HEARTBEAT, DEFAULT_HEARTBEAT_TIMEOUT_SEC } from '@paperclip-mastra/shared';
+import { createAgentWithSkills, createHeartbeatRuntimeContext, getInternalApiUrl, buildHeartbeatMemoryKeys } from '@tourbillon/mastra';
+import type { HeartbeatJobData } from '@tourbillon/shared';
+import { QUEUE_HEARTBEAT, DEFAULT_HEARTBEAT_TIMEOUT_SEC, summarizeGenerateResult, resolveModelProviderConfig, modelProviderOverridesFromAgent } from '@tourbillon/shared';
 import { randomUUID } from 'crypto';
+import { createJobTracer } from './job-trace';
 
 const CONCURRENCY = parseInt(process.env.WORKER_CONCURRENCY ?? '1', 10);
 
 export const heartbeatWorker = new Worker<HeartbeatJobData>(
   QUEUE_HEARTBEAT,
   processHeartbeat,
-  { connection, concurrency: CONCURRENCY, stalledInterval: 30_000 }
+  { connection: workerConnection, concurrency: CONCURRENCY, stalledInterval: 30_000 }
 );
 
-heartbeatWorker.on('completed', (job) =>
-  console.log(`[heartbeat] done: agent=${job.data.agentId} job=${job.id}`)
-);
-heartbeatWorker.on('failed', (job, err) =>
-  console.error(`[heartbeat] failed: agent=${job?.data.agentId}`, err.message)
-);
+heartbeatWorker.on('completed', (job) => {
+  const tracer = createJobTracer('heartbeat', {
+    jobId: job.id,
+    agentId: job.data.agentId,
+    taskId: job.data.taskId,
+    wakeReason: job.data.wakeReason,
+  });
+  tracer.info('job completed');
+});
+
+heartbeatWorker.on('failed', (job, err) => {
+  const tracer = createJobTracer('heartbeat', {
+    jobId: job?.id,
+    agentId: job?.data.agentId,
+    taskId: job?.data.taskId,
+    wakeReason: job?.data.wakeReason,
+  });
+  tracer.error('job failed', { error: err.message });
+});
 
 async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
-  const { agentId, companyId, invocationSource, wakeReason, wakePayloadJson } = job.data;
+  const { agentId, companyId, invocationSource, wakeReason, taskId } = job.data;
+  const tracer = createJobTracer(
+    'heartbeat',
+    {
+      jobId: job.id,
+      agentId,
+      companyId,
+      taskId,
+      wakeReason,
+    },
+    job
+  );
+
+  tracer.info('processing heartbeat job', {
+    invocationSource,
+    apiBase: getInternalApiUrl(),
+    jobData: job.data,
+  });
 
   const agentRecord = await db.query.agents.findFirst({
     where: and(eq(agents.id, agentId), eq(agents.companyId, companyId)),
   });
   if (!agentRecord) throw new Error(`Agent ${agentId} not found`);
 
+  const agentTracer = tracer.child({ agentName: agentRecord.name });
+
   const company = await db.query.companies.findFirst({ where: eq(companies.id, companyId) });
   if (!company) throw new Error(`Company ${companyId} not found`);
 
-  if (agentRecord.status !== 'active') return;
-  if (company.status !== 'active') return;
-  if (agentRecord.spentMonthlyTokens >= agentRecord.budgetMonthlyTokens) return;
+  if (agentRecord.status !== 'active') {
+    agentTracer.warn('skipped: agent not active', { status: agentRecord.status });
+    return;
+  }
+  if (company.status !== 'active') {
+    agentTracer.warn('skipped: company not active', { status: company.status });
+    return;
+  }
+  if (agentRecord.spentMonthlyTokens >= agentRecord.budgetMonthlyTokens) {
+    agentTracer.warn('skipped: over token budget', {
+      spentMonthlyTokens: agentRecord.spentMonthlyTokens,
+      budgetMonthlyTokens: agentRecord.budgetMonthlyTokens,
+    });
+    return;
+  }
+
+  if (taskId) {
+    const assignedIssue = await db.query.issues.findFirst({ where: eq(issues.id, taskId) });
+    agentTracer.info('assignment wake target issue', {
+      taskId,
+      found: Boolean(assignedIssue),
+      identifier: assignedIssue?.identifier,
+      title: assignedIssue?.title,
+      status: assignedIssue?.status,
+      assigneeAgentId: assignedIssue?.assigneeAgentId,
+      assigneeMatchesAgent: assignedIssue?.assigneeAgentId === agentId,
+      checkoutRunId: assignedIssue?.checkoutRunId,
+    });
+    if (assignedIssue && assignedIssue.assigneeAgentId !== agentId) {
+      agentTracer.warn('taskId issue is assigned to a different agent', {
+        taskId,
+        expectedAgentId: agentId,
+        actualAssigneeAgentId: assignedIssue.assigneeAgentId,
+      });
+    }
+  }
 
   const runId = randomUUID();
+  const runTracer = agentTracer.child({ runId, taskId });
+
   await db.insert(heartbeatRuns).values({
-    id: runId, agentId, companyId, invocationSource, status: 'running',
-    contextSnapshot: { wakeReason, wakePayloadJson }, startedAt: new Date(),
+    id: runId,
+    agentId,
+    companyId,
+    invocationSource,
+    status: 'running',
+    contextSnapshot: {
+      wakeReason,
+      wakePayloadJson: job.data.wakePayloadJson,
+      taskId: job.data.taskId,
+      jobId: job.id,
+      agentName: agentRecord.name,
+      agentUrlKey: agentRecord.urlKey,
+    },
+    startedAt: new Date(),
   });
+  runTracer.info('heartbeat run created');
 
   const apiKey = buildRunScopedApiKey(runId, agentId, companyId);
   const agent = await createAgentWithSkills(agentRecord);
   const wakeMessage = buildWakeMessage(job.data);
   const timeoutMs = DEFAULT_HEARTBEAT_TIMEOUT_SEC * 1000;
 
+  const providerConfig = resolveModelProviderConfig(
+    modelProviderOverridesFromAgent(agentRecord.adapterType, agentRecord.adapterConfig),
+    agentRecord.modelId,
+  );
+
+  runTracer.info('invoking agent.generate', {
+    modelId: agentRecord.modelId ?? 'unknown',
+    provider: providerConfig.provider,
+    apiMode: providerConfig.apiMode,
+    modelBaseURL: providerConfig.baseURL,
+    timeoutSec: DEFAULT_HEARTBEAT_TIMEOUT_SEC,
+    wakeMessagePreview: wakeMessage.slice(0, 400),
+    runtimeContextKeys: ['apiKey', 'runId', 'agentId', 'companyId', 'taskId'],
+  });
+
+  const runtimeContext = createHeartbeatRuntimeContext({
+    apiKey,
+    runId,
+    agentId,
+    companyId,
+    taskId,
+  });
+
+  let memoryKeys = buildHeartbeatMemoryKeys({ companyId, agentId, issueId: taskId });
+  if (taskId) {
+    const issueForMemory = await db.query.issues.findFirst({ where: eq(issues.id, taskId) });
+    if (issueForMemory) {
+      memoryKeys = buildHeartbeatMemoryKeys({
+        companyId,
+        agentId,
+        issueId: taskId,
+        goalId: issueForMemory.goalId,
+        projectId: issueForMemory.projectId,
+      });
+    }
+  }
+
+  // runTracer.info('memory keys resolved', { ...memoryKeys });
+
   try {
     const result = await Promise.race([
       agent.generate(wakeMessage, {
-        runtimeContext: new Map([
-          ['apiKey', apiKey], ['runId', runId],
-          ['agentId', agentId], ['companyId', companyId],
-        ]),
+        requestContext: runtimeContext,
         maxSteps: 30,
+        memory: {
+          resource: memoryKeys.resource,
+          thread: memoryKeys.thread,
+        },
       }),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('Heartbeat timeout')), timeoutMs)
       ),
     ]);
 
+    // const summary = summarizeGenerateResult(result);
+    // runTracer.info('agent.generate finished', summary);
+
+    if (taskId) {
+      const issueAfter = await db.query.issues.findFirst({ where: eq(issues.id, taskId) });
+      runTracer.info('issue state after heartbeat', {
+        taskId,
+        found: Boolean(issueAfter),
+        status: issueAfter?.status,
+        checkoutRunId: issueAfter?.checkoutRunId,
+        checkoutMatchesRun: issueAfter?.checkoutRunId === runId,
+        updatedAt: issueAfter?.updatedAt?.toISOString(),
+      });
+    }
+
     if (result.usage) {
-      const total = (result.usage.promptTokens ?? 0) + (result.usage.completionTokens ?? 0);
+      const inputTokens = result.usage.inputTokens ?? result.usage.promptTokens ?? 0;
+      const outputTokens = result.usage.outputTokens ?? result.usage.completionTokens ?? 0;
+      const total = inputTokens + outputTokens;
       await db.insert(costEvents).values({
-        agentId, companyId, runId,
-        provider: 'lmstudio', model: agentRecord.modelId ?? 'unknown',
-        inputTokens: result.usage.promptTokens ?? 0,
-        outputTokens: result.usage.completionTokens ?? 0,
+        agentId,
+        companyId,
+        runId,
+        provider: providerConfig.provider,
+        model: agentRecord.modelId ?? 'unknown',
+        inputTokens,
+        outputTokens,
         costCents: 0,
       });
       await db.update(agents)
         .set({ spentMonthlyTokens: sql`${agents.spentMonthlyTokens} + ${total}` })
         .where(eq(agents.id, agentId));
+      runTracer.info('token usage recorded', { totalTokens: total });
     }
 
     await db.update(heartbeatRuns)
       .set({ status: 'succeeded', finishedAt: new Date() })
       .where(eq(heartbeatRuns.id, runId));
+    runTracer.info('heartbeat run succeeded');
   } catch (err) {
     const errorText = err instanceof Error ? err.message : String(err);
+    runTracer.error('heartbeat run failed', { error: errorText });
     await db.update(heartbeatRuns)
       .set({ status: 'failed', finishedAt: new Date(), errorText })
       .where(eq(heartbeatRuns.id, runId));

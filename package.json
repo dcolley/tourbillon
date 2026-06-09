@@ -11,16 +11,24 @@
     "db:studio": "pnpm --filter @tourbillon/db studio",
     "workers:dev": "pnpm --filter @tourbillon/scheduler dev",
     "type-check": "pnpm -r type-check",
-    "lint": "pnpm -r lint"
+    "lint": "pnpm -r lint",
+    "deps:check": "pnpm outdated -r",
+    "deps:update:safe": "pnpm up -r"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
-    "typescript": "^5.4.0",
-    "prettier": "^3.0.0",
-    "eslint": "^9.0.0"
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "prettier": "catalog:",
+    "eslint": "catalog:"
   },
   "engines": {
     "node": ">=20.0.0",
     "pnpm": ">=9.0.0"
+  },
+  "packageManager": "pnpm@10.12.4+sha512.5ea8b0deed94ed68691c9bad4c955492705c5eeb8a87ef86bc62c74a26b037b08ff9570f108b2e4dbd1dd1a9186fea925e527f141c648e85af45631074680184",
+  "pnpm": {
+    "overrides": {
+      "ioredis": "^5.11.0"
+    }
   }
 }

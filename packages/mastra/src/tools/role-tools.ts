@@ -1,15 +1,6 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
-
-const API_URL = () => process.env.INTERNAL_API_URL ?? 'http://localhost:3000';
-
-function headers(apiKey: string, runId?: string): Record<string, string> {
-  const h: Record<string, string> = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
-  if (runId) h['X-Paperclip-Run-Id'] = runId;
-  return h;
-}
-
-// ─── Tier 2: Role-gated tools ────────────────────────────────────────────────────────────
+import { extractToolRuntimeContext, tracedAgentFetch } from './api-client';
 
 const addCommentTool = createTool({
   id: 'addComment',
@@ -18,11 +9,10 @@ const addCommentTool = createTool({
     issueId: z.string(),
     body: z.string().describe('Markdown content of the comment'),
   }),
-  execute: async ({ issueId, body }, { context }) => {
-    const { apiKey, runId } = context as { apiKey: string; runId: string };
-    const res = await fetch(`${API_URL()}/api/issues/${issueId}/comments`, {
+  execute: async (inputData, { requestContext }) => {
+    const { issueId, body } = inputData;
+    const res = await tracedAgentFetch('addComment', requestContext, `/api/issues/${issueId}/comments`, {
       method: 'POST',
-      headers: headers(apiKey, runId),
       body: JSON.stringify({ body }),
     });
     if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
@@ -43,14 +33,14 @@ const createApprovalTool = createTool({
       risks: z.array(z.string()).optional(),
     }),
   }),
-  execute: async (body, { context }) => {
-    const { apiKey, runId, companyId, agentId } = context as {
-      apiKey: string; runId: string; companyId: string; agentId: string;
-    };
-    const res = await fetch(`${API_URL()}/api/companies/${companyId}/approvals`, {
+  execute: async (inputData, { requestContext }) => {
+    const { companyId, agentId } = extractToolRuntimeContext(requestContext);
+    if (!companyId || !agentId) {
+      return { error: 'missing_context', message: 'companyId/agentId not present in tool runtime context' };
+    }
+    const res = await tracedAgentFetch('createApproval', requestContext, `/api/companies/${companyId}/approvals`, {
       method: 'POST',
-      headers: headers(apiKey, runId),
-      body: JSON.stringify({ ...body, requestedByAgentId: agentId }),
+      body: JSON.stringify({ ...inputData, requestedByAgentId: agentId }),
     });
     if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
     return res.json();
@@ -61,11 +51,12 @@ const listAgentsTool = createTool({
   id: 'listAgents',
   description: 'List all agents in the company with their roles and current status. Use to find agent IDs for assignment.',
   inputSchema: z.object({}),
-  execute: async (_input, { context }) => {
-    const { apiKey, companyId } = context as { apiKey: string; companyId: string };
-    const res = await fetch(`${API_URL()}/api/companies/${companyId}/agents`, {
-      headers: headers(apiKey),
-    });
+  execute: async (_inputData, { requestContext }) => {
+    const { companyId } = extractToolRuntimeContext(requestContext);
+    if (!companyId) {
+      return { error: 'missing_company', message: 'companyId not present in tool runtime context' };
+    }
+    const res = await tracedAgentFetch('listAgents', requestContext, `/api/companies/${companyId}/agents`);
     if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
     return res.json();
   },
@@ -81,12 +72,40 @@ const requestConfirmationTool = createTool({
     question: z.string(),
     context: z.string().describe('Background context to help the reviewer decide'),
   }),
-  execute: async ({ issueId, question, context: ctx }, { context }) => {
-    const { apiKey, runId } = context as { apiKey: string; runId: string };
-    const res = await fetch(`${API_URL()}/api/issues/${issueId}/interactions`, {
+  execute: async (inputData, { requestContext }) => {
+    const { issueId, question, context: questionContext } = inputData;
+    const res = await tracedAgentFetch('requestConfirmation', requestContext, `/api/issues/${issueId}/interactions`, {
       method: 'POST',
-      headers: headers(apiKey, runId),
-      body: JSON.stringify({ type: 'request_confirmation', question, context: ctx }),
+      body: JSON.stringify({ type: 'request_confirmation', question, context: questionContext }),
+    });
+    if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
+    return res.json();
+  },
+});
+
+const createIssueTool = createTool({
+  id: 'createIssue',
+  description:
+    'Create a top-level issue linked to a goal. Use for first-layer tasks under a goal. ' +
+    'For sub-issues under an existing task, use createSubtask instead.',
+  inputSchema: z.object({
+    title: z.string(),
+    description: z.string().optional(),
+    goalId: z.string().describe('Goal ID — required for traceability'),
+    parentId: z.string().optional().describe('Optional parent issue ID for nested work'),
+    assigneeAgentId: z.string().optional(),
+    priority: z.enum(['critical', 'high', 'medium', 'low']).default('medium'),
+    blockedByIssueIds: z.array(z.string()).optional(),
+    billingCode: z.string().optional(),
+  }),
+  execute: async (inputData, { requestContext }) => {
+    const { companyId } = extractToolRuntimeContext(requestContext);
+    if (!companyId) {
+      return { error: 'missing_company', message: 'companyId not present in tool runtime context' };
+    }
+    const res = await tracedAgentFetch('createIssue', requestContext, `/api/companies/${companyId}/issues`, {
+      method: 'POST',
+      body: JSON.stringify(inputData),
     });
     if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
     return res.json();
@@ -101,11 +120,10 @@ const putPlanDocumentTool = createTool({
     body: z.string().describe('Markdown content of the plan'),
     baseRevisionId: z.string().nullable().default(null).describe('Pass current revision ID when updating existing plan'),
   }),
-  execute: async ({ issueId, body, baseRevisionId }, { context }) => {
-    const { apiKey, runId } = context as { apiKey: string; runId: string };
-    const res = await fetch(`${API_URL()}/api/issues/${issueId}/documents/plan`, {
+  execute: async (inputData, { requestContext }) => {
+    const { issueId, body, baseRevisionId } = inputData;
+    const res = await tracedAgentFetch('putPlanDocument', requestContext, `/api/issues/${issueId}/documents/plan`, {
       method: 'PUT',
-      headers: headers(apiKey, runId),
       body: JSON.stringify({ title: 'Plan', format: 'markdown', body, baseRevisionId }),
     });
     if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
@@ -113,12 +131,13 @@ const putPlanDocumentTool = createTool({
   },
 });
 
-// ─── Toolset registry: toolset ID → tools map ──────────────────────────────────────────
+const rosterTools = { listAgentsTool };
 
 export const ROLE_TOOLS: Record<string, Record<string, unknown>> = {
-  'comments':          { addCommentTool },
-  'approvals':         { createApprovalTool },
-  'agent-management':  { listAgentsTool },
-  'planning':          { putPlanDocumentTool, requestConfirmationTool },
-  'web-search':        {},  // populated at runtime by MCP — see mcp-tools.ts
+  roster: rosterTools,
+  'agent-management': rosterTools, // legacy alias
+  comments: { addCommentTool },
+  approvals: { createApprovalTool },
+  planning: { createIssueTool, putPlanDocumentTool, requestConfirmationTool },
+  'web-search': {},
 };
