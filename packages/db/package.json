@@ -1,0 +1,20 @@
+{
+  "name": "@paperclip-mastra/db",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "generate": "drizzle-kit generate",
+    "migrate": "drizzle-kit migrate",
+    "studio": "drizzle-kit studio",
+    "push": "drizzle-kit push"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.40.0",
+    "postgres": "^3.4.0"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.30.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
+  }
+}
