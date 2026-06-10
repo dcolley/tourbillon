@@ -3,27 +3,48 @@ import { notFound } from 'next/navigation';
 import { db, agents } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
 import { getProjectDetail } from '@/lib/projects';
+import { listGoalOptions } from '@/lib/goals';
 import { NewProjectIssueDialog } from '../new-project-issue-dialog';
+import { updateProjectAction } from '../actions';
+import { ProjectEditForm } from './project-edit-form';
 
 export default async function ProjectDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ projectId: string }>;
+  searchParams: Promise<{ saved?: string }>;
 }) {
   const { projectId } = await params;
-  const [detail, agentList] = await Promise.all([
+  const { saved } = await searchParams;
+
+  const [detail, agentList, goalList] = await Promise.all([
     getProjectDetail(projectId),
     db
-      .select({ id: agents.id, name: agents.name, urlKey: agents.urlKey })
+      .select({
+        id: agents.id,
+        name: agents.name,
+        urlKey: agents.urlKey,
+        role: agents.role,
+        title: agents.title,
+      })
       .from(agents)
       .where(eq(agents.status, 'active'))
       .orderBy(agents.name),
+    listGoalOptions(true),
   ]);
 
   if (!detail) notFound();
 
   const { project, goal, owner, issues, stats } = detail;
   const progressPct = stats.total > 0 ? Math.round((stats.done / stats.total) * 100) : 0;
+  const savedFlag = saved === '1';
+
+  // Include current goal even if no longer active
+  const goals =
+    project.goalId && !goalList.some((g) => g.id === project.goalId) && goal
+      ? [{ id: goal.id, title: goal.title }, ...goalList]
+      : goalList;
 
   return (
     <div className="p-6 space-y-6 max-w-3xl">
@@ -60,6 +81,19 @@ export default async function ProjectDetailPage({
           <NewProjectIssueDialog projectId={project.id} agents={agentList} />
         </div>
       </div>
+
+      {savedFlag && (
+        <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800 dark:border-green-900 dark:bg-green-950 dark:text-green-200">
+          Changes saved.
+        </div>
+      )}
+
+      <ProjectEditForm
+        project={project}
+        goals={goals}
+        agents={agentList}
+        action={updateProjectAction}
+      />
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
         <StatCard label="Issues" value={String(stats.total)} />

@@ -3,8 +3,8 @@ import { notFound, redirect } from 'next/navigation';
 import { db, agents, heartbeatRuns } from '@tourbillon/db';
 import { eq, desc } from 'drizzle-orm';
 import type { AgentRuntimeConfig } from '@tourbillon/shared';
-import { TOOLSET_CATALOG, modelProviderOverridesFromAgent, resolveModelProviderConfig } from '@tourbillon/shared';
-import { AgentValidationError, getAgentByUrlKey, updateAgentRuntimeConfig, updateAgentAssignedToolsets } from '@/lib/agents';
+import { TOOLSET_CATALOG, modelProviderOverridesFromAgent, resolveModelProviderConfig, isAgentBudgetEnforced, isAgentBudgetExceeded } from '@tourbillon/shared';
+import { AgentValidationError, getAgentByUrlKey, updateAgentRuntimeConfig, updateAgentAssignedToolsets, updateAgentBudget, updateAgentInstructions } from '@/lib/agents';
 import { heartbeatJobHref } from '@/lib/heartbeats';
 import { triggerAgentHeartbeat } from '@/lib/heartbeat';
 import { listRoutinesForAgent, setRoutineEnabled } from '@/lib/routines';
@@ -78,6 +78,47 @@ async function updateToolsets(formData: FormData) {
   redirect(`/agent/${urlKey}?saved=toolsets`);
 }
 
+async function updateBudgetConfig(formData: FormData) {
+  'use server';
+
+  const agentId = formData.get('agentId') as string;
+  const urlKey = formData.get('urlKey') as string;
+  const enforce = formData.get('enforceBudget') === 'on';
+  const budgetMonthlyTokens = parseInt(formData.get('budgetMonthlyTokens') as string, 10);
+
+  if (!Number.isInteger(budgetMonthlyTokens) || budgetMonthlyTokens < 0) {
+    redirect(`/agent/${urlKey}?error=${encodeURIComponent('Monthly token budget must be a non-negative integer.')}`);
+  }
+
+  try {
+    await updateAgentBudget(agentId, { budgetMonthlyTokens, enforce });
+  } catch (err) {
+    const message = err instanceof AgentValidationError ? err.message : 'Failed to update budget settings.';
+    redirect(`/agent/${urlKey}?error=${encodeURIComponent(message)}`);
+  }
+
+  redirect(`/agent/${urlKey}?saved=budget`);
+}
+
+async function updateInstructions(formData: FormData) {
+  'use server';
+
+  const agentId = formData.get('agentId') as string;
+  const urlKey = formData.get('urlKey') as string;
+
+  try {
+    await updateAgentInstructions(agentId, {
+      soulMd: formData.get('instructionsBundleSoulMd') as string,
+      agentsMd: formData.get('instructionsBundleAgentsMd') as string,
+    });
+  } catch (err) {
+    const message = err instanceof AgentValidationError ? err.message : 'Failed to update instructions.';
+    redirect(`/agent/${urlKey}?error=${encodeURIComponent(message)}`);
+  }
+
+  redirect(`/agent/${urlKey}?saved=instructions`);
+}
+
 async function toggleRoutine(formData: FormData) {
   'use server';
 
@@ -117,12 +158,14 @@ export default async function AgentDetailPage({
   ]);
 
   const runtime = agent.runtimeConfig as AgentRuntimeConfig;
+  const budgetEnforced = isAgentBudgetEnforced(runtime);
   const budgetUsedPct = agent.budgetMonthlyTokens
     ? Math.round((agent.spentMonthlyTokens / agent.budgetMonthlyTokens) * 100)
     : 0;
 
   const canRunHeartbeat =
-    agent.status === 'active' && agent.spentMonthlyTokens < agent.budgetMonthlyTokens;
+    agent.status === 'active' &&
+    !isAgentBudgetExceeded(agent.spentMonthlyTokens, agent.budgetMonthlyTokens, runtime);
   const error = errorParam ? decodeURIComponent(errorParam) : null;
   const providerConfig = resolveModelProviderConfig(
     modelProviderOverridesFromAgent(agent.adapterType, agent.adapterConfig),
@@ -173,6 +216,18 @@ export default async function AgentDetailPage({
       {saved === 'toolsets' && (
         <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
           Toolsets saved. Changes apply on the agent&apos;s next heartbeat.
+        </div>
+      )}
+
+      {saved === 'budget' && (
+        <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800 dark:border-green-900 dark:bg-green-950 dark:text-green-200">
+          Budget settings saved.
+        </div>
+      )}
+
+      {saved === 'instructions' && (
+        <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
+          Instructions saved. Changes apply on the agent&apos;s next heartbeat.
         </div>
       )}
 
@@ -284,6 +339,51 @@ export default async function AgentDetailPage({
       </section>
 
       <section className="border rounded-lg p-4 space-y-4">
+        <div>
+          <h2 className="text-sm font-semibold">Instructions</h2>
+          <p className="text-xs text-muted-foreground mt-1">
+            Injected into the system prompt on every heartbeat — SOUL first, then AGENTS, then assigned skills.
+          </p>
+        </div>
+        <form action={updateInstructions} className="space-y-4">
+          <input type="hidden" name="agentId" value={agent.id} />
+          <input type="hidden" name="urlKey" value={agent.urlKey} />
+          <div className="space-y-1.5">
+            <label htmlFor="instructionsBundleSoulMd" className="text-sm font-medium">
+              SOUL.md
+            </label>
+            <p className="text-xs text-muted-foreground">Personality, values, and communication style.</p>
+            <textarea
+              id="instructionsBundleSoulMd"
+              name="instructionsBundleSoulMd"
+              rows={12}
+              defaultValue={agent.instructionsBundleSoulMd ?? ''}
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <label htmlFor="instructionsBundleAgentsMd" className="text-sm font-medium">
+              AGENTS.md
+            </label>
+            <p className="text-xs text-muted-foreground">Role responsibilities, domain context, and constraints.</p>
+            <textarea
+              id="instructionsBundleAgentsMd"
+              name="instructionsBundleAgentsMd"
+              rows={12}
+              defaultValue={agent.instructionsBundleAgentsMd ?? ''}
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+            />
+          </div>
+          <button
+            type="submit"
+            className="inline-flex items-center justify-center rounded-md border px-3 py-1.5 text-sm font-medium hover:bg-muted"
+          >
+            Save instructions
+          </button>
+        </form>
+      </section>
+
+      <section className="border rounded-lg p-4 space-y-4">
         <h2 className="text-sm font-semibold">Automatic heartbeats</h2>
         <form action={updateHeartbeatConfig} className="space-y-4 text-sm">
           <input type="hidden" name="agentId" value={agent.id} />
@@ -359,7 +459,7 @@ export default async function AgentDetailPage({
         </section>
       )}
 
-      <section className="border rounded-lg p-4 space-y-3">
+      <section className="border rounded-lg p-4 space-y-4">
         <h2 className="text-sm font-semibold">Budget</h2>
         <div className="text-sm">
           <p className="font-medium">
@@ -367,12 +467,56 @@ export default async function AgentDetailPage({
           </p>
           <div className="mt-2 h-2 rounded-full bg-muted overflow-hidden">
             <div
-              className="h-full bg-primary rounded-full"
+              className={`h-full rounded-full ${budgetEnforced && budgetUsedPct >= 100 ? 'bg-destructive' : 'bg-primary'}`}
               style={{ width: `${Math.min(budgetUsedPct, 100)}%` }}
             />
           </div>
-          <p className="text-muted-foreground mt-1">{budgetUsedPct}% used this month</p>
+          <p className="text-muted-foreground mt-1">
+            {budgetUsedPct}% used this month
+            {!budgetEnforced && ' · enforcement off'}
+          </p>
         </div>
+
+        <form action={updateBudgetConfig} className="space-y-4 border-t pt-4 text-sm">
+          <input type="hidden" name="agentId" value={agent.id} />
+          <input type="hidden" name="urlKey" value={agent.urlKey} />
+
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              name="enforceBudget"
+              defaultChecked={budgetEnforced}
+              className="rounded border-input"
+            />
+            <span>Enforce monthly token budget</span>
+          </label>
+          <p className="text-xs text-muted-foreground -mt-2 pl-6">
+            When off, heartbeats run even if the agent is over its allocation. Usage is still tracked.
+          </p>
+
+          <div>
+            <label htmlFor="budgetMonthlyTokens" className="text-muted-foreground block mb-1">
+              Monthly token allocation
+            </label>
+            <input
+              id="budgetMonthlyTokens"
+              name="budgetMonthlyTokens"
+              type="number"
+              min={0}
+              step={1}
+              required
+              defaultValue={agent.budgetMonthlyTokens}
+              className="w-full max-w-xs rounded-md border border-input bg-background px-3 py-1.5 text-sm"
+            />
+          </div>
+
+          <button
+            type="submit"
+            className="inline-flex items-center justify-center rounded-md border px-3 py-1.5 text-sm font-medium hover:bg-muted"
+          >
+            Save budget settings
+          </button>
+        </form>
       </section>
 
       <section className="border rounded-lg divide-y">

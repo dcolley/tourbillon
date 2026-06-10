@@ -7,6 +7,7 @@ import { randomUUID } from 'crypto';
 import IORedis from 'ioredis';
 import type { HeartbeatJobData } from '@tourbillon/shared';
 import { formatTrace, QUEUE_HEARTBEAT, QUEUE_APPROVAL_WAKES } from '@tourbillon/shared';
+import { enrichHeartbeatJob } from './wake-payload';
 
 export type JobQueueName = typeof QUEUE_HEARTBEAT | typeof QUEUE_APPROVAL_WAKES;
 
@@ -100,7 +101,8 @@ export async function enqueueHeartbeat(
     }
   }
 
-  const job = await queue.add(`heartbeat:${data.agentId}`, data, { jobId, delay, priority });
+  const enriched = await enrichHeartbeatJob(data);
+  const job = await queue.add(`heartbeat:${enriched.agentId}`, enriched, { jobId, delay, priority });
 
   console.log(
     formatTrace('enqueue', {

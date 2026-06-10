@@ -20,6 +20,7 @@ export const agents = pgTable('agents', {
   // Model
   modelId: text('model_id').default('meta-llama/Llama-3.3-70B-Instruct'),
   // Instructions
+  instructionsBundleSoulMd: text('instructions_bundle_soul_md'),  // SOUL.md content
   instructionsBundleAgentsMd: text('instructions_bundle_agents_md'),  // AGENTS.md content
   instructionsPath: text('instructions_path'),  // optional file path override
   // Skills (slugs of SKILL.md files to inject at wake time)

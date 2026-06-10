@@ -57,7 +57,7 @@ export const checkoutIssueTool = createTool({
 export const getHeartbeatContextTool = createTool({
   id: 'getHeartbeatContext',
   description:
-    'Get compact context for a task: state, ancestors, goal info, and comment cursor. ' +
+    'Get compact context for a task: state, ancestors, goal info, latestCommentId, and commentCount. ' +
     'Always call this before reading the full comment thread.',
   inputSchema: z.object({ issueId: z.string() }),
   execute: async (inputData, { requestContext }) => {
@@ -70,10 +70,12 @@ export const getHeartbeatContextTool = createTool({
 
 export const getCommentsTool = createTool({
   id: 'getComments',
-  description: 'Get comments on a task. Use after parameter for incremental updates (preferred). Omit for full thread (cold start only).',
+  description:
+    'Get comments on a task. Omit after on cold start (assignment/reassignment). ' +
+    'For incremental updates within a run, pass latestId from a prior getComments response.',
   inputSchema: z.object({
     issueId: z.string(),
-    after: z.string().optional().describe('Last seen comment ID for incremental fetch'),
+    after: z.string().optional().describe('latestId from a prior getComments response (incremental only)'),
   }),
   execute: async (inputData, { requestContext }) => {
     const { issueId, after } = inputData;

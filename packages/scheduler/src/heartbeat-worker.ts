@@ -5,8 +5,9 @@ const workerConnection = createConnection();
 import { db, agents, heartbeatRuns, companies, costEvents, issues } from '@tourbillon/db';
 import { eq, and, sql } from 'drizzle-orm';
 import { createAgentWithSkills, createHeartbeatRuntimeContext, getInternalApiUrl, buildHeartbeatMemoryKeys } from '@tourbillon/mastra';
-import type { HeartbeatJobData } from '@tourbillon/shared';
-import { QUEUE_HEARTBEAT, DEFAULT_HEARTBEAT_TIMEOUT_SEC, summarizeGenerateResult, resolveModelProviderConfig, modelProviderOverridesFromAgent } from '@tourbillon/shared';
+import type { HeartbeatJobData, WakePayload } from '@tourbillon/shared';
+import { DEFAULT_HEARTBEAT_TIMEOUT_SEC, QUEUE_HEARTBEAT, summarizeGenerateResult, resolveModelProviderConfig, modelProviderOverridesFromAgent, isAgentBudgetExceeded } from '@tourbillon/shared';
+import type { AgentRuntimeConfig } from '@tourbillon/shared';
 import { randomUUID } from 'crypto';
 import { createJobTracer } from './job-trace';
 
@@ -76,16 +77,24 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
     agentTracer.warn('skipped: company not active', { status: company.status });
     return;
   }
-  if (agentRecord.spentMonthlyTokens >= agentRecord.budgetMonthlyTokens) {
+  if (
+    isAgentBudgetExceeded(
+      agentRecord.spentMonthlyTokens,
+      agentRecord.budgetMonthlyTokens,
+      agentRecord.runtimeConfig as AgentRuntimeConfig,
+    )
+  ) {
     agentTracer.warn('skipped: over token budget', {
       spentMonthlyTokens: agentRecord.spentMonthlyTokens,
       budgetMonthlyTokens: agentRecord.budgetMonthlyTokens,
+      enforceBudget: (agentRecord.runtimeConfig as AgentRuntimeConfig).budget?.enforce !== false,
     });
     return;
   }
 
+  let assignedIssue: Awaited<ReturnType<typeof db.query.issues.findFirst>> | undefined;
   if (taskId) {
-    const assignedIssue = await db.query.issues.findFirst({ where: eq(issues.id, taskId) });
+    assignedIssue = await db.query.issues.findFirst({ where: eq(issues.id, taskId) });
     agentTracer.info('assignment wake target issue', {
       taskId,
       found: Boolean(assignedIssue),
@@ -96,13 +105,6 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
       assigneeMatchesAgent: assignedIssue?.assigneeAgentId === agentId,
       checkoutRunId: assignedIssue?.checkoutRunId,
     });
-    if (assignedIssue && assignedIssue.assigneeAgentId !== agentId) {
-      agentTracer.warn('taskId issue is assigned to a different agent', {
-        taskId,
-        expectedAgentId: agentId,
-        actualAssigneeAgentId: assignedIssue.assigneeAgentId,
-      });
-    }
   }
 
   const runId = randomUUID();
@@ -125,6 +127,19 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
     startedAt: new Date(),
   });
   runTracer.info('heartbeat run created');
+
+  if (assignedIssue && assignedIssue.assigneeAgentId !== agentId) {
+    const errorText = `Task ${taskId} is assigned to agent ${assignedIssue.assigneeAgentId}, not ${agentId}`;
+    runTracer.warn('skipped: assignee mismatch', {
+      taskId,
+      expectedAgentId: agentId,
+      actualAssigneeAgentId: assignedIssue.assigneeAgentId,
+    });
+    await db.update(heartbeatRuns)
+      .set({ status: 'failed', finishedAt: new Date(), errorText })
+      .where(eq(heartbeatRuns.id, runId));
+    return;
+  }
 
   const apiKey = buildRunScopedApiKey(runId, agentId, companyId);
   const agent = await createAgentWithSkills(agentRecord);
@@ -234,13 +249,39 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
   }
 }
 
+const WAKE_COMMENTS_MAX_CHARS = 3000;
+
 function buildWakeMessage(data: HeartbeatJobData): string {
   const parts = [`Wake reason: ${data.wakeReason}`];
   if (data.taskId) parts.push(`Assigned task ID: ${data.taskId}`);
   if (data.wakePayloadJson) {
     try {
-      const payload = JSON.parse(data.wakePayloadJson);
-      if (payload.issue) parts.push(`Task: ${payload.issue.identifier} — ${payload.issue.title}`);
+      const payload = JSON.parse(data.wakePayloadJson) as WakePayload;
+      if (payload.issue) {
+        parts.push(
+          `Task: ${payload.issue.identifier} — ${payload.issue.title} (${payload.issue.status}, ${payload.issue.priority})`
+        );
+      }
+      if (payload.newComments?.length) {
+        const commentLines: string[] = ['\nRecent issue comments:'];
+        let chars = 0;
+        for (const c of payload.newComments) {
+          const line = `- [${c.createdAt}] ${c.authorName}: ${c.body}`;
+          if (chars + line.length > WAKE_COMMENTS_MAX_CHARS) {
+            commentLines.push('- … (truncated)');
+            break;
+          }
+          commentLines.push(line);
+          chars += line.length;
+        }
+        parts.push(commentLines.join('\n'));
+      }
+      if (payload.fallbackFetchNeeded) {
+        parts.push(
+          '\nFull comment history may be incomplete in this wake message. ' +
+            'After checkout, call getComments without `after` for the full thread.'
+        );
+      }
     } catch { /* ignore */ }
   }
   parts.push('\nBegin your heartbeat procedure. Follow SKILL: Control Plane Operations exactly.');

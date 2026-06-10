@@ -110,8 +110,12 @@ function assembleSystemPrompt(
 ): string {
   const parts: string[] = [];
 
-  if (agentRecord.instructionsBundleAgentsMd) {
-    parts.push(`## Your Identity and Role\n\n${agentRecord.instructionsBundleAgentsMd}`);
+  if (agentRecord.instructionsBundleSoulMd?.trim()) {
+    parts.push(`## Your Soul\n\n${agentRecord.instructionsBundleSoulMd.trim()}`);
+  }
+
+  if (agentRecord.instructionsBundleAgentsMd?.trim()) {
+    parts.push(`## Your Identity and Role\n\n${agentRecord.instructionsBundleAgentsMd.trim()}`);
   }
 
   for (const skill of skillContents) {

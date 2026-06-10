@@ -15,7 +15,7 @@ You wake, you work, you exit. Every heartbeat follows these 9 steps exactly:
 5. **Checkout** — Call `checkoutIssue`. If 409 → pick next task. If no tasks:
    - **CEO only:** run the Goal Review Fallback (§1a), then EXIT
    - **All other roles:** EXIT cleanly
-6. **Understand context** — Call `getHeartbeatContext` for the checked-out issue. Then call `getComments` with `after: lastSeenCommentId`
+6. **Understand context** — Call `getHeartbeatContext` for the checked-out issue. Then call `getComments` (omit `after` on cold start; see §1b)
 7. **Do work** — Act on the task. Use all available tools. Create subtasks to delegate. Update status and add a comment at every material checkpoint
 8. **Hand off or complete** — Set status to `done`, `in_review`, or `blocked`. Always include a comment explaining what is complete, what remains, and who acts next
 9. **EXIT** — The scheduler re-wakes you as needed. Do not poll or loop
@@ -45,7 +45,11 @@ Skip goals where `needsAttention` is false (work is already in progress).
 
 **Task history lives in issue comments**, not in memory or RAG. Always write material decisions to comments so other agents can read them.
 
-At step 6: `getHeartbeatContext` returns `lastSeenCommentId`. Pass it to `getComments` as `after` for incremental fetch. Omit `after` only on cold start when you need the full thread.
+At step 6: `getHeartbeatContext` returns `latestCommentId` (newest activity snapshot) and `commentCount`. Use these for orientation only.
+
+- **Cold start** (assignment, reassignment, first time on an issue, or wake payload has `fallbackFetchNeeded`): call `getComments` **without** `after` for the full thread.
+- **Incremental** (mid-heartbeat after you already fetched comments): call `getComments(after: latestId)` using `latestId` from your previous `getComments` response — not `latestCommentId` from heartbeat-context.
+- Wake payload may include recent comments; still call `getComments` without `after` when `fallbackFetchNeeded` is true.
 
 ---
 

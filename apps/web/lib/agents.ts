@@ -55,6 +55,14 @@ export interface CreateAgentInput {
   urlKey?: string;
   companyId?: string;
   reportsToId?: string | null;
+  instructionsBundleSoulMd?: string;
+  instructionsBundleAgentsMd?: string;
+}
+
+function normalizeInstructionField(value: string | undefined | null): string | null {
+  if (value == null) return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 export async function createAgent(input: CreateAgentInput): Promise<Agent> {
@@ -116,6 +124,8 @@ export async function createAgent(input: CreateAgentInput): Promise<Agent> {
       adapterType: defaultAgentAdapterType(),
       status: 'active',
       runtimeConfig: DEFAULT_RUNTIME_CONFIG,
+      instructionsBundleSoulMd: normalizeInstructionField(input.instructionsBundleSoulMd),
+      instructionsBundleAgentsMd: normalizeInstructionField(input.instructionsBundleAgentsMd),
     })
     .returning();
 
@@ -167,6 +177,66 @@ export async function updateAgentAssignedToolsets(
   const [updated] = await db
     .update(agents)
     .set({ assignedToolsets: unique, updatedAt: new Date() })
+    .where(eq(agents.id, agentId))
+    .returning();
+
+  return updated;
+}
+
+export async function updateAgentInstructions(
+  agentId: string,
+  input: { soulMd?: string; agentsMd?: string }
+): Promise<Agent> {
+  const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+  if (!agent) throw new AgentValidationError('Agent not found.');
+
+  const patch: {
+    instructionsBundleSoulMd?: string | null;
+    instructionsBundleAgentsMd?: string | null;
+    updatedAt: Date;
+  } = { updatedAt: new Date() };
+
+  if (input.soulMd !== undefined) {
+    patch.instructionsBundleSoulMd = normalizeInstructionField(input.soulMd);
+  }
+  if (input.agentsMd !== undefined) {
+    patch.instructionsBundleAgentsMd = normalizeInstructionField(input.agentsMd);
+  }
+
+  const [updated] = await db
+    .update(agents)
+    .set(patch)
+    .where(eq(agents.id, agentId))
+    .returning();
+
+  return updated;
+}
+
+export async function updateAgentBudget(
+  agentId: string,
+  input: { budgetMonthlyTokens: number; enforce: boolean },
+): Promise<Agent> {
+  const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+  if (!agent) throw new AgentValidationError('Agent not found.');
+
+  const budgetMonthlyTokens = input.budgetMonthlyTokens;
+  if (!Number.isInteger(budgetMonthlyTokens) || budgetMonthlyTokens < 0) {
+    throw new AgentValidationError('Monthly token budget must be a non-negative integer.');
+  }
+
+  const current = agent.runtimeConfig as AgentRuntimeConfig;
+  const runtimeConfig: AgentRuntimeConfig = {
+    ...current,
+    budget: { ...current.budget, enforce: input.enforce },
+  };
+
+  const [updated] = await db
+    .update(agents)
+    .set({
+      budgetMonthlyTokens,
+      runtimeConfig,
+      updatedAt: new Date(),
+    })
     .where(eq(agents.id, agentId))
     .returning();
 

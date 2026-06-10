@@ -133,6 +133,14 @@ export async function listIssueComments(
   };
 }
 
+export async function countIssueComments(
+  issueId: string,
+  companyId: string
+): Promise<number> {
+  const { comments } = await listIssueComments(issueId, companyId);
+  return comments.length;
+}
+
 export async function getLatestIssueActivityId(
   issueId: string,
   companyId: string

@@ -3,6 +3,8 @@ import { db, agents, companies } from '@tourbillon/db';
 import { eq, and } from 'drizzle-orm';
 import { validateRunToken } from '@/lib/auth/run-token';
 import { logAgentApiRequest, logAgentApiResponse } from '@/lib/agent-api-trace';
+import { isAgentBudgetEnforced, isAgentBudgetExceeded } from '@tourbillon/shared';
+import type { AgentRuntimeConfig } from '@tourbillon/shared';
 
 export async function GET(req: NextRequest) {
   const token = req.headers.get('authorization')?.replace('Bearer ', '');
@@ -20,12 +22,22 @@ export async function GET(req: NextRequest) {
 
   if (!agent) return NextResponse.json({ error: 'Not found' }, { status: 404 });
 
-  const budgetRatio = agent.spentMonthlyTokens / agent.budgetMonthlyTokens;
+  const runtime = agent.runtimeConfig as AgentRuntimeConfig;
+  const budgetEnforced = isAgentBudgetEnforced(runtime);
+  const budgetRatio = agent.budgetMonthlyTokens
+    ? agent.spentMonthlyTokens / agent.budgetMonthlyTokens
+    : 0;
+  const budgetExceeded = isAgentBudgetExceeded(
+    agent.spentMonthlyTokens,
+    agent.budgetMonthlyTokens,
+    runtime,
+  );
 
   logAgentApiResponse('/api/agents/me', 'GET', runCtx, 200, {
     agentName: agent.name,
     status: agent.status,
-    budgetExhausted: budgetRatio >= 1.0,
+    budgetEnforced,
+    budgetExhausted: budgetExceeded,
   });
 
   return NextResponse.json({
@@ -38,9 +50,10 @@ export async function GET(req: NextRequest) {
     reportsToName: agent.reportsTo?.name ?? null,
     budgetMonthlyTokens: agent.budgetMonthlyTokens,
     spentMonthlyTokens: agent.spentMonthlyTokens,
+    budgetEnforced,
     budgetRatio,
-    budgetWarning: budgetRatio >= 0.8,
-    budgetExhausted: budgetRatio >= 1.0,
+    budgetWarning: budgetEnforced && budgetRatio >= 0.8,
+    budgetExhausted: budgetExceeded,
     status: agent.status,
   });
 }

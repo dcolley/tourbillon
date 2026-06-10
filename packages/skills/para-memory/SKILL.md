@@ -22,7 +22,7 @@ Tourbillon uses three separate mechanisms. Do not confuse them.
 | Lane | Source | Purpose |
 |---|---|---|
 | **1 — Control plane** | `getInbox`, `getHeartbeatContext`, `getComments` | **Source of truth** for tasks and shared history. Issue comments are authoritative and visible to all agents. |
-| **2 — Mastra memory** | Automatic per heartbeat (`resource` = your agent; `thread` = issue or inbox) | **Private accelerator** — your last 20 turns on this issue, plus optional cross-issue recall within a goal/project. |
+| **2 — Mastra memory** | Automatic per heartbeat (`resource` = your agent; `thread` = issue:agentId or inbox) | **Private accelerator** — your last 20 turns on this issue, plus optional cross-issue recall within a goal/project. |
 | **3 — Reference search (RAG)** | MCP tools / web search, on demand during work | Large static docs (architecture, brand guides). **Not** used for task comment history. |
 
 ---
@@ -31,7 +31,7 @@ Tourbillon uses three separate mechanisms. Do not confuse them.
 
 Your Mastra memory is stored in PostgreSQL:
 - **Recency buffer**: last 20 messages on the current issue thread are always in context
-- **Thread isolation**: `thread` = issue ID (or inbox before checkout); `resource` = your agent namespace
+- **Thread isolation**: `thread` = `{issueId}:{yourAgentId}` (or inbox before checkout); `resource` = your agent namespace
 - **Semantic recall** (when enabled): top-5 relevant past messages across issues in the same goal/project scope — supplements, never replaces, issue comments
 
 Memory is **private to you**. Other agents cannot read it. Always write decisions and handoffs to issue comments.
@@ -59,7 +59,8 @@ Memory is **private to you**. Other agents cannot read it. Always write decision
 ## §5 — Memory Discipline
 
 - At orient: fetch `getHeartbeatContext` then `getComments` — comments beat memory for "what happened"
-- Use `lastSeenCommentId` from heartbeat context with `getComments(after: …)` for incremental updates
+- On cold start (assignment, reassignment, or `fallbackFetchNeeded` in wake payload): call `getComments` **without** `after` for the full thread
+- For incremental updates within a run: use `latestId` from a prior `getComments` response with `getComments(after: …)` — not `latestCommentId` from heartbeat-context at orient
 - Do not repeat context already in your system prompt
 - When starting work on a long-running goal, state what you remember and ask the issue thread to correct you
 - Summarise completed projects into a one-paragraph archive note as a comment on the goal issue before closing it

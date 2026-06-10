@@ -3,7 +3,7 @@ import { db, issues, goals, projects } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
 import { validateRunToken } from '@/lib/auth/run-token';
 import { logAgentApiRequest, logAgentApiResponse } from '@/lib/agent-api-trace';
-import { getLatestIssueActivityId } from '@/lib/issue-comments';
+import { countIssueComments, getLatestIssueActivityId } from '@/lib/issue-comments';
 
 export async function GET(
   req: NextRequest,
@@ -27,7 +27,10 @@ export async function GET(
   if (!issue) return NextResponse.json({ error: 'Not found' }, { status: 404 });
   if (issue.companyId !== runCtx.companyId) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
 
-  const lastSeenCommentId = await getLatestIssueActivityId(issueId, runCtx.companyId);
+  const [latestCommentId, commentCount] = await Promise.all([
+    getLatestIssueActivityId(issueId, runCtx.companyId),
+    countIssueComments(issueId, runCtx.companyId),
+  ]);
 
   // Resolve blocked-by titles for context
   const blockers = issue.blockedByIssueIds?.length
@@ -63,6 +66,7 @@ export async function GET(
       : null,
     project: issue.project ? { id: issue.project.id, title: issue.project.title } : null,
     blockedBy: blockers.filter((b) => issue.blockedByIssueIds.includes(b.id)),
-    lastSeenCommentId,
+    latestCommentId,
+    commentCount,
   });
 }

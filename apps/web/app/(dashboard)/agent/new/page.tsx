@@ -3,6 +3,7 @@ import { redirect } from 'next/navigation';
 import { db, agents } from '@tourbillon/db';
 import { desc } from 'drizzle-orm';
 import { AgentValidationError, createAgent } from '@/lib/agents';
+import { AgentInstructionFields } from './agent-instruction-fields';
 
 const ROLES = [
   { value: 'ceo', label: 'CEO' },
@@ -26,6 +27,8 @@ async function hireAgent(formData: FormData) {
       role: formData.get('role') as string,
       urlKey: (formData.get('urlKey') as string) || undefined,
       reportsToId: reportsToId || null,
+      instructionsBundleSoulMd: (formData.get('instructionsBundleSoulMd') as string) || undefined,
+      instructionsBundleAgentsMd: (formData.get('instructionsBundleAgentsMd') as string) || undefined,
     });
   } catch (err) {
     if (err instanceof AgentValidationError) {
@@ -146,6 +149,8 @@ export default async function NewAgentPage({
             </select>
           </div>
         )}
+
+        <AgentInstructionFields />
 
         <div className="flex gap-3 pt-2">
           <button

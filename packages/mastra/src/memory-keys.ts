@@ -15,7 +15,7 @@ export interface HeartbeatMemoryKeys {
  * Build Mastra memory resource/thread keys for a heartbeat run.
  *
  * - resource: agent namespace; widened to project or goal when semantic recall is enabled
- * - thread: per-issue conversation, or a shared inbox thread before checkout
+ * - thread: per-agent per-issue conversation, or a shared inbox thread before checkout
  */
 export function buildHeartbeatMemoryKeys(input: HeartbeatMemoryKeyInput): HeartbeatMemoryKeys {
   const { companyId, agentId, issueId, goalId, projectId } = input;
@@ -30,7 +30,9 @@ export function buildHeartbeatMemoryKeys(input: HeartbeatMemoryKeyInput): Heartb
     }
   }
 
-  const thread = issueId ?? `${companyId}:${agentId}:inbox`;
+  const thread = issueId
+    ? `${issueId}:${agentId}`
+    : `${companyId}:${agentId}:inbox`;
 
   return { resource, thread };
 }

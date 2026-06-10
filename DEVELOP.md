@@ -68,6 +68,8 @@ pnpm workers:dev
 
 **Queue monitor** — browse BullMQ jobs at **http://localhost:3002/jobs**. Requires Redis for stats; workers must be running for jobs to process (not just appear in the queue).
 
+**Bull Board (hidden)** — official queue inspector at **http://localhost:3002/bullmq** (not in sidebar). Requires Redis; complements `/jobs`.
+
 ### Automatic heartbeats
 
 On an agent detail page (`/agent/{urlKey}`), enable **Automatic heartbeats** and set an interval (minimum 60s). The agent-interval scheduler in `packages/scheduler` polls every 30s and enqueues timer wakes for active agents with `heartbeat.enabled` set.

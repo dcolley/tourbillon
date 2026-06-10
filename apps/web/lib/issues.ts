@@ -11,7 +11,7 @@ import {
   type ActivityLogEntry,
   type HeartbeatRun,
 } from '@tourbillon/db';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import type { IssuePriority, IssueStatus } from '@tourbillon/db';
 import { getOrCreateDefaultCompany } from './company';
 import { validateGoalId } from './goals';
@@ -399,6 +399,66 @@ export async function updateIssue(issueId: string, input: UpdateIssueInput): Pro
   }
 
   return updated;
+}
+
+export const ISSUE_LIST_PAGE_SIZE = 25;
+export const ISSUE_KANBAN_LIMIT = 500;
+
+export type IssueListRow = {
+  issue: Issue;
+  agent: { id: string; name: string; urlKey: string } | null;
+};
+
+export interface IssueListResult {
+  rows: IssueListRow[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+export async function listIssues(opts: {
+  statuses: readonly string[];
+  page?: number;
+  pageSize?: number;
+}): Promise<IssueListResult> {
+  const page = Math.max(0, opts.page ?? 0);
+  const pageSize = opts.pageSize ?? ISSUE_LIST_PAGE_SIZE;
+  const company = await getOrCreateDefaultCompany();
+  const statusList = opts.statuses as IssueStatus[];
+
+  const where = and(
+    eq(issues.companyId, company.id),
+    statusList.length > 0 ? inArray(issues.status, statusList) : undefined,
+  );
+
+  const [rows, countRow] = await Promise.all([
+    db
+      .select({
+        issue: issues,
+        agent: {
+          id: agents.id,
+          name: agents.name,
+          urlKey: agents.urlKey,
+        },
+      })
+      .from(issues)
+      .leftJoin(agents, eq(issues.assigneeAgentId, agents.id))
+      .where(where)
+      .orderBy(desc(issues.updatedAt))
+      .limit(pageSize)
+      .offset(page * pageSize),
+    db.select({ count: sql<number>`count(*)::int` }).from(issues).where(where),
+  ]);
+
+  return {
+    rows: rows.map((r) => ({
+      issue: r.issue,
+      agent: r.agent?.id ? r.agent : null,
+    })),
+    total: countRow[0]?.count ?? 0,
+    page,
+    pageSize,
+  };
 }
 
 export async function listIssueAgentOptions(): Promise<IssueAgentOption[]> {

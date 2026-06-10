@@ -66,6 +66,10 @@ export interface AgentRuntimeConfig {
   model?: {
     temperature?: number;
   };
+  budget?: {
+    /** When false, heartbeats and UI limits ignore the monthly token cap. Default: true. */
+    enforce?: boolean;
+  };
 }
 
 export const DEFAULT_RUNTIME_CONFIG: AgentRuntimeConfig = {
@@ -80,7 +84,24 @@ export const DEFAULT_RUNTIME_CONFIG: AgentRuntimeConfig = {
     heartbeatSec: 300,
     graceSec: 30,
   },
+  budget: {
+    enforce: true,
+  },
 };
+
+/** Whether monthly token budget limits apply for this agent. */
+export function isAgentBudgetEnforced(runtimeConfig: AgentRuntimeConfig): boolean {
+  return runtimeConfig.budget?.enforce !== false;
+}
+
+export function isAgentBudgetExceeded(
+  spentMonthlyTokens: number,
+  budgetMonthlyTokens: number,
+  runtimeConfig: AgentRuntimeConfig,
+): boolean {
+  if (!isAgentBudgetEnforced(runtimeConfig)) return false;
+  return spentMonthlyTokens >= budgetMonthlyTokens;
+}
 
 // ─── SSE Event Types ───────────────────────────────────────────────────────
 

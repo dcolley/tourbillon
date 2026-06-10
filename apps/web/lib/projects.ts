@@ -147,6 +147,97 @@ export async function createProject(input: CreateProjectInput): Promise<Project>
   return created;
 }
 
+export interface UpdateProjectInput {
+  title?: string;
+  description?: string | null;
+  status?: string;
+  goalId?: string;
+  ownerAgentId?: string | null;
+}
+
+export async function updateProject(projectId: string, input: UpdateProjectInput): Promise<Project> {
+  const project = await db.query.projects.findFirst({ where: eq(projects.id, projectId) });
+  if (!project) throw new ProjectValidationError('Project not found.');
+
+  const updates: Partial<Project> & { updatedAt: Date } = { updatedAt: new Date() };
+  const changed: Record<string, unknown> = {};
+
+  if (input.title !== undefined) {
+    const title = input.title.trim();
+    if (!title) throw new ProjectValidationError('Title is required.');
+    if (title !== project.title) {
+      updates.title = title;
+      changed.title = title;
+    }
+  }
+
+  if (input.description !== undefined) {
+    const description = input.description?.trim() || null;
+    if (description !== project.description) {
+      updates.description = description;
+      changed.description = description;
+    }
+  }
+
+  if (input.status !== undefined) {
+    const status = input.status as ProjectStatus;
+    if (!PROJECT_STATUSES.includes(status)) {
+      throw new ProjectValidationError('Invalid status.');
+    }
+    if (status !== project.status) {
+      updates.status = status;
+      changed.status = status;
+    }
+  }
+
+  if (input.goalId !== undefined) {
+    const goalId = input.goalId.trim();
+    if (!goalId) throw new ProjectValidationError('Goal is required.');
+    await validateGoalId(goalId, project.companyId);
+    if (goalId !== project.goalId) {
+      updates.goalId = goalId;
+      changed.goalId = goalId;
+    }
+  }
+
+  if (input.ownerAgentId !== undefined) {
+    const ownerAgentId = input.ownerAgentId || null;
+    if (ownerAgentId) {
+      const agent = await db.query.agents.findFirst({
+        where: and(eq(agents.id, ownerAgentId), eq(agents.companyId, project.companyId)),
+      });
+      if (!agent) throw new ProjectValidationError('Owner agent not found.');
+    }
+    if (ownerAgentId !== project.ownerAgentId) {
+      updates.ownerAgentId = ownerAgentId;
+      changed.ownerAgentId = ownerAgentId;
+    }
+  }
+
+  if (Object.keys(changed).length === 0) {
+    return project;
+  }
+
+  const [updated] = await db
+    .update(projects)
+    .set(updates)
+    .where(eq(projects.id, projectId))
+    .returning();
+
+  await db.insert(activityLog).values({
+    companyId: project.companyId,
+    actorType: 'user',
+    actorId: 'dashboard',
+    actorName: 'Dashboard',
+    action: 'project.updated',
+    entityType: 'project',
+    entityId: projectId,
+    details: changed,
+  });
+
+  return updated;
+}
+
 export async function getProjectDetail(projectId: string): Promise<ProjectDetail | null> {
   const row = await db
     .select({ project: projects, goal: goals, owner: agents })

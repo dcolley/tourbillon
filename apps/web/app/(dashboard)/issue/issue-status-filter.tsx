@@ -44,6 +44,19 @@ export function statusesForFilter(filter: IssueFilter): readonly string[] {
   }
 }
 
+export function issueListHref(filter: IssueFilter, page = 0): string {
+  const params = new URLSearchParams();
+  if (filter !== 'active') params.set('filter', filter);
+  if (page > 0) params.set('page', String(page));
+  const qs = params.toString();
+  return qs ? `/issue?${qs}` : '/issue';
+}
+
+export function parseIssuePage(value: string | undefined): number {
+  const n = parseInt(value ?? '0', 10);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+
 export function IssueStatusFilter({ current }: { current: IssueFilter }) {
   return (
     <div className="flex flex-wrap gap-2">
@@ -52,7 +65,7 @@ export function IssueStatusFilter({ current }: { current: IssueFilter }) {
           key={filter.id}
           variant={current === filter.id ? 'default' : 'outline'}
           size="sm"
-          render={<Link href={filter.id === 'active' ? '/issue' : `/issue?filter=${filter.id}`} />}
+          render={<Link href={issueListHref(filter.id)} />}
         >
           {filter.label}
         </Button>
