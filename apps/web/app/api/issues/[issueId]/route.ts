@@ -66,8 +66,12 @@ export async function PATCH(
     details: { ...updates, comment: body.comment, runId },
   });
 
-  // If status changed to in_review and has a new assignee, wake them
-  if (body.status === 'in_review' && body.assigneeAgentId && body.assigneeAgentId !== runCtx.agentId) {
+  const assigneeChanged =
+    body.assigneeAgentId !== undefined &&
+    body.assigneeAgentId !== issue.assigneeAgentId &&
+    body.assigneeAgentId !== runCtx.agentId;
+
+  if (assigneeChanged && body.assigneeAgentId) {
     await enqueueHeartbeat({
       agentId: body.assigneeAgentId,
       companyId: runCtx.companyId,

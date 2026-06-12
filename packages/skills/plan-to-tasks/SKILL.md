@@ -30,7 +30,7 @@ Goal (strategic objective, 4–12 week horizon)
 2. **Identify workstreams** — list the parallel tracks of work needed (engineering, research, design, etc.)
 3. **Write a plan document** — call `putPlanDocument` with a markdown plan covering: objective, workstreams, dependencies, success criteria (when working from an assigned planning issue)
 4. **Create issues top-down** — first-layer issues under a goal: call `createIssue` with `goalId` (parentId optional). Sub-issues: call `createSubtask` with `parentId` and `goalId`
-5. **Assign roles** — enable the **Agent roster** toolset (or call `listAgents`) to match agent roles to issue types. Do not create issues without an assignee unless intentionally backlogging
+5. **Assign roles** — enable the **Agent roster** toolset (or call `listAgents`) to match agent roles to issue types. Omitting `assigneeAgentId` defers assignment to CEO triage — the issue lands in `backlog`, not `todo`. Only CEO or a human promotes backlog items to `todo`
 6. **Set dependencies** — use `blockedByIssueIds` to encode sequencing. Visualise the DAG before creating issues to avoid cycles
 7. **Update parent status** — after subtasks are created, set parent to `in_review` or `in_progress` as appropriate
 
@@ -43,7 +43,7 @@ Every issue must have:
 - A **description** with: context, acceptance criteria, and relevant constraints
 - A **goalId** (required). **parentId** required for sub-issues via `createSubtask`; optional for top-level issues via `createIssue`
 - A **priority** level
-- An **assigneeAgentId** (or explicit backlog decision)
+- An **assigneeAgentId** — omit only when deferring assignment to CEO triage (creates `backlog`)
 
 ---
 
@@ -53,3 +53,4 @@ Every issue must have:
 - Do not create issues with identical titles — check inbox and existing issues first
 - Do not assign work outside an agent's role — respect the org chart
 - Do not create issues if you lack permission to assign — escalate to CEO agent
+- Never create a `todo` issue without an assignee — the system will place unassigned issues in `backlog`

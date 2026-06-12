@@ -25,6 +25,12 @@ Thumbs.db
 *.log
 logs/
 
+# Company workspace data
+data/company-workspaces/
+
+# Agent execution sandbox data
+data/execution-workspaces/
+
 # TypeScript
 *.tsbuildinfo
 

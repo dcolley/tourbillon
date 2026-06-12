@@ -8,14 +8,14 @@
 
 Tourbillon is an **open-source, locally-run AI agent operating system** — a platform for running a team of autonomous agents that plan, delegate, execute, and review work through a continuous heartbeat loop. It is a TypeScript monorepo built on:
 
-- **Next.js 16 + React 19** (web app and REST API)
+- **Next.js + React** (web app and REST API)
 - **Mastra** (agent runtime, tool calling, memory)
 - **BullMQ + Redis** (job scheduling and heartbeat queue)
 - **Drizzle ORM + PostgreSQL** (persistent state)
-- **LM Studio / Ollama** (local OpenAI-compatible LLM inference — no cloud required)
+- **LM Studio / Ollama / vLLM** (local OpenAI-compatible LLM inference — no cloud required)
 - **shadcn/ui + Tailwind CSS** (component library)
 
-The system is intentionally **fully local and open-source**. There are no mandatory cloud services. LLM calls go to LM Studio (default) or Ollama running on the same machine.
+The system is intentionally **fully local and open-source**. There are no mandatory cloud services. LLM calls go to LM Studio (default) or Ollama or vLLM running on the same machine.
 
 ---
 
@@ -142,6 +142,15 @@ Mastra memory is keyed per agent × issue (thread). Memory keys are built in `pa
 
 Memory persists across heartbeats for the same issue. **Task history is written to issue comments**, not memory — comments are the shared record of record that all agents can read.
 
+### Observability
+
+When `OBSERVABILITY_ENABLED=true`, Mastra tracing exports completed spans to the `agent_observability_events` table via a custom PostgreSQL exporter (`packages/mastra/src/observability/`). Spans are denormalized with `issue_id`, `goal_id`, `project_id`, and `agent_id` for fast filtering.
+
+- **Human/debug only** — issue comments remain the agent thread of record; observability is not written to comments or BullMQ logs as primary storage.
+- **UI** — `/observability` (global timeline) and the **Observability** tab on issue detail pages.
+- **Heartbeat runs** — `heartbeat_runs.trace_id` links a run to its Mastra trace.
+- Set `OBSERVABILITY_STORE_MODEL_CHUNKS=true` to persist per-token `MODEL_CHUNK` spans (high volume).
+
 ---
 
 ## Development Setup
@@ -216,6 +225,10 @@ All variables live in `.env` at the repo root. Key ones:
 | `BETTER_AUTH_URL` | Auth callback base URL | `http://localhost:3002` |
 | `MEMORY_SEMANTIC_RECALL` | Enable pgvector semantic memory | `false` |
 | `MEMORY_EMBEDDING_MODEL` | Embedding model for semantic memory | `text-embedding-nomic-embed-text-v1.5` |
+| `OBSERVABILITY_ENABLED` | Export Mastra spans to PostgreSQL | `false` |
+| `OBSERVABILITY_STORE_MODEL_CHUNKS` | Persist per-token MODEL_CHUNK spans | `false` |
+| `OBSERVABILITY_PREVIEW_CHARS` | Truncate span previews in list UI | `500` |
+| `OBSERVABILITY_MAX_PAYLOAD_BYTES` | Cap stored span payload JSON size | `32768` |
 
 ---
 
@@ -233,6 +246,7 @@ Schema files live in `packages/db/src/schema/`. The tables are:
 | `routines` | Cron-triggered task templates per agent |
 | `approvals` | Board approval requests from agents |
 | `heartbeat_runs` | Audit log of every agent.generate() invocation |
+| `agent_observability_events` | Denormalized Mastra span events for observability UI |
 | `cost_events` | Per-run token usage records |
 | `activity_log` | Human-readable event feed |
 | `skills` | DB-persisted skill records (supplements file-based skills) |

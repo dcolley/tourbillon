@@ -119,7 +119,9 @@ export async function createIssue(input: CreateIssueInput): Promise<Issue> {
     throw new IssueValidationError('Invalid priority.');
   }
 
-  const status = (input.status ?? 'todo') as IssueStatus;
+  const status = (
+    input.assigneeAgentId ? (input.status ?? 'todo') : 'backlog'
+  ) as IssueStatus;
   if (!STATUSES.includes(status)) {
     throw new IssueValidationError('Invalid status.');
   }

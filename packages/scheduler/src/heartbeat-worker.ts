@@ -4,9 +4,22 @@ import { createConnection } from './redis';
 const workerConnection = createConnection();
 import { db, agents, heartbeatRuns, companies, costEvents, issues } from '@tourbillon/db';
 import { eq, and, sql } from 'drizzle-orm';
-import { createAgentWithSkills, createHeartbeatRuntimeContext, getInternalApiUrl, buildHeartbeatMemoryKeys } from '@tourbillon/mastra';
+import {
+  createAgentWithSkills,
+  createHeartbeatRuntimeContext,
+  flushObservability,
+  getInternalApiUrl,
+  buildHeartbeatMemoryKeys,
+} from '@tourbillon/mastra';
 import type { HeartbeatJobData, WakePayload } from '@tourbillon/shared';
-import { DEFAULT_HEARTBEAT_TIMEOUT_SEC, QUEUE_HEARTBEAT, summarizeGenerateResult, resolveModelProviderConfig, modelProviderOverridesFromAgent, isAgentBudgetExceeded } from '@tourbillon/shared';
+import {
+  DEFAULT_HEARTBEAT_TIMEOUT_SEC,
+  QUEUE_HEARTBEAT,
+  resolveModelProviderConfig,
+  modelProviderOverridesFromAgent,
+  isAgentBudgetExceeded,
+  isObservabilityEnabled,
+} from '@tourbillon/shared';
 import type { AgentRuntimeConfig } from '@tourbillon/shared';
 import { randomUUID } from 'crypto';
 import { createJobTracer } from './job-trace';
@@ -142,7 +155,9 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
   }
 
   const apiKey = buildRunScopedApiKey(runId, agentId, companyId);
-  const agent = await createAgentWithSkills(agentRecord);
+  const agent = await createAgentWithSkills(agentRecord, {
+    allowedMcpServerIds: company.allowedMcpServerIds ?? [],
+  });
   const wakeMessage = buildWakeMessage(job.data);
   const timeoutMs = DEFAULT_HEARTBEAT_TIMEOUT_SEC * 1000;
 
@@ -161,27 +176,28 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
     runtimeContextKeys: ['apiKey', 'runId', 'agentId', 'companyId', 'taskId'],
   });
 
+  const issueForTask = taskId
+    ? await db.query.issues.findFirst({ where: eq(issues.id, taskId) })
+    : undefined;
+
   const runtimeContext = createHeartbeatRuntimeContext({
     apiKey,
     runId,
     agentId,
     companyId,
     taskId,
+    goalId: issueForTask?.goalId ?? undefined,
+    projectId: issueForTask?.projectId ?? undefined,
+    jobId: job.id ?? undefined,
   });
 
-  let memoryKeys = buildHeartbeatMemoryKeys({ companyId, agentId, issueId: taskId });
-  if (taskId) {
-    const issueForMemory = await db.query.issues.findFirst({ where: eq(issues.id, taskId) });
-    if (issueForMemory) {
-      memoryKeys = buildHeartbeatMemoryKeys({
-        companyId,
-        agentId,
-        issueId: taskId,
-        goalId: issueForMemory.goalId,
-        projectId: issueForMemory.projectId,
-      });
-    }
-  }
+  const memoryKeys = buildHeartbeatMemoryKeys({
+    companyId,
+    agentId,
+    issueId: taskId,
+    goalId: issueForTask?.goalId ?? undefined,
+    projectId: issueForTask?.projectId ?? undefined,
+  });
 
   // runTracer.info('memory keys resolved', { ...memoryKeys });
 
@@ -194,6 +210,31 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
           resource: memoryKeys.resource,
           thread: memoryKeys.thread,
         },
+        ...(isObservabilityEnabled()
+          ? {
+              tracingOptions: {
+                metadata: {
+                  issueId: taskId,
+                  goalId: issueForTask?.goalId ?? undefined,
+                  projectId: issueForTask?.projectId ?? undefined,
+                  heartbeatRunId: runId,
+                  jobId: job.id,
+                  companyId,
+                  agentId,
+                },
+                tags: taskId ? [`issue:${taskId}`] : [],
+                requestContextKeys: [
+                  'runId',
+                  'agentId',
+                  'companyId',
+                  'taskId',
+                  'goalId',
+                  'projectId',
+                  'jobId',
+                ],
+              },
+            }
+          : {}),
       }),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('Heartbeat timeout')), timeoutMs)
@@ -235,13 +276,31 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
       runTracer.info('token usage recorded', { totalTokens: total });
     }
 
-    await db.update(heartbeatRuns)
-      .set({ status: 'succeeded', finishedAt: new Date() })
-      .where(eq(heartbeatRuns.id, runId));
-    runTracer.info('heartbeat run succeeded');
+    const runUpdates: { status: 'succeeded'; finishedAt: Date; traceId?: string } = {
+      status: 'succeeded',
+      finishedAt: new Date(),
+    };
+    if (typeof result.traceId === 'string' && result.traceId.length > 0) {
+      runUpdates.traceId = result.traceId;
+    }
+
+    await db.update(heartbeatRuns).set(runUpdates).where(eq(heartbeatRuns.id, runId));
+
+    if (isObservabilityEnabled()) {
+      await flushObservability();
+    }
+
+    runTracer.info('heartbeat run succeeded', {
+      traceId: runUpdates.traceId,
+    });
   } catch (err) {
     const errorText = err instanceof Error ? err.message : String(err);
     runTracer.error('heartbeat run failed', { error: errorText });
+
+    if (isObservabilityEnabled()) {
+      await flushObservability().catch(() => undefined);
+    }
+
     await db.update(heartbeatRuns)
       .set({ status: 'failed', finishedAt: new Date(), errorText })
       .where(eq(heartbeatRuns.id, runId));

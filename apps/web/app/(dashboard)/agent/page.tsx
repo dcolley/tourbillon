@@ -4,13 +4,23 @@ import Link from 'next/link';
 import { PageHeader } from '@/components/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
-import { StatusBadge } from '@/lib/status-badges';
+import { AgentListRow } from './agent-list-row';
 
-export default async function AgentsPage() {
+export default async function AgentsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ error?: string }>;
+}) {
+  const { error } = await searchParams;
   const allAgents = await db.select().from(agents).orderBy(desc(agents.createdAt));
 
   return (
     <div className="space-y-6">
+      {error ? (
+        <p className="rounded-md border border-destructive/50 bg-destructive/10 px-4 py-2 text-sm text-destructive">
+          {error}
+        </p>
+      ) : null}
       <PageHeader
         title="Agents"
         description="Your AI workforce"
@@ -27,25 +37,7 @@ export default async function AgentsPage() {
           ) : (
             <div className="divide-y">
               {allAgents.map((agent) => (
-                <Link
-                  key={agent.id}
-                  href={`/agent/${agent.urlKey}`}
-                  className="flex items-center justify-between p-4 transition-colors hover:bg-muted/50"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary/10 text-sm font-bold text-primary">
-                      {agent.name.charAt(0)}
-                    </div>
-                    <div>
-                      <p className="font-medium">{agent.name}</p>
-                      <p className="text-sm text-muted-foreground">{agent.title}</p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-4 text-sm text-muted-foreground">
-                    <span className="capitalize">{agent.role}</span>
-                    <StatusBadge status={agent.status} />
-                  </div>
-                </Link>
+                <AgentListRow key={agent.id} agent={agent} />
               ))}
             </div>
           )}

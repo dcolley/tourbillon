@@ -166,11 +166,115 @@ export const getGoalDetailTool = createTool({
   },
 });
 
+export const listWorkspaceFilesTool = createTool({
+  id: 'listWorkspaceFiles',
+  description:
+    'List files and folders in the company shared workspace. ' +
+    'Use during work to discover reference docs (start with resources/).',
+  inputSchema: z.object({
+    path: z.string().optional().describe('Relative directory path, default root'),
+    recursive: z.boolean().optional().describe('List nested entries recursively'),
+  }),
+  execute: async (inputData, { requestContext }) => {
+    const { companyId } = extractToolRuntimeContext(requestContext);
+    if (!companyId) {
+      return { error: 'missing_company', message: 'companyId not present in tool runtime context' };
+    }
+    const params = new URLSearchParams();
+    if (inputData.path) params.set('path', inputData.path);
+    if (inputData.recursive) params.set('recursive', 'true');
+    const query = params.toString();
+    const res = await tracedAgentFetch(
+      'listWorkspaceFiles',
+      requestContext,
+      `/api/companies/${companyId}/workspace${query ? `?${query}` : ''}`
+    );
+    if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
+    return res.json();
+  },
+});
+
+export const readWorkspaceFileTool = createTool({
+  id: 'readWorkspaceFile',
+  description:
+    'Read a text file from the company shared workspace. ' +
+    'Path is relative to the workspace root (e.g. resources/brand-guide.md).',
+  inputSchema: z.object({
+    path: z.string().describe('Relative file path within the company workspace'),
+  }),
+  execute: async (inputData, { requestContext }) => {
+    const { companyId } = extractToolRuntimeContext(requestContext);
+    if (!companyId) {
+      return { error: 'missing_company', message: 'companyId not present in tool runtime context' };
+    }
+    const res = await tracedAgentFetch(
+      'readWorkspaceFile',
+      requestContext,
+      `/api/companies/${companyId}/workspace/file?path=${encodeURIComponent(inputData.path)}`
+    );
+    if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
+    return res.json();
+  },
+});
+
+export const writeWorkspaceFileTool = createTool({
+  id: 'writeWorkspaceFile',
+  description:
+    'Create or update a text file in the company shared workspace. ' +
+    'Comment on the issue when the write affects the current task.',
+  inputSchema: z.object({
+    path: z.string().describe('Relative file path within the company workspace'),
+    content: z.string().describe('UTF-8 text content'),
+  }),
+  execute: async (inputData, { requestContext }) => {
+    const { companyId } = extractToolRuntimeContext(requestContext);
+    if (!companyId) {
+      return { error: 'missing_company', message: 'companyId not present in tool runtime context' };
+    }
+    const res = await tracedAgentFetch(
+      'writeWorkspaceFile',
+      requestContext,
+      `/api/companies/${companyId}/workspace/file`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(inputData),
+      }
+    );
+    if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
+    return res.json();
+  },
+});
+
+export const deleteWorkspaceFileTool = createTool({
+  id: 'deleteWorkspaceFile',
+  description:
+    'Delete a file or empty directory from the company shared workspace. ' +
+    'Prefer moving material to archives/ over deleting.',
+  inputSchema: z.object({
+    path: z.string().describe('Relative path to delete'),
+  }),
+  execute: async (inputData, { requestContext }) => {
+    const { companyId } = extractToolRuntimeContext(requestContext);
+    if (!companyId) {
+      return { error: 'missing_company', message: 'companyId not present in tool runtime context' };
+    }
+    const res = await tracedAgentFetch(
+      'deleteWorkspaceFile',
+      requestContext,
+      `/api/companies/${companyId}/workspace/file?path=${encodeURIComponent(inputData.path)}`,
+      { method: 'DELETE' }
+    );
+    if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
+    return res.json();
+  },
+});
+
 export const createSubtaskTool = createTool({
   id: 'createSubtask',
   description:
     'Create a child issue to delegate work to another agent. ' +
-    'Always set parentId and goalId — no orphan tasks allowed.',
+    'Always set parentId and goalId — no orphan tasks allowed. ' +
+    'assigneeAgentId is required for work to start; omit only to defer assignment to CEO (creates backlog).',
   inputSchema: z.object({
     title: z.string(),
     description: z.string().optional(),
@@ -205,5 +309,9 @@ export const CONTROL_PLANE_TOOLS = {
   getHeartbeatContextTool,
   getCommentsTool,
   updateIssueTool,
+  listWorkspaceFilesTool,
+  readWorkspaceFileTool,
+  writeWorkspaceFileTool,
+  deleteWorkspaceFileTool,
   createSubtaskTool,
 };

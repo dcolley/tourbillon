@@ -1,9 +1,13 @@
 import { db, companies, type Company } from '@tourbillon/db';
+import { ensureCompanyWorkspace } from '@tourbillon/shared';
 import { eq } from 'drizzle-orm';
 
 export async function getOrCreateDefaultCompany(): Promise<Company> {
   const existing = await db.query.companies.findFirst();
-  if (existing) return existing;
+  if (existing) {
+    await ensureCompanyWorkspace(existing.id);
+    return existing;
+  }
 
   const [created] = await db
     .insert(companies)
@@ -15,6 +19,7 @@ export async function getOrCreateDefaultCompany(): Promise<Company> {
     })
     .returning();
 
+  await ensureCompanyWorkspace(created.id);
   return created;
 }
 

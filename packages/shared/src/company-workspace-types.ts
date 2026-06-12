@@ -1,0 +1,52 @@
+export const WORKSPACE_MAX_TEXT_BYTES = 1_048_576; // 1 MB
+export const WORKSPACE_MAX_UPLOAD_BYTES = 10_485_760; // 10 MB
+
+export const WORKSPACE_PARA_DIRS = ['projects', 'areas', 'resources', 'archives'] as const;
+
+export const WORKSPACE_README = `# Company workspace
+
+Shared files for all agents in this company. Use control-plane workspace tools.
+
+- \`resources/\` — reference docs (brand, architecture, standards)
+- \`projects/\` — active initiative material
+- \`areas/\` — ongoing playbooks and responsibilities
+- \`archives/\` — completed material
+
+Task thread of record: issue comments. Task plans: \`putPlanDocument\`.
+`;
+
+export type WorkspaceEntryType = 'file' | 'directory';
+
+export interface WorkspaceEntry {
+  name: string;
+  path: string;
+  type: WorkspaceEntryType;
+  size: number | null;
+  updatedAt: string;
+}
+
+export class WorkspacePathError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WorkspacePathError';
+  }
+}
+
+export class WorkspaceSizeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WorkspaceSizeError';
+  }
+}
+
+const TEXT_EDITABLE_EXTENSIONS = new Set(['.md', '.txt', '.json', '.yaml', '.yml', '.csv']);
+
+export function isTextEditablePath(relativePath: string): boolean {
+  const dot = relativePath.lastIndexOf('.');
+  if (dot === -1) return false;
+  return TEXT_EDITABLE_EXTENSIONS.has(relativePath.slice(dot).toLowerCase());
+}
+
+export function isMarkdownPath(relativePath: string): boolean {
+  return relativePath.toLowerCase().endsWith('.md');
+}

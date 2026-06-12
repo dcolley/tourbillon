@@ -4,7 +4,8 @@ import { db, agents, heartbeatRuns } from '@tourbillon/db';
 import { eq, desc } from 'drizzle-orm';
 import type { AgentRuntimeConfig } from '@tourbillon/shared';
 import { TOOLSET_CATALOG, modelProviderOverridesFromAgent, resolveModelProviderConfig, isAgentBudgetEnforced, isAgentBudgetExceeded } from '@tourbillon/shared';
-import { AgentValidationError, getAgentByUrlKey, updateAgentRuntimeConfig, updateAgentAssignedToolsets, updateAgentBudget, updateAgentInstructions } from '@/lib/agents';
+import { AgentValidationError, getAgentByUrlKey, updateAgentRuntimeConfig, updateAgentAssignedToolsets, updateAgentBudget, updateAgentInstructions, updateAgentModel, updateAgentProfile } from '@/lib/agents';
+import { AgentModelForm } from './agent-model-form';
 import { heartbeatJobHref } from '@/lib/heartbeats';
 import { triggerAgentHeartbeat } from '@/lib/heartbeat';
 import { listRoutinesForAgent, setRoutineEnabled } from '@/lib/routines';
@@ -100,6 +101,45 @@ async function updateBudgetConfig(formData: FormData) {
   redirect(`/agent/${urlKey}?saved=budget`);
 }
 
+async function updateProfile(formData: FormData) {
+  'use server';
+
+  const agentId = formData.get('agentId') as string;
+  const currentUrlKey = formData.get('currentUrlKey') as string;
+  const reportsToRaw = formData.get('reportsToId') as string;
+
+  let updated;
+  try {
+    updated = await updateAgentProfile(agentId, {
+      name: formData.get('name') as string,
+      urlKey: formData.get('urlKey') as string,
+      reportsToId: reportsToRaw || null,
+    });
+  } catch (err) {
+    const message = err instanceof AgentValidationError ? err.message : 'Failed to update agent profile.';
+    redirect(`/agent/${currentUrlKey}?error=${encodeURIComponent(message)}`);
+  }
+
+  redirect(`/agent/${updated.urlKey}?saved=profile`);
+}
+
+async function updateModel(formData: FormData) {
+  'use server';
+
+  const agentId = formData.get('agentId') as string;
+  const urlKey = formData.get('urlKey') as string;
+  const modelId = formData.get('modelId') as string;
+
+  try {
+    await updateAgentModel(agentId, modelId);
+  } catch (err) {
+    const message = err instanceof AgentValidationError ? err.message : 'Failed to update model.';
+    redirect(`/agent/${urlKey}?error=${encodeURIComponent(message)}`);
+  }
+
+  redirect(`/agent/${urlKey}?saved=model`);
+}
+
 async function updateInstructions(formData: FormData) {
   'use server';
 
@@ -143,11 +183,13 @@ export default async function AgentDetailPage({
   const agent = await getAgentByUrlKey(urlKey);
   if (!agent) notFound();
 
-  const [manager, directReports, recentRuns, agentRoutines] = await Promise.all([
-    agent.reportsToId
-      ? db.query.agents.findFirst({ where: eq(agents.id, agent.reportsToId) })
-      : Promise.resolve(null),
+  const [directReports, companyAgents, recentRuns, agentRoutines] = await Promise.all([
     db.select().from(agents).where(eq(agents.reportsToId, agent.id)),
+    db
+      .select({ id: agents.id, name: agents.name, urlKey: agents.urlKey, title: agents.title })
+      .from(agents)
+      .where(eq(agents.companyId, agent.companyId))
+      .orderBy(agents.name),
     db
       .select()
       .from(heartbeatRuns)
@@ -231,55 +273,133 @@ export default async function AgentDetailPage({
         </div>
       )}
 
+      {saved === 'profile' && (
+        <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
+          Agent profile saved.
+        </div>
+      )}
+
+      {saved === 'model' && (
+        <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
+          Model saved. Changes apply on the agent&apos;s next heartbeat.
+        </div>
+      )}
+
       {error && (
         <div className="rounded-md border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm text-destructive">
           {error}
         </div>
       )}
 
-      <section className="grid grid-cols-2 gap-4">
-        <DetailCard label="Role" value={agent.role} />
-        <DetailCard label="Agent ID" value={agent.urlKey} mono />
-        <DetailCard label="Model" value={agent.modelId ?? '—'} mono />
-        <DetailCard label="Provider" value={providerConfig.provider} />
-        <DetailCard label="API mode" value={providerConfig.apiMode} />
-        <DetailCard label="Adapter" value={agent.adapterType} />
+      <section className="border rounded-lg p-4 space-y-4">
+        <div>
+          <h2 className="text-sm font-semibold">Profile</h2>
+          <p className="text-xs text-muted-foreground mt-1">Name, URL slug, and reporting line.</p>
+        </div>
+        <form action={updateProfile} className="space-y-4">
+          <input type="hidden" name="agentId" value={agent.id} />
+          <input type="hidden" name="currentUrlKey" value={agent.urlKey} />
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <label htmlFor="agent-name" className="text-sm font-medium">
+                Name
+              </label>
+              <input
+                id="agent-name"
+                name="name"
+                type="text"
+                required
+                defaultValue={agent.name}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label htmlFor="agent-url-key" className="text-sm font-medium">
+                Agent ID
+              </label>
+              <input
+                id="agent-url-key"
+                name="urlKey"
+                type="text"
+                required
+                defaultValue={agent.urlKey}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+              />
+              <p className="text-xs text-muted-foreground">
+                URL slug — <span className="font-mono">/agent/{agent.urlKey}</span>. Changing this
+                only updates the link; issues, heartbeats, and other records stay tied to the same
+                internal agent.
+              </p>
+            </div>
+          </div>
+          <div className="space-y-1.5 max-w-md">
+            <label htmlFor="agent-reports-to" className="text-sm font-medium">
+              Reports to
+            </label>
+            <select
+              id="agent-reports-to"
+              name="reportsToId"
+              defaultValue={agent.reportsToId ?? ''}
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+            >
+              <option value="">None</option>
+              {companyAgents
+                .filter((a) => a.id !== agent.id)
+                .map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name} ({a.title})
+                  </option>
+                ))}
+            </select>
+          </div>
+          <button
+            type="submit"
+            className="inline-flex items-center justify-center rounded-md border px-3 py-1.5 text-sm font-medium hover:bg-muted"
+          >
+            Save profile
+          </button>
+        </form>
+        {directReports.length > 0 && (
+          <div className="border-t pt-4 text-sm">
+            <p className="text-muted-foreground mb-2">Direct reports</p>
+            <ul className="space-y-1">
+              {directReports.map((report) => (
+                <li key={report.id}>
+                  <Link href={`/agent/${report.urlKey}`} className="font-medium hover:underline">
+                    {report.name}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </section>
 
-      <section className="border rounded-lg p-4 space-y-3">
-        <h2 className="text-sm font-semibold">Org chart</h2>
-        <dl className="grid grid-cols-2 gap-3 text-sm">
-          <div>
-            <dt className="text-muted-foreground">Reports to</dt>
-            <dd className="font-medium mt-0.5">
-              {manager ? (
-                <Link href={`/agent/${manager.urlKey}`} className="hover:underline">
-                  {manager.name}
-                </Link>
-              ) : (
-                '—'
-              )}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-muted-foreground">Direct reports</dt>
-            <dd className="font-medium mt-0.5">
-              {directReports.length === 0 ? (
-                '—'
-              ) : (
-                <ul className="space-y-1">
-                  {directReports.map((report) => (
-                    <li key={report.id}>
-                      <Link href={`/agent/${report.urlKey}`} className="hover:underline">
-                        {report.name}
-                      </Link>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </dd>
-          </div>
-        </dl>
+      <section className="border rounded-lg p-4 space-y-4">
+        <div>
+          <h2 className="text-sm font-semibold">Model</h2>
+          <p className="text-xs text-muted-foreground mt-1">
+            LLM used on heartbeats. Provider and adapter come from env / agent configuration.
+          </p>
+        </div>
+        <div className="grid grid-cols-2 gap-4 text-sm">
+          <DetailCard label="Provider" value={providerConfig.provider} />
+          <DetailCard label="API mode" value={providerConfig.apiMode} />
+          <DetailCard label="Adapter" value={agent.adapterType} />
+        </div>
+        <AgentModelForm
+          agentId={agent.id}
+          urlKey={agent.urlKey}
+          initialModelId={agent.modelId ?? providerConfig.defaultModel}
+          provider={providerConfig.provider}
+          baseURL={providerConfig.baseURL}
+          updateModel={updateModel}
+        />
+      </section>
+
+      <section className="grid grid-cols-2 gap-4">
+        <DetailCard label="Role" value={agent.role} />
+        <DetailCard label="Title" value={agent.title} />
       </section>
 
       <section className="border rounded-lg p-4 space-y-4">

@@ -1,20 +1,21 @@
 import { MCPClient } from '@mastra/mcp';
+import { ensureCompanyWorkspace, getCompanyWorkspaceDir } from '@tourbillon/shared/company-workspace';
 
 // ─── Tier 3: Capability-gated MCP tools ────────────────────────────────────────────────────
 //
 // MCP servers are opt-in per agent via agent.mcpServerIds.
-// Company policy is enforced in the heartbeat worker before calling this.
+// Company policy is enforced via allowedMcpServerIds before calling this.
 
 const mcpClientCache = new Map<string, MCPClient>();
 
-function getMCPClient(serverId: string): MCPClient | null {
-  if (mcpClientCache.has(serverId)) return mcpClientCache.get(serverId)!;
+async function getMCPClient(serverId: string, companyId: string): Promise<MCPClient | null> {
+  const cacheKey = serverId === 'filesystem-local' ? `${serverId}:${companyId}` : serverId;
+  if (mcpClientCache.has(cacheKey)) return mcpClientCache.get(cacheKey)!;
 
   let client: MCPClient | null = null;
 
   switch (serverId) {
     case 'searxng-local':
-      // Local SearXNG instance — fully open-source, no API key
       client = new MCPClient({
         id: 'searxng-local',
         servers: {
@@ -25,21 +26,22 @@ function getMCPClient(serverId: string): MCPClient | null {
       });
       break;
 
-    case 'filesystem-local':
-      // Local filesystem MCP server — scoped to agent workspace
+    case 'filesystem-local': {
+      await ensureCompanyWorkspace(companyId);
+      const workspacePath = getCompanyWorkspaceDir(companyId);
       client = new MCPClient({
-        id: 'filesystem-local',
+        id: `filesystem-local-${companyId}`,
         servers: {
           filesystem: {
             command: 'npx',
-            args: ['-y', '@modelcontextprotocol/server-filesystem', '/workspace'],
+            args: ['-y', '@modelcontextprotocol/server-filesystem', workspacePath],
           },
         },
       });
       break;
+    }
 
     case 'github-mcp':
-      // GitHub MCP — requires GITHUB_TOKEN env var
       client = new MCPClient({
         id: 'github-mcp',
         servers: {
@@ -56,18 +58,23 @@ function getMCPClient(serverId: string): MCPClient | null {
       return null;
   }
 
-  mcpClientCache.set(serverId, client);
+  mcpClientCache.set(cacheKey, client);
   return client;
 }
 
 export async function buildMCPTools(
   mcpServerIds: string[],
-  _companyId: string
+  companyId: string,
+  allowedMcpServerIds: string[] = []
 ): Promise<Record<string, unknown>> {
   const tools: Record<string, unknown> = {};
+  const allowed =
+    allowedMcpServerIds.length > 0
+      ? mcpServerIds.filter((id) => allowedMcpServerIds.includes(id))
+      : mcpServerIds;
 
-  for (const serverId of mcpServerIds) {
-    const client = getMCPClient(serverId);
+  for (const serverId of allowed) {
+    const client = await getMCPClient(serverId, companyId);
     if (!client) continue;
     try {
       const serverTools = await client.getTools();

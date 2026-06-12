@@ -9,6 +9,9 @@ import { ROLE_TOOLS } from './tools/role-tools';
 import { loadSkillsForAgent } from './skills/skill-loader';
 import { buildMCPTools } from './tools/mcp-tools';
 import { getInternalApiUrl } from './tools/api-client';
+import { buildCodeExecutionWorkspace } from './execution-workspace';
+import { getMastraInstance } from './mastra-instance';
+import { isObservabilityEnabled } from '@tourbillon/shared';
 
 const globalForMastra = globalThis as unknown as {
   mastraMemory?: Memory;
@@ -54,7 +57,8 @@ function getAgentMemory(): Memory {
  *   Tier 3 (capability)    — MCP tools by mcpServerIds
  */
 export async function createAgentWithSkills(
-  agentRecord: AgentRecord
+  agentRecord: AgentRecord,
+  options?: { allowedMcpServerIds?: string[] }
 ): Promise<Agent> {
   // ── Tier 1: Universal control plane tools
   const tools: Record<string, unknown> = { ...CONTROL_PLANE_TOOLS };
@@ -67,7 +71,11 @@ export async function createAgentWithSkills(
 
   // ── Tier 3: MCP capability-gated tools
   if (agentRecord.mcpServerIds?.length) {
-    const mcpTools = await buildMCPTools(agentRecord.mcpServerIds, agentRecord.companyId);
+    const mcpTools = await buildMCPTools(
+      agentRecord.mcpServerIds,
+      agentRecord.companyId,
+      options?.allowedMcpServerIds ?? []
+    );
     Object.assign(tools, mcpTools);
   }
 
@@ -81,6 +89,8 @@ export async function createAgentWithSkills(
   );
   const providerConfig = resolveModelProviderConfig(providerOverrides, agentRecord.modelId);
 
+  const codeExecutionEnabled = agentRecord.assignedToolsets?.includes('code-execution') ?? false;
+
   console.log(
     formatTrace('agent-factory', { agentId: agentRecord.id, agentName: agentRecord.name }, 'agent ready', {
       urlKey: agentRecord.urlKey,
@@ -92,16 +102,27 @@ export async function createAgentWithSkills(
       toolCount: Object.keys(tools).length,
       tools: Object.keys(tools),
       skillCount: skillContents.length,
+      codeExecutionEnabled,
     })
   );
 
-  return new Agent({
+  const agent = new Agent({
+    id: agentRecord.id,
     name: agentRecord.name,
     instructions: systemPrompt,
     model: getLanguageModelForAgent(agentRecord),
     tools: tools as Parameters<typeof Agent>[0]['tools'],
     memory: getAgentMemory(),
+    ...(codeExecutionEnabled ? { workspace: buildCodeExecutionWorkspace() } : {}),
   });
+
+  if (isObservabilityEnabled()) {
+    const mastra = getMastraInstance();
+    mastra.removeAgent(agentRecord.id);
+    mastra.addAgent(agent, agentRecord.id);
+  }
+
+  return agent;
 }
 
 function assembleSystemPrompt(

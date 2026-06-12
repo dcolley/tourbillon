@@ -3,5 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "main": "./src/index.ts",
-  "types": "./src/index.ts"
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./company-workspace": "./src/company-workspace.ts",
+    "./company-workspace-types": "./src/company-workspace-types.ts",
+    "./observability": "./src/observability.ts"
+  }
 }

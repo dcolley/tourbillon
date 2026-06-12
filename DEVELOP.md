@@ -28,6 +28,7 @@ Edit `.env` at the **repo root** (not inside `apps/web`). Important values:
 | `SCHEDULER_API_KEY` | Routine scheduler → issue API | `dev-scheduler-key` (match in `.env`) |
 | `LM_STUDIO_BASE_URL` | LLM API endpoint | `http://localhost:1234/v1` |
 | `LM_STUDIO_DEFAULT_MODEL` | Model name in LM Studio | match your loaded model |
+| `COMPANY_WORKSPACE_ROOT` | Per-company shared document storage | `./data/company-workspaces` |
 
 Start infrastructure and apply migrations:
 

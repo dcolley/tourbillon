@@ -48,13 +48,14 @@ export async function POST(
     .returning();
 
   const identifier = `${company.issuePrefix}-${updatedCompany.issueCounter}`;
+  const status = body.assigneeAgentId ? 'todo' : 'backlog';
 
   const [newIssue] = await db.insert(issues).values({
     companyId: companyId,
     identifier,
     title: body.title,
     description: body.description,
-    status: 'todo',
+    status,
     priority: (body.priority as 'critical' | 'high' | 'medium' | 'low') ?? 'medium',
     parentId: body.parentId,
     goalId: body.goalId,

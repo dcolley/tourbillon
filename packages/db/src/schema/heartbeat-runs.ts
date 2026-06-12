@@ -23,6 +23,7 @@ export const heartbeatRuns = pgTable('heartbeat_runs', {
   status: text('status').$type<HeartbeatStatus>().notNull().default('queued'),
   contextSnapshot: jsonb('context_snapshot').default({}),
   errorText: text('error_text'),
+  traceId: text('trace_id'),
   shortLivedJwt: text('short_lived_jwt'),  // run-scoped API key
   startedAt: timestamp('started_at').notNull().defaultNow(),
   finishedAt: timestamp('finished_at'),

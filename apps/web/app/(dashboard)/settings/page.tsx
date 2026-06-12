@@ -42,6 +42,10 @@ export default async function SettingsPage({
     { label: 'Redis', value: process.env.REDIS_URL ?? '—' },
     { label: 'Internal API', value: process.env.INTERNAL_API_URL ?? '—' },
     { label: 'SearXNG', value: process.env.SEARXNG_URL ?? 'Not configured' },
+    {
+      label: 'Company workspace',
+      value: process.env.COMPANY_WORKSPACE_ROOT ?? './data/company-workspaces',
+    },
   ];
 
   return (

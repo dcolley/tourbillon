@@ -11,6 +11,9 @@ export interface HeartbeatRuntimeValues {
   agentId: string;
   companyId: string;
   taskId?: string;
+  goalId?: string;
+  projectId?: string;
+  jobId?: string;
 }
 
 export interface ToolRuntimeContext extends TraceContext {
@@ -26,6 +29,9 @@ export function createHeartbeatRuntimeContext(
   requestContext.set('agentId', values.agentId);
   requestContext.set('companyId', values.companyId);
   if (values.taskId) requestContext.set('taskId', values.taskId);
+  if (values.goalId) requestContext.set('goalId', values.goalId);
+  if (values.projectId) requestContext.set('projectId', values.projectId);
+  if (values.jobId) requestContext.set('jobId', values.jobId);
   return requestContext;
 }
 
@@ -42,6 +48,9 @@ export function extractToolRuntimeContext(requestContext: unknown): ToolRuntimeC
       agentId: asString(ctx.get('agentId')),
       companyId: asString(ctx.get('companyId')),
       taskId: asString(ctx.get('taskId')),
+      goalId: asString(ctx.get('goalId')),
+      projectId: asString(ctx.get('projectId')),
+      jobId: asString(ctx.get('jobId')),
       apiKey: asString(ctx.get('apiKey')),
     };
   }
@@ -52,6 +61,9 @@ export function extractToolRuntimeContext(requestContext: unknown): ToolRuntimeC
     agentId: asString(value.agentId),
     companyId: asString(value.companyId),
     taskId: asString(value.taskId),
+    goalId: asString(value.goalId),
+    projectId: asString(value.projectId),
+    jobId: asString(value.jobId),
     apiKey: asString(value.apiKey),
   };
 }

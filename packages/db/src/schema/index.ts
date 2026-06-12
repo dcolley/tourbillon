@@ -7,5 +7,6 @@ export * from './heartbeat-runs';
 export * from './cost-events';
 export * from './approvals';
 export * from './activity-log';
+export * from './agent-observability-events';
 export * from './routines';
 export * from './skills';

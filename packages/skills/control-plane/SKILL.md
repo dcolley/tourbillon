@@ -26,10 +26,13 @@ When your inbox is empty and your role is `ceo`:
 
 1. Call `listGoals` with `status: active`
 2. For each goal where `needsAttention` is true, call `getGoalDetail`
-3. Apply **SKILL: Plan to Tasks** — identify gaps, create issues via `createIssue` (set `goalId`, assign via `listAgents`, use `blockedByIssueIds` for sequencing)
-4. Add a comment on each created issue summarizing the plan and next owner
-5. Do not create more than 15 issues per goal per heartbeat — break into phases if needed
-6. EXIT — assignment wakes will handle downstream agents
+3. **Triage unassigned issues** — for each issue with `assigneeAgentId: null` and status `backlog` or `todo`:
+   - Call `listAgents` to pick the right role
+   - Call `updateIssue` with `assigneeAgentId`, `status: 'todo'`, and a comment explaining the assignment
+4. Apply **SKILL: Plan to Tasks** — identify gaps, create issues via `createIssue` (set `goalId`, assign via `listAgents`, use `blockedByIssueIds` for sequencing)
+5. Add a comment on each created issue summarizing the plan and next owner
+6. Do not create more than 15 issues per goal per heartbeat — break into phases if needed
+7. EXIT — assignment wakes will handle downstream agents
 
 Skip goals where `needsAttention` is false (work is already in progress).
 
@@ -41,7 +44,8 @@ Skip goals where `needsAttention` is false (work is already in progress).
 |---|---|---|
 | **Control plane (source of truth)** | `getInbox`, `getHeartbeatContext`, `getComments`, `updateIssue` | Every heartbeat — steps 3–8 |
 | **Mastra memory (private accelerator)** | Automatic — your turns persist per issue thread | Across heartbeats on the same task |
-| **Reference search** | MCP / web search tools | On demand during work — not for task history |
+| **Company workspace** | `listWorkspaceFiles`, `readWorkspaceFile`, `writeWorkspaceFile` | On demand during work — shared reference docs, not task history |
+| **Web search** | MCP web search tools | External information only |
 
 **Task history lives in issue comments**, not in memory or RAG. Always write material decisions to comments so other agents can read them.
 
@@ -82,7 +86,7 @@ At step 6: `getHeartbeatContext` returns `latestCommentId` (newest activity snap
 
 - Break large tasks into subtasks via `createSubtask`
 - Every subtask **must** have `parentId` and `goalId` — no orphan issues
-- Set `assigneeAgentId` to route work to the appropriate agent
+- Set `assigneeAgentId` to route work to the appropriate agent — omitting it creates a `backlog` issue for CEO triage
 - Set `blockedByIssueIds` to encode dependencies between subtasks
 - Your task stays `in_progress` while child tasks are running; set to `in_review` when all children reach `done`
 
@@ -134,3 +138,11 @@ Context: [relevant background]
 - **Never assign tasks to yourself** via `createSubtask` — you are already doing the parent
 - **Never impersonate another agent** — your `agentId` is fixed per heartbeat run
 - **Always prefer delegation** for work outside your role. A CEO delegates; does not code.
+
+---
+
+## §8 — Company Workspace
+
+- Read workspace files **after checkout**, during step 7 only — not at orient
+- Never store task decisions only in workspace — always echo material findings in issue comments
+- When completing work that produced a reusable artifact (spec, checklist), write to `resources/` or `projects/` and link the path in your completion comment

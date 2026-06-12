@@ -87,7 +87,8 @@ const createIssueTool = createTool({
   id: 'createIssue',
   description:
     'Create a top-level issue linked to a goal. Use for first-layer tasks under a goal. ' +
-    'For sub-issues under an existing task, use createSubtask instead.',
+    'For sub-issues under an existing task, use createSubtask instead. ' +
+    'assigneeAgentId is required for work to start; omit only to defer assignment to CEO (creates backlog).',
   inputSchema: z.object({
     title: z.string(),
     description: z.string().optional(),

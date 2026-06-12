@@ -56,6 +56,12 @@ export const TOOLSET_CATALOG = [
     label: 'Web search',
     description: 'Search the web via MCP (when configured).',
   },
+  {
+    id: 'code-execution',
+    label: 'Code execution',
+    description:
+      'Run shell commands in an isolated local sandbox (execute_command, get_process_output, kill_process).',
+  },
 ] as const;
 
 export type ToolsetId = (typeof TOOLSET_CATALOG)[number]['id'];
@@ -65,8 +71,8 @@ export const VALID_TOOLSET_IDS = new Set<string>(TOOLSET_CATALOG.map((t) => t.id
 export const ROLE_DEFAULT_TOOLSETS: Record<string, string[]> = {
   ceo:      ['comments', 'approvals', 'roster', 'planning', 'web-search'],
   cto:      ['comments', 'approvals', 'planning', 'roster'],
-  engineer: ['comments', 'planning'],
+  engineer: ['comments', 'planning', 'code-execution'],
   pm:       ['comments', 'approvals', 'planning', 'roster', 'web-search'],
-  qa:       ['comments'],
+  qa:       ['comments', 'code-execution'],
   designer: ['comments'],
 };

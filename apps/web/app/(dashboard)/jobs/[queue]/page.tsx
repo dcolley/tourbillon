@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import { notFound } from 'next/navigation';
+import { notFound, redirect } from 'next/navigation';
 import { QUEUE_HEARTBEAT } from '@tourbillon/shared';
 import {
   getQueueJobs,
@@ -8,7 +8,6 @@ import {
   type JobState,
 } from '@/lib/jobs';
 import { isJobQueueName } from '@/lib/queue';
-import { HeartbeatListPage } from './heartbeat-list-page';
 
 function parseState(value: string | undefined): JobState {
   if (value && JOB_STATES.includes(value as JobState)) return value as JobState;
@@ -20,7 +19,7 @@ export default async function QueueJobsPage({
   searchParams,
 }: {
   params: Promise<{ queue: string }>;
-  searchParams: Promise<{ state?: string; status?: string; page?: string; agent?: string }>;
+  searchParams: Promise<{ state?: string }>;
 }) {
   const { queue } = await params;
   const resolvedSearchParams = await searchParams;
@@ -28,15 +27,7 @@ export default async function QueueJobsPage({
   if (!isJobQueueName(queue)) notFound();
 
   if (queue === QUEUE_HEARTBEAT) {
-    return (
-      <HeartbeatListPage
-        searchParams={{
-          status: resolvedSearchParams.status ?? resolvedSearchParams.state,
-          page: resolvedSearchParams.page,
-          agent: resolvedSearchParams.agent,
-        }}
-      />
-    );
+    redirect('/jobs/heartbeat');
   }
 
   const meta = getQueueMeta(queue)!;

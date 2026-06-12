@@ -212,6 +212,112 @@ export async function updateAgentInstructions(
   return updated;
 }
 
+export interface UpdateAgentProfileInput {
+  name: string;
+  urlKey: string;
+  reportsToId?: string | null;
+}
+
+export async function updateAgentProfile(
+  agentId: string,
+  input: UpdateAgentProfileInput,
+): Promise<Agent> {
+  const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+  if (!agent) throw new AgentValidationError('Agent not found.');
+
+  const name = input.name?.trim();
+  if (!name) throw new AgentValidationError('Name is required.');
+
+  const urlKey = slugifyUrlKey(input.urlKey?.trim() || '');
+  if (!urlKey) throw new AgentValidationError('Agent ID is required.');
+  if (RESERVED_AGENT_IDS.has(urlKey)) {
+    throw new AgentValidationError(`Agent ID "${urlKey}" is reserved.`);
+  }
+  if (!isValidUrlKey(urlKey)) {
+    throw new AgentValidationError('Agent ID must use lowercase letters, numbers, and hyphens only.');
+  }
+
+  if (urlKey !== agent.urlKey) {
+    const duplicate = await db.query.agents.findFirst({
+      where: and(eq(agents.companyId, agent.companyId), eq(agents.urlKey, urlKey)),
+    });
+    if (duplicate) {
+      throw new AgentValidationError(`Agent ID "${urlKey}" is already in use.`);
+    }
+  }
+
+  const reportsToId =
+    typeof input.reportsToId === 'string' && input.reportsToId.trim()
+      ? input.reportsToId.trim()
+      : null;
+
+  if (reportsToId === agentId) {
+    throw new AgentValidationError('An agent cannot report to themselves.');
+  }
+
+  if (reportsToId) {
+    const manager = await db.query.agents.findFirst({
+      where: and(eq(agents.id, reportsToId), eq(agents.companyId, agent.companyId)),
+    });
+    if (!manager) throw new AgentValidationError('Reports-to agent not found in this company.');
+
+    const directReport = await db.query.agents.findFirst({
+      where: and(eq(agents.id, reportsToId), eq(agents.reportsToId, agentId)),
+    });
+    if (directReport) {
+      throw new AgentValidationError('Cannot report to a direct report — that would create a cycle.');
+    }
+  }
+
+  const [updated] = await db
+    .update(agents)
+    .set({ name, urlKey, reportsToId, updatedAt: new Date() })
+    .where(eq(agents.id, agentId))
+    .returning();
+
+  return updated;
+}
+
+export async function setAgentActive(agentId: string, active: boolean): Promise<Agent> {
+  const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+  if (!agent) throw new AgentValidationError('Agent not found.');
+
+  if (agent.status === 'pending_approval') {
+    throw new AgentValidationError('Agent is pending approval and cannot be activated yet.');
+  }
+
+  const status = active ? 'active' : 'paused';
+
+  const [updated] = await db
+    .update(agents)
+    .set({ status, updatedAt: new Date() })
+    .where(eq(agents.id, agentId))
+    .returning();
+
+  return updated;
+}
+
+export {
+  getAgentHeartbeatSummary,
+  type AgentHeartbeatSummary,
+} from './agent-heartbeat-summary';
+
+export async function updateAgentModel(agentId: string, modelId: string): Promise<Agent> {
+  const trimmed = modelId?.trim();
+  if (!trimmed) throw new AgentValidationError('Model ID is required.');
+
+  const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+  if (!agent) throw new AgentValidationError('Agent not found.');
+
+  const [updated] = await db
+    .update(agents)
+    .set({ modelId: trimmed, updatedAt: new Date() })
+    .where(eq(agents.id, agentId))
+    .returning();
+
+  return updated;
+}
+
 export async function updateAgentBudget(
   agentId: string,
   input: { budgetMonthlyTokens: number; enforce: boolean },

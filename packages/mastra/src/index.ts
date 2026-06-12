@@ -1,6 +1,7 @@
 export * from './memory-keys';
 export * from './provider';
 export * from './agent-factory';
+export * from './mastra-instance';
 export * from './tools/api-client';
 export * from './tools/control-plane-tools';
 export * from './tools/role-tools';

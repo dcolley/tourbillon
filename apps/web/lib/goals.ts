@@ -36,12 +36,7 @@ export interface GoalDetail {
   owner: GoalOwnerOption | null;
   projects: GoalProjectRow[];
   issues: GoalIssueRow[];
-  stats: {
-    total: number;
-    done: number;
-    inProgress: number;
-    blocked: number;
-  };
+  stats: GoalStats;
 }
 
 export interface CreateGoalInput {
@@ -212,12 +207,7 @@ export async function getGoalDetail(goalId: string): Promise<GoalDetail | null> 
     assignee: agent ? { id: agent.id, name: agent.name, urlKey: agent.urlKey } : null,
   }));
 
-  const stats = {
-    total: mapped.length,
-    done: mapped.filter((r) => r.issue.status === 'done').length,
-    inProgress: mapped.filter((r) => r.issue.status === 'in_progress').length,
-    blocked: mapped.filter((r) => r.issue.status === 'blocked').length,
-  };
+  const stats = computeGoalStats(mapped);
 
   return {
     goal,
@@ -242,6 +232,27 @@ export interface GoalStats {
   done: number;
   inProgress: number;
   blocked: number;
+  unassigned: number;
+}
+
+const UNASSIGNED_STATUSES = new Set([
+  'backlog',
+  'todo',
+  'in_progress',
+  'in_review',
+  'blocked',
+]);
+
+export function computeGoalStats(mapped: GoalIssueRow[]): GoalStats {
+  return {
+    total: mapped.length,
+    done: mapped.filter((r) => r.issue.status === 'done').length,
+    inProgress: mapped.filter((r) => r.issue.status === 'in_progress').length,
+    blocked: mapped.filter((r) => r.issue.status === 'blocked').length,
+    unassigned: mapped.filter(
+      (r) => !r.issue.assigneeAgentId && UNASSIGNED_STATUSES.has(r.issue.status)
+    ).length,
+  };
 }
 
 export function computeGoalNeedsAttention(
@@ -249,6 +260,7 @@ export function computeGoalNeedsAttention(
   goalStatus: string
 ): boolean {
   if (goalStatus !== 'active') return false;
+  if (stats.unassigned > 0) return true;
   if (stats.total === 0) return true;
   if (stats.inProgress === 0 && stats.blocked > 0) return true;
   if (stats.total > 0 && stats.done === stats.total) return true;

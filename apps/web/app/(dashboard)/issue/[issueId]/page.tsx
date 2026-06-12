@@ -8,8 +8,10 @@ import { listIssueComments } from '@/lib/issue-comments';
 import { getIssueDetail, listIssueAgentOptions } from '@/lib/issues';
 import { commentOnIssueAction, updateIssueAction } from '../actions';
 import { IssueCommentsSection } from './issue-comments-section';
+import { IssueDetailTabs } from './issue-detail-tabs';
 import { IssueEditForm } from './issue-edit-form';
 import { IssueExecutionPanel } from './issue-execution-panel';
+import { IssueObservabilityTab } from './issue-observability-tab';
 
 export default async function IssueDetailPage({
   params,
@@ -37,8 +39,10 @@ export default async function IssueDetailPage({
   const savedFlag = saved === '1';
   const activeJob = heartbeatJobs.find((job) => job.state === 'active') ?? heartbeatJobs[0];
 
+  const observabilityAgents = agents.map((a) => ({ id: a.id, name: a.name }));
+
   return (
-    <div className="max-w-3xl space-y-6 p-6">
+    <div className="max-w-5xl space-y-6 p-6">
       <div>
         <Link
           href="/issue"
@@ -74,6 +78,9 @@ export default async function IssueDetailPage({
         )}
       </div>
 
+      <IssueDetailTabs
+        overview={
+          <>
       {savedFlag && (
         <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
           Changes saved.
@@ -208,6 +215,12 @@ export default async function IssueDetailPage({
           </div>
         </div>
       )}
+          </>
+        }
+        observability={
+          <IssueObservabilityTab issueId={issueId} agents={observabilityAgents} />
+        }
+      />
     </div>
   );
 }

@@ -11,22 +11,10 @@ export interface HeartbeatRunWithAgent {
   agent: Pick<Agent, 'id' | 'name' | 'urlKey' | 'title'> | null;
 }
 
-export type HeartbeatListFilter =
-  | 'all'
-  | 'running'
-  | 'succeeded'
-  | 'failed'
-  | 'queued'
-  | 'in_queue';
+export type { HeartbeatListFilter } from './heartbeat-list-storage';
+export { HEARTBEAT_LIST_FILTERS } from './heartbeat-list-storage';
 
-export const HEARTBEAT_LIST_FILTERS: Array<{ value: HeartbeatListFilter; label: string }> = [
-  { value: 'all', label: 'All' },
-  { value: 'in_queue', label: 'In queue' },
-  { value: 'running', label: 'Running' },
-  { value: 'succeeded', label: 'Succeeded' },
-  { value: 'failed', label: 'Failed' },
-  { value: 'queued', label: 'Queued' },
-];
+import type { HeartbeatListFilter } from './heartbeat-list-storage';
 
 export interface HeartbeatListEntry {
   key: string;
