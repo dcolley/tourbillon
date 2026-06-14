@@ -1,4 +1,5 @@
 import { Agent } from '@mastra/core/agent';
+import { createDurableAgent } from '@mastra/core/agent/durable';
 import { Memory } from '@mastra/memory';
 import { PostgresStore, PgVector } from '@mastra/pg';
 import type { Agent as AgentRecord } from '@tourbillon/db';
@@ -17,7 +18,7 @@ const globalForMastra = globalThis as unknown as {
   mastraMemory?: Memory;
 };
 
-function getAgentMemory(): Memory {
+export function getAgentMemory(): Memory {
   if (!globalForMastra.mastraMemory) {
     const connectionString = process.env.DATABASE_URL!;
     const semanticRecallEnabled = process.env.MEMORY_SEMANTIC_RECALL === 'true';
@@ -49,6 +50,34 @@ function getAgentMemory(): Memory {
   return globalForMastra.mastraMemory;
 }
 
+export async function assembleAgentTools(
+  agentRecord: AgentRecord,
+  options?: { allowedMcpServerIds?: string[] },
+): Promise<Record<string, unknown>> {
+  const tools: Record<string, unknown> = { ...CONTROL_PLANE_TOOLS };
+
+  for (const toolsetId of agentRecord.assignedToolsets ?? []) {
+    const roleTools = ROLE_TOOLS[toolsetId];
+    if (roleTools) Object.assign(tools, roleTools);
+  }
+
+  if (agentRecord.mcpServerIds?.length) {
+    const mcpTools = await buildMCPTools(
+      agentRecord.mcpServerIds,
+      agentRecord.companyId,
+      options?.allowedMcpServerIds ?? [],
+    );
+    Object.assign(tools, mcpTools);
+  }
+
+  return tools;
+}
+
+export async function assembleAgentSystemPrompt(agentRecord: AgentRecord): Promise<string> {
+  const skillContents = await loadSkillsForAgent(agentRecord);
+  return assembleSystemPrompt(agentRecord, skillContents);
+}
+
 /**
  * Create a fully-equipped Mastra Agent for a given agent DB record.
  * Tool tiers:
@@ -60,26 +89,8 @@ export async function createAgentWithSkills(
   agentRecord: AgentRecord,
   options?: { allowedMcpServerIds?: string[] }
 ): Promise<Agent> {
-  // ── Tier 1: Universal control plane tools
-  const tools: Record<string, unknown> = { ...CONTROL_PLANE_TOOLS };
+  const tools = await assembleAgentTools(agentRecord, options);
 
-  // ── Tier 2: Role-gated toolsets
-  for (const toolsetId of agentRecord.assignedToolsets ?? []) {
-    const roleTools = ROLE_TOOLS[toolsetId];
-    if (roleTools) Object.assign(tools, roleTools);
-  }
-
-  // ── Tier 3: MCP capability-gated tools
-  if (agentRecord.mcpServerIds?.length) {
-    const mcpTools = await buildMCPTools(
-      agentRecord.mcpServerIds,
-      agentRecord.companyId,
-      options?.allowedMcpServerIds ?? []
-    );
-    Object.assign(tools, mcpTools);
-  }
-
-  // ── Assemble system prompt from AGENTS.md + SKILL.md files
   const skillContents = await loadSkillsForAgent(agentRecord);
   const systemPrompt = assembleSystemPrompt(agentRecord, skillContents);
 
@@ -116,13 +127,28 @@ export async function createAgentWithSkills(
     ...(codeExecutionEnabled ? { workspace: buildCodeExecutionWorkspace() } : {}),
   });
 
+  return agent;
+}
+
+export async function createDurableAgentWithSkills(
+  agentRecord: AgentRecord,
+  options?: { allowedMcpServerIds?: string[]; maxSteps?: number },
+): Promise<ReturnType<typeof createDurableAgent>> {
+  const agent = await createAgentWithSkills(agentRecord, options);
+  const durableAgent = createDurableAgent({
+    agent,
+    maxSteps: options?.maxSteps ?? 30,
+  });
+
+  // DurableAgent workflows read mastra.observability from __registerMastra on the
+  // wrapper — registering only the inner Agent leaves spans with no exporter.
   if (isObservabilityEnabled()) {
     const mastra = getMastraInstance();
     mastra.removeAgent(agentRecord.id);
-    mastra.addAgent(agent, agentRecord.id);
+    mastra.addAgent(durableAgent, agentRecord.id);
   }
 
-  return agent;
+  return durableAgent;
 }
 
 function assembleSystemPrompt(

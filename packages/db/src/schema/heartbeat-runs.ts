@@ -24,6 +24,8 @@ export const heartbeatRuns = pgTable('heartbeat_runs', {
   contextSnapshot: jsonb('context_snapshot').default({}),
   errorText: text('error_text'),
   traceId: text('trace_id'),
+  harnessRunId: text('harness_run_id'),
+  durableRunId: text('durable_run_id'),
   shortLivedJwt: text('short_lived_jwt'),  // run-scoped API key
   startedAt: timestamp('started_at').notNull().defaultNow(),
   finishedAt: timestamp('finished_at'),

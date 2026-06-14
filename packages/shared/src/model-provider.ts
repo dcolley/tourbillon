@@ -160,8 +160,16 @@ export function modelProviderOverridesFromAgent(
   const cfg = isRecord(adapterConfig) ? adapterConfig : {};
   const overrides: ModelProviderOverrides = {};
 
-  const adapterProvider = parseModelProviderKind(adapterType);
-  if (adapterProvider) overrides.provider = adapterProvider;
+  // harness_local stores LLM provider in adapter_config.provider
+  if (adapterType === 'harness_local') {
+    const harnessProvider = parseModelProviderKind(
+      typeof cfg.provider === 'string' ? cfg.provider : undefined,
+    );
+    if (harnessProvider) overrides.provider = harnessProvider;
+  } else {
+    const adapterProvider = parseModelProviderKind(adapterType);
+    if (adapterProvider) overrides.provider = adapterProvider;
+  }
 
   const configProvider = parseModelProviderKind(
     typeof cfg.provider === 'string' ? cfg.provider : undefined,

@@ -16,7 +16,9 @@
     "bullmq": "^5.0.0",
     "cron-parser": "^5.5.0",
     "drizzle-orm": "catalog:",
-    "ioredis": "catalog:"
+    "ioredis": "catalog:",
+    "mastracode": "^0.22.3",
+    "redlock": "5.0.0-beta.2"
   },
   "devDependencies": {
     "@types/node": "catalog:",

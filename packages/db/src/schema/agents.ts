@@ -15,7 +15,7 @@ export const agents = pgTable('agents', {
   // Org chart
   reportsToId: text('reports_to_id'),  // self-referential FK — set after all agents created
   // Adapter configuration
-  adapterType: text('adapter_type', { enum: ['lmstudio', 'ollama', 'process', 'http'] }).notNull().default('lmstudio'),
+  adapterType: text('adapter_type', { enum: ['lmstudio', 'ollama', 'process', 'http', 'harness_local'] }).notNull().default('lmstudio'),
   adapterConfig: jsonb('adapter_config').notNull().default({}),
   // Model
   modelId: text('model_id').default('meta-llama/Llama-3.3-70B-Instruct'),

@@ -3,9 +3,7 @@ import { getSseSubscribers } from '@/lib/sse';
 
 /**
  * Server-Sent Events endpoint for real-time dashboard updates.
- * Clients subscribe to company-level events.
- * Uses a simple in-memory broadcast for the prototype.
- * Production: replace with Redis pub/sub.
+ * Clients subscribe to company-level events via Redis pub/sub.
  */
 
 export async function GET(

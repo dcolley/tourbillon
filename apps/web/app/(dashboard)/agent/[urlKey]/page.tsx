@@ -3,12 +3,16 @@ import { notFound, redirect } from 'next/navigation';
 import { db, agents, heartbeatRuns } from '@tourbillon/db';
 import { eq, desc } from 'drizzle-orm';
 import type { AgentRuntimeConfig } from '@tourbillon/shared';
-import { TOOLSET_CATALOG, modelProviderOverridesFromAgent, resolveModelProviderConfig, isAgentBudgetEnforced, isAgentBudgetExceeded } from '@tourbillon/shared';
+import { TOOLSET_CATALOG, modelProviderOverridesFromAgent, resolveModelProviderConfig, isAgentBudgetEnforced, isAgentBudgetExceeded, agentRuntimeLabel } from '@tourbillon/shared';
 import { AgentValidationError, getAgentByUrlKey, updateAgentRuntimeConfig, updateAgentAssignedToolsets, updateAgentBudget, updateAgentInstructions, updateAgentModel, updateAgentProfile } from '@/lib/agents';
 import { AgentModelForm } from './agent-model-form';
 import { heartbeatJobHref } from '@/lib/heartbeats';
 import { triggerAgentHeartbeat } from '@/lib/heartbeat';
 import { listRoutinesForAgent, setRoutineEnabled } from '@/lib/routines';
+import { listGoalOptions } from '@/lib/goals';
+import { listProjectOptions } from '@/lib/projects';
+import { AgentDetailTabs } from './agent-detail-tabs';
+import { AgentObservabilityTab } from './agent-observability-tab';
 
 async function runHeartbeat(formData: FormData) {
   'use server';
@@ -183,7 +187,7 @@ export default async function AgentDetailPage({
   const agent = await getAgentByUrlKey(urlKey);
   if (!agent) notFound();
 
-  const [directReports, companyAgents, recentRuns, agentRoutines] = await Promise.all([
+  const [directReports, companyAgents, recentRuns, agentRoutines, goals, projects] = await Promise.all([
     db.select().from(agents).where(eq(agents.reportsToId, agent.id)),
     db
       .select({ id: agents.id, name: agents.name, urlKey: agents.urlKey, title: agents.title })
@@ -197,6 +201,8 @@ export default async function AgentDetailPage({
       .orderBy(desc(heartbeatRuns.startedAt))
       .limit(5),
     listRoutinesForAgent(agent.id),
+    listGoalOptions(),
+    listProjectOptions(),
   ]);
 
   const runtime = agent.runtimeConfig as AgentRuntimeConfig;
@@ -215,7 +221,7 @@ export default async function AgentDetailPage({
   );
 
   return (
-    <div className="p-6 space-y-6 max-w-3xl">
+    <div className="p-6 space-y-6 max-w-5xl">
       <div>
         <Link href="/agent" className="text-sm text-muted-foreground hover:text-foreground">
           ← Back to agents
@@ -291,6 +297,9 @@ export default async function AgentDetailPage({
         </div>
       )}
 
+      <AgentDetailTabs
+        overview={
+          <>
       <section className="border rounded-lg p-4 space-y-4">
         <div>
           <h2 className="text-sm font-semibold">Profile</h2>
@@ -383,6 +392,7 @@ export default async function AgentDetailPage({
           </p>
         </div>
         <div className="grid grid-cols-2 gap-4 text-sm">
+          <DetailCard label="Agent type" value={agentRuntimeLabel(agent.adapterType)} />
           <DetailCard label="Provider" value={providerConfig.provider} />
           <DetailCard label="API mode" value={providerConfig.apiMode} />
           <DetailCard label="Adapter" value={agent.adapterType} />
@@ -676,6 +686,17 @@ export default async function AgentDetailPage({
       <p className="text-xs text-muted-foreground">
         Created {new Date(agent.createdAt).toLocaleString()}
       </p>
+          </>
+        }
+        observability={
+          <AgentObservabilityTab
+            agentId={agent.id}
+            agentName={agent.name}
+            goals={goals}
+            projects={projects}
+          />
+        }
+      />
     </div>
   );
 }

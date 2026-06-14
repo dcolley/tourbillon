@@ -5,9 +5,11 @@ import {
   ROLE_DEFAULT_TOOLSETS,
   DEFAULT_RUNTIME_CONFIG,
   VALID_TOOLSET_IDS,
-  defaultAgentAdapterType,
   resolveModelProviderConfig,
+  resolveAdapterFieldsForRuntime,
+  parseAgentRuntimeType,
   type AgentRuntimeConfig,
+  type AgentRuntimeType,
 } from '@tourbillon/shared';
 import { getOrCreateDefaultCompany } from './company';
 
@@ -57,6 +59,7 @@ export interface CreateAgentInput {
   reportsToId?: string | null;
   instructionsBundleSoulMd?: string;
   instructionsBundleAgentsMd?: string;
+  runtimeType?: AgentRuntimeType;
 }
 
 function normalizeInstructionField(value: string | undefined | null): string | null {
@@ -109,6 +112,9 @@ export async function createAgent(input: CreateAgentInput): Promise<Agent> {
 
   const envProvider = resolveModelProviderConfig();
 
+  const runtimeType = parseAgentRuntimeType(input.runtimeType) ?? 'agent';
+  const { adapterType, adapterConfig } = resolveAdapterFieldsForRuntime(runtimeType);
+
   const [created] = await db
     .insert(agents)
     .values({
@@ -121,7 +127,8 @@ export async function createAgent(input: CreateAgentInput): Promise<Agent> {
       assignedSkills: ROLE_DEFAULT_SKILLS[role] ?? ['control-plane'],
       assignedToolsets: ROLE_DEFAULT_TOOLSETS[role] ?? [],
       modelId: envProvider.defaultModel,
-      adapterType: defaultAgentAdapterType(),
+      adapterType,
+      adapterConfig,
       status: 'active',
       runtimeConfig: DEFAULT_RUNTIME_CONFIG,
       instructionsBundleSoulMd: normalizeInstructionField(input.instructionsBundleSoulMd),

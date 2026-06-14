@@ -64,7 +64,31 @@ const EVENT_TYPE_LABELS: Record<ObservabilityEventType, string> = {
   tool_call: 'Tool call',
   mcp_tool_call: 'MCP tool',
   generic: 'Generic',
+  text_delta: 'Text delta',
+  tool_call_start: 'Tool call start',
+  tool_call_result: 'Tool result',
+  tool_suspended: 'Tool suspended',
+  tool_approval_required: 'Tool approval',
+  subagent_spawn: 'Subagent spawn',
+  subagent_done: 'Subagent done',
+  subagent_start: 'Subagent start',
+  subagent_end: 'Subagent end',
+  om_observation: 'OM observation',
+  om_reflection: 'OM reflection',
+  agent_done: 'Agent done',
+  usage_update: 'Token usage',
+  mode_switch: 'Mode switch',
+  error: 'Error',
 };
+
+const REFRESH_INTERVALS = [
+  { label: 'Manual only', ms: 0 },
+  { label: 'Every 1s', ms: 1000 },
+  { label: 'Every 2s', ms: 2000 },
+  { label: 'Every 5s', ms: 5000 },
+  { label: 'Every 10s', ms: 10000 },
+  { label: 'Every 30s', ms: 30000 },
+] as const;
 
 function defaultFilters(overrides?: Partial<ObservabilityFilters>): ObservabilityFilters {
   return {
@@ -115,8 +139,13 @@ export interface ObservabilityListClientProps {
   projects?: ProjectOption[];
   /** Lock issue filter (issue detail tab). */
   fixedIssueId?: string;
+  /** Lock agent filter (agent detail tab). */
+  fixedAgentId?: string;
   showIssueColumn?: boolean;
+  showAgentColumn?: boolean;
   showPageHeader?: boolean;
+  /** Default auto-refresh interval in ms; 0 = manual only. */
+  defaultRefreshIntervalMs?: number;
 }
 
 export function ObservabilityListClient({
@@ -124,11 +153,21 @@ export function ObservabilityListClient({
   goals = [],
   projects = [],
   fixedIssueId,
+  fixedAgentId,
   showIssueColumn = true,
+  showAgentColumn = true,
   showPageHeader = true,
+  defaultRefreshIntervalMs = 0,
 }: ObservabilityListClientProps) {
+  const initialRefreshMs = REFRESH_INTERVALS.some((o) => o.ms === defaultRefreshIntervalMs)
+    ? defaultRefreshIntervalMs
+    : 0;
+  const [refreshIntervalMs, setRefreshIntervalMs] = useState(initialRefreshMs);
   const [filters, setFilters] = useState<ObservabilityFilters>(() =>
-    defaultFilters(fixedIssueId ? { issueId: fixedIssueId } : undefined)
+    defaultFilters({
+      ...(fixedIssueId ? { issueId: fixedIssueId } : {}),
+      ...(fixedAgentId ? { agentId: fixedAgentId } : {}),
+    })
   );
   const [data, setData] = useState<ObservabilityListResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -168,6 +207,14 @@ export function ObservabilityListClient({
     void fetchList(filters);
   }, [filters, fetchList]);
 
+  useEffect(() => {
+    if (refreshIntervalMs <= 0) return;
+    const interval = setInterval(() => {
+      void fetchList(filters, { silent: true });
+    }, refreshIntervalMs);
+    return () => clearInterval(interval);
+  }, [refreshIntervalMs, filters, fetchList]);
+
   function updateFilters(patch: Partial<ObservabilityFilters>) {
     const resetPage =
       patch.issueId !== undefined ||
@@ -187,6 +234,7 @@ export function ObservabilityListClient({
       ...prev,
       ...patch,
       ...(fixedIssueId ? { issueId: fixedIssueId } : {}),
+      ...(fixedAgentId ? { agentId: fixedAgentId } : {}),
       page: patch.page !== undefined ? patch.page : resetPage ? 0 : prev.page,
     }));
   }
@@ -198,9 +246,22 @@ export function ObservabilityListClient({
   const from = total === 0 ? 0 : page * pageSize + 1;
   const to = Math.min((page + 1) * pageSize, total);
 
+  const liveTokenTotals = (data?.events ?? []).reduce(
+    (acc, event) => {
+      if (event.eventType === 'usage_update') {
+        acc.input += event.inputTokens ?? 0;
+        acc.output += event.outputTokens ?? 0;
+      }
+      return acc;
+    },
+    { input: 0, output: 0 },
+  );
+
   const selectClass =
     'w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm';
   const labelClass = 'text-xs font-medium text-muted-foreground';
+  const tableColumnCount =
+    8 + (showAgentColumn ? 1 : 0) + (showIssueColumn ? 1 : 0);
 
   return (
     <div className="space-y-6">
@@ -211,6 +272,13 @@ export function ObservabilityListClient({
             description="Agent spans exported from Mastra heartbeats — tool calls, model steps, and traces."
           />
         </>
+      )}
+
+      {(fixedIssueId || fixedAgentId) && (
+        <p className="text-sm text-muted-foreground">
+          Live tokens (this page): {liveTokenTotals.input} in / {liveTokenTotals.output} out
+          {refreshIntervalMs > 0 && refreshing ? ' · updating…' : ''}
+        </p>
       )}
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
@@ -275,25 +343,27 @@ export function ObservabilityListClient({
           </div>
         )}
 
-        <div className="space-y-1.5">
-          <label htmlFor="obs-agent" className={labelClass}>
-            Agent
-          </label>
-          <select
-            id="obs-agent"
-            className={selectClass}
-            disabled={loading}
-            value={filters.agentId}
-            onChange={(e) => updateFilters({ agentId: e.target.value })}
-          >
-            <option value="">All agents</option>
-            {agents.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.name}
-              </option>
-            ))}
-          </select>
-        </div>
+        {!fixedAgentId && (
+          <div className="space-y-1.5">
+            <label htmlFor="obs-agent" className={labelClass}>
+              Agent
+            </label>
+            <select
+              id="obs-agent"
+              className={selectClass}
+              disabled={loading}
+              value={filters.agentId}
+              onChange={(e) => updateFilters({ agentId: e.target.value })}
+            >
+              <option value="">All agents</option>
+              {agents.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
 
         <div className="space-y-1.5">
           <label htmlFor="obs-type" className={labelClass}>
@@ -413,7 +483,7 @@ export function ObservabilityListClient({
         </div>
       </div>
 
-      <div className="flex items-center justify-between gap-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <p className="text-sm text-muted-foreground">
           {loading && !data
             ? 'Loading…'
@@ -422,16 +492,34 @@ export function ObservabilityListClient({
               : `Showing ${from}–${to} of ${total}`}
           {refreshing && data && <span className="ml-2 text-xs">· Refreshing…</span>}
         </p>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={loading || refreshing}
-          onClick={() => void fetchList(filters, { silent: Boolean(data) })}
-        >
-          <RefreshCw className={`size-4 ${refreshing ? 'animate-spin' : ''}`} />
-          Refresh
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <label htmlFor="obs-refresh-interval" className="sr-only">
+            Auto-refresh interval
+          </label>
+          <select
+            id="obs-refresh-interval"
+            className="rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+            disabled={loading}
+            value={refreshIntervalMs}
+            onChange={(e) => setRefreshIntervalMs(parseInt(e.target.value, 10))}
+          >
+            {REFRESH_INTERVALS.map((option) => (
+              <option key={option.ms} value={option.ms}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={loading || refreshing}
+            onClick={() => void fetchList(filters, { silent: Boolean(data) })}
+          >
+            <RefreshCw className={`size-4 ${refreshing ? 'animate-spin' : ''}`} />
+            Refresh
+          </Button>
+        </div>
       </div>
 
       {error && (
@@ -449,7 +537,7 @@ export function ObservabilityListClient({
                 <th className="px-4 py-3 font-medium">Time</th>
                 <th className="px-4 py-3 font-medium">Type</th>
                 <th className="px-4 py-3 font-medium">Name</th>
-                <th className="px-4 py-3 font-medium">Agent</th>
+                {showAgentColumn && <th className="px-4 py-3 font-medium">Agent</th>}
                 {showIssueColumn && <th className="px-4 py-3 font-medium">Issue</th>}
                 <th className="px-4 py-3 font-medium">Duration</th>
                 <th className="px-4 py-3 font-medium">Tokens</th>
@@ -461,7 +549,7 @@ export function ObservabilityListClient({
               {loading && !data ? (
                 <tr>
                   <td
-                    colSpan={showIssueColumn ? 10 : 9}
+                    colSpan={tableColumnCount}
                     className="px-4 py-8 text-center text-muted-foreground"
                   >
                     Loading events…
@@ -470,7 +558,7 @@ export function ObservabilityListClient({
               ) : !data || data.events.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={showIssueColumn ? 10 : 9}
+                    colSpan={tableColumnCount}
                     className="px-4 py-8 text-center text-muted-foreground"
                   >
                     No observability events in this view.
@@ -510,11 +598,13 @@ export function ObservabilityListClient({
                             </span>
                           )}
                         </td>
-                        <td className="px-4 py-3">
-                          {event.agentName ?? (
-                            <span className="text-muted-foreground">—</span>
-                          )}
-                        </td>
+                        {showAgentColumn && (
+                          <td className="px-4 py-3">
+                            {event.agentName ?? (
+                              <span className="text-muted-foreground">—</span>
+                            )}
+                          </td>
+                        )}
                         {showIssueColumn && (
                           <td className="px-4 py-3">
                             {event.issueId ? (
@@ -542,7 +632,7 @@ export function ObservabilityListClient({
                       </tr>
                       {expanded && (
                         <tr className="bg-muted/20">
-                          <td colSpan={showIssueColumn ? 10 : 9} className="px-4 py-4">
+                          <td colSpan={tableColumnCount} className="px-4 py-4">
                             <ObservabilityEventDetail
                               event={event}
                               onTraceFilter={(traceId) => updateFilters({ traceId, page: 0 })}
@@ -637,6 +727,12 @@ function ObservabilityEventDetail({
 
       {event.errorText && (
         <p className="text-destructive text-xs">{event.errorText}</p>
+      )}
+
+      {event.eventType === 'text_delta' && event.outputPreview && (
+        <blockquote className="border-l-2 border-muted-foreground/40 pl-3 text-sm italic text-muted-foreground whitespace-pre-wrap">
+          {event.outputPreview}
+        </blockquote>
       )}
 
       {event.inputPreview && (

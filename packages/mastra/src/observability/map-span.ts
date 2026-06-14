@@ -55,6 +55,21 @@ function capPayload(value: unknown, maxBytes: number): Record<string, unknown> {
   };
 }
 
+function readContextValue(ctx: unknown, key: string): string | undefined {
+  if (
+    ctx &&
+    typeof ctx === 'object' &&
+    'get' in ctx &&
+    typeof (ctx as { get: unknown }).get === 'function'
+  ) {
+    return asString((ctx as { get: (k: string) => unknown }).get(key));
+  }
+  if (ctx && typeof ctx === 'object') {
+    return asString((ctx as Record<string, unknown>)[key]);
+  }
+  return undefined;
+}
+
 function extractContext(span: AnyExportedSpan): {
   companyId?: string;
   heartbeatRunId?: string;
@@ -64,26 +79,26 @@ function extractContext(span: AnyExportedSpan): {
   projectId?: string;
   goalId?: string;
 } {
-  const ctx = (span.requestContext ?? {}) as Record<string, unknown>;
+  const ctx = span.requestContext;
   const meta = (span.metadata ?? {}) as Record<string, unknown>;
 
   return {
-    companyId: asString(ctx.companyId) ?? asString(meta.companyId),
+    companyId: readContextValue(ctx, 'companyId') ?? asString(meta.companyId),
     heartbeatRunId:
-      asString(ctx.runId) ??
+      readContextValue(ctx, 'runId') ??
       asString(meta.heartbeatRunId) ??
       asString(meta.runId),
-    jobId: asString(ctx.jobId) ?? asString(meta.jobId),
+    jobId: readContextValue(ctx, 'jobId') ?? asString(meta.jobId),
     agentId:
-      asString(ctx.agentId) ??
+      readContextValue(ctx, 'agentId') ??
       asString(meta.agentId) ??
       asString(span.entityId),
     issueId:
-      asString(ctx.taskId) ??
+      readContextValue(ctx, 'taskId') ??
       asString(meta.issueId) ??
       asString(meta.taskId),
-    projectId: asString(ctx.projectId) ?? asString(meta.projectId),
-    goalId: asString(ctx.goalId) ?? asString(meta.goalId),
+    projectId: readContextValue(ctx, 'projectId') ?? asString(meta.projectId),
+    goalId: readContextValue(ctx, 'goalId') ?? asString(meta.goalId),
   };
 }
 
@@ -127,6 +142,11 @@ export function mapExportedSpanToEvent(span: AnyExportedSpan): NewAgentObservabi
       : undefined);
 
   const occurredAt = span.endTime ?? span.startTime ?? new Date();
+  const eventType = mapEventType(span);
+  const name =
+    (typeof span.name === 'string' && span.name.trim()) ||
+    toolId ||
+    eventType;
 
   return {
     id: randomUUID(),
@@ -140,8 +160,8 @@ export function mapExportedSpanToEvent(span: AnyExportedSpan): NewAgentObservabi
     issueId: context.issueId,
     projectId: context.projectId,
     goalId: context.goalId,
-    eventType: mapEventType(span),
-    name: span.name,
+    eventType,
+    name,
     status: mapStatus(span),
     model: asString((attrs as { model?: string } | undefined)?.model),
     toolId,

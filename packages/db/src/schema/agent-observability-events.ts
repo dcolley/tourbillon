@@ -10,7 +10,22 @@ export type ObservabilityEventType =
   | 'model_step'
   | 'tool_call'
   | 'mcp_tool_call'
-  | 'generic';
+  | 'generic'
+  | 'text_delta'
+  | 'tool_call_start'
+  | 'tool_call_result'
+  | 'tool_suspended'
+  | 'tool_approval_required'
+  | 'subagent_spawn'
+  | 'subagent_done'
+  | 'subagent_start'
+  | 'subagent_end'
+  | 'om_observation'
+  | 'om_reflection'
+  | 'agent_done'
+  | 'usage_update'
+  | 'mode_switch'
+  | 'error';
 
 export type ObservabilityEventStatus = 'ok' | 'error';
 

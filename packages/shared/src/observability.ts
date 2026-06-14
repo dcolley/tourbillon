@@ -5,6 +5,22 @@ export const OBSERVABILITY_EVENT_TYPES = [
   'tool_call',
   'mcp_tool_call',
   'generic',
+  // Harness-native event types (real-time streaming)
+  'text_delta',
+  'tool_call_start',
+  'tool_call_result',
+  'tool_suspended',
+  'tool_approval_required',
+  'subagent_spawn',
+  'subagent_done',
+  'subagent_start',
+  'subagent_end',
+  'om_observation',
+  'om_reflection',
+  'agent_done',
+  'usage_update',
+  'mode_switch',
+  'error',
 ] as const;
 
 export type ObservabilityEventType = (typeof OBSERVABILITY_EVENT_TYPES)[number];

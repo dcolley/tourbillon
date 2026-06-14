@@ -48,6 +48,7 @@ export async function POST(
     role: string;
     urlKey?: string;
     reportsToId?: string | null;
+    runtimeType?: 'agent' | 'harness';
   };
 
   try {

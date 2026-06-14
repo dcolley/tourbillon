@@ -5,13 +5,15 @@ const workerConnection = createConnection();
 import { db, agents, heartbeatRuns, companies, costEvents, issues } from '@tourbillon/db';
 import { eq, and, sql } from 'drizzle-orm';
 import {
-  createAgentWithSkills,
+  createDurableAgentWithSkills,
   createHeartbeatRuntimeContext,
   flushObservability,
   getInternalApiUrl,
   buildHeartbeatMemoryKeys,
+  getResumableDurableRun,
+  persistDurableRunId,
 } from '@tourbillon/mastra';
-import type { HeartbeatJobData, WakePayload } from '@tourbillon/shared';
+import type { HeartbeatJobData } from '@tourbillon/shared';
 import {
   DEFAULT_HEARTBEAT_TIMEOUT_SEC,
   QUEUE_HEARTBEAT,
@@ -19,10 +21,15 @@ import {
   modelProviderOverridesFromAgent,
   isAgentBudgetExceeded,
   isObservabilityEnabled,
+  isHarnessAdapter,
+  buildWakeMessage,
 } from '@tourbillon/shared';
 import type { AgentRuntimeConfig } from '@tourbillon/shared';
+import type { Agent as AgentRecord } from '@tourbillon/db';
 import { randomUUID } from 'crypto';
 import { createJobTracer } from './job-trace';
+import { runWithHarness, type HarnessRunResult } from './adapters/harness-adapter';
+import { redisPub } from './redis-pub';
 
 const CONCURRENCY = parseInt(process.env.WORKER_CONCURRENCY ?? '1', 10);
 
@@ -51,6 +58,82 @@ heartbeatWorker.on('failed', (job, err) => {
   });
   tracer.error('job failed', { error: err.message });
 });
+
+interface TokenUsageResult {
+  inputTokens: number;
+  outputTokens: number;
+  traceId?: string;
+}
+
+async function publishHeartbeatRunUpdate(
+  companyId: string,
+  runId: string,
+  status: 'succeeded' | 'failed',
+  agentId: string,
+): Promise<void> {
+  await redisPub.publish(
+    `sse:${companyId}`,
+    JSON.stringify({ type: 'heartbeat_run_update', runId, status, agentId }),
+  );
+}
+
+async function recordHeartbeatSuccess(
+  runId: string,
+  agentRecord: AgentRecord,
+  companyId: string,
+  provider: string,
+  usage: TokenUsageResult,
+): Promise<void> {
+  const total = usage.inputTokens + usage.outputTokens;
+  if (total > 0) {
+    await db.insert(costEvents).values({
+      agentId: agentRecord.id,
+      companyId,
+      runId,
+      provider,
+      model: agentRecord.modelId ?? 'unknown',
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      costCents: 0,
+    });
+    await db.update(agents)
+      .set({ spentMonthlyTokens: sql`${agents.spentMonthlyTokens} + ${total}` })
+      .where(eq(agents.id, agentRecord.id));
+  }
+
+  const runUpdates: { status: 'succeeded'; finishedAt: Date; traceId?: string } = {
+    status: 'succeeded',
+    finishedAt: new Date(),
+  };
+  if (usage.traceId) {
+    runUpdates.traceId = usage.traceId;
+  }
+
+  await db.update(heartbeatRuns).set(runUpdates).where(eq(heartbeatRuns.id, runId));
+
+  await publishHeartbeatRunUpdate(companyId, runId, 'succeeded', agentRecord.id);
+
+  if (isObservabilityEnabled()) {
+    await flushObservability();
+  }
+}
+
+async function recordHeartbeatFailure(
+  runId: string,
+  errorText: string,
+  companyId: string,
+  agentId: string,
+): Promise<void> {
+  if (isObservabilityEnabled()) {
+    await flushObservability().catch(() => undefined);
+  }
+
+  await db.update(heartbeatRuns)
+    .set({ status: 'failed', finishedAt: new Date(), errorText })
+    .where(eq(heartbeatRuns.id, runId));
+
+  await publishHeartbeatRunUpdate(companyId, runId, 'failed', agentId);
+}
 
 async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
   const { agentId, companyId, invocationSource, wakeReason, taskId } = job.data;
@@ -148,16 +231,11 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
       expectedAgentId: agentId,
       actualAssigneeAgentId: assignedIssue.assigneeAgentId,
     });
-    await db.update(heartbeatRuns)
-      .set({ status: 'failed', finishedAt: new Date(), errorText })
-      .where(eq(heartbeatRuns.id, runId));
+    await recordHeartbeatFailure(runId, errorText, companyId, agentId);
     return;
   }
 
   const apiKey = buildRunScopedApiKey(runId, agentId, companyId);
-  const agent = await createAgentWithSkills(agentRecord, {
-    allowedMcpServerIds: company.allowedMcpServerIds ?? [],
-  });
   const wakeMessage = buildWakeMessage(job.data);
   const timeoutMs = DEFAULT_HEARTBEAT_TIMEOUT_SEC * 1000;
 
@@ -166,24 +244,154 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
     agentRecord.modelId,
   );
 
-  runTracer.info('invoking agent.generate', {
+  const issueForTask = taskId
+    ? await db.query.issues.findFirst({ where: eq(issues.id, taskId) })
+    : undefined;
+
+  runTracer.info('invoking heartbeat runtime', {
+    adapterType: agentRecord.adapterType,
     modelId: agentRecord.modelId ?? 'unknown',
     provider: providerConfig.provider,
     apiMode: providerConfig.apiMode,
     modelBaseURL: providerConfig.baseURL,
     timeoutSec: DEFAULT_HEARTBEAT_TIMEOUT_SEC,
     wakeMessagePreview: wakeMessage.slice(0, 400),
-    runtimeContextKeys: ['apiKey', 'runId', 'agentId', 'companyId', 'taskId'],
   });
 
-  const issueForTask = taskId
-    ? await db.query.issues.findFirst({ where: eq(issues.id, taskId) })
-    : undefined;
+  const lockExtender = setInterval(() => {
+    void job.extendLock(job.token!, 30_000).catch(() => undefined);
+  }, 20_000);
+
+  try {
+    if (isHarnessAdapter(agentRecord.adapterType)) {
+      const harnessResult = await runWithHarness(
+        agentRecord,
+        {
+          job,
+          runId,
+          apiKey,
+          goalId: issueForTask?.goalId ?? undefined,
+          projectId: issueForTask?.projectId ?? undefined,
+        },
+        timeoutMs,
+        company.allowedMcpServerIds ?? [],
+      );
+
+      await logIssueStateAfterRun(runTracer, taskId);
+      await recordHarnessResult(
+        runId,
+        agentRecord,
+        companyId,
+        providerConfig.provider,
+        harnessResult,
+      );
+      runTracer.info('harness heartbeat succeeded', {
+        finishReason: harnessResult.finishReason,
+        traceId: harnessResult.traceId,
+      });
+      return;
+    }
+
+    await runDurableAgentHeartbeat({
+      agentRecord,
+      job,
+      runId,
+      runTracer,
+      apiKey,
+      wakeMessage,
+      timeoutMs,
+      taskId,
+      issueForTask,
+      providerConfig,
+      companyId,
+    });
+  } catch (err) {
+    const errorText = err instanceof Error ? err.message : String(err);
+    runTracer.error('heartbeat run failed', { error: errorText });
+    await recordHeartbeatFailure(runId, errorText, companyId, agentId);
+    throw err;
+  } finally {
+    clearInterval(lockExtender);
+  }
+}
+
+async function recordHarnessResult(
+  runId: string,
+  agentRecord: AgentRecord,
+  companyId: string,
+  provider: string,
+  result: HarnessRunResult,
+): Promise<void> {
+  if (result.finishReason === 'suspended') {
+    await db.update(heartbeatRuns)
+      .set({
+        status: 'succeeded',
+        finishedAt: new Date(),
+        traceId: result.traceId ?? undefined,
+        harnessRunId: result.harnessRunId ?? undefined,
+      })
+      .where(eq(heartbeatRuns.id, runId));
+
+    if (isObservabilityEnabled()) {
+      await flushObservability();
+    }
+    return;
+  }
+
+  if (result.finishReason === 'timeout') {
+    await recordHeartbeatFailure(runId, 'Heartbeat timeout', companyId, agentRecord.id);
+    return;
+  }
+
+  if (result.finishReason === 'error') {
+    await recordHeartbeatFailure(runId, 'Harness run failed', companyId, agentRecord.id);
+    return;
+  }
+
+  await recordHeartbeatSuccess(runId, agentRecord, companyId, provider, {
+    inputTokens: result.inputTokens,
+    outputTokens: result.outputTokens,
+    traceId: result.traceId,
+  });
+}
+
+async function runDurableAgentHeartbeat(params: {
+  agentRecord: AgentRecord;
+  job: Job<HeartbeatJobData>;
+  runId: string;
+  runTracer: ReturnType<typeof createJobTracer>;
+  apiKey: string;
+  wakeMessage: string;
+  timeoutMs: number;
+  taskId?: string;
+  issueForTask: Awaited<ReturnType<typeof db.query.issues.findFirst>> | undefined;
+  providerConfig: ReturnType<typeof resolveModelProviderConfig>;
+  companyId: string;
+}): Promise<void> {
+  const {
+    agentRecord,
+    job,
+    runId,
+    runTracer,
+    apiKey,
+    wakeMessage,
+    timeoutMs,
+    taskId,
+    issueForTask,
+    providerConfig,
+    companyId,
+  } = params;
+
+  const company = await db.query.companies.findFirst({ where: eq(companies.id, companyId) });
+  const durableAgent = await createDurableAgentWithSkills(agentRecord, {
+    allowedMcpServerIds: company?.allowedMcpServerIds ?? [],
+    maxSteps: 30,
+  });
 
   const runtimeContext = createHeartbeatRuntimeContext({
     apiKey,
     runId,
-    agentId,
+    agentId: agentRecord.id,
     companyId,
     taskId,
     goalId: issueForTask?.goalId ?? undefined,
@@ -193,158 +401,132 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
 
   const memoryKeys = buildHeartbeatMemoryKeys({
     companyId,
-    agentId,
+    agentId: agentRecord.id,
     issueId: taskId,
     goalId: issueForTask?.goalId ?? undefined,
     projectId: issueForTask?.projectId ?? undefined,
   });
 
-  // runTracer.info('memory keys resolved', { ...memoryKeys });
+  const resumable = await getResumableDurableRun(agentRecord.id, taskId);
+  const tracingOptions = isObservabilityEnabled()
+    ? {
+        metadata: {
+          issueId: taskId,
+          goalId: issueForTask?.goalId ?? undefined,
+          projectId: issueForTask?.projectId ?? undefined,
+          heartbeatRunId: runId,
+          jobId: job.id,
+          companyId,
+          agentId: agentRecord.id,
+        },
+        tags: taskId ? [`issue:${taskId}`] : [],
+        requestContextKeys: [
+          'runId',
+          'agentId',
+          'companyId',
+          'taskId',
+          'goalId',
+          'projectId',
+          'jobId',
+        ],
+      }
+    : undefined;
+
+  const keepalive = setInterval(() => {
+    void job.updateProgress(0).catch(() => undefined);
+  }, 20_000);
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const result = await Promise.race([
-      agent.generate(wakeMessage, {
-        requestContext: runtimeContext,
-        maxSteps: 30,
-        memory: {
-          resource: memoryKeys.resource,
-          thread: memoryKeys.thread,
-        },
-        ...(isObservabilityEnabled()
-          ? {
-              tracingOptions: {
-                metadata: {
-                  issueId: taskId,
-                  goalId: issueForTask?.goalId ?? undefined,
-                  projectId: issueForTask?.projectId ?? undefined,
-                  heartbeatRunId: runId,
-                  jobId: job.id,
-                  companyId,
-                  agentId,
-                },
-                tags: taskId ? [`issue:${taskId}`] : [],
-                requestContextKeys: [
-                  'runId',
-                  'agentId',
-                  'companyId',
-                  'taskId',
-                  'goalId',
-                  'projectId',
-                  'jobId',
-                ],
-              },
-            }
-          : {}),
-      }),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('Heartbeat timeout')), timeoutMs)
-      ),
-    ]);
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let traceId: string | undefined;
+    let durableRunId: string | undefined;
+    let streamResult: { cleanup: () => void } | undefined;
 
-    // const summary = summarizeGenerateResult(result);
-    // runTracer.info('agent.generate finished', summary);
-
-    if (taskId) {
-      const issueAfter = await db.query.issues.findFirst({ where: eq(issues.id, taskId) });
-      runTracer.info('issue state after heartbeat', {
-        taskId,
-        found: Boolean(issueAfter),
-        status: issueAfter?.status,
-        checkoutRunId: issueAfter?.checkoutRunId,
-        checkoutMatchesRun: issueAfter?.checkoutRunId === runId,
-        updatedAt: issueAfter?.updatedAt?.toISOString(),
-      });
+    try {
+      if (resumable?.durableRunId) {
+        runTracer.info('resuming durable agent run', { durableRunId: resumable.durableRunId });
+        const observed = await durableAgent.observe(resumable.durableRunId, {
+          offset: 0,
+          abortSignal: controller.signal,
+          onFinish: (result) => {
+            const usage = result.output?.usage;
+            inputTokens = usage?.promptTokens ?? usage?.inputTokens ?? inputTokens;
+            outputTokens = usage?.completionTokens ?? usage?.outputTokens ?? outputTokens;
+          },
+        } as NonNullable<Parameters<typeof durableAgent.observe>[1]> & { abortSignal: AbortSignal });
+        streamResult = observed;
+        durableRunId = observed.runId;
+        traceId = observed.runId;
+        await observed.output.text;
+        observed.cleanup();
+        streamResult = undefined;
+      } else {
+        const streamed = await durableAgent.stream(wakeMessage, {
+          requestContext: runtimeContext,
+          maxSteps: 30,
+          memory: {
+            resource: memoryKeys.resource,
+            thread: memoryKeys.thread,
+          },
+          ...(tracingOptions ? { tracingOptions } : {}),
+          abortSignal: controller.signal,
+          onFinish: (result) => {
+            const usage = result.output?.usage;
+            inputTokens = usage?.promptTokens ?? usage?.inputTokens ?? 0;
+            outputTokens = usage?.completionTokens ?? usage?.outputTokens ?? 0;
+          },
+        } as NonNullable<Parameters<typeof durableAgent.stream>[1]> & { abortSignal: AbortSignal });
+        streamResult = streamed;
+        durableRunId = streamed.runId;
+        traceId = streamed.runId;
+        await streamed.output.text;
+        streamed.cleanup();
+        streamResult = undefined;
+      }
+    } catch (err) {
+      streamResult?.cleanup();
+      if (controller.signal.aborted) {
+        throw new Error('Heartbeat timeout');
+      }
+      throw err;
     }
 
-    if (result.usage) {
-      const inputTokens = result.usage.inputTokens ?? result.usage.promptTokens ?? 0;
-      const outputTokens = result.usage.outputTokens ?? result.usage.completionTokens ?? 0;
-      const total = inputTokens + outputTokens;
-      await db.insert(costEvents).values({
-        agentId,
-        companyId,
-        runId,
-        provider: providerConfig.provider,
-        model: agentRecord.modelId ?? 'unknown',
-        inputTokens,
-        outputTokens,
-        costCents: 0,
-      });
-      await db.update(agents)
-        .set({ spentMonthlyTokens: sql`${agents.spentMonthlyTokens} + ${total}` })
-        .where(eq(agents.id, agentId));
-      runTracer.info('token usage recorded', { totalTokens: total });
+    if (durableRunId) {
+      await persistDurableRunId(runId, durableRunId);
     }
 
-    const runUpdates: { status: 'succeeded'; finishedAt: Date; traceId?: string } = {
-      status: 'succeeded',
-      finishedAt: new Date(),
-    };
-    if (typeof result.traceId === 'string' && result.traceId.length > 0) {
-      runUpdates.traceId = result.traceId;
-    }
+    await logIssueStateAfterRun(runTracer, taskId);
 
-    await db.update(heartbeatRuns).set(runUpdates).where(eq(heartbeatRuns.id, runId));
-
-    if (isObservabilityEnabled()) {
-      await flushObservability();
-    }
-
-    runTracer.info('heartbeat run succeeded', {
-      traceId: runUpdates.traceId,
+    await recordHeartbeatSuccess(runId, agentRecord, companyId, providerConfig.provider, {
+      inputTokens,
+      outputTokens,
+      traceId,
     });
-  } catch (err) {
-    const errorText = err instanceof Error ? err.message : String(err);
-    runTracer.error('heartbeat run failed', { error: errorText });
 
-    if (isObservabilityEnabled()) {
-      await flushObservability().catch(() => undefined);
-    }
-
-    await db.update(heartbeatRuns)
-      .set({ status: 'failed', finishedAt: new Date(), errorText })
-      .where(eq(heartbeatRuns.id, runId));
-    throw err;
+    runTracer.info('durable agent heartbeat succeeded', { traceId, durableRunId });
+  } finally {
+    clearTimeout(timeout);
+    clearInterval(keepalive);
   }
 }
 
-const WAKE_COMMENTS_MAX_CHARS = 3000;
-
-function buildWakeMessage(data: HeartbeatJobData): string {
-  const parts = [`Wake reason: ${data.wakeReason}`];
-  if (data.taskId) parts.push(`Assigned task ID: ${data.taskId}`);
-  if (data.wakePayloadJson) {
-    try {
-      const payload = JSON.parse(data.wakePayloadJson) as WakePayload;
-      if (payload.issue) {
-        parts.push(
-          `Task: ${payload.issue.identifier} — ${payload.issue.title} (${payload.issue.status}, ${payload.issue.priority})`
-        );
-      }
-      if (payload.newComments?.length) {
-        const commentLines: string[] = ['\nRecent issue comments:'];
-        let chars = 0;
-        for (const c of payload.newComments) {
-          const line = `- [${c.createdAt}] ${c.authorName}: ${c.body}`;
-          if (chars + line.length > WAKE_COMMENTS_MAX_CHARS) {
-            commentLines.push('- … (truncated)');
-            break;
-          }
-          commentLines.push(line);
-          chars += line.length;
-        }
-        parts.push(commentLines.join('\n'));
-      }
-      if (payload.fallbackFetchNeeded) {
-        parts.push(
-          '\nFull comment history may be incomplete in this wake message. ' +
-            'After checkout, call getComments without `after` for the full thread.'
-        );
-      }
-    } catch { /* ignore */ }
-  }
-  parts.push('\nBegin your heartbeat procedure. Follow SKILL: Control Plane Operations exactly.');
-  return parts.join('\n');
+async function logIssueStateAfterRun(
+  runTracer: ReturnType<typeof createJobTracer>,
+  taskId?: string,
+): Promise<void> {
+  if (!taskId) return;
+  const issueAfter = await db.query.issues.findFirst({ where: eq(issues.id, taskId) });
+  runTracer.info('issue state after heartbeat', {
+    taskId,
+    found: Boolean(issueAfter),
+    status: issueAfter?.status,
+    checkoutRunId: issueAfter?.checkoutRunId,
+    updatedAt: issueAfter?.updatedAt?.toISOString(),
+  });
 }
 
 function buildRunScopedApiKey(runId: string, agentId: string, companyId: string): string {

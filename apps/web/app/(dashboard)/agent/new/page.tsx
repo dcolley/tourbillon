@@ -27,6 +27,7 @@ async function hireAgent(formData: FormData) {
       role: formData.get('role') as string,
       urlKey: (formData.get('urlKey') as string) || undefined,
       reportsToId: reportsToId || null,
+      runtimeType: (formData.get('runtimeType') as 'agent' | 'harness') || 'agent',
       instructionsBundleSoulMd: (formData.get('instructionsBundleSoulMd') as string) || undefined,
       instructionsBundleAgentsMd: (formData.get('instructionsBundleAgentsMd') as string) || undefined,
     });
@@ -110,6 +111,41 @@ export default async function NewAgentPage({
               </option>
             ))}
           </select>
+        </div>
+
+        <div className="space-y-1.5">
+          <span className="text-sm font-medium">Agent type</span>
+          <div className="space-y-2 rounded-md border border-input p-3">
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input
+                type="radio"
+                name="runtimeType"
+                value="agent"
+                defaultChecked
+                className="mt-1"
+              />
+              <span>
+                <span className="text-sm font-medium">Agent</span>
+                <span className="block text-xs text-muted-foreground">
+                  Standard heartbeat agent with durable resume (recommended)
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input
+                type="radio"
+                name="runtimeType"
+                value="harness"
+                className="mt-1"
+              />
+              <span>
+                <span className="text-sm font-medium">Harness</span>
+                <span className="block text-xs text-muted-foreground">
+                  Mastra Code harness with file tools, sandbox, and observational memory
+                </span>
+              </span>
+            </label>
+          </div>
         </div>
 
         <div className="space-y-1.5">
