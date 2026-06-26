@@ -1,4 +1,5 @@
 export * from './companies';
+export * from './llm-providers';
 export * from './agents';
 export * from './goals';
 export * from './projects';

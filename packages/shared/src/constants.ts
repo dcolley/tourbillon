@@ -42,11 +42,6 @@ export const TOOLSET_CATALOG = [
     description: 'Post markdown comments on issues.',
   },
   {
-    id: 'planning',
-    label: 'Planning',
-    description: 'Plan documents and confirmation requests.',
-  },
-  {
     id: 'approvals',
     label: 'Approvals',
     description: 'Submit governance approval requests.',
@@ -69,10 +64,10 @@ export type ToolsetId = (typeof TOOLSET_CATALOG)[number]['id'];
 export const VALID_TOOLSET_IDS = new Set<string>(TOOLSET_CATALOG.map((t) => t.id));
 
 export const ROLE_DEFAULT_TOOLSETS: Record<string, string[]> = {
-  ceo:      ['comments', 'approvals', 'roster', 'planning', 'web-search'],
-  cto:      ['comments', 'approvals', 'planning', 'roster'],
-  engineer: ['comments', 'planning', 'code-execution'],
-  pm:       ['comments', 'approvals', 'planning', 'roster', 'web-search'],
+  ceo:      ['comments', 'approvals', 'roster', 'web-search'],
+  cto:      ['comments', 'approvals', 'roster'],
+  engineer: ['comments', 'code-execution'],
+  pm:       ['comments', 'approvals', 'roster', 'web-search'],
   qa:       ['comments', 'code-execution'],
   designer: ['comments'],
 };

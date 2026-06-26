@@ -54,6 +54,7 @@ async function fireDueAgentHeartbeats(): Promise<void> {
       try {
         const { jobId, outcome } = await enqueueHeartbeat({
           agentId: agent.id,
+          agentName: agent.name,
           companyId: agent.companyId,
           invocationSource: 'timer',
           wakeReason: 'timer',

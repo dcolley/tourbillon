@@ -1,8 +1,8 @@
 'use client';
 
-import { startTransition, useEffect, useState } from 'react';
+import { startTransition, useEffect, useState, useActionState } from 'react';
 import { useRouter } from 'next/navigation';
-import { useFormState, useFormStatus } from 'react-dom';
+import { useFormStatus } from 'react-dom';
 import type { Issue } from '@tourbillon/db';
 import type { GoalOption } from '@/lib/goals';
 import type { ProjectOption } from '@/lib/projects';
@@ -42,7 +42,7 @@ export function IssueEditForm({
   action: (_prev: UpdateIssueState, formData: FormData) => Promise<UpdateIssueState>;
 }) {
   const router = useRouter();
-  const [state, formAction] = useFormState(action, initialState);
+  const [state, formAction] = useActionState(action, initialState);
   const [selectedGoalId, setSelectedGoalId] = useState(issue.goalId ?? '');
   const [selectedProjectId, setSelectedProjectId] = useState(issue.projectId ?? '');
 

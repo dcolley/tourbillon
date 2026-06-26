@@ -42,6 +42,42 @@ export interface HarnessObservabilityContext {
   toolCallNames?: Map<string, string>;
 }
 
+function summarizeToolResult(result: unknown): string {
+  if (result == null) return '(empty)';
+  if (typeof result === 'string') {
+    if (
+      result.includes('<!DOCTYPE html') ||
+      result.includes('<html') ||
+      result.includes('next-error-h1')
+    ) {
+      const httpMatch = result.match(/HTTP (\d{3})/i);
+      const titleMatch = result.match(/<title>([^<]+)<\/title>/i);
+      const parts: string[] = ['HTML error'];
+      if (httpMatch) parts.push(`HTTP ${httpMatch[1]}`);
+      if (titleMatch) parts.push(titleMatch[1].trim().slice(0, 80));
+      return parts.join(' · ');
+    }
+    return result.length > 500 ? `${result.slice(0, 500)}…` : result;
+  }
+  if (Array.isArray(result)) return `Array(${result.length})`;
+  if (result && typeof result === 'object') {
+    const obj = result as Record<string, unknown>;
+    if (obj.error != null) {
+      const msg = typeof obj.message === 'string' ? obj.message.slice(0, 200) : '';
+      return msg ? `Error ${obj.error}: ${msg}` : `Error ${String(obj.error)}`;
+    }
+    if (Array.isArray(obj.entries)) return `${obj.entries.length} files`;
+    if (Array.isArray(obj.comments)) return `${obj.comments.length} comments`;
+    if (Array.isArray(obj.issues)) return `${obj.issues.length} issues`;
+    if (typeof obj.content === 'string') {
+      return `File (${obj.content.length} chars)`;
+    }
+    const json = JSON.stringify(result);
+    return json.length > 500 ? `${json.slice(0, 500)}…` : json;
+  }
+  return String(result);
+}
+
 function serializePreview(value: unknown): string | null {
   if (value == null) return null;
   const max = observabilityPreviewChars();
@@ -126,6 +162,17 @@ export function writeHarnessObservabilityEvent(
 ): void {
   if (!HARNESS_OBSERVABLE_EVENT_TYPES.has(event.type)) return;
 
+  // message_update replays the full accumulated assistant message on every
+  // stream tick — tool_start/tool_end rows already capture the useful signal.
+  if (
+    event.type === 'message_update' ||
+    event.type === 'message_start' ||
+    event.type === 'message_end' ||
+    event.type === 'tool_input_delta'
+  ) {
+    return;
+  }
+
   if (
     event.type === 'tool_start' &&
     ctx.toolCallNames &&
@@ -151,10 +198,10 @@ export function writeHarnessObservabilityEvent(
     inputPreview = serializePreview(event.args);
   }
   if ('result' in event) {
-    outputPreview = serializePreview(event.result);
+    outputPreview = serializePreview(summarizeToolResult(event.result));
   }
   if ('partialResult' in event) {
-    outputPreview = serializePreview(event.partialResult);
+    outputPreview = serializePreview(summarizeToolResult(event.partialResult));
   }
   if (event.type === 'usage_update') {
     inputTokens = event.usage.promptTokens ?? null;

@@ -4,7 +4,7 @@ import {
   getWorkspaceRoot,
   listWorkspaceEntries,
   readWorkspaceText,
-  isTextEditablePath,
+  isTextViewablePath,
 } from '@/lib/company-workspace';
 import { WorkspaceClient } from './workspace-client';
 
@@ -15,26 +15,21 @@ export default async function WorkspacePage({
 }) {
   const { path: selectedPath } = await searchParams;
   const company = await getOrCreateDefaultCompany();
-  const entries = await listWorkspaceEntries(company.id, { recursive: true });
+  const entries = await listWorkspaceEntries(company.id, { recursive: false });
 
-  let fileContent: string | null = null;
-  let fileSize: number | null = null;
+  let initialContent: string | null = null;
 
-  if (selectedPath && isTextEditablePath(selectedPath)) {
+  if (selectedPath && isTextViewablePath(selectedPath)) {
     try {
       const file = await readWorkspaceText(company.id, selectedPath);
-      fileContent = file.content;
-      fileSize = file.size;
+      initialContent = file.content;
     } catch {
-      fileContent = null;
+      initialContent = null;
     }
-  } else if (selectedPath) {
-    const entry = entries.find((e) => e.path === selectedPath && e.type === 'file');
-    fileSize = entry?.size ?? null;
   }
 
   return (
-    <div className="max-w-6xl space-y-6">
+    <div className="max-w-7xl space-y-6">
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Workspace</h1>
         <p className="text-muted-foreground">
@@ -43,12 +38,11 @@ export default async function WorkspacePage({
       </div>
 
       <WorkspaceClient
-        entries={entries}
+        initialEntries={entries}
+        selectedPath={selectedPath ?? null}
+        initialContent={initialContent}
         workspaceRoot={getWorkspaceRoot()}
         companyWorkspaceDir={getCompanyWorkspaceDir(company.id)}
-        selectedPath={selectedPath ?? null}
-        fileContent={fileContent}
-        fileSize={fileSize}
       />
     </div>
   );

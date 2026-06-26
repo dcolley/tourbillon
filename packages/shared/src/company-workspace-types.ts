@@ -41,10 +41,48 @@ export class WorkspaceSizeError extends Error {
 
 const TEXT_EDITABLE_EXTENSIONS = new Set(['.md', '.txt', '.json', '.yaml', '.yml', '.csv']);
 
-export function isTextEditablePath(relativePath: string): boolean {
+const CODE_VIEWABLE_EXTENSIONS = new Set([
+  '.js',
+  '.jsx',
+  '.ts',
+  '.tsx',
+  '.mjs',
+  '.cjs',
+  '.css',
+  '.scss',
+  '.less',
+  '.html',
+  '.htm',
+  '.xml',
+  '.sh',
+  '.bash',
+  '.zsh',
+  '.sql',
+  '.py',
+  '.go',
+  '.rs',
+  '.java',
+  '.kt',
+  '.vue',
+  '.svelte',
+]);
+
+function fileExtension(relativePath: string): string | null {
   const dot = relativePath.lastIndexOf('.');
-  if (dot === -1) return false;
-  return TEXT_EDITABLE_EXTENSIONS.has(relativePath.slice(dot).toLowerCase());
+  if (dot === -1) return null;
+  return relativePath.slice(dot).toLowerCase();
+}
+
+export function isTextEditablePath(relativePath: string): boolean {
+  const ext = fileExtension(relativePath);
+  if (!ext) return false;
+  return TEXT_EDITABLE_EXTENSIONS.has(ext);
+}
+
+export function isTextViewablePath(relativePath: string): boolean {
+  const ext = fileExtension(relativePath);
+  if (!ext) return false;
+  return TEXT_EDITABLE_EXTENSIONS.has(ext) || CODE_VIEWABLE_EXTENSIONS.has(ext);
 }
 
 export function isMarkdownPath(relativePath: string): boolean {

@@ -1,6 +1,7 @@
 import type { Job, JobType } from 'bullmq';
 import type { HeartbeatJobData } from '@tourbillon/shared';
 import { QUEUE_HEARTBEAT } from '@tourbillon/shared';
+import { reconcileRunningHeartbeatRunsForJob } from '@tourbillon/db';
 import { getQueue, JOB_QUEUES, isJobQueueName, connection, type JobQueueName } from './queue';
 import { getHeartbeatRunByJobId, getHeartbeatTaskId } from './heartbeats';
 
@@ -261,6 +262,9 @@ export async function removeJob(queueName: JobQueueName, jobId: string): Promise
   const job = await getQueue(queueName).getJob(jobId);
   if (!job) throw new JobsError('Job not found.');
   await job.remove();
+  if (queueName === QUEUE_HEARTBEAT) {
+    await reconcileRunningHeartbeatRunsForJob(jobId, 'BullMQ job removed manually');
+  }
 }
 
 const HEARTBEAT_JOB_STATES: JobType[] = ['active', 'waiting', 'completed', 'failed', 'delayed'];

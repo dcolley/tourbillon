@@ -4,6 +4,8 @@ import { eq } from 'drizzle-orm';
 import { validateRunToken } from '@/lib/auth/run-token';
 import { logAgentApiRequest, logAgentApiResponse, summarizeBody } from '@/lib/agent-api-trace';
 import { enqueueHeartbeat } from '@/lib/queue';
+import { statusesThatReleaseCheckoutLock, CHECKOUT_LOCK_CLEAR_FIELDS } from '@/lib/checkout-lock';
+import { resolveReviewAssignee } from '@/lib/review-routing';
 
 export async function PATCH(
   req: NextRequest,
@@ -40,21 +42,46 @@ export async function PATCH(
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
   }
 
+  let effectiveAssigneeId = body.assigneeAgentId;
+  let reviewAssigneeAutoResolved = false;
+  let reviewAssigneeReason: string | undefined;
+
+  if (body.status === 'in_review') {
+    const needsAutoResolve =
+      body.assigneeAgentId === undefined || body.assigneeAgentId === runCtx.agentId;
+    if (needsAutoResolve) {
+      const resolved = await resolveReviewAssignee(issue, runCtx.agentId);
+      if (resolved) {
+        effectiveAssigneeId = resolved.agentId;
+        reviewAssigneeAutoResolved = true;
+        reviewAssigneeReason = resolved.reason;
+      }
+    }
+  }
+
   const updates: Record<string, unknown> = { updatedAt: new Date() };
   if (body.status) updates.status = body.status;
   if (body.priority) updates.priority = body.priority;
-  if (body.assigneeAgentId !== undefined) updates.assigneeAgentId = body.assigneeAgentId;
+  if (effectiveAssigneeId !== undefined) updates.assigneeAgentId = effectiveAssigneeId;
   if (body.blockedByIssueIds !== undefined) updates.blockedByIssueIds = body.blockedByIssueIds;
   if (body.status === 'done') updates.completedAt = new Date();
 
-  // Release checkout lock when terminal status set
-  if (['done', 'cancelled', 'blocked', 'in_review'].includes(body.status ?? '')) {
-    updates.checkoutRunId = null;
-    updates.executionLockedAt = null;
-    updates.executionAgentNameKey = null;
+  // Release checkout lock when leaving active work
+  if (body.status && statusesThatReleaseCheckoutLock(body.status)) {
+    Object.assign(updates, CHECKOUT_LOCK_CLEAR_FIELDS);
   }
 
   const [updated] = await db.update(issues).set(updates).where(eq(issues.id, issueId)).returning();
+
+  const activityDetails: Record<string, unknown> = {
+    ...updates,
+    comment: body.comment,
+    runId,
+  };
+  if (reviewAssigneeAutoResolved) {
+    activityDetails.reviewAssigneeAutoResolved = true;
+    activityDetails.reviewAssigneeReason = reviewAssigneeReason;
+  }
 
   await db.insert(activityLog).values({
     companyId: runCtx.companyId,
@@ -63,17 +90,17 @@ export async function PATCH(
     action: 'issue.updated',
     entityType: 'issue',
     entityId: issueId,
-    details: { ...updates, comment: body.comment, runId },
+    details: activityDetails,
   });
 
   const assigneeChanged =
-    body.assigneeAgentId !== undefined &&
-    body.assigneeAgentId !== issue.assigneeAgentId &&
-    body.assigneeAgentId !== runCtx.agentId;
+    effectiveAssigneeId !== undefined &&
+    effectiveAssigneeId !== issue.assigneeAgentId &&
+    effectiveAssigneeId !== runCtx.agentId;
 
-  if (assigneeChanged && body.assigneeAgentId) {
+  if (assigneeChanged && effectiveAssigneeId) {
     await enqueueHeartbeat({
-      agentId: body.assigneeAgentId,
+      agentId: effectiveAssigneeId,
       companyId: runCtx.companyId,
       invocationSource: 'assignment',
       wakeReason: 'assignment',
@@ -88,6 +115,8 @@ export async function PATCH(
     priority: updated.priority,
     assigneeAgentId: updated.assigneeAgentId,
     updates,
+    reviewAssigneeAutoResolved,
+    reviewAssigneeReason,
   });
 
   return NextResponse.json(updated);

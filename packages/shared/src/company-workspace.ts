@@ -18,6 +18,7 @@ export {
   WorkspacePathError,
   WorkspaceSizeError,
   isTextEditablePath,
+  isTextViewablePath,
   type WorkspaceEntry,
   type WorkspaceEntryType,
 } from './company-workspace-types';

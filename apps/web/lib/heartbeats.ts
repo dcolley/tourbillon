@@ -1,4 +1,4 @@
-import { db, agents, heartbeatRuns, type Agent, type HeartbeatRun } from '@tourbillon/db';
+import { db, agents, heartbeatRuns, reconcileRunningHeartbeatRunsForJob, type Agent, type HeartbeatRun } from '@tourbillon/db';
 import { desc, eq, and, inArray, sql, count } from 'drizzle-orm';
 import type { JobType } from 'bullmq';
 import { QUEUE_HEARTBEAT } from '@tourbillon/shared';
@@ -302,12 +302,46 @@ export async function getHeartbeatList(opts: {
   const jobIds = withAgents.map(({ run }) => getHeartbeatJobId(run)).filter((id): id is string => Boolean(id));
   const jobsById = await fetchJobsById(jobIds);
 
+  const missingJobIds = new Set<string>();
+  for (const { run } of withAgents) {
+    if (run.status !== 'running') continue;
+    const jobId = getHeartbeatJobId(run);
+    if (jobId && !jobsById.has(jobId)) missingJobIds.add(jobId);
+  }
+
+  const reconciledRunIds = new Set<string>();
+  for (const jobId of missingJobIds) {
+    const runIds = await reconcileRunningHeartbeatRunsForJob(
+      jobId,
+      'BullMQ job missing or removed',
+    );
+    runIds.forEach((id) => reconciledRunIds.add(id));
+  }
+
   const entries = withAgents.map((item) => {
     const jobId = getHeartbeatJobId(item.run);
-    return entryFromRun(item, jobId ? jobsById.get(jobId) : undefined);
+    const job = jobId ? jobsById.get(jobId) : undefined;
+    let run = item.run;
+    if (reconciledRunIds.has(run.id)) {
+      run = {
+        ...run,
+        status: 'failed',
+        finishedAt: run.finishedAt ?? new Date(),
+        errorText: run.errorText ?? 'BullMQ job missing or removed',
+      };
+    }
+    return entryFromRun({ run, agent: item.agent }, job);
   });
 
-  return { entries, total: dbTotal, page, pageSize, filter };
+  const filteredEntries =
+    filter === 'running' ? entries.filter((e) => e.runStatus !== 'failed') : entries;
+
+  const total =
+    reconciledRunIds.size > 0 && filter !== 'all'
+      ? await countHeartbeatRuns(company.id, filter, opts.agentId)
+      : dbTotal;
+
+  return { entries: filteredEntries, total, page, pageSize, filter };
 }
 
 export async function getHeartbeatRun(runId: string): Promise<HeartbeatRunWithAgent | null> {

@@ -1,6 +1,7 @@
 'use client';
 
-import { useFormState, useFormStatus } from 'react-dom';
+import { useActionState } from 'react';
+import { useFormStatus } from 'react-dom';
 import type { Issue } from '@tourbillon/db';
 import type { IssueAgentOption } from '@/lib/issues';
 import type { CommentOnIssueState } from '../actions';
@@ -33,7 +34,7 @@ export function IssueCommentForm({
   agents: IssueAgentOption[];
   action: (_prev: CommentOnIssueState, formData: FormData) => Promise<CommentOnIssueState>;
 }) {
-  const [state, formAction] = useFormState(action, initialState);
+  const [state, formAction] = useActionState(action, initialState);
 
   return (
     <div className="rounded-lg border bg-muted/30">

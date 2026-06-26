@@ -92,6 +92,7 @@ export const updateIssueTool = createTool({
   id: 'updateIssue',
   description:
     'Update issue status, add a comment, change priority or assignee. ' +
+    'When status is in_review, you MUST set assigneeAgentId to the reviewer (task requester first, else reportsTo from getIdentity) so they receive it in their inbox. ' +
     'Always include a comment explaining what changed and the next action.',
   inputSchema: z.object({
     issueId: z.string(),
@@ -100,7 +101,10 @@ export const updateIssueTool = createTool({
       .optional(),
     comment: z.string().optional().describe('Markdown comment — what was done, what remains, who owns the next step'),
     priority: z.enum(['critical', 'high', 'medium', 'low']).optional(),
-    assigneeAgentId: z.string().optional(),
+    assigneeAgentId: z
+      .string()
+      .optional()
+      .describe('Required when setting status to in_review — assign the reviewer so they see it in getInbox'),
     assigneeUserId: z.string().optional(),
     blockedByIssueIds: z.array(z.string()).optional().describe('Replaces current blockers. Send [] to clear all.'),
   }),
@@ -110,57 +114,6 @@ export const updateIssueTool = createTool({
       method: 'PATCH',
       body: JSON.stringify(body),
     });
-    if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
-    return res.json();
-  },
-});
-
-export const listGoalsTool = createTool({
-  id: 'listGoals',
-  description:
-    'List company goals with issue stats and needsAttention flag. ' +
-    'CEO: call when inbox is empty to find goals requiring planning or follow-up.',
-  inputSchema: z.object({
-    status: z
-      .enum(['active', 'completed', 'archived', 'all'])
-      .default('active')
-      .describe('Filter goals by status — default active'),
-  }),
-  execute: async (inputData, { requestContext }) => {
-    const { companyId } = extractToolRuntimeContext(requestContext);
-    if (!companyId) {
-      return { error: 'missing_company', message: 'companyId not present in tool runtime context' };
-    }
-    const query = inputData.status !== 'active' ? `?status=${encodeURIComponent(inputData.status)}` : '?status=active';
-    const res = await tracedAgentFetch(
-      'listGoals',
-      requestContext,
-      `/api/companies/${companyId}/goals${query}`
-    );
-    if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
-    return res.json();
-  },
-});
-
-export const getGoalDetailTool = createTool({
-  id: 'getGoalDetail',
-  description:
-    'Get full goal context: description, linked issues, stats, and needsAttention. ' +
-    'Call before decomposing a goal into tasks.',
-  inputSchema: z.object({
-    goalId: z.string().describe('Goal UUID'),
-  }),
-  execute: async (inputData, { requestContext }) => {
-    const { companyId } = extractToolRuntimeContext(requestContext);
-    if (!companyId) {
-      return { error: 'missing_company', message: 'companyId not present in tool runtime context' };
-    }
-    const { goalId } = inputData;
-    const res = await tracedAgentFetch(
-      'getGoalDetail',
-      requestContext,
-      `/api/companies/${companyId}/goals/${goalId}`
-    );
     if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
     return res.json();
   },
@@ -303,8 +256,6 @@ export const createSubtaskTool = createTool({
 export const CONTROL_PLANE_TOOLS = {
   getIdentityTool,
   getInboxTool,
-  listGoalsTool,
-  getGoalDetailTool,
   checkoutIssueTool,
   getHeartbeatContextTool,
   getCommentsTool,

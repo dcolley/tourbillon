@@ -13,6 +13,7 @@ export type WakeReason =
 
 export interface HeartbeatJobData {
   agentId: string;
+  agentName?: string;
   companyId: string;
   invocationSource: WakeReason;
   wakeReason: WakeReason;
@@ -70,6 +71,8 @@ export interface AgentRuntimeConfig {
     /** When false, heartbeats and UI limits ignore the monthly token cap. Default: true. */
     enforce?: boolean;
   };
+  /** Tier-2 granular tool ids (goal/project/issue management). */
+  assignedTools?: string[];
 }
 
 export const DEFAULT_RUNTIME_CONFIG: AgentRuntimeConfig = {

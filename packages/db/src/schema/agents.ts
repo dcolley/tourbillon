@@ -1,6 +1,7 @@
 import { pgTable, text, timestamp, integer, boolean, jsonb } from 'drizzle-orm/pg-core';
 import { relations } from 'drizzle-orm';
 import { companies } from './companies';
+import { llmProviders } from './llm-providers';
 import { createId } from '../utils';
 
 export const agents = pgTable('agents', {
@@ -18,6 +19,7 @@ export const agents = pgTable('agents', {
   adapterType: text('adapter_type', { enum: ['lmstudio', 'ollama', 'process', 'http', 'harness_local'] }).notNull().default('lmstudio'),
   adapterConfig: jsonb('adapter_config').notNull().default({}),
   // Model
+  providerId: text('provider_id').references(() => llmProviders.id, { onDelete: 'set null' }),
   modelId: text('model_id').default('meta-llama/Llama-3.3-70B-Instruct'),
   // Instructions
   instructionsBundleSoulMd: text('instructions_bundle_soul_md'),  // SOUL.md content
@@ -46,6 +48,7 @@ export const agents = pgTable('agents', {
 
 export const agentsRelations = relations(agents, ({ one, many }) => ({
   company: one(companies, { fields: [agents.companyId], references: [companies.id] }),
+  provider: one(llmProviders, { fields: [agents.providerId], references: [llmProviders.id] }),
   reportsTo: one(agents, { fields: [agents.reportsToId], references: [agents.id], relationName: 'reports_to' }),
   reports: many(agents, { relationName: 'reports_to' }),
 }));

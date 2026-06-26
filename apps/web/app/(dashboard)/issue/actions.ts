@@ -4,6 +4,7 @@ import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import { addIssueComment } from '@/lib/issue-comments';
 import { createIssue, updateIssue, IssueValidationError } from '@/lib/issues';
+import { releaseIssueCheckoutLock } from '@/lib/checkout-lock';
 import { db, issues } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
 
@@ -125,6 +126,21 @@ export async function commentOnIssueAction(
     }
     throw err;
   }
+
+  revalidatePath('/issue');
+  revalidatePath(`/issue/${issueId}`);
+  redirect(`/issue/${issueId}?saved=1`);
+}
+
+export async function releaseCheckoutLockAction(formData: FormData): Promise<void> {
+  const issueId = formData.get('issueId') as string;
+  if (!issueId) return;
+
+  await releaseIssueCheckoutLock(issueId, {
+    type: 'user',
+    id: 'dashboard',
+    name: 'Dashboard',
+  });
 
   revalidatePath('/issue');
   revalidatePath(`/issue/${issueId}`);

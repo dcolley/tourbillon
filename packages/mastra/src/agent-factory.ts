@@ -3,10 +3,12 @@ import { createDurableAgent } from '@mastra/core/agent/durable';
 import { Memory } from '@mastra/memory';
 import { PostgresStore, PgVector } from '@mastra/pg';
 import type { Agent as AgentRecord } from '@tourbillon/db';
-import { formatTrace, modelProviderOverridesFromAgent, resolveModelProviderConfig } from '@tourbillon/shared';
-import { getEmbeddingModel, getLanguageModelForAgent } from './provider';
+import { getLlmProviderRowById } from '@tourbillon/db';
+import { formatTrace, modelProviderOverridesFromAgent, resolveModelProviderConfig, resolveAssignedTools, type AgentRuntimeConfig } from '@tourbillon/shared';
+import { getEmbeddingModel, getLanguageModelForAgent, llmProviderRowToRecord } from './provider';
 import { CONTROL_PLANE_TOOLS } from './tools/control-plane-tools';
 import { ROLE_TOOLS } from './tools/role-tools';
+import { assignableToolsForIds } from './tools/assignable-tools';
 import { loadSkillsForAgent } from './skills/skill-loader';
 import { buildMCPTools } from './tools/mcp-tools';
 import { getInternalApiUrl } from './tools/api-client';
@@ -56,10 +58,18 @@ export async function assembleAgentTools(
 ): Promise<Record<string, unknown>> {
   const tools: Record<string, unknown> = { ...CONTROL_PLANE_TOOLS };
 
-  for (const toolsetId of agentRecord.assignedToolsets ?? []) {
+  const booleanToolsets = (agentRecord.assignedToolsets ?? []).filter((id) => id !== 'planning');
+  for (const toolsetId of booleanToolsets) {
     const roleTools = ROLE_TOOLS[toolsetId];
     if (roleTools) Object.assign(tools, roleTools);
   }
+
+  const assignedToolIds = resolveAssignedTools({
+    role: agentRecord.role,
+    assignedToolsets: agentRecord.assignedToolsets,
+    runtimeConfig: agentRecord.runtimeConfig as AgentRuntimeConfig,
+  });
+  Object.assign(tools, assignableToolsForIds(assignedToolIds));
 
   if (agentRecord.mcpServerIds?.length) {
     const mcpTools = await buildMCPTools(
@@ -82,7 +92,7 @@ export async function assembleAgentSystemPrompt(agentRecord: AgentRecord): Promi
  * Create a fully-equipped Mastra Agent for a given agent DB record.
  * Tool tiers:
  *   Tier 1 (universal)     — CONTROL_PLANE_TOOLS (always included)
- *   Tier 2 (role-gated)    — ROLE_TOOLS by assignedToolsets
+ *   Tier 2 (role-gated)    — boolean ROLE_TOOLS by assignedToolsets + granular tools by runtimeConfig.assignedTools
  *   Tier 3 (capability)    — MCP tools by mcpServerIds
  */
 export async function createAgentWithSkills(
@@ -98,7 +108,15 @@ export async function createAgentWithSkills(
     agentRecord.adapterType,
     agentRecord.adapterConfig,
   );
-  const providerConfig = resolveModelProviderConfig(providerOverrides, agentRecord.modelId);
+  const providerRow = agentRecord.providerId
+    ? await getLlmProviderRowById(agentRecord.providerId)
+    : null;
+  const providerRecord = providerRow ? llmProviderRowToRecord(providerRow) : null;
+  const providerConfig = resolveModelProviderConfig(
+    providerOverrides,
+    agentRecord.modelId,
+    providerRecord,
+  );
 
   const codeExecutionEnabled = agentRecord.assignedToolsets?.includes('code-execution') ?? false;
 
@@ -107,6 +125,8 @@ export async function createAgentWithSkills(
       urlKey: agentRecord.urlKey,
       modelId: agentRecord.modelId,
       provider: providerConfig.provider,
+      providerId: providerConfig.providerId,
+      providerName: providerConfig.providerName,
       apiMode: providerConfig.apiMode,
       modelBaseURL: providerConfig.baseURL,
       apiBase: getInternalApiUrl(),
@@ -121,7 +141,7 @@ export async function createAgentWithSkills(
     id: agentRecord.id,
     name: agentRecord.name,
     instructions: systemPrompt,
-    model: getLanguageModelForAgent(agentRecord),
+    model: getLanguageModelForAgent(agentRecord, providerRecord),
     tools: tools as Parameters<typeof Agent>[0]['tools'],
     memory: getAgentMemory(),
     ...(codeExecutionEnabled ? { workspace: buildCodeExecutionWorkspace() } : {}),

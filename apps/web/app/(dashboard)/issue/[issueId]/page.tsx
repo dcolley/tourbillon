@@ -6,7 +6,7 @@ import { listGoalOptions } from '@/lib/goals';
 import { listProjectOptions } from '@/lib/projects';
 import { listIssueComments } from '@/lib/issue-comments';
 import { getIssueDetail, listIssueAgentOptions } from '@/lib/issues';
-import { commentOnIssueAction, updateIssueAction } from '../actions';
+import { commentOnIssueAction, updateIssueAction, releaseCheckoutLockAction } from '../actions';
 import { IssueCommentsSection } from './issue-comments-section';
 import { IssueDetailTabs } from './issue-detail-tabs';
 import { IssueEditForm } from './issue-edit-form';
@@ -38,6 +38,9 @@ export default async function IssueDetailPage({
   const { issue, assignee, goal, project, activity, heartbeatRuns, heartbeatJobs } = detail;
   const savedFlag = saved === '1';
   const activeJob = heartbeatJobs.find((job) => job.state === 'active') ?? heartbeatJobs[0];
+  const holdingRun = issue.checkoutRunId
+    ? heartbeatRuns.find((r) => r.id === issue.checkoutRunId)
+    : undefined;
 
   const observabilityAgents = agents.map((a) => ({ id: a.id, name: a.name }));
 
@@ -95,9 +98,33 @@ export default async function IssueDetailPage({
         <DetailField label="Updated" value={issue.updatedAt.toLocaleString()} />
         <DetailField
           label="Checkout"
-          value={issue.checkoutRunId ? `Locked (${issue.checkoutRunId.slice(0, 8)}…)` : 'Available'}
+          value={
+            issue.checkoutRunId
+              ? `Locked (${issue.checkoutRunId.slice(0, 8)}…${
+                  holdingRun ? ` · run ${holdingRun.status}` : ' · stale?'
+                })`
+              : 'Available'
+          }
         />
       </div>
+
+      {issue.checkoutRunId && (
+        <form action={releaseCheckoutLockAction} className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+          <input type="hidden" name="issueId" value={issue.id} />
+          <p className="text-sm text-amber-900">
+            This issue is checked out by heartbeat run{' '}
+            <span className="font-mono">{issue.checkoutRunId.slice(0, 8)}…</span>
+            {holdingRun ? ` (${holdingRun.status})` : ' (run not found — likely stale)'}.
+            Agents will get 409 on checkout until the lock is released.
+          </p>
+          <button
+            type="submit"
+            className="mt-2 inline-flex items-center justify-center rounded-md border border-amber-300 bg-white px-3 py-1.5 text-sm font-medium hover:bg-amber-100"
+          >
+            Release checkout lock
+          </button>
+        </form>
+      )}
 
       <IssueEditForm
         issue={issue}

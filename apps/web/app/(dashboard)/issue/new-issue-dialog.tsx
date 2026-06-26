@@ -1,8 +1,8 @@
 'use client';
 
-import { startTransition, useEffect, useState } from 'react';
+import { startTransition, useActionState, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { useFormState, useFormStatus } from 'react-dom';
+import { useFormStatus } from 'react-dom';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -62,7 +62,7 @@ export function NewIssueDialog({
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [selectedGoalId, setSelectedGoalId] = useState(defaultGoalId ?? '');
-  const [state, formAction] = useFormState(createIssueAction, initialState);
+  const [state, formAction] = useActionState(createIssueAction, initialState);
 
   const filteredProjects = selectedGoalId
     ? projects.filter((p) => p.goalId === selectedGoalId)

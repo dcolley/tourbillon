@@ -18,6 +18,10 @@ import { validateGoalId } from './goals';
 import { validateProjectId } from './projects';
 import { enqueueHeartbeat } from './queue';
 import { findHeartbeatJobsForTask, type JobSummary } from './jobs';
+import {
+  CHECKOUT_LOCK_CLEAR_FIELDS,
+  statusesThatReleaseCheckoutLock,
+} from './checkout-lock';
 
 const PRIORITIES: IssuePriority[] = ['critical', 'high', 'medium', 'low'];
 const STATUSES: IssueStatus[] = [
@@ -327,10 +331,8 @@ export async function updateIssue(issueId: string, input: UpdateIssueInput): Pro
         updates.completedAt = new Date();
         changed.completedAt = updates.completedAt;
       }
-      if (['done', 'cancelled', 'blocked', 'in_review'].includes(status)) {
-        updates.checkoutRunId = null;
-        updates.executionLockedAt = null;
-        updates.executionAgentNameKey = null;
+      if (statusesThatReleaseCheckoutLock(status)) {
+        Object.assign(updates, CHECKOUT_LOCK_CLEAR_FIELDS);
       }
     }
   }

@@ -88,10 +88,12 @@ Each agent row in the `agents` table has:
 - `role` — `ceo | cto | engineer | pm | qa | designer | custom`
 - `urlKey` — short slug used in URLs and wake routing (e.g. `cto`)
 - `assignedSkills` — array of skill slugs injected into the system prompt (always includes `control-plane`)
-- `assignedToolsets` — Tier 2 role-gated tools (e.g. `planning`, `approvals`, `roster`)
+- `assignedToolsets` — Tier 2 boolean toolsets (e.g. `comments`, `approvals`, `roster`)
+- `runtimeConfig.assignedTools` — Tier 2 granular tools (goal/project/issue management), toggled per tool
 - `mcpServerIds` — Tier 3 MCP capability tools
-- `adapterType` — `lmstudio | ollama | process | http`
-- `modelId` — model identifier as loaded in LM Studio (e.g. `meta-llama/Llama-3.3-70B-Instruct`)
+- `adapterType` — runtime adapter (`lmstudio | ollama | harness_local | process | http`)
+- `providerId` — FK to system-wide `llm_providers` registry (preferred); configure providers at `/settings`
+- `modelId` — model identifier from the selected provider endpoint (e.g. `meta-llama/Llama-3.3-70B-Instruct`)
 - `instructionsBundleSoulMd` — agent's personality/values (SOUL.md content)
 - `instructionsBundleAgentsMd` — agent's knowledge of the team (AGENTS.md content, per-agent version)
 
@@ -100,7 +102,8 @@ Each agent row in the `agents` table has:
 | Tier | Source | Gating |
 |---|---|---|
 | **Tier 1 — Control Plane** | `control-plane-tools.ts` | Every agent always gets these |
-| **Tier 2 — Role Tools** | `role-tools.ts` | Gated by `assignedToolsets` array on the agent |
+| **Tier 2 — Boolean toolsets** | `role-tools.ts` | Gated by `assignedToolsets` (comments, roster, approvals, code-execution, web-search) |
+| **Tier 2 — Granular tools** | `assignable-tools.ts` | Gated by `runtimeConfig.assignedTools` (per-tool toggles in goal/project/issue groups) |
 | **Tier 3 — MCP Tools** | `mcp-tools.ts` | Gated by `mcpServerIds` on the agent |
 
 **Tier 1 tools (all agents):**
@@ -110,15 +113,24 @@ Each agent row in the `agents` table has:
 - `getHeartbeatContext` — task state + comment cursor
 - `getComments` — full or incremental comment thread
 - `updateIssue` — status, comment, priority, assignee, blockers
-- `listGoals` — company goals with needsAttention flag
-- `getGoalDetail` — full goal context
 - `createSubtask` — create delegated child issue
 
-**Tier 2 toolsets:**
-- `planning` — `createIssue`, `putPlanDocument`, `requestConfirmation`
+**Tier 2 boolean toolsets:**
+- `comments` — `addComment`
 - `approvals` — `createApproval`
 - `roster` — `listAgents`
-- `comments` — `addComment`
+- `code-execution` — sandbox shell tools (when enabled)
+- `web-search` — MCP web search (when configured)
+
+**Tier 2 granular tool groups** (each tool toggled individually in agent settings):
+
+| Group | Read tools | Write tools |
+|---|---|---|
+| Goal management | `listGoals`, `getGoalDetail` | `createGoal`, `updateGoal` |
+| Project management | `listProjects`, `getProjectDetail` | `createProject`, `updateProject` |
+| Issue management | — (Tier 1 covers read) | `createIssue`, `putPlanDocument`, `requestConfirmation` |
+
+Defaults: CEO/CTO/PM get all granular tools; engineers get goal/project read + issue write (no `createGoal` / `createProject` / `requestConfirmation` unless enabled).
 
 ### Skills (Prompt Injections)
 
@@ -218,7 +230,8 @@ All variables live in `.env` at the repo root. Key ones:
 | `REDIS_URL` | BullMQ / Redis | `redis://localhost:6379` |
 | `LM_STUDIO_BASE_URL` | LM Studio API | `http://localhost:1234/v1` |
 | `LM_STUDIO_DEFAULT_MODEL` | Default model identifier | match your loaded model |
-| `LLM_PROVIDER` | `lmstudio \| ollama \| openai-compatible` | `lmstudio` |
+| `LLM_PROVIDER` | Env fallback + seeds default registry entry | `lmstudio` |
+| `LLM_API_MODE` | `chat` or `responses` API mode | `chat` |
 | `INTERNAL_API_URL` | Workers → Next.js API | `http://localhost:3002` |
 | `SCHEDULER_API_KEY` | Routine scheduler auth | `change-me-in-production` |
 | `BETTER_AUTH_SECRET` | Auth signing secret | generate with `openssl rand -base64 32` |
@@ -239,6 +252,7 @@ Schema files live in `packages/db/src/schema/`. The tables are:
 | Table | Purpose |
 |---|---|
 | `companies` | Tenant — each company is an isolated agent workspace |
+| `llm_providers` | System-wide LLM endpoint registry (type, URL, API key, headers) |
 | `agents` | Agent definitions — identity, model, skills, toolsets, budget |
 | `goals` | Desired outcomes owned by the CEO agent |
 | `projects` | Optional grouping containers under goals |

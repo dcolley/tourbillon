@@ -1,33 +1,14 @@
 import { QueueEvents } from 'bullmq';
-import { and, eq, sql } from 'drizzle-orm';
-import { db, heartbeatRuns } from '@tourbillon/db';
 import { createTraceLogger, QUEUE_HEARTBEAT } from '@tourbillon/shared';
+import { reconcileRunningHeartbeatRunsForJob } from '@tourbillon/db';
 import { createConnection } from './redis';
 
 const tracer = createTraceLogger('heartbeat-reconciler', {});
 
 async function reconcileRunningRun(jobId: string, errorText: string): Promise<void> {
-  const updated = await db
-    .update(heartbeatRuns)
-    .set({
-      status: 'failed',
-      errorText,
-      finishedAt: new Date(),
-    })
-    .where(
-      and(
-        eq(heartbeatRuns.status, 'running'),
-        sql`context_snapshot->>'jobId' = ${jobId}`,
-      ),
-    )
-    .returning({ id: heartbeatRuns.id });
-
-  if (updated.length > 0) {
-    tracer.info('reconciled stale heartbeat run', {
-      jobId,
-      runIds: updated.map((row) => row.id),
-      errorText,
-    });
+  const runIds = await reconcileRunningHeartbeatRunsForJob(jobId, errorText);
+  if (runIds.length > 0) {
+    tracer.info('reconciled stale heartbeat run', { jobId, runIds, errorText });
   }
 }
 
@@ -45,8 +26,17 @@ export function startReconciler(): void {
   });
 
   queueEvents.on('failed', ({ jobId }) => {
-    void reconcileRunningRun(jobId, 'BullMQ job stalled').catch((err) => {
+    void reconcileRunningRun(jobId, 'BullMQ job failed').catch((err) => {
       tracer.error('failed to reconcile failed job', {
+        jobId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  });
+
+  queueEvents.on('removed', ({ jobId }) => {
+    void reconcileRunningRun(jobId, 'BullMQ job removed').catch((err) => {
+      tracer.error('failed to reconcile removed job', {
         jobId,
         error: err instanceof Error ? err.message : String(err),
       });

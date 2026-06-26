@@ -313,3 +313,111 @@ export async function listProjectsForGoal(goalId: string): Promise<GoalProjectRo
     owner: owner ? { id: owner.id, name: owner.name, urlKey: owner.urlKey } : null,
   }));
 }
+
+export interface AgentProjectListItem {
+  id: string;
+  title: string;
+  description: string | null;
+  status: string;
+  goalId: string | null;
+  goalTitle: string | null;
+  owner: { id: string; name: string; urlKey: string } | null;
+  stats: {
+    total: number;
+    done: number;
+    inProgress: number;
+    blocked: number;
+  };
+}
+
+export async function listProjectsForAgent(
+  companyId: string,
+  filters?: { goalId?: string; status?: ProjectStatus | 'all' },
+): Promise<AgentProjectListItem[]> {
+  const conditions = [eq(projects.companyId, companyId)];
+  if (filters?.goalId) {
+    conditions.push(eq(projects.goalId, filters.goalId));
+  }
+
+  const rows = await db
+    .select({ project: projects, goal: goals, owner: agents })
+    .from(projects)
+    .leftJoin(goals, eq(projects.goalId, goals.id))
+    .leftJoin(agents, eq(projects.ownerAgentId, agents.id))
+    .where(and(...conditions))
+    .orderBy(desc(projects.updatedAt))
+    .limit(100);
+
+  const statusFilter = filters?.status ?? 'all';
+  const filtered =
+    statusFilter === 'all' ? rows : rows.filter(({ project }) => project.status === statusFilter);
+
+  const results: AgentProjectListItem[] = [];
+  for (const { project, goal, owner } of filtered) {
+    const detail = await getProjectDetail(project.id);
+    if (!detail) continue;
+    results.push({
+      id: project.id,
+      title: project.title,
+      description: project.description,
+      status: project.status,
+      goalId: project.goalId,
+      goalTitle: goal?.title ?? null,
+      owner: owner ? { id: owner.id, name: owner.name, urlKey: owner.urlKey } : null,
+      stats: detail.stats,
+    });
+  }
+  return results;
+}
+
+export interface AgentProjectDetail {
+  project: {
+    id: string;
+    title: string;
+    description: string | null;
+    status: string;
+    goalId: string | null;
+  };
+  goal: ProjectGoalOption | null;
+  owner: ProjectOwnerOption | null;
+  stats: ProjectDetail['stats'];
+  issues: Array<{
+    id: string;
+    identifier: string;
+    title: string;
+    status: string;
+    priority: string;
+    assigneeAgentId: string | null;
+    assignee: { id: string; name: string; urlKey: string } | null;
+  }>;
+}
+
+export async function getProjectDetailForAgent(
+  projectId: string,
+  companyId: string,
+): Promise<AgentProjectDetail | null> {
+  const detail = await getProjectDetail(projectId);
+  if (!detail || detail.project.companyId !== companyId) return null;
+
+  return {
+    project: {
+      id: detail.project.id,
+      title: detail.project.title,
+      description: detail.project.description,
+      status: detail.project.status,
+      goalId: detail.project.goalId,
+    },
+    goal: detail.goal,
+    owner: detail.owner,
+    stats: detail.stats,
+    issues: detail.issues.map(({ issue, assignee }) => ({
+      id: issue.id,
+      identifier: issue.identifier,
+      title: issue.title,
+      status: issue.status,
+      priority: issue.priority,
+      assigneeAgentId: issue.assigneeAgentId,
+      assignee,
+    })),
+  };
+}

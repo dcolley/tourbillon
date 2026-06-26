@@ -3,8 +3,9 @@ import { notFound, redirect } from 'next/navigation';
 import { db, agents, heartbeatRuns } from '@tourbillon/db';
 import { eq, desc } from 'drizzle-orm';
 import type { AgentRuntimeConfig } from '@tourbillon/shared';
-import { TOOLSET_CATALOG, modelProviderOverridesFromAgent, resolveModelProviderConfig, isAgentBudgetEnforced, isAgentBudgetExceeded, agentRuntimeLabel } from '@tourbillon/shared';
-import { AgentValidationError, getAgentByUrlKey, updateAgentRuntimeConfig, updateAgentAssignedToolsets, updateAgentBudget, updateAgentInstructions, updateAgentModel, updateAgentProfile } from '@/lib/agents';
+import { modelProviderOverridesFromAgent, resolveModelProviderConfig, isAgentBudgetEnforced, isAgentBudgetExceeded, agentRuntimeLabel, resolveAssignedTools } from '@tourbillon/shared';
+import { AgentValidationError, getAgentByUrlKey, updateAgentRuntimeConfig, updateAgentCapabilities, updateAgentBudget, updateAgentInstructions, updateAgentModel, updateAgentProfile } from '@/lib/agents';
+import { getLlmProviderRecordById, listLlmProvidersPublic } from '@/lib/llm-providers';
 import { AgentModelForm } from './agent-model-form';
 import { heartbeatJobHref } from '@/lib/heartbeats';
 import { triggerAgentHeartbeat } from '@/lib/heartbeat';
@@ -13,6 +14,7 @@ import { listGoalOptions } from '@/lib/goals';
 import { listProjectOptions } from '@/lib/projects';
 import { AgentDetailTabs } from './agent-detail-tabs';
 import { AgentObservabilityTab } from './agent-observability-tab';
+import { AgentCapabilitiesForm } from './agent-capabilities-form';
 
 async function runHeartbeat(formData: FormData) {
   'use server';
@@ -64,19 +66,26 @@ async function updateHeartbeatConfig(formData: FormData) {
   redirect(`/agent/${urlKey}?saved=heartbeat`);
 }
 
-async function updateToolsets(formData: FormData) {
+async function updateCapabilities(formData: FormData) {
   'use server';
 
   const agentId = formData.get('agentId') as string;
   const urlKey = formData.get('urlKey') as string;
-  const selected = TOOLSET_CATALOG.filter(
-    (entry) => formData.get(`toolset_${entry.id}`) === 'on'
+
+  const { GRANULAR_TOOL_GROUPS } = await import('@tourbillon/shared/tool-catalog');
+  const { TOOLSET_CATALOG } = await import('@tourbillon/shared/constants');
+
+  const allToolIds = GRANULAR_TOOL_GROUPS.flatMap((g) => g.tools.map((t) => t.id));
+  const assignedTools = allToolIds.filter((id) => formData.get(`tool_${id}`) === 'on');
+
+  const toolsets = TOOLSET_CATALOG.filter(
+    (entry) => formData.get(`toolset_${entry.id}`) === 'on',
   ).map((entry) => entry.id);
 
   try {
-    await updateAgentAssignedToolsets(agentId, selected);
+    await updateAgentCapabilities(agentId, { toolsets, assignedTools });
   } catch (err) {
-    const message = err instanceof AgentValidationError ? err.message : 'Failed to update toolsets.';
+    const message = err instanceof AgentValidationError ? err.message : 'Failed to update capabilities.';
     redirect(`/agent/${urlKey}?error=${encodeURIComponent(message)}`);
   }
 
@@ -133,9 +142,10 @@ async function updateModel(formData: FormData) {
   const agentId = formData.get('agentId') as string;
   const urlKey = formData.get('urlKey') as string;
   const modelId = formData.get('modelId') as string;
+  const providerId = formData.get('providerId') as string | null;
 
   try {
-    await updateAgentModel(agentId, modelId);
+    await updateAgentModel(agentId, { modelId, providerId });
   } catch (err) {
     const message = err instanceof AgentValidationError ? err.message : 'Failed to update model.';
     redirect(`/agent/${urlKey}?error=${encodeURIComponent(message)}`);
@@ -187,7 +197,8 @@ export default async function AgentDetailPage({
   const agent = await getAgentByUrlKey(urlKey);
   if (!agent) notFound();
 
-  const [directReports, companyAgents, recentRuns, agentRoutines, goals, projects] = await Promise.all([
+  const [directReports, companyAgents, recentRuns, agentRoutines, goals, projects, providerList, providerRecord] =
+    await Promise.all([
     db.select().from(agents).where(eq(agents.reportsToId, agent.id)),
     db
       .select({ id: agents.id, name: agents.name, urlKey: agents.urlKey, title: agents.title })
@@ -203,6 +214,8 @@ export default async function AgentDetailPage({
     listRoutinesForAgent(agent.id),
     listGoalOptions(),
     listProjectOptions(),
+    listLlmProvidersPublic(),
+    agent.providerId ? getLlmProviderRecordById(agent.providerId) : Promise.resolve(null),
   ]);
 
   const runtime = agent.runtimeConfig as AgentRuntimeConfig;
@@ -218,7 +231,14 @@ export default async function AgentDetailPage({
   const providerConfig = resolveModelProviderConfig(
     modelProviderOverridesFromAgent(agent.adapterType, agent.adapterConfig),
     agent.modelId,
+    providerRecord,
   );
+
+  const enabledTools = resolveAssignedTools({
+    role: agent.role,
+    assignedToolsets: agent.assignedToolsets,
+    runtimeConfig: runtime,
+  });
 
   return (
     <div className="p-6 space-y-6 max-w-5xl">
@@ -263,7 +283,7 @@ export default async function AgentDetailPage({
 
       {saved === 'toolsets' && (
         <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
-          Toolsets saved. Changes apply on the agent&apos;s next heartbeat.
+          Capabilities saved. Changes apply on the agent&apos;s next heartbeat.
         </div>
       )}
 
@@ -388,21 +408,30 @@ export default async function AgentDetailPage({
         <div>
           <h2 className="text-sm font-semibold">Model</h2>
           <p className="text-xs text-muted-foreground mt-1">
-            LLM used on heartbeats. Provider and adapter come from env / agent configuration.
+            LLM used on heartbeats. Select a registered provider and model identifier.
           </p>
         </div>
         <div className="grid grid-cols-2 gap-4 text-sm">
           <DetailCard label="Agent type" value={agentRuntimeLabel(agent.adapterType)} />
-          <DetailCard label="Provider" value={providerConfig.provider} />
+          <DetailCard
+            label="Provider"
+            value={providerConfig.providerName ?? providerConfig.provider}
+          />
           <DetailCard label="API mode" value={providerConfig.apiMode} />
-          <DetailCard label="Adapter" value={agent.adapterType} />
+          <DetailCard label="Endpoint" value={providerConfig.baseURL} />
         </div>
         <AgentModelForm
           agentId={agent.id}
           urlKey={agent.urlKey}
           initialModelId={agent.modelId ?? providerConfig.defaultModel}
-          provider={providerConfig.provider}
-          baseURL={providerConfig.baseURL}
+          initialProviderId={agent.providerId}
+          providers={providerList.map((p) => ({
+            id: p.id,
+            name: p.name,
+            type: p.type,
+            baseURL: p.baseURL,
+            isDefault: p.isDefault,
+          }))}
           updateModel={updateModel}
         />
       </section>
@@ -427,45 +456,13 @@ export default async function AgentDetailPage({
           )}
         </div>
 
-        <form action={updateToolsets} className="space-y-3 border-t pt-4">
-          <input type="hidden" name="agentId" value={agent.id} />
-          <input type="hidden" name="urlKey" value={agent.urlKey} />
-          <div>
-            <p className="text-sm font-medium">Toolsets</p>
-            <p className="text-xs text-muted-foreground mt-0.5">
-              Always included: control-plane tools (inbox, checkout, create subtask, update issue, etc.)
-            </p>
-          </div>
-          <ul className="space-y-3">
-            {TOOLSET_CATALOG.map((entry) => {
-              const checked =
-                agent.assignedToolsets.includes(entry.id) ||
-                (entry.id === 'roster' && agent.assignedToolsets.includes('agent-management'));
-              return (
-                <li key={entry.id}>
-                  <label className="flex items-start gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      name={`toolset_${entry.id}`}
-                      defaultChecked={checked}
-                      className="mt-0.5 rounded border-input"
-                    />
-                    <span>
-                      <span className="font-medium">{entry.label}</span>
-                      <span className="block text-xs text-muted-foreground">{entry.description}</span>
-                    </span>
-                  </label>
-                </li>
-              );
-            })}
-          </ul>
-          <button
-            type="submit"
-            className="inline-flex items-center justify-center rounded-md border px-3 py-1.5 text-sm font-medium hover:bg-muted"
-          >
-            Save toolsets
-          </button>
-        </form>
+        <AgentCapabilitiesForm
+          agentId={agent.id}
+          urlKey={agent.urlKey}
+          assignedToolsets={agent.assignedToolsets}
+          enabledTools={enabledTools}
+          updateCapabilities={updateCapabilities}
+        />
       </section>
 
       <section className="border rounded-lg p-4 space-y-4">

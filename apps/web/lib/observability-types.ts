@@ -45,6 +45,7 @@ export interface ListObservabilityEventsInput {
   status?: ObservabilityEventStatus;
   traceId?: string;
   heartbeatRunId?: string;
+  jobId?: string;
   from?: Date;
   to?: Date;
   search?: string;

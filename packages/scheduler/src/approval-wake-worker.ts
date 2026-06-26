@@ -40,6 +40,7 @@ export const approvalWakeWorker = new Worker<ApprovalWakeJobData>(
 
     const { jobId: heartbeatJobId } = await enqueueHeartbeat({
       agentId,
+      agentName: agentRecord?.name,
       companyId,
       invocationSource: 'approval_resolved',
       wakeReason: 'approval_resolved',

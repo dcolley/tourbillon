@@ -1,4 +1,4 @@
-import { db, issues } from '@tourbillon/db';
+import { db, issues, agents } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
 import type { HeartbeatJobData, WakePayload } from '@tourbillon/shared';
 import { listIssueComments } from './issue-comments';
@@ -54,10 +54,20 @@ export async function buildAssignmentWakePayloadJson(
 }
 
 export async function enrichHeartbeatJob(data: HeartbeatJobData): Promise<HeartbeatJobData> {
-  if (!data.taskId || data.wakePayloadJson) return data;
+  let enriched = data;
 
-  const wakePayloadJson = await buildAssignmentWakePayloadJson(data.taskId, data.companyId);
-  if (!wakePayloadJson) return data;
+  if (!enriched.agentName) {
+    const agent = await db.query.agents.findFirst({
+      where: eq(agents.id, data.agentId),
+      columns: { name: true },
+    });
+    if (agent?.name) enriched = { ...enriched, agentName: agent.name };
+  }
 
-  return { ...data, wakePayloadJson };
+  if (!enriched.taskId || enriched.wakePayloadJson) return enriched;
+
+  const wakePayloadJson = await buildAssignmentWakePayloadJson(enriched.taskId, enriched.companyId);
+  if (!wakePayloadJson) return enriched;
+
+  return { ...enriched, wakePayloadJson };
 }

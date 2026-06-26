@@ -2,8 +2,11 @@
 
 import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
+import { QUEUE_HEARTBEAT } from '@tourbillon/shared/constants';
 import type { HeartbeatRunSnapshot, JobLiveSnapshot, JobState } from '@/lib/jobs';
 import { StatusBadge } from '@/lib/status-badges';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { HeartbeatObservabilityTab } from './heartbeat-observability-tab';
 
 const LIVE_STATES = new Set(['waiting', 'active']);
 const TERMINAL_STATES = new Set(['completed', 'failed', 'delayed']);
@@ -65,7 +68,7 @@ export function JobDetailLive({
     }
   }, [snapshot.logs, polling]);
 
-  return (
+  const overview = (
     <>
       {snapshot.heartbeatRun && <HeartbeatRunSection run={snapshot.heartbeatRun} />}
 
@@ -131,6 +134,29 @@ export function JobDetailLive({
       </div>
     </>
   );
+
+  if (queue === QUEUE_HEARTBEAT) {
+    return (
+      <Tabs defaultValue="overview" className="w-full">
+        <TabsList>
+          <TabsTrigger value="overview">Overview</TabsTrigger>
+          <TabsTrigger value="observability">Observability</TabsTrigger>
+        </TabsList>
+        <TabsContent value="overview" className="mt-6 space-y-6">
+          {overview}
+        </TabsContent>
+        <TabsContent value="observability" className="mt-6">
+          <HeartbeatObservabilityTab
+            jobId={jobId}
+            heartbeatRunId={snapshot.heartbeatRun?.id}
+            agent={snapshot.heartbeatRun?.agent}
+          />
+        </TabsContent>
+      </Tabs>
+    );
+  }
+
+  return <div className="space-y-6">{overview}</div>;
 }
 
 function hasContextSnapshot(value: unknown): value is Record<string, unknown> {

@@ -2,19 +2,32 @@ import { createOpenAI, type OpenAIProvider } from '@ai-sdk/openai';
 import type { Agent as AgentRecord } from '@tourbillon/db';
 import type { EmbeddingModelV3, LanguageModelV3 } from '@ai-sdk/provider';
 import {
+  buildProviderRequestHeaders,
   modelProviderOverridesFromAgent,
   resolveModelProviderConfig,
+  toLlmProviderRecord,
+  type LlmProviderRecord,
   type ModelProviderConfig,
   type ModelProviderOverrides,
 } from '@tourbillon/shared';
+import type { LlmProvider } from '@tourbillon/db';
 
 const providerCache = new Map<string, OpenAIProvider>();
 
-function providerCacheKey(config: Pick<ModelProviderConfig, 'provider' | 'baseURL' | 'apiKey'>): string {
-  return `${config.provider}|${config.baseURL}|${config.apiKey}`;
+function providerCacheKey(
+  config: Pick<ModelProviderConfig, 'provider' | 'baseURL' | 'apiKey' | 'headers'>,
+): string {
+  const headerKey = JSON.stringify(
+    Object.keys(config.headers)
+      .sort()
+      .map((k) => [k, config.headers[k]]),
+  );
+  return `${config.provider}|${config.baseURL}|${config.apiKey}|${headerKey}`;
 }
 
-function getOpenAIProvider(config: Pick<ModelProviderConfig, 'provider' | 'baseURL' | 'apiKey'>): OpenAIProvider {
+function getOpenAIProvider(
+  config: Pick<ModelProviderConfig, 'provider' | 'baseURL' | 'apiKey' | 'headers'>,
+): OpenAIProvider {
   const key = providerCacheKey(config);
   const cached = providerCache.get(key);
   if (cached) return cached;
@@ -23,6 +36,7 @@ function getOpenAIProvider(config: Pick<ModelProviderConfig, 'provider' | 'baseU
     apiKey: config.apiKey,
     baseURL: config.baseURL,
     name: config.provider,
+    headers: buildProviderRequestHeaders(config),
   });
   providerCache.set(key, provider);
   return provider;
@@ -65,12 +79,17 @@ export function getLanguageModelFromEnv(
   return languageModelFromConfig(config, modelId);
 }
 
-/** Language model for a specific agent (adapter type/config + modelId). */
+export function llmProviderRowToRecord(row: LlmProvider): LlmProviderRecord {
+  return toLlmProviderRecord(row);
+}
+
+/** Language model for a specific agent (adapter type/config + modelId + optional registry record). */
 export function getLanguageModelForAgent(
   agent: Pick<AgentRecord, 'adapterType' | 'adapterConfig' | 'modelId'>,
+  providerRecord?: LlmProviderRecord | null,
 ): LanguageModelV3 {
   const overrides = modelProviderOverridesFromAgent(agent.adapterType, agent.adapterConfig);
-  const config = resolveModelProviderConfig(overrides, agent.modelId);
+  const config = resolveModelProviderConfig(overrides, agent.modelId, providerRecord);
   return languageModelFromConfig(config, agent.modelId);
 }
 

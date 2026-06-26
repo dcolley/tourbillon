@@ -1,5 +1,5 @@
 export type { WorkspaceEntry } from '@tourbillon/shared/company-workspace-types';
-export { isTextEditablePath, isMarkdownPath } from '@tourbillon/shared/company-workspace-types';
+export { isTextEditablePath, isTextViewablePath, isMarkdownPath } from '@tourbillon/shared/company-workspace-types';
 
 export {
   ensureCompanyWorkspace,

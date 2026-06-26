@@ -1,8 +1,8 @@
 'use client';
 
-import { startTransition, useEffect, useState } from 'react';
+import { startTransition, useEffect, useState, useActionState } from 'react';
 import { useRouter } from 'next/navigation';
-import { useFormState, useFormStatus } from 'react-dom';
+import { useFormStatus } from 'react-dom';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -43,7 +43,7 @@ export function NewProjectIssueDialog({
 }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
-  const [state, formAction] = useFormState(createProjectIssueAction, initialState);
+  const [state, formAction] = useActionState(createProjectIssueAction, initialState);
 
   useEffect(() => {
     if (state?.success) {

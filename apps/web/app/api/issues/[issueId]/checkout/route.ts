@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db, issues, activityLog } from '@tourbillon/db';
-import { eq, and, inArray } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { validateRunToken } from '@/lib/auth/run-token';
 import { logAgentApiRequest, logAgentApiResponse, summarizeBody } from '@/lib/agent-api-trace';
+import { isStaleCheckoutRun } from '@/lib/checkout-lock';
 
 export async function POST(
   req: NextRequest,
@@ -15,7 +16,7 @@ export async function POST(
   const runCtx = validateRunToken(token);
   if (!runCtx) return NextResponse.json({ error: 'Invalid token' }, { status: 401 });
 
-  const runId = req.headers.get('x-paperclip-run-id');
+  const runId = req.headers.get('x-paperclip-run-id') ?? runCtx.runId;
   const body = await req.json() as { agentId: string; expectedStatuses: string[] };
 
   logAgentApiRequest(`/api/issues/${issueId}/checkout`, 'POST', runCtx, {
@@ -24,7 +25,6 @@ export async function POST(
     body: summarizeBody(body),
   });
 
-  // Atomic checkout via DB transaction
   try {
     const result = await db.transaction(async (tx) => {
       const issue = await tx.query.issues.findFirst({
@@ -34,17 +34,25 @@ export async function POST(
       if (!issue) throw Object.assign(new Error('Not found'), { status: 404 });
       if (issue.companyId !== runCtx.companyId) throw Object.assign(new Error('Forbidden'), { status: 403 });
 
-      // Check if already locked by a DIFFERENT run
-      if (issue.checkoutRunId && issue.checkoutRunId !== runId) {
-        throw Object.assign(new Error('Conflict: already checked out'), { status: 409 });
+      let effectiveCheckoutRunId = issue.checkoutRunId;
+
+      // Stale lock: previous heartbeat finished/crashed but lock was not cleared.
+      if (effectiveCheckoutRunId && effectiveCheckoutRunId !== runId) {
+        const stale = await isStaleCheckoutRun(effectiveCheckoutRunId);
+        if (stale) {
+          effectiveCheckoutRunId = null;
+        } else {
+          throw Object.assign(new Error('Conflict: already checked out'), { status: 409 });
+        }
       }
 
-      // Check expected statuses
       if (body.expectedStatuses && !body.expectedStatuses.includes(issue.status)) {
-        throw Object.assign(new Error(`Issue status is ${issue.status}, not in expected ${body.expectedStatuses.join(',')}`), { status: 409 });
+        throw Object.assign(
+          new Error(`Issue status is ${issue.status}, not in expected ${body.expectedStatuses.join(',')}`),
+          { status: 409 },
+        );
       }
 
-      // Acquire lock
       const [updated] = await tx
         .update(issues)
         .set({
@@ -65,7 +73,13 @@ export async function POST(
         action: 'issue.checked_out',
         entityType: 'issue',
         entityId: issueId,
-        details: { runId, previousStatus: issue.status },
+        details: {
+          runId,
+          previousStatus: issue.status,
+          ...(issue.checkoutRunId && issue.checkoutRunId !== runId
+            ? { replacedStaleLockFrom: issue.checkoutRunId }
+            : {}),
+        },
       });
 
       return updated;

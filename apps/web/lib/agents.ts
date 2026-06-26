@@ -3,8 +3,10 @@ import { and, eq } from 'drizzle-orm';
 import {
   ROLE_DEFAULT_SKILLS,
   ROLE_DEFAULT_TOOLSETS,
+  ROLE_DEFAULT_ASSIGNED_TOOLS,
   DEFAULT_RUNTIME_CONFIG,
   VALID_TOOLSET_IDS,
+  VALID_ASSIGNABLE_TOOL_IDS,
   resolveModelProviderConfig,
   resolveAdapterFieldsForRuntime,
   parseAgentRuntimeType,
@@ -12,6 +14,7 @@ import {
   type AgentRuntimeType,
 } from '@tourbillon/shared';
 import { getOrCreateDefaultCompany } from './company';
+import { getDefaultLlmProviderRecord } from './llm-providers';
 
 const AGENT_ROLES = ['ceo', 'cto', 'engineer', 'pm', 'qa', 'designer', 'custom'] as const;
 export type AgentRole = (typeof AGENT_ROLES)[number];
@@ -110,10 +113,16 @@ export async function createAgent(input: CreateAgentInput): Promise<Agent> {
     if (!manager) throw new AgentValidationError('Reports-to agent not found in this company.');
   }
 
-  const envProvider = resolveModelProviderConfig();
+  const defaultProvider = await getDefaultLlmProviderRecord();
+  const envProvider = resolveModelProviderConfig(null, null, defaultProvider);
 
   const runtimeType = parseAgentRuntimeType(input.runtimeType) ?? 'agent';
   const { adapterType, adapterConfig } = resolveAdapterFieldsForRuntime(runtimeType);
+
+  const runtimeConfig: AgentRuntimeConfig = {
+    ...DEFAULT_RUNTIME_CONFIG,
+    assignedTools: ROLE_DEFAULT_ASSIGNED_TOOLS[role] ?? [],
+  };
 
   const [created] = await db
     .insert(agents)
@@ -126,11 +135,12 @@ export async function createAgent(input: CreateAgentInput): Promise<Agent> {
       reportsToId: input.reportsToId ?? null,
       assignedSkills: ROLE_DEFAULT_SKILLS[role] ?? ['control-plane'],
       assignedToolsets: ROLE_DEFAULT_TOOLSETS[role] ?? [],
+      providerId: defaultProvider?.id ?? null,
       modelId: envProvider.defaultModel,
       adapterType,
       adapterConfig,
       status: 'active',
-      runtimeConfig: DEFAULT_RUNTIME_CONFIG,
+      runtimeConfig,
       instructionsBundleSoulMd: normalizeInstructionField(input.instructionsBundleSoulMd),
       instructionsBundleAgentsMd: normalizeInstructionField(input.instructionsBundleAgentsMd),
     })
@@ -184,6 +194,46 @@ export async function updateAgentAssignedToolsets(
   const [updated] = await db
     .update(agents)
     .set({ assignedToolsets: unique, updatedAt: new Date() })
+    .where(eq(agents.id, agentId))
+    .returning();
+
+  return updated;
+}
+
+export async function updateAgentCapabilities(
+  agentId: string,
+  input: { toolsets: string[]; assignedTools: string[] },
+): Promise<Agent> {
+  const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+  if (!agent) throw new AgentValidationError('Agent not found.');
+
+  const toolsets = [...new Set(input.toolsets.map((t) => t.trim()).filter(Boolean))].filter(
+    (id) => id !== 'planning',
+  );
+  const invalidToolsets = toolsets.filter((id) => !VALID_TOOLSET_IDS.has(id));
+  if (invalidToolsets.length > 0) {
+    throw new AgentValidationError(`Unknown toolsets: ${invalidToolsets.join(', ')}`);
+  }
+
+  const assignedTools = [...new Set(input.assignedTools.map((t) => t.trim()).filter(Boolean))];
+  const invalidTools = assignedTools.filter((id) => !VALID_ASSIGNABLE_TOOL_IDS.has(id));
+  if (invalidTools.length > 0) {
+    throw new AgentValidationError(`Unknown tools: ${invalidTools.join(', ')}`);
+  }
+
+  const current = agent.runtimeConfig as AgentRuntimeConfig;
+  const runtimeConfig: AgentRuntimeConfig = {
+    ...current,
+    assignedTools,
+  };
+
+  const [updated] = await db
+    .update(agents)
+    .set({
+      assignedToolsets: toolsets,
+      runtimeConfig,
+      updatedAt: new Date(),
+    })
     .where(eq(agents.id, agentId))
     .returning();
 
@@ -309,16 +359,32 @@ export {
   type AgentHeartbeatSummary,
 } from './agent-heartbeat-summary';
 
-export async function updateAgentModel(agentId: string, modelId: string): Promise<Agent> {
-  const trimmed = modelId?.trim();
+export async function updateAgentModel(
+  agentId: string,
+  input: { modelId: string; providerId?: string | null },
+): Promise<Agent> {
+  const trimmed = input.modelId?.trim();
   if (!trimmed) throw new AgentValidationError('Model ID is required.');
 
   const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
   if (!agent) throw new AgentValidationError('Agent not found.');
 
+  const patch: {
+    modelId: string;
+    providerId?: string | null;
+    updatedAt: Date;
+  } = {
+    modelId: trimmed,
+    updatedAt: new Date(),
+  };
+
+  if (input.providerId !== undefined) {
+    patch.providerId = input.providerId?.trim() ? input.providerId.trim() : null;
+  }
+
   const [updated] = await db
     .update(agents)
-    .set({ modelId: trimmed, updatedAt: new Date() })
+    .set(patch)
     .where(eq(agents.id, agentId))
     .returning();
 

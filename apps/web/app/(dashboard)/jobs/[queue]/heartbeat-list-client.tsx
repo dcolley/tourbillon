@@ -277,12 +277,12 @@ export function HeartbeatListClient({ agents }: { agents: AgentOption[] }) {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b bg-muted/40 text-left">
+                <th className="px-4 py-3 font-medium">Job ID</th>
                 <th className="px-4 py-3 font-medium">Agent</th>
                 <th className="px-4 py-3 font-medium">Source</th>
                 <th className="px-4 py-3 font-medium">Run</th>
                 <th className="px-4 py-3 font-medium">Job</th>
                 <th className="px-4 py-3 font-medium">Started</th>
-                <th className="px-4 py-3 font-medium">Job ID</th>
               </tr>
             </thead>
             <tbody className="divide-y">
@@ -301,6 +301,22 @@ export function HeartbeatListClient({ agents }: { agents: AgentOption[] }) {
               ) : (
                 data.entries.map((entry) => (
                   <tr key={entry.key} className="hover:bg-accent/30">
+                    <td className="px-4 py-3">
+                      <Link
+                        href={entry.href}
+                        className="font-mono text-xs text-primary hover:underline break-all"
+                      >
+                        {entry.jobId ?? entry.runId?.slice(0, 8) ?? '—'}
+                      </Link>
+                      {entry.source === 'queue' && (
+                        <span className="ml-2 text-[10px] uppercase tracking-wide text-muted-foreground">
+                          queue only
+                        </span>
+                      )}
+                      {entry.errorText && (
+                        <p className="text-xs text-destructive mt-1 truncate max-w-xs">{entry.errorText}</p>
+                      )}
+                    </td>
                     <td className="px-4 py-3">
                       {entry.agent ? (
                         <Link href={`/agent/${entry.agent.urlKey}`} className="font-medium hover:underline">
@@ -329,22 +345,6 @@ export function HeartbeatListClient({ agents }: { agents: AgentOption[] }) {
                     </td>
                     <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">
                       {entry.startedAt ? new Date(entry.startedAt).toLocaleString() : '—'}
-                    </td>
-                    <td className="px-4 py-3">
-                      <Link
-                        href={entry.href}
-                        className="font-mono text-xs text-primary hover:underline break-all"
-                      >
-                        {entry.jobId ?? entry.runId?.slice(0, 8) ?? '—'}
-                      </Link>
-                      {entry.source === 'queue' && (
-                        <span className="ml-2 text-[10px] uppercase tracking-wide text-muted-foreground">
-                          queue only
-                        </span>
-                      )}
-                      {entry.errorText && (
-                        <p className="text-xs text-destructive mt-1 truncate max-w-xs">{entry.errorText}</p>
-                      )}
                     </td>
                   </tr>
                 ))

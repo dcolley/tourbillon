@@ -8,3 +8,4 @@ export * from './company-workspace-types';
 export * from './company-workspace';
 export * from './execution-workspace';
 export * from './observability';
+export * from './tool-catalog';

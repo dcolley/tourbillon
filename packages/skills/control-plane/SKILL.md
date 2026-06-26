@@ -17,7 +17,7 @@ You wake, you work, you exit. Every heartbeat follows these 9 steps exactly:
    - **All other roles:** EXIT cleanly
 6. **Understand context** — Call `getHeartbeatContext` for the checked-out issue. Then call `getComments` (omit `after` on cold start; see §1b)
 7. **Do work** — Act on the task. Use all available tools. Create subtasks to delegate. Update status and add a comment at every material checkpoint
-8. **Hand off or complete** — Set status to `done`, `in_review`, or `blocked`. Always include a comment explaining what is complete, what remains, and who acts next
+8. **Hand off or complete** — Set status to `done`, `in_review`, or `blocked`. For `in_review`, follow §2a (assign reviewer via `assigneeAgentId`). Always include a comment explaining what is complete, what remains, and who acts next
 9. **EXIT** — The scheduler re-wakes you as needed. Do not poll or loop
 
 ### §1a — CEO Goal Review Fallback (empty inbox only)
@@ -35,6 +35,18 @@ When your inbox is empty and your role is `ceo`:
 7. EXIT — assignment wakes will handle downstream agents
 
 Skip goals where `needsAttention` is false (work is already in progress).
+
+### §1c — CEO Review Triage (unassigned `in_review`)
+
+Your `getInbox` may include company issues in `in_review` with **no assignee** (`triageReason: unassigned_in_review`). These need routing — they are invisible to reviewers until assigned.
+
+When you pick one up:
+
+1. Checkout → `getHeartbeatContext` + `getComments`
+2. Determine the reviewer from the comment thread, `suggestedReviewer` in heartbeat context, or `listAgents`
+3. Call `updateIssue` with `assigneeAgentId` set to the reviewer; **keep** `status: 'in_review'` unless you are closing the review yourself
+4. Comment: `CEO triage: assigned [reviewer] for review — [reason]`
+5. Do **not** perform the review work unless no suitable reviewer exists — then escalate via comment or `createApproval`
 
 ---
 
@@ -70,6 +82,22 @@ At step 6: `getHeartbeatContext` returns `latestCommentId` (newest activity snap
 | `cancelled` | No longer needed | Human / CEO agent |
 
 **Never** set status to `done` without a summary comment. **Never** mark a task `in_progress` without checking it out first.
+
+### §2a — `in_review` handoff rules
+
+When setting `status: 'in_review'`, you **must** call `updateIssue` with `assigneeAgentId` set to the reviewer in the **same** call. Inbox routing is assignee-based — reviewers only see work assigned to them.
+
+**Reviewer selection order:**
+
+1. Agent who **requested/delegated** the task (parent issue assignee, or issue creator from history)
+2. Your `reportsToId` from `getIdentity` if no clear requester
+3. `listAgents` only when the org chart is ambiguous
+
+**Rules:**
+
+- Comment must name the reviewer and match `assigneeAgentId`
+- **Never** leave yourself as assignee on `in_review` unless you are the reviewer
+- If you are the **reviewer** on an `in_review` item: checkout, review the work, then set `done` or return to `in_progress` with feedback
 
 ---
 
@@ -112,6 +140,12 @@ Next: [what resolves the block]
 ```
 ✅ Done: [what was completed]
 Next: [what happens next, who owns it]
+```
+
+**Ready for review:**
+```
+👀 Ready for review: [summary of work]
+Reviewer: [agent name] — assigned for inbox routing
 ```
 
 **Escalating to human:**

@@ -1,4 +1,5 @@
 import type { Agent as AgentRecord } from '@tourbillon/db';
+import { getLlmProviderRowById } from '@tourbillon/db';
 import type { Harness } from '@mastra/core/harness';
 import { Harness as HarnessClass } from '@mastra/core/harness';
 import type { HarnessMode } from '@mastra/core/harness';
@@ -10,7 +11,7 @@ import {
   assembleAgentTools,
   getAgentMemory,
 } from './agent-factory';
-import { getLanguageModelForAgent } from './provider';
+import { getLanguageModelForAgent, llmProviderRowToRecord } from './provider';
 import { buildCodeExecutionWorkspace } from './execution-workspace';
 
 export function buildHarnessThreadId(agentRecord: AgentRecord, taskId?: string): string {
@@ -61,12 +62,16 @@ export async function buildHarnessWorkModes(
   const tools = await assembleAgentTools(agentRecord, options);
   const systemPrompt = await assembleAgentSystemPrompt(agentRecord);
   const codeExecutionEnabled = agentRecord.assignedToolsets?.includes('code-execution') ?? false;
+  const providerRow = agentRecord.providerId
+    ? await getLlmProviderRowById(agentRecord.providerId)
+    : null;
+  const providerRecord = providerRow ? llmProviderRowToRecord(providerRow) : null;
 
   const workAgent = new Agent({
     id: agentRecord.id,
     name: agentRecord.name,
     instructions: systemPrompt,
-    model: getLanguageModelForAgent(agentRecord),
+    model: getLanguageModelForAgent(agentRecord, providerRecord),
     tools: tools as Parameters<typeof Agent>[0]['tools'],
     memory: getAgentMemory(),
     ...(codeExecutionEnabled ? { workspace: buildCodeExecutionWorkspace() } : {}),
@@ -106,7 +111,13 @@ export async function createTourbillonHarness(
     memory: getAgentMemory(),
     modes,
     // Used only if OM/subagents resolve a model ID — always route to local provider.
-    resolveModel: () => getLanguageModelForAgent(agentRecord),
+    resolveModel: async () => {
+      const row = agentRecord.providerId
+        ? await getLlmProviderRowById(agentRecord.providerId)
+        : null;
+      const record = row ? llmProviderRowToRecord(row) : null;
+      return getLanguageModelForAgent(agentRecord, record);
+    },
     initialState: {
       yolo: true,
       permissionRules: buildHarnessPermissionRules(agentRecord),

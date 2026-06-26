@@ -76,6 +76,7 @@ export async function listObservabilityEvents(
   if (input.heartbeatRunId) {
     conditions.push(eq(agentObservabilityEvents.heartbeatRunId, input.heartbeatRunId));
   }
+  if (input.jobId) conditions.push(eq(agentObservabilityEvents.jobId, input.jobId));
   if (input.from) conditions.push(gte(agentObservabilityEvents.occurredAt, input.from));
   if (input.to) conditions.push(lte(agentObservabilityEvents.occurredAt, input.to));
 

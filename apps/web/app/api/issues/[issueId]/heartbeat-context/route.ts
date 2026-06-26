@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import { validateRunToken } from '@/lib/auth/run-token';
 import { logAgentApiRequest, logAgentApiResponse } from '@/lib/agent-api-trace';
 import { countIssueComments, getLatestIssueActivityId } from '@/lib/issue-comments';
+import { resolveReviewAssignee } from '@/lib/review-routing';
 
 export async function GET(
   req: NextRequest,
@@ -27,14 +28,21 @@ export async function GET(
   if (!issue) return NextResponse.json({ error: 'Not found' }, { status: 404 });
   if (issue.companyId !== runCtx.companyId) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
 
-  const [latestCommentId, commentCount] = await Promise.all([
+  const [latestCommentId, commentCount, suggestedReviewer] = await Promise.all([
     getLatestIssueActivityId(issueId, runCtx.companyId),
     countIssueComments(issueId, runCtx.companyId),
+    resolveReviewAssignee(issue, runCtx.agentId),
   ]);
 
   // Resolve blocked-by titles for context
   const blockers = issue.blockedByIssueIds?.length
-    ? await db.select({ id: issues.id, identifier: issues.identifier, title: issues.title, status: issues.status })
+    ? await db
+        .select({
+          id: issues.id,
+          identifier: issues.identifier,
+          title: issues.title,
+          status: issues.status,
+        })
         .from(issues)
         .where(eq(issues.companyId, runCtx.companyId))
     : [];
@@ -44,6 +52,7 @@ export async function GET(
     identifier: issue.identifier,
     status: issue.status,
     assigneeAgentId: issue.assigneeAgentId,
+    suggestedReviewerAgentId: suggestedReviewer?.agentId,
   });
 
   return NextResponse.json({
@@ -68,5 +77,12 @@ export async function GET(
     blockedBy: blockers.filter((b) => issue.blockedByIssueIds.includes(b.id)),
     latestCommentId,
     commentCount,
+    suggestedReviewer: suggestedReviewer
+      ? {
+          agentId: suggestedReviewer.agentId,
+          name: suggestedReviewer.name,
+          reason: suggestedReviewer.reason,
+        }
+      : null,
   });
 }

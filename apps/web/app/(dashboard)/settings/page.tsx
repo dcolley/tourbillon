@@ -1,6 +1,7 @@
 import { redirect } from 'next/navigation';
 import { getOrCreateDefaultCompany, updateCompanySettings } from '@/lib/company';
 import { resolveModelProviderConfig } from '@tourbillon/shared';
+import { LlmProvidersSettings } from '@/components/llm-providers-settings';
 
 async function saveSettings(formData: FormData) {
   'use server';
@@ -49,7 +50,7 @@ export default async function SettingsPage({
   ];
 
   return (
-    <div className="p-6 max-w-lg space-y-8">
+    <div className="p-6 max-w-3xl space-y-8">
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Settings</h1>
         <p className="text-muted-foreground">Company and runtime configuration</p>
@@ -138,10 +139,13 @@ export default async function SettingsPage({
         </form>
       </section>
 
+      <LlmProvidersSettings />
+
       <section className="space-y-4">
-        <h2 className="text-lg font-semibold">Runtime</h2>
+        <h2 className="text-lg font-semibold">Runtime (env fallback)</h2>
         <p className="text-sm text-muted-foreground">
-          Read from <code className="text-xs">.env</code> at the repo root. Restart the dev server after changes.
+          Used when an agent has no provider assigned, or to seed the default registry entry.
+          Read from <code className="text-xs">.env</code> at the repo root.
         </p>
         <dl className="border rounded-lg divide-y text-sm">
           {envSettings.map((item) => (

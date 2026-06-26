@@ -47,14 +47,16 @@ Before calling the agents API:
 
 ## §4 — Tool Tier Assignment by Role
 
-| Role | Tier 2 Toolsets | Tier 3 MCP Servers |
-|---|---|---|
-| ceo | comments, approvals, agent-management, planning, web-search | searxng-local |
-| cto | comments, approvals, planning | github-mcp |
-| engineer | comments, planning | github-mcp, filesystem-local |
-| pm | comments, approvals, planning | searxng-local |
-| qa | comments | filesystem-local |
-| designer | comments | filesystem-local |
+| Role | Boolean toolsets | Granular tools (`runtimeConfig.assignedTools`) | Tier 3 MCP |
+|---|---|---|---|
+| ceo | comments, approvals, roster, web-search | All goal/project/issue tools | searxng-local |
+| cto | comments, approvals, roster | All goal/project/issue tools | github-mcp |
+| engineer | comments, code-execution | `listGoals`, `getGoalDetail`, `listProjects`, `getProjectDetail`, `createIssue`, `putPlanDocument` | github-mcp, filesystem-local |
+| pm | comments, approvals, roster, web-search | All goal/project/issue tools | searxng-local |
+| qa | comments, code-execution | Same as engineer defaults | filesystem-local |
+| designer | comments | Same as engineer defaults | filesystem-local |
+
+Granular tools are configured per-tool on the agent detail page under Capabilities. Legacy `planning` toolset maps to issue-management write tools on first save.
 
 ---
 

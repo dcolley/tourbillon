@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { validateRunToken } from '@/lib/auth/run-token';
 import { logAgentApiRequest, logAgentApiResponse } from '@/lib/agent-api-trace';
-import { getGoalDetailForAgent } from '@/lib/goals';
+import { getGoalDetailForAgent, updateGoal, GoalValidationError } from '@/lib/goals';
 
 function unauthorized() {
   return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -41,4 +41,52 @@ export async function GET(
   );
 
   return NextResponse.json(detail);
+}
+
+export async function PATCH(
+  req: NextRequest,
+  { params }: { params: Promise<{ companyId: string; goalId: string }> },
+) {
+  const { companyId, goalId } = await params;
+  const token = req.headers.get('authorization')?.replace('Bearer ', '');
+  if (!token) return unauthorized();
+  const runCtx = validateRunToken(token);
+  if (!runCtx) return unauthorized();
+  if (runCtx.companyId !== companyId) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+  }
+
+  const body = (await req.json()) as {
+    title?: string;
+    description?: string | null;
+    status?: string;
+    ownerAgentId?: string | null;
+  };
+
+  logAgentApiRequest(
+    `/api/companies/${companyId}/goals/${goalId}`,
+    'PATCH',
+    runCtx,
+    { goalId },
+  );
+
+  try {
+    const goal = await updateGoal(goalId, body);
+    if (goal.companyId !== companyId) {
+      return NextResponse.json({ error: 'Not found' }, { status: 404 });
+    }
+    logAgentApiResponse(
+      `/api/companies/${companyId}/goals/${goalId}`,
+      'PATCH',
+      runCtx,
+      200,
+      { goalId: goal.id },
+    );
+    return NextResponse.json(goal);
+  } catch (err) {
+    if (err instanceof GoalValidationError) {
+      return NextResponse.json({ error: err.message }, { status: 400 });
+    }
+    throw err;
+  }
 }

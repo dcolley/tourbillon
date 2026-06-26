@@ -1,6 +1,7 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
+import { redirect } from 'next/navigation';
 import { getOrCreateDefaultCompany } from '@/lib/company';
 import {
   writeWorkspaceText,
@@ -46,7 +47,7 @@ export async function deleteWorkspaceFileAction(
   try {
     await deleteWorkspaceEntry(company.id, path);
     revalidatePath('/workspace');
-    return { error: null, success: true };
+    redirect('/workspace');
   } catch (err) {
     if (err instanceof WorkspacePathError) {
       return { error: err.message };

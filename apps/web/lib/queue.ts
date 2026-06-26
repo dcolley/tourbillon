@@ -85,6 +85,7 @@ export async function enqueueHeartbeat(
           formatTrace('enqueue', {
             jobId: existing.id,
             agentId: data.agentId,
+            agentName: data.agentName,
             companyId: data.companyId,
             taskId: data.taskId,
             wakeReason: data.wakeReason,
@@ -102,15 +103,20 @@ export async function enqueueHeartbeat(
   }
 
   const enriched = await enrichHeartbeatJob(data);
-  const job = await queue.add(`heartbeat:${enriched.agentId}`, enriched, { jobId, delay, priority });
+  const job = await queue.add(
+    `heartbeat:${enriched.agentName ?? enriched.agentId}`,
+    enriched,
+    { jobId, delay, priority },
+  );
 
   console.log(
     formatTrace('enqueue', {
       jobId: job.id,
-      agentId: data.agentId,
-      companyId: data.companyId,
-      taskId: data.taskId,
-      wakeReason: data.wakeReason,
+      agentId: enriched.agentId,
+      agentName: enriched.agentName,
+      companyId: enriched.companyId,
+      taskId: enriched.taskId,
+      wakeReason: enriched.wakeReason,
     }, `heartbeat job ${outcome} from web`, {
       deduplicate,
       delay,

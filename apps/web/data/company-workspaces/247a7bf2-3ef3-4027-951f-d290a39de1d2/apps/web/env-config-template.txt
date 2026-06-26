@@ -1,0 +1,16 @@
+# Tourbillon Authentication Configuration
+# Copy this file to .env and fill in the values
+
+# --- Session Management ---
+SESSION_SECRET=your-session-secret-change-in-production
+
+# --- Google OAuth ---
+GOOGLE_CLIENT_ID=your-google-client-id
+GOOGLE_CLIENT_SECRET=your-google-client-secret
+
+# --- GitHub OAuth ---
+GITHUB_CLIENT_ID=your-github-client-id
+GITHUB_CLIENT_SECRET=your-github-client-secret
+
+# --- App Configuration ---
+NEXT_PUBLIC_BASE_URL=http://localhost:3000

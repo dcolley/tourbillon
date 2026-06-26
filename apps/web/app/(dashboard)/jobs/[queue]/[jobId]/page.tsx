@@ -83,7 +83,7 @@ export default async function JobDetailPage({
   const retried = resolvedSearchParams.retried === '1';
 
   return (
-    <div className="p-6 space-y-6 max-w-3xl">
+    <div className={`p-6 space-y-6 ${queue === QUEUE_HEARTBEAT ? 'max-w-6xl' : 'max-w-3xl'}`}>
       <div>
         <Link
           href={`/jobs/${queue}?state=${listState}`}

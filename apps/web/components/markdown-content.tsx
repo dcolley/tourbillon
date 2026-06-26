@@ -1,15 +1,24 @@
 'use client';
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { resolveWorkspaceLink } from '@/lib/workspace-links';
 
 interface MarkdownContentProps {
   content: string;
   className?: string;
+  /** When set, relative links resolve against this workspace file path. */
+  workspacePath?: string | null;
+  /** Navigate to another workspace file (in-app). */
+  onWorkspaceNavigate?: (path: string) => void;
 }
 
-const markdownComponents = {
+function createMarkdownComponents(
+  workspacePath: string | null | undefined,
+  onWorkspaceNavigate: ((path: string) => void) | undefined
+) {
+  return {
   h1: ({ children }: { children?: React.ReactNode }) => (
     <h1 className="text-lg font-bold mt-4 mb-2 first:mt-0">{children}</h1>
   ),
@@ -50,16 +59,38 @@ const markdownComponents = {
   pre: ({ children }: { children?: React.ReactNode }) => (
     <pre className="my-2 overflow-x-auto">{children}</pre>
   ),
-  a: ({ href, children }: { href?: string; children?: React.ReactNode }) => (
-    <a
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="text-primary underline underline-offset-2 hover:opacity-80"
-    >
-      {children}
-    </a>
-  ),
+  a: ({ href, children }: { href?: string; children?: React.ReactNode }) => {
+    const workspaceTarget =
+      href && workspacePath && onWorkspaceNavigate
+        ? resolveWorkspaceLink(href, workspacePath)
+        : null;
+
+    if (workspaceTarget && onWorkspaceNavigate) {
+      return (
+        <a
+          href={`/workspace?path=${encodeURIComponent(workspaceTarget)}`}
+          onClick={(e) => {
+            e.preventDefault();
+            onWorkspaceNavigate(workspaceTarget);
+          }}
+          className="text-primary underline underline-offset-2 hover:opacity-80 cursor-pointer"
+        >
+          {children}
+        </a>
+      );
+    }
+
+    return (
+      <a
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-primary underline underline-offset-2 hover:opacity-80"
+      >
+        {children}
+      </a>
+    );
+  },
   table: ({ children }: { children?: React.ReactNode }) => (
     <div className="my-2 overflow-x-auto">
       <table className="min-w-full text-xs border-collapse">{children}</table>
@@ -74,10 +105,20 @@ const markdownComponents = {
     <td className="border border-border px-2 py-1">{children}</td>
   ),
   hr: () => <hr className="my-3 border-border" />,
-};
+  };
+}
 
-export function MarkdownContent({ content, className }: MarkdownContentProps) {
+export function MarkdownContent({
+  content,
+  className,
+  workspacePath,
+  onWorkspaceNavigate,
+}: MarkdownContentProps) {
   const [mode, setMode] = useState<'parsed' | 'raw'>('parsed');
+  const markdownComponents = useMemo(
+    () => createMarkdownComponents(workspacePath, onWorkspaceNavigate),
+    [workspacePath, onWorkspaceNavigate]
+  );
 
   return (
     <div className={className}>

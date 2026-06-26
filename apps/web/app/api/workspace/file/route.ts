@@ -2,12 +2,13 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getOrCreateDefaultCompany } from '@/lib/company';
 import {
   readWorkspaceText,
+  writeWorkspaceText,
   saveWorkspaceUpload,
   resolveSafePath,
   WorkspacePathError,
   WorkspaceSizeError,
 } from '@tourbillon/shared/company-workspace';
-import { isTextEditablePath } from '@tourbillon/shared/company-workspace-types';
+import { isTextEditablePath, isTextViewablePath } from '@tourbillon/shared/company-workspace-types';
 import { stat } from 'fs/promises';
 
 export async function GET(req: NextRequest) {
@@ -18,7 +19,7 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    if (isTextEditablePath(filePath)) {
+    if (isTextViewablePath(filePath)) {
       const file = await readWorkspaceText(company.id, filePath);
       return new NextResponse(file.content, {
         headers: {
@@ -74,6 +75,32 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     if (err instanceof WorkspacePathError || err instanceof WorkspaceSizeError) {
       return NextResponse.json({ error: err.message }, { status: 400 });
+    }
+    throw err;
+  }
+}
+
+export async function PUT(req: NextRequest) {
+  const company = await getOrCreateDefaultCompany();
+  const body = (await req.json()) as { path?: string; content?: string };
+
+  if (!body.path || typeof body.content !== 'string') {
+    return NextResponse.json({ error: 'path and content are required.' }, { status: 400 });
+  }
+
+  if (!isTextEditablePath(body.path)) {
+    return NextResponse.json({ error: 'File type is not editable.' }, { status: 400 });
+  }
+
+  try {
+    const result = await writeWorkspaceText(company.id, body.path, body.content);
+    return NextResponse.json(result);
+  } catch (err) {
+    if (err instanceof WorkspacePathError) {
+      return NextResponse.json({ error: err.message }, { status: 400 });
+    }
+    if (err instanceof WorkspaceSizeError) {
+      return NextResponse.json({ error: err.message }, { status: 413 });
     }
     throw err;
   }

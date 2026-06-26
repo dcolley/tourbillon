@@ -2,7 +2,7 @@ import { Worker, type Job } from 'bullmq';
 import { createConnection } from './redis';
 
 const workerConnection = createConnection();
-import { db, agents, heartbeatRuns, companies, costEvents, issues } from '@tourbillon/db';
+import { db, agents, heartbeatRuns, companies, costEvents, issues, getLlmProviderRowById } from '@tourbillon/db';
 import { eq, and, sql } from 'drizzle-orm';
 import {
   createDurableAgentWithSkills,
@@ -19,6 +19,7 @@ import {
   QUEUE_HEARTBEAT,
   resolveModelProviderConfig,
   modelProviderOverridesFromAgent,
+  toLlmProviderRecord,
   isAgentBudgetExceeded,
   isObservabilityEnabled,
   isHarnessAdapter,
@@ -239,9 +240,14 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
   const wakeMessage = buildWakeMessage(job.data);
   const timeoutMs = DEFAULT_HEARTBEAT_TIMEOUT_SEC * 1000;
 
+  const providerRow = agentRecord.providerId
+    ? await getLlmProviderRowById(agentRecord.providerId)
+    : null;
+  const providerRecord = providerRow ? toLlmProviderRecord(providerRow) : null;
   const providerConfig = resolveModelProviderConfig(
     modelProviderOverridesFromAgent(agentRecord.adapterType, agentRecord.adapterConfig),
     agentRecord.modelId,
+    providerRecord,
   );
 
   const issueForTask = taskId
@@ -252,6 +258,8 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
     adapterType: agentRecord.adapterType,
     modelId: agentRecord.modelId ?? 'unknown',
     provider: providerConfig.provider,
+    providerId: providerConfig.providerId,
+    providerName: providerConfig.providerName,
     apiMode: providerConfig.apiMode,
     modelBaseURL: providerConfig.baseURL,
     timeoutSec: DEFAULT_HEARTBEAT_TIMEOUT_SEC,

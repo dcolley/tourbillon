@@ -13,6 +13,13 @@ import {
   isObservabilityPageSize,
   type ObservabilityEventRow,
 } from '@/lib/observability-types';
+import {
+  buildEventTimeline,
+  formatEventPreview,
+  formatJsonText,
+  formatPayloadForDisplay,
+  shortId,
+} from '@/lib/observability-display';
 import { PageHeader } from '@/components/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -43,6 +50,7 @@ interface ObservabilityFilters {
   status: ObservabilityEventStatus | '';
   traceId: string;
   heartbeatRunId: string;
+  jobId: string;
   search: string;
   from: string;
   to: string;
@@ -100,6 +108,7 @@ function defaultFilters(overrides?: Partial<ObservabilityFilters>): Observabilit
     status: '',
     traceId: '',
     heartbeatRunId: '',
+    jobId: '',
     search: '',
     from: '',
     to: '',
@@ -121,6 +130,7 @@ function buildQueryParams(filters: ObservabilityFilters): URLSearchParams {
   if (filters.status) params.set('status', filters.status);
   if (filters.traceId) params.set('traceId', filters.traceId);
   if (filters.heartbeatRunId) params.set('heartbeatRunId', filters.heartbeatRunId);
+  if (filters.jobId) params.set('jobId', filters.jobId);
   if (filters.search) params.set('search', filters.search);
   if (filters.from) {
     const d = new Date(filters.from);
@@ -141,6 +151,10 @@ export interface ObservabilityListClientProps {
   fixedIssueId?: string;
   /** Lock agent filter (agent detail tab). */
   fixedAgentId?: string;
+  /** Lock heartbeat run filter (heartbeat job detail tab). */
+  fixedHeartbeatRunId?: string;
+  /** Lock BullMQ job id when run is not created yet. */
+  fixedJobId?: string;
   showIssueColumn?: boolean;
   showAgentColumn?: boolean;
   showPageHeader?: boolean;
@@ -154,6 +168,8 @@ export function ObservabilityListClient({
   projects = [],
   fixedIssueId,
   fixedAgentId,
+  fixedHeartbeatRunId,
+  fixedJobId,
   showIssueColumn = true,
   showAgentColumn = true,
   showPageHeader = true,
@@ -167,6 +183,8 @@ export function ObservabilityListClient({
     defaultFilters({
       ...(fixedIssueId ? { issueId: fixedIssueId } : {}),
       ...(fixedAgentId ? { agentId: fixedAgentId } : {}),
+      ...(fixedHeartbeatRunId ? { heartbeatRunId: fixedHeartbeatRunId } : {}),
+      ...(fixedJobId ? { jobId: fixedJobId } : {}),
     })
   );
   const [data, setData] = useState<ObservabilityListResponse | null>(null);
@@ -204,6 +222,17 @@ export function ObservabilityListClient({
   );
 
   useEffect(() => {
+    setFilters((prev) => ({
+      ...prev,
+      ...(fixedIssueId ? { issueId: fixedIssueId } : { issueId: prev.issueId }),
+      ...(fixedAgentId ? { agentId: fixedAgentId } : {}),
+      heartbeatRunId: fixedHeartbeatRunId ?? '',
+      jobId: fixedJobId ?? '',
+      page: 0,
+    }));
+  }, [fixedIssueId, fixedAgentId, fixedHeartbeatRunId, fixedJobId]);
+
+  useEffect(() => {
     void fetchList(filters);
   }, [filters, fetchList]);
 
@@ -225,6 +254,7 @@ export function ObservabilityListClient({
       patch.status !== undefined ||
       patch.traceId !== undefined ||
       patch.heartbeatRunId !== undefined ||
+      patch.jobId !== undefined ||
       patch.search !== undefined ||
       patch.from !== undefined ||
       patch.to !== undefined ||
@@ -235,6 +265,8 @@ export function ObservabilityListClient({
       ...patch,
       ...(fixedIssueId ? { issueId: fixedIssueId } : {}),
       ...(fixedAgentId ? { agentId: fixedAgentId } : {}),
+      ...(fixedHeartbeatRunId ? { heartbeatRunId: fixedHeartbeatRunId, jobId: '' } : {}),
+      ...(fixedJobId ? { jobId: fixedJobId, heartbeatRunId: '' } : {}),
       page: patch.page !== undefined ? patch.page : resetPage ? 0 : prev.page,
     }));
   }
@@ -274,7 +306,7 @@ export function ObservabilityListClient({
         </>
       )}
 
-      {(fixedIssueId || fixedAgentId) && (
+      {(fixedIssueId || fixedAgentId || fixedHeartbeatRunId || fixedJobId) && (
         <p className="text-sm text-muted-foreground">
           Live tokens (this page): {liveTokenTotals.input} in / {liveTokenTotals.output} out
           {refreshIntervalMs > 0 && refreshing ? ' · updating…' : ''}
@@ -467,20 +499,22 @@ export function ObservabilityListClient({
           />
         </div>
 
-        <div className="space-y-1.5">
-          <label htmlFor="obs-run" className={labelClass}>
-            Heartbeat run ID
-          </label>
-          <input
-            id="obs-run"
-            type="text"
-            className={selectClass}
-            placeholder="Run id"
-            disabled={loading}
-            value={filters.heartbeatRunId}
-            onChange={(e) => updateFilters({ heartbeatRunId: e.target.value })}
-          />
-        </div>
+        {!fixedHeartbeatRunId && (
+          <div className="space-y-1.5">
+            <label htmlFor="obs-run" className={labelClass}>
+              Heartbeat run ID
+            </label>
+            <input
+              id="obs-run"
+              type="text"
+              className={selectClass}
+              placeholder="Run id"
+              disabled={loading}
+              value={filters.heartbeatRunId}
+              onChange={(e) => updateFilters({ heartbeatRunId: e.target.value })}
+            />
+          </div>
+        )}
       </div>
 
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -626,8 +660,8 @@ export function ObservabilityListClient({
                         <td className="px-4 py-3">
                           <StatusBadge status={event.status} />
                         </td>
-                        <td className="px-4 py-3 max-w-xs truncate text-xs text-muted-foreground">
-                          {event.outputPreview ?? event.inputPreview ?? '—'}
+                        <td className="px-4 py-3 max-w-xs truncate text-xs text-muted-foreground" title={formatEventPreview(event)}>
+                          {formatEventPreview(event)}
                         </td>
                       </tr>
                       {expanded && (
@@ -705,60 +739,139 @@ function ObservabilityEventDetail({
   event: ObservabilityEventRow;
   onTraceFilter: (traceId: string) => void;
 }) {
+  const timeline = buildEventTimeline(event);
+  const payloadDisplay = formatPayloadForDisplay(event.payload);
+  const [showRawPayload, setShowRawPayload] = useState(false);
+
   return (
     <div className="space-y-3 text-sm">
-      <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-muted-foreground">
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
         <span>
           Trace:{' '}
           <button
             type="button"
             className="font-mono text-primary hover:underline"
+            title={event.traceId}
             onClick={() => onTraceFilter(event.traceId)}
           >
-            {event.traceId}
+            {shortId(event.traceId)}
           </button>
         </span>
-        <span className="font-mono">Span: {event.spanId}</span>
+        <span className="font-mono" title={event.spanId}>
+          Span: {shortId(event.spanId)}
+        </span>
         {event.heartbeatRunId && (
-          <span className="font-mono">Run: {event.heartbeatRunId}</span>
+          <span className="font-mono" title={event.heartbeatRunId}>
+            Run: {shortId(event.heartbeatRunId)}
+          </span>
         )}
-        {event.jobId && <span className="font-mono">Job: {event.jobId}</span>}
+        {event.jobId && (
+          <span className="font-mono" title={event.jobId}>
+            Job: {shortId(event.jobId)}
+          </span>
+        )}
       </div>
 
       {event.errorText && (
-        <p className="text-destructive text-xs">{event.errorText}</p>
+        <p className="rounded border border-destructive/30 bg-destructive/10 px-3 py-2 text-destructive text-xs">
+          {event.errorText}
+        </p>
       )}
 
-      {event.eventType === 'text_delta' && event.outputPreview && (
-        <blockquote className="border-l-2 border-muted-foreground/40 pl-3 text-sm italic text-muted-foreground whitespace-pre-wrap">
-          {event.outputPreview}
-        </blockquote>
-      )}
-
-      {event.inputPreview && (
+      {timeline.length > 0 && (
         <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1">Input preview</p>
-          <pre className="rounded border bg-background p-3 text-xs overflow-x-auto whitespace-pre-wrap">
-            {event.inputPreview}
+          <p className="text-xs font-medium text-muted-foreground mb-2">Activity</p>
+          <ul className="space-y-1.5 rounded border bg-background p-3 text-xs">
+            {timeline.map((entry, index) => (
+              <li key={index} className="flex gap-2">
+                <span
+                  className={`shrink-0 font-mono ${
+                    entry.kind === 'tool_call'
+                      ? 'text-blue-600 dark:text-blue-400'
+                      : entry.kind === 'tool_result'
+                        ? entry.isError
+                          ? 'text-destructive'
+                          : 'text-green-600 dark:text-green-400'
+                        : entry.kind === 'error'
+                          ? 'text-destructive'
+                          : 'text-muted-foreground'
+                  }`}
+                >
+                  {entry.kind === 'tool_call'
+                    ? '→'
+                    : entry.kind === 'tool_result'
+                      ? entry.isError
+                        ? '✗'
+                        : '←'
+                      : entry.kind === 'error'
+                        ? '!'
+                        : '·'}
+                </span>
+                <div className="min-w-0">
+                  <span
+                    className={
+                      entry.isError ? 'font-medium text-destructive' : 'font-medium'
+                    }
+                  >
+                    {entry.label}
+                  </span>
+                  {entry.detail && (
+                    <p className="text-muted-foreground mt-0.5 break-words whitespace-pre-wrap">
+                      {entry.detail}
+                    </p>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {timeline.length === 0 && event.outputPreview && (
+        <div>
+          <p className="text-xs font-medium text-muted-foreground mb-1">Output</p>
+          <pre className="rounded border bg-background p-3 text-xs overflow-x-auto whitespace-pre-wrap font-mono">
+            {formatJsonText(event.outputPreview)}
           </pre>
         </div>
       )}
 
-      {event.outputPreview && (
+      {timeline.length === 0 && !event.outputPreview && event.inputPreview && (
         <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1">Output preview</p>
-          <pre className="rounded border bg-background p-3 text-xs overflow-x-auto whitespace-pre-wrap">
-            {event.outputPreview}
+          <p className="text-xs font-medium text-muted-foreground mb-1">Input</p>
+          <pre className="rounded border bg-background p-3 text-xs overflow-x-auto whitespace-pre-wrap font-mono">
+            {formatJsonText(event.inputPreview)}
           </pre>
         </div>
       )}
 
       {Object.keys(event.payload).length > 0 && (
         <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1">Full payload</p>
-          <pre className="rounded border bg-background p-3 text-xs overflow-x-auto max-h-96">
-            {JSON.stringify(event.payload, null, 2)}
-          </pre>
+          <button
+            type="button"
+            className="text-xs font-medium text-muted-foreground hover:text-foreground"
+            onClick={() => setShowRawPayload((v) => !v)}
+          >
+            {showRawPayload ? 'Hide raw payload' : 'Show raw payload'}
+            {payloadDisplay.isTruncated ? ' (truncated at storage limit)' : ''}
+          </button>
+          {showRawPayload && (
+            <div className="mt-2 space-y-3">
+              <pre className="rounded border bg-background p-3 text-xs overflow-x-auto max-h-96 whitespace-pre-wrap font-mono">
+                {payloadDisplay.json}
+              </pre>
+              {payloadDisplay.previewFormatted && (
+                <div>
+                  <p className="text-xs font-medium text-muted-foreground mb-1">
+                    Preview (formatted)
+                  </p>
+                  <pre className="rounded border bg-background p-3 text-xs overflow-x-auto max-h-[32rem] whitespace-pre-wrap font-mono">
+                    {payloadDisplay.previewFormatted}
+                  </pre>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>
