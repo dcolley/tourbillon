@@ -33,6 +33,13 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { StatusBadge } from '@/lib/status-badges';
 import { RefreshCw } from 'lucide-react';
+import {
+  OBSERVABILITY_LIST_REFRESH_INTERVALS,
+  isObservabilityListRefreshInterval,
+  readObservabilityListRefreshPrefs,
+  writeObservabilityListRefreshPrefs,
+  type ObservabilityListRefreshIntervalSec,
+} from '@/lib/observability-list-refresh-storage';
 
 interface AgentOption {
   id: string;
@@ -99,15 +106,6 @@ const EVENT_TYPE_LABELS: Record<ObservabilityEventType, string> = {
   error: 'Error',
 };
 
-const REFRESH_INTERVALS = [
-  { label: 'Manual only', ms: 0 },
-  { label: 'Every 1s', ms: 1000 },
-  { label: 'Every 2s', ms: 2000 },
-  { label: 'Every 5s', ms: 5000 },
-  { label: 'Every 10s', ms: 10000 },
-  { label: 'Every 30s', ms: 30000 },
-] as const;
-
 function defaultFilters(overrides?: Partial<ObservabilityFilters>): ObservabilityFilters {
   return {
     issueId: '',
@@ -168,8 +166,6 @@ export interface ObservabilityListClientProps {
   showIssueColumn?: boolean;
   showAgentColumn?: boolean;
   showPageHeader?: boolean;
-  /** Default auto-refresh interval in ms; 0 = manual only. */
-  defaultRefreshIntervalMs?: number;
 }
 
 export function ObservabilityListClient({
@@ -183,12 +179,9 @@ export function ObservabilityListClient({
   showIssueColumn = true,
   showAgentColumn = true,
   showPageHeader = true,
-  defaultRefreshIntervalMs = 0,
 }: ObservabilityListClientProps) {
-  const initialRefreshMs = REFRESH_INTERVALS.some((o) => o.ms === defaultRefreshIntervalMs)
-    ? defaultRefreshIntervalMs
-    : 0;
-  const [refreshIntervalMs, setRefreshIntervalMs] = useState(initialRefreshMs);
+  const [refreshIntervalSec, setRefreshIntervalSec] =
+    useState<ObservabilityListRefreshIntervalSec | null>(null);
   const [filters, setFilters] = useState<ObservabilityFilters>(() =>
     defaultFilters({
       ...(fixedIssueId ? { issueId: fixedIssueId } : {}),
@@ -202,6 +195,10 @@ export function ObservabilityListClient({
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setRefreshIntervalSec(readObservabilityListRefreshPrefs().refreshIntervalSec);
+  }, []);
 
   const fetchList = useCallback(
     async (next: ObservabilityFilters, opts?: { silent?: boolean }) => {
@@ -247,12 +244,17 @@ export function ObservabilityListClient({
   }, [filters, fetchList]);
 
   useEffect(() => {
-    if (refreshIntervalMs <= 0) return;
+    if (refreshIntervalSec === null || refreshIntervalSec === 0) return;
     const interval = setInterval(() => {
       void fetchList(filters, { silent: true });
-    }, refreshIntervalMs);
+    }, refreshIntervalSec * 1000);
     return () => clearInterval(interval);
-  }, [refreshIntervalMs, filters, fetchList]);
+  }, [refreshIntervalSec, filters, fetchList]);
+
+  function updateRefreshInterval(next: ObservabilityListRefreshIntervalSec) {
+    setRefreshIntervalSec(next);
+    writeObservabilityListRefreshPrefs({ refreshIntervalSec: next });
+  }
 
   function updateFilters(patch: Partial<ObservabilityFilters>) {
     const resetPage =
@@ -319,7 +321,7 @@ export function ObservabilityListClient({
       {(fixedIssueId || fixedAgentId || fixedHeartbeatRunId || fixedJobId) && (
         <p className="text-sm text-muted-foreground">
           Live tokens (this page): {liveTokenTotals.input} in / {liveTokenTotals.output} out
-          {refreshIntervalMs > 0 && refreshing ? ' · updating…' : ''}
+          {refreshIntervalSec !== null && refreshIntervalSec > 0 && refreshing ? ' · updating…' : ''}
         </p>
       )}
 
@@ -543,13 +545,16 @@ export function ObservabilityListClient({
           <select
             id="obs-refresh-interval"
             className="rounded-md border border-input bg-background px-2 py-1.5 text-sm"
-            disabled={loading}
-            value={refreshIntervalMs}
-            onChange={(e) => setRefreshIntervalMs(parseInt(e.target.value, 10))}
+            disabled={loading || refreshIntervalSec === null}
+            value={refreshIntervalSec ?? 0}
+            onChange={(e) => {
+              const n = parseInt(e.target.value, 10);
+              if (isObservabilityListRefreshInterval(n)) updateRefreshInterval(n);
+            }}
           >
-            {REFRESH_INTERVALS.map((option) => (
-              <option key={option.ms} value={option.ms}>
-                {option.label}
+            {OBSERVABILITY_LIST_REFRESH_INTERVALS.map(({ value, label }) => (
+              <option key={value} value={value}>
+                {label}
               </option>
             ))}
           </select>

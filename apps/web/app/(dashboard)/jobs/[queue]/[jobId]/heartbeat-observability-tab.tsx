@@ -19,7 +19,6 @@ export function HeartbeatObservabilityTab({
       fixedAgentId={agent?.id}
       showAgentColumn={!agent}
       showPageHeader={false}
-      defaultRefreshIntervalMs={2000}
     />
   );
 }
