@@ -1,4 +1,4 @@
-import { getOrCreateDefaultCompany } from '@/lib/company';
+import { getActiveCompany } from '@/lib/company';
 import {
   getCompanyWorkspaceDir,
   getWorkspaceRoot,
@@ -14,7 +14,7 @@ export default async function WorkspacePage({
   searchParams: Promise<{ path?: string }>;
 }) {
   const { path: selectedPath } = await searchParams;
-  const company = await getOrCreateDefaultCompany();
+  const company = await getActiveCompany();
   const entries = await listWorkspaceEntries(company.id, { recursive: false });
 
   let initialContent: string | null = null;

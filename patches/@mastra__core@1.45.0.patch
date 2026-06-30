@@ -1,0 +1,26 @@
+diff --git a/dist/agent/durable/index.cjs b/dist/agent/durable/index.cjs
+index e520c34564cd9643111bcd8d7217b21212901bc3..0b91d645b7b6a3959e637f92100136547da90376 100644
+--- a/dist/agent/durable/index.cjs
++++ b/dist/agent/durable/index.cjs
+@@ -754,7 +754,7 @@ var globalRunRegistry = new ttlcache.TTLCache({
+   ttl: 10 * 60 * 1e3,
+   updateAgeOnGet: true,
+   dispose: (entry) => {
+-    entry.cleanup?.();
++    entry?.cleanup?.();
+   },
+   noDisposeOnSet: true
+ });
+diff --git a/dist/agent/durable/index.js b/dist/agent/durable/index.js
+index 184c72e0d339cd42a6736a29804ee19555d5633a..5a86ae0de2d320f2d55d252bb6766ce8e1e9f0b8 100644
+--- a/dist/agent/durable/index.js
++++ b/dist/agent/durable/index.js
+@@ -752,7 +752,7 @@ var globalRunRegistry = new TTLCache({
+   ttl: 10 * 60 * 1e3,
+   updateAgeOnGet: true,
+   dispose: (entry) => {
+-    entry.cleanup?.();
++    entry?.cleanup?.();
+   },
+   noDisposeOnSet: true
+ });

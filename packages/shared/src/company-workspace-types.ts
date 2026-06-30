@@ -11,6 +11,7 @@ Shared files for all agents in this company. Use control-plane workspace tools.
 - \`projects/\` — active initiative material
 - \`areas/\` — ongoing playbooks and responsibilities
 - \`archives/\` — completed material
+- \`agents/{urlKey}/skills/\` — per-agent toolset skill copies (seeded at hire time; editable)
 
 Task thread of record: issue comments. Task plans: \`putPlanDocument\`.
 `;

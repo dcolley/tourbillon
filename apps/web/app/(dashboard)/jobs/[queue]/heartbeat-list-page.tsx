@@ -1,9 +1,11 @@
 import { Suspense } from 'react';
 import { db, agents } from '@tourbillon/db';
-import { desc } from 'drizzle-orm';
+import { desc, eq } from 'drizzle-orm';
+import { getActiveCompany } from '@/lib/company';
 import { HeartbeatListClient } from './heartbeat-list-client';
 
 async function loadAgentOptions() {
+  const company = await getActiveCompany();
   return db
     .select({
       id: agents.id,
@@ -12,6 +14,7 @@ async function loadAgentOptions() {
       title: agents.title,
     })
     .from(agents)
+    .where(eq(agents.companyId, company.id))
     .orderBy(desc(agents.createdAt));
 }
 

@@ -10,8 +10,10 @@ import {
   assembleAgentSystemPrompt,
   assembleAgentTools,
   getAgentMemory,
+  type AssembleAgentToolsOptions,
 } from './agent-factory';
 import { getLanguageModelForAgent, llmProviderRowToRecord } from './provider';
+import { resolveAgentModelSettings } from './model-settings';
 import { buildCodeExecutionWorkspace } from './execution-workspace';
 
 export function buildHarnessThreadId(agentRecord: AgentRecord, taskId?: string): string {
@@ -42,7 +44,9 @@ export function buildHarnessStorageConfig(): {
 
 export function buildHarnessPermissionRules(agentRecord: AgentRecord) {
   const codeExecutionEnabled = agentRecord.assignedToolsets?.includes('code-execution') ?? false;
-  const mcpEnabled = (agentRecord.mcpServerIds?.length ?? 0) > 0;
+  const mcpEnabled =
+    (agentRecord.mcpServerIds?.length ?? 0) > 0 ||
+    (agentRecord.assignedToolsets?.includes('buffer') ?? false);
 
   return {
     categories: {
@@ -57,7 +61,7 @@ export function buildHarnessPermissionRules(agentRecord: AgentRecord) {
 
 export async function buildHarnessWorkModes(
   agentRecord: AgentRecord,
-  options?: { allowedMcpServerIds?: string[] },
+  options?: AssembleAgentToolsOptions,
 ): Promise<HarnessMode<Record<string, unknown>>[]> {
   const tools = await assembleAgentTools(agentRecord, options);
   const systemPrompt = await assembleAgentSystemPrompt(agentRecord);
@@ -66,6 +70,7 @@ export async function buildHarnessWorkModes(
     ? await getLlmProviderRowById(agentRecord.providerId)
     : null;
   const providerRecord = providerRow ? llmProviderRowToRecord(providerRow) : null;
+  const modelSettings = resolveAgentModelSettings(agentRecord, providerRecord);
 
   const workAgent = new Agent({
     id: agentRecord.id,
@@ -75,6 +80,7 @@ export async function buildHarnessWorkModes(
     tools: tools as Parameters<typeof Agent>[0]['tools'],
     memory: getAgentMemory(),
     ...(codeExecutionEnabled ? { workspace: buildCodeExecutionWorkspace() } : {}),
+    ...(modelSettings ? { defaultOptions: { modelSettings } } : {}),
   });
 
   return [
@@ -99,7 +105,7 @@ export interface TourbillonHarnessState {
  */
 export async function createTourbillonHarness(
   agentRecord: AgentRecord,
-  options?: { allowedMcpServerIds?: string[]; cwd?: string },
+  options?: AssembleAgentToolsOptions & { cwd?: string },
 ): Promise<Harness<TourbillonHarnessState>> {
   const modes = await buildHarnessWorkModes(agentRecord, options);
   const codeExecutionEnabled = agentRecord.assignedToolsets?.includes('code-execution') ?? false;

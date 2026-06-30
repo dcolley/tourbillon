@@ -4,12 +4,15 @@ import { PageHeader } from '@/components/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { StatusBadge } from '@/lib/status-badges';
+import { getActiveCompany } from '@/lib/company';
 
 export default async function ApprovalsPage() {
+  const company = await getActiveCompany();
   const pendingApprovals = await db
     .select({ approval: approvals, agent: agents })
     .from(approvals)
     .leftJoin(agents, eq(approvals.requestedByAgentId, agents.id))
+    .where(eq(approvals.companyId, company.id))
     .orderBy(desc(approvals.createdAt))
     .limit(50);
 

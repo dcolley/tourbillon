@@ -1,3 +1,5 @@
+import { parseAgentModelSettings, type AgentModelSettings } from './model-settings';
+
 export type ModelProviderKind =
   | 'lmstudio'
   | 'ollama'
@@ -38,6 +40,7 @@ export interface LlmProviderRecord {
   headers: Record<string, string>;
   apiMode: ModelApiMode;
   isDefault: boolean;
+  defaultModelSettings: AgentModelSettings;
 }
 
 /** Per-agent overrides stored in agents.adapter_config (and env fallbacks). */
@@ -333,7 +336,6 @@ export function modelProviderOverridesFromAgent(
   return overrides;
 }
 
-/** Convert a Drizzle llm_providers row to LlmProviderRecord. */
 export function toLlmProviderRecord(row: {
   id: string;
   name: string;
@@ -343,6 +345,7 @@ export function toLlmProviderRecord(row: {
   headers: unknown;
   apiMode: string;
   isDefault: boolean;
+  defaultModelSettings?: unknown;
 }): LlmProviderRecord {
   const type = parseLlmProviderType(row.type);
   if (!type) {
@@ -358,6 +361,7 @@ export function toLlmProviderRecord(row: {
     headers: parseHeaders(row.headers),
     apiMode,
     isDefault: row.isDefault,
+    defaultModelSettings: parseAgentModelSettings(row.defaultModelSettings),
   };
 }
 

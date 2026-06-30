@@ -1,12 +1,13 @@
 import Link from 'next/link';
 import { db, agents, goals } from '@tourbillon/db';
-import { eq } from 'drizzle-orm';
+import { eq, and } from 'drizzle-orm';
 import { PageHeader } from '@/components/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { StatusBadge } from '@/lib/status-badges';
 import { listProjects, type ProjectStatus } from '@/lib/projects';
 import { listGoalOptions } from '@/lib/goals';
+import { getActiveCompany } from '@/lib/company';
 import { NewProjectDialog } from './new-project-dialog';
 
 const FILTERS = [
@@ -30,6 +31,7 @@ export default async function ProjectsPage({
   searchParams: { filter?: string };
 }) {
   const filter = parseFilter(searchParams.filter);
+  const company = await getActiveCompany();
 
   const [projectList, goalList, agentList, goalTitles] = await Promise.all([
     listProjects(filter),
@@ -43,9 +45,9 @@ export default async function ProjectsPage({
         title: agents.title,
       })
       .from(agents)
-      .where(eq(agents.status, 'active'))
+      .where(and(eq(agents.companyId, company.id), eq(agents.status, 'active')))
       .orderBy(agents.name),
-    db.select({ id: goals.id, title: goals.title }).from(goals),
+    db.select({ id: goals.id, title: goals.title }).from(goals).where(eq(goals.companyId, company.id)),
   ]);
 
   const goalTitleById = new Map(goalTitles.map((g) => [g.id, g.title]));

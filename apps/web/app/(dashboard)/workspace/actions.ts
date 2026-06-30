@@ -2,7 +2,7 @@
 
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
-import { getOrCreateDefaultCompany } from '@/lib/company';
+import { getActiveCompany } from '@/lib/company';
 import {
   writeWorkspaceText,
   deleteWorkspaceEntry,
@@ -17,7 +17,7 @@ export async function saveWorkspaceFileAction(
   _prev: WorkspaceActionState,
   formData: FormData
 ): Promise<WorkspaceActionState> {
-  const company = await getOrCreateDefaultCompany();
+  const company = await getActiveCompany();
   const path = (formData.get('path') as string)?.trim();
   const content = formData.get('content') as string;
 
@@ -40,7 +40,7 @@ export async function deleteWorkspaceFileAction(
   _prev: WorkspaceActionState,
   formData: FormData
 ): Promise<WorkspaceActionState> {
-  const company = await getOrCreateDefaultCompany();
+  const company = await getActiveCompany();
   const path = (formData.get('path') as string)?.trim();
   if (!path) return { error: 'Path is required.' };
 
@@ -60,7 +60,7 @@ export async function uploadWorkspaceFileAction(
   _prev: WorkspaceActionState,
   formData: FormData
 ): Promise<WorkspaceActionState> {
-  const company = await getOrCreateDefaultCompany();
+  const company = await getActiveCompany();
   const targetDir = ((formData.get('targetDir') as string) ?? '').trim();
   const file = formData.get('file');
 

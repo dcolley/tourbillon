@@ -12,11 +12,11 @@
   },
   "dependencies": {
     "drizzle-orm": "catalog:",
-    "postgres": "^3.4.0"
+    "postgres": "^3.4.9"
   },
   "devDependencies": {
-    "drizzle-kit": "^0.31.0",
     "@types/node": "catalog:",
+    "drizzle-kit": "^0.31.10",
     "typescript": "catalog:"
   }
 }

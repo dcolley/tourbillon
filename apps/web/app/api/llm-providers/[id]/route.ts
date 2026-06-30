@@ -38,6 +38,7 @@ export async function PATCH(
       apiMode?: string;
       isDefault?: boolean;
       clearApiKey?: boolean;
+      defaultModelSettings?: Record<string, unknown>;
     };
 
     const provider = await updateLlmProvider(id, body);

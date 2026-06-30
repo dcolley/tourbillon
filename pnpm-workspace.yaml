@@ -2,12 +2,35 @@ packages:
   - 'apps/*'
   - 'packages/*'
 
-catalog:
-  typescript: ^5.9.0
-  "@types/node": ^20.19.0
-  eslint: ^9.39.0
-  prettier: ^3.8.0
-  "@ai-sdk/openai": ^3.0.0
-  drizzle-orm: ^0.45.0
+# Reject package versions published less than 7 days ago (supply-chain protection).
+minimumReleaseAge: 10080
+
+overrides:
   ioredis: ^5.11.0
-  zod: ^4.0.0
+
+catalog:
+  typescript: ^5.9.3
+  "@types/node": ^20.19.43
+  eslint: ^9.39.4
+  prettier: ^3.8.4
+  "@ai-sdk/openai": ^3.0.74
+  drizzle-orm: ^0.45.2
+  ioredis: ^5.11.0
+  zod: ^4.4.3
+
+allowBuilds:
+  esbuild: true
+  sharp: true
+  msgpackr-extract: true
+  protobufjs: true
+  unrs-resolver: true
+  bufferutil: false
+  '@google/genai': false
+  agent-browser: false
+  edgedriver: false
+  geckodriver: false
+  koffi: false
+  onnxruntime-node: false
+
+patchedDependencies:
+  '@mastra/core@1.45.0': patches/@mastra__core@1.45.0.patch

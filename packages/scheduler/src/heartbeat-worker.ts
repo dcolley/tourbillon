@@ -12,8 +12,12 @@ import {
   buildHeartbeatMemoryKeys,
   getResumableDurableRun,
   persistDurableRunId,
+  resolveAgentModelSettings,
+  shouldUseHeartbeatMemory,
+  clearInboxThread,
 } from '@tourbillon/mastra';
 import type { HeartbeatJobData } from '@tourbillon/shared';
+import type { AgentModelSettings } from '@tourbillon/shared';
 import {
   DEFAULT_HEARTBEAT_TIMEOUT_SEC,
   QUEUE_HEARTBEAT,
@@ -24,6 +28,7 @@ import {
   isObservabilityEnabled,
   isHarnessAdapter,
   buildWakeMessage,
+  parseCompanySettings,
 } from '@tourbillon/shared';
 import type { AgentRuntimeConfig } from '@tourbillon/shared';
 import type { Agent as AgentRecord } from '@tourbillon/db';
@@ -254,6 +259,8 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
     ? await db.query.issues.findFirst({ where: eq(issues.id, taskId) })
     : undefined;
 
+  const modelSettings = resolveAgentModelSettings(agentRecord, providerRecord);
+
   runTracer.info('invoking heartbeat runtime', {
     adapterType: agentRecord.adapterType,
     modelId: agentRecord.modelId ?? 'unknown',
@@ -262,6 +269,7 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
     providerName: providerConfig.providerName,
     apiMode: providerConfig.apiMode,
     modelBaseURL: providerConfig.baseURL,
+    modelSettings,
     timeoutSec: DEFAULT_HEARTBEAT_TIMEOUT_SEC,
     wakeMessagePreview: wakeMessage.slice(0, 400),
   });
@@ -282,7 +290,10 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
           projectId: issueForTask?.projectId ?? undefined,
         },
         timeoutMs,
-        company.allowedMcpServerIds ?? [],
+        {
+          allowedMcpServerIds: company.allowedMcpServerIds ?? [],
+          companySettings: parseCompanySettings(company.settings),
+        },
       );
 
       await logIssueStateAfterRun(runTracer, taskId);
@@ -312,6 +323,7 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
       issueForTask,
       providerConfig,
       companyId,
+      modelSettings,
     });
   } catch (err) {
     const errorText = err instanceof Error ? err.message : String(err);
@@ -375,6 +387,7 @@ async function runDurableAgentHeartbeat(params: {
   issueForTask: Awaited<ReturnType<typeof db.query.issues.findFirst>> | undefined;
   providerConfig: ReturnType<typeof resolveModelProviderConfig>;
   companyId: string;
+  modelSettings?: AgentModelSettings;
 }): Promise<void> {
   const {
     agentRecord,
@@ -388,11 +401,13 @@ async function runDurableAgentHeartbeat(params: {
     issueForTask,
     providerConfig,
     companyId,
+    modelSettings,
   } = params;
 
   const company = await db.query.companies.findFirst({ where: eq(companies.id, companyId) });
   const durableAgent = await createDurableAgentWithSkills(agentRecord, {
     allowedMcpServerIds: company?.allowedMcpServerIds ?? [],
+    companySettings: parseCompanySettings(company?.settings),
     maxSteps: 30,
   });
 
@@ -416,6 +431,18 @@ async function runDurableAgentHeartbeat(params: {
   });
 
   const resumable = await getResumableDurableRun(agentRecord.id, taskId);
+  const useMemory = shouldUseHeartbeatMemory(taskId);
+
+  if (!resumable && !useMemory) {
+    await clearInboxThread(companyId, agentRecord.id);
+    runTracer.info('cleared inbox thread for stateless wake');
+  }
+
+  runTracer.info('heartbeat memory', {
+    useMemory,
+    thread: useMemory ? memoryKeys.thread : undefined,
+  });
+
   const tracingOptions = isObservabilityEnabled()
     ? {
         metadata: {
@@ -476,10 +503,15 @@ async function runDurableAgentHeartbeat(params: {
         const streamed = await durableAgent.stream(wakeMessage, {
           requestContext: runtimeContext,
           maxSteps: 30,
-          memory: {
-            resource: memoryKeys.resource,
-            thread: memoryKeys.thread,
-          },
+          ...(useMemory
+            ? {
+                memory: {
+                  resource: memoryKeys.resource,
+                  thread: memoryKeys.thread,
+                },
+              }
+            : {}),
+          ...(modelSettings ? { modelSettings } : {}),
           ...(tracingOptions ? { tracingOptions } : {}),
           abortSignal: controller.signal,
           onFinish: (result) => {

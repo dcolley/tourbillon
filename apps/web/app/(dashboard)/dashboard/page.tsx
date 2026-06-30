@@ -1,20 +1,29 @@
 import { db } from '@tourbillon/db';
 import { agents, issues } from '@tourbillon/db';
-import { eq, count } from 'drizzle-orm';
+import { and, eq, count } from 'drizzle-orm';
 import Link from 'next/link';
 import { PageHeader } from '@/components/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { StatusBadge } from '@/lib/status-badges';
 import { heartbeatJobHref, listHeartbeatRuns } from '@/lib/heartbeats';
+import { getActiveCompany } from '@/lib/company';
 
 export default async function DashboardPage() {
-  const [agentCount] = await db.select({ count: count() }).from(agents);
-  const [issueCount] = await db.select({ count: count() }).from(issues);
+  const company = await getActiveCompany();
+
+  const [agentCount] = await db
+    .select({ count: count() })
+    .from(agents)
+    .where(eq(agents.companyId, company.id));
+  const [issueCount] = await db
+    .select({ count: count() })
+    .from(issues)
+    .where(eq(issues.companyId, company.id));
   const [activeIssueCount] = await db
     .select({ count: count() })
     .from(issues)
-    .where(eq(issues.status, 'in_progress'));
+    .where(and(eq(issues.companyId, company.id), eq(issues.status, 'in_progress')));
 
   const recentRuns = await listHeartbeatRuns({ limit: 10 });
 

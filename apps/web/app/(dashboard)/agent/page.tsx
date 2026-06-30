@@ -1,24 +1,35 @@
 import { db, agents } from '@tourbillon/db';
-import { desc } from 'drizzle-orm';
+import { desc, eq } from 'drizzle-orm';
 import Link from 'next/link';
 import { PageHeader } from '@/components/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
+import { getActiveCompany } from '@/lib/company';
 import { AgentListRow } from './agent-list-row';
 
 export default async function AgentsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ error?: string }>;
+  searchParams: Promise<{ error?: string; deleted?: string }>;
 }) {
-  const { error } = await searchParams;
-  const allAgents = await db.select().from(agents).orderBy(desc(agents.createdAt));
+  const { error, deleted } = await searchParams;
+  const company = await getActiveCompany();
+  const allAgents = await db
+    .select()
+    .from(agents)
+    .where(eq(agents.companyId, company.id))
+    .orderBy(desc(agents.createdAt));
 
   return (
     <div className="space-y-6">
       {error ? (
         <p className="rounded-md border border-destructive/50 bg-destructive/10 px-4 py-2 text-sm text-destructive">
           {error}
+        </p>
+      ) : null}
+      {deleted === '1' ? (
+        <p className="rounded-md border border-green-200 bg-green-50 px-4 py-2 text-sm text-green-800">
+          Agent deleted.
         </p>
       ) : null}
       <PageHeader

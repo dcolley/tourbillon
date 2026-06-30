@@ -42,14 +42,17 @@ export async function POST(
         if (stale) {
           effectiveCheckoutRunId = null;
         } else {
-          throw Object.assign(new Error('Conflict: already checked out'), { status: 409 });
+          throw Object.assign(new Error('Conflict: already checked out'), {
+            status: 409,
+            code: 'lock_conflict',
+          });
         }
       }
 
       if (body.expectedStatuses && !body.expectedStatuses.includes(issue.status)) {
         throw Object.assign(
           new Error(`Issue status is ${issue.status}, not in expected ${body.expectedStatuses.join(',')}`),
-          { status: 409 },
+          { status: 409, code: 'status_mismatch' },
         );
       }
 
@@ -93,12 +96,16 @@ export async function POST(
     });
     return NextResponse.json(result);
   } catch (err: unknown) {
-    const e = err as { status?: number; message?: string };
+    const e = err as { status?: number; message?: string; code?: string };
     const status = e.status ?? 500;
     logAgentApiResponse(`/api/issues/${issueId}/checkout`, 'POST', runCtx, status, {
       issueId: issueId,
       error: e.message,
+      code: e.code,
     });
-    return NextResponse.json({ error: e.message }, { status });
+    return NextResponse.json(
+      { error: e.message, ...(e.code ? { code: e.code } : {}) },
+      { status },
+    );
   }
 }

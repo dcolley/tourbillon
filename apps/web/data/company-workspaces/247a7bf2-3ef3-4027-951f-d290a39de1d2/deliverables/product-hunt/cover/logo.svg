@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Tourbillon Logo</title></head>
+<body style="margin:0;background:#ffffff;">
+
+<!-- LOGO (512x512) - SVG for scalability -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <radialGradient id="logoGrad" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#818cf8"/>
+      <stop offset="100%" stop-color="#4f46e5"/>
+    </radialGradient>
+  </defs>
+  
+  <!-- Outer ring -->
+  <circle cx="256" cy="256" r="236" fill="none" stroke="url(#logoGrad)" stroke-width="12"/>
+  
+  <!-- Inner filled circle (partial - spiral effect) -->
+  <path d="M256,256 L256,80 A176,176 0 0,1 432,256 Z" fill="#6366f180"/>
+  
+  <!-- Core circle -->
+  <circle cx="256" cy="256" r="60" fill="#c7d2fe"/>
+  
+  <!-- Compass points (tour/orchestration theme) -->
+  <line x1="256" y1="80" x2="256" y2="100" stroke="#a5b4fc" stroke-width="3"/>
+  <line x1="256" y1="412" x2="256" y2="432" stroke="#a5b4fc" stroke-width="3"/>
+  <line x1="80" y1="256" x2="100" y2="256" stroke="#a5b4fc" stroke-width="3"/>
+  <line x1="412" y1="256" x2="432" y2="256" stroke="#a5b4fc" stroke-width="3"/>
+  
+  <!-- Inner decorative ring -->
+  <circle cx="256" cy="256" r="120" fill="none" stroke="#a5b4fc" stroke-width="2" stroke-dasharray="8,4"/>
+  
+  <!-- Center node (crosshair - represents focus/orchestration) -->
+  <line x1="256" y1="230" x2="256" y2="282" stroke="#ffffff" stroke-width="4"/>
+  <line x1="230" y1="256" x2="282" y2="256" stroke="#ffffff" stroke-width="4"/>
+</svg>
+
+<!-- App Icon variant (simpler, solid background) -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" rx="80" fill="#6366f1"/>
+  
+  <!-- Simplified logo for app icon -->
+  <circle cx="256" cy="256" r="140" fill="none" stroke="#ffffff" stroke-width="4" opacity="0.9"/>
+  <circle cx="256" cy="256" r="80" fill="#ffffff" opacity="0.9"/>
+  
+  <!-- Compass points -->
+  <line x1="256" y1="100" x2="256" y2="140" stroke="#4f46e5" stroke-width="3"/>
+  <line x1="256" y1="372" x2="256" y2="412" stroke="#4f46e5" stroke-width="3"/>
+  <line x1="100" y1="256" x2="140" y2="256" stroke="#4f46e5" stroke-width="3"/>
+  <line x1="372" y1="256" x2="412" y2="256" stroke="#4f46e5" stroke-width="3"/>
+  
+  <!-- Center crosshair -->
+  <line x1="256" y1="220" x2="256" y2="292" stroke="#6366f1" stroke-width="3"/>
+  <line x1="220" y1="256" x2="292" y2="256" stroke="#6366f1" stroke-width="3"/>
+</svg>
+
+</body>
+</html>

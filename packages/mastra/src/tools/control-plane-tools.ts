@@ -1,4 +1,5 @@
 import { createTool } from '@mastra/core/tools';
+import { CHECKOUT_EXPECTED_STATUSES } from '@tourbillon/shared';
 import { z } from 'zod';
 import { extractToolRuntimeContext, tracedAgentFetch } from './api-client';
 
@@ -31,8 +32,8 @@ export const getInboxTool = createTool({
 export const checkoutIssueTool = createTool({
   id: 'checkoutIssue',
   description:
-    'Atomically checkout a task before doing any work on it. ' +
-    'Returns 409 if owned by another agent — NEVER retry a 409, pick a different task.',
+    'Atomically checkout a task before doing any work on it (including resuming in_progress work). ' +
+    'On 409 conflict, pick the next inbox task — never retry the same issue in one heartbeat.',
   inputSchema: z.object({
     issueId: z.string().describe('The issue UUID to checkout'),
   }),
@@ -43,11 +44,26 @@ export const checkoutIssueTool = createTool({
       method: 'POST',
       body: JSON.stringify({
         agentId,
-        expectedStatuses: ['todo', 'backlog', 'blocked', 'in_review'],
+        expectedStatuses: [...CHECKOUT_EXPECTED_STATUSES],
       }),
     });
     if (res.status === 409) {
-      return { conflict: true, message: 'Task owned by another agent. Pick a different task.' };
+      const body = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
+      if (body.code === 'lock_conflict') {
+        return {
+          conflict: true,
+          conflictReason: 'lock',
+          message:
+            'Another heartbeat run holds the checkout lock on this task. Pick a different inbox task.',
+        };
+      }
+      return {
+        conflict: true,
+        conflictReason: body.code ?? 'checkout_conflict',
+        message:
+          body.error ??
+          'Cannot checkout this task right now. Pick a different inbox task.',
+      };
     }
     if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
     return res.json();

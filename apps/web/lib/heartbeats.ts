@@ -2,7 +2,7 @@ import { db, agents, heartbeatRuns, reconcileRunningHeartbeatRunsForJob, type Ag
 import { desc, eq, and, inArray, sql, count } from 'drizzle-orm';
 import type { JobType } from 'bullmq';
 import { QUEUE_HEARTBEAT } from '@tourbillon/shared';
-import { getOrCreateDefaultCompany } from './company';
+import { getActiveCompany } from './company';
 import { getQueue } from './queue';
 import type { JobSummary } from './jobs';
 
@@ -62,7 +62,7 @@ async function attachAgents(
 ): Promise<HeartbeatRunWithAgent[]> {
   if (runs.length === 0) return [];
 
-  const company = await getOrCreateDefaultCompany();
+  const company = await getActiveCompany();
   const agentIds = [...new Set(runs.map((r) => r.agentId))];
   const agentRows = await db
     .select({ id: agents.id, name: agents.name, urlKey: agents.urlKey, title: agents.title })
@@ -82,7 +82,7 @@ export async function listHeartbeatRuns(opts: {
   limit?: number;
 } = {}): Promise<HeartbeatRunWithAgent[]> {
   const { agentId, limit = 50 } = opts;
-  const company = await getOrCreateDefaultCompany();
+  const company = await getActiveCompany();
 
   const runs = await db
     .select()
@@ -210,7 +210,7 @@ async function listOrphanQueueJobs(agentId?: string): Promise<HeartbeatListEntry
   );
 
   const jobIds = summaries.map((j) => j.summary.id).filter(Boolean);
-  const company = await getOrCreateDefaultCompany();
+  const company = await getActiveCompany();
 
   const runsWithJobs =
     jobIds.length > 0
@@ -265,7 +265,7 @@ export async function getHeartbeatList(opts: {
   const filter = opts.filter ?? 'all';
   const page = Math.max(0, opts.page ?? 0);
   const pageSize = opts.pageSize ?? DEFAULT_PAGE_SIZE;
-  const company = await getOrCreateDefaultCompany();
+  const company = await getActiveCompany();
 
   if (filter === 'in_queue') {
     const orphans = await listOrphanQueueJobs(opts.agentId);

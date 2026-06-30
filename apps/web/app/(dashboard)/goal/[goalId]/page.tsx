@@ -1,8 +1,10 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { db, agents } from '@tourbillon/db';
-import { eq } from 'drizzle-orm';
+import { eq, and } from 'drizzle-orm';
 import { getGoalDetail } from '@/lib/goals';
+import { DeepLinkCompanySync } from '@/components/deep-link-company-sync';
+import { getCompanyById } from '@/lib/company';
 import { NewProjectDialog } from '../../project/new-project-dialog';
 import { NewGoalIssueDialog } from '../new-goal-issue-dialog';
 import { updateGoalAction } from '../actions';
@@ -19,8 +21,12 @@ export default async function GoalDetailPage({
 }) {
   const { goalId } = await params;
   const { saved } = await searchParams;
-  const [detail, agentList] = await Promise.all([
-    getGoalDetail(goalId),
+  const detail = await getGoalDetail(goalId);
+  if (!detail) notFound();
+
+  const { goal, owner, projects, issues, stats } = detail;
+  const company = await getCompanyById(goal.companyId);
+  const [agentList] = await Promise.all([
     db
       .select({
         id: agents.id,
@@ -30,19 +36,18 @@ export default async function GoalDetailPage({
         title: agents.title,
       })
       .from(agents)
-      .where(eq(agents.status, 'active'))
+      .where(and(eq(agents.companyId, goal.companyId), eq(agents.status, 'active')))
       .orderBy(agents.name),
   ]);
-
-  if (!detail) notFound();
-
-  const { goal, owner, projects, issues, stats } = detail;
   const progressPct = stats.total > 0 ? Math.round((stats.done / stats.total) * 100) : 0;
   const goalOption = [{ id: goal.id, title: goal.title }];
   const savedFlag = saved === '1';
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
+      {company ? (
+        <DeepLinkCompanySync requiredCompanyId={company.id} requiredCompanyName={company.name} />
+      ) : null}
       <div>
         <Link href="/goal" className="text-sm text-muted-foreground hover:text-foreground">
           ← Back to goals

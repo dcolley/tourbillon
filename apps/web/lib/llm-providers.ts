@@ -16,6 +16,8 @@ import {
   parseModelApiMode,
   resolveModelProviderConfigFromEnv,
   toLlmProviderRecord,
+  type AgentModelSettings,
+  parseAgentModelSettings,
   type LlmProviderRecord,
   type LlmProviderType,
 } from '@tourbillon/shared';
@@ -36,6 +38,7 @@ export interface LlmProviderPublic {
   headers: Record<string, string>;
   apiMode: 'chat' | 'responses';
   isDefault: boolean;
+  defaultModelSettings: AgentModelSettings;
   createdAt: string;
   updatedAt: string;
 }
@@ -48,6 +51,7 @@ export interface CreateLlmProviderInput {
   headers?: Record<string, string>;
   apiMode?: string;
   isDefault?: boolean;
+  defaultModelSettings?: AgentModelSettings;
 }
 
 export interface UpdateLlmProviderInput {
@@ -59,6 +63,7 @@ export interface UpdateLlmProviderInput {
   apiMode?: string;
   isDefault?: boolean;
   clearApiKey?: boolean;
+  defaultModelSettings?: AgentModelSettings;
 }
 
 function toPublic(row: LlmProvider): LlmProviderPublic {
@@ -72,6 +77,7 @@ function toPublic(row: LlmProvider): LlmProviderPublic {
     headers: record.headers,
     apiMode: record.apiMode,
     isDefault: record.isDefault,
+    defaultModelSettings: record.defaultModelSettings,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -105,6 +111,17 @@ function parseProviderType(type: string): LlmProviderType {
     );
   }
   return parsed;
+}
+
+function validateDefaultModelSettings(settings?: AgentModelSettings): AgentModelSettings {
+  if (!settings) return {};
+  try {
+    return parseAgentModelSettings(settings);
+  } catch (err) {
+    throw new LlmProviderValidationError(
+      err instanceof Error ? err.message : 'Invalid default generation settings.',
+    );
+  }
 }
 
 async function clearOtherDefaults(exceptId?: string): Promise<void> {
@@ -170,6 +187,7 @@ export async function createLlmProvider(input: CreateLlmProviderInput): Promise<
   const apiMode = parseModelApiMode(input.apiMode) ?? 'chat';
   const headers = input.headers ?? {};
   const isDefault = input.isDefault ?? false;
+  const defaultModelSettings = validateDefaultModelSettings(input.defaultModelSettings);
 
   if (isDefault) {
     await clearOtherDefaults();
@@ -185,6 +203,7 @@ export async function createLlmProvider(input: CreateLlmProviderInput): Promise<
       headers,
       apiMode,
       isDefault,
+      defaultModelSettings,
     })
     .returning();
 
@@ -221,8 +240,12 @@ export async function updateLlmProvider(
   if (input.isDefault === true) {
     await clearOtherDefaults(id);
     updates.isDefault = true;
-  } else if (input.isDefault === false) {
+  } else   if (input.isDefault === false) {
     updates.isDefault = false;
+  }
+
+  if (input.defaultModelSettings !== undefined) {
+    updates.defaultModelSettings = validateDefaultModelSettings(input.defaultModelSettings);
   }
 
   const [updated] = await db

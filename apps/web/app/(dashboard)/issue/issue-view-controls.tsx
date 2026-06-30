@@ -11,9 +11,11 @@ export type IssueViewMode = 'list' | 'kanban';
 export function IssueViewControls({
   listView,
   kanbanView,
+  toolbarActions,
 }: {
   listView: ReactNode;
   kanbanView: ReactNode;
+  toolbarActions?: ReactNode;
 }) {
   const [view, setView] = useState<IssueViewMode | null>(null);
 
@@ -30,7 +32,8 @@ export function IssueViewControls({
   if (view === null) {
     return (
       <div className="space-y-4">
-        <div className="flex justify-end gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {toolbarActions}
           <Button variant="outline" size="sm" disabled>
             <List className="size-4" />
             List
@@ -47,7 +50,8 @@ export function IssueViewControls({
 
   return (
     <div className="space-y-4">
-      <div className="flex justify-end gap-2">
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        {toolbarActions}
         <Button
           variant={view === 'list' ? 'default' : 'outline'}
           size="sm"

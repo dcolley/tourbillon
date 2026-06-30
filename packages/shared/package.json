@@ -8,9 +8,16 @@
     ".": "./src/index.ts",
     "./constants": "./src/constants.ts",
     "./model-provider": "./src/model-provider.ts",
+    "./model-settings": "./src/model-settings.ts",
     "./company-workspace": "./src/company-workspace.ts",
     "./company-workspace-types": "./src/company-workspace-types.ts",
     "./observability": "./src/observability.ts",
-    "./tool-catalog": "./src/tool-catalog.ts"
+    "./tool-catalog": "./src/tool-catalog.ts",
+    "./company-settings": "./src/company-settings.ts",
+    "./mcp-registry": "./src/mcp-registry.ts",
+    "./mcp-credentials": "./src/mcp-credentials.ts"
+  },
+  "dependencies": {
+    "zod": "catalog:"
   }
 }

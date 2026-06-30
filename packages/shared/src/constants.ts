@@ -20,6 +20,15 @@ export const ISSUE_STATUS_WORK_PRIORITY: Record<string, number> = {
   backlog: 4,
 };
 
+/** Statuses the checkoutIssue tool may acquire — must cover getInbox workable statuses. */
+export const CHECKOUT_EXPECTED_STATUSES = [
+  'in_progress',
+  'in_review',
+  'todo',
+  'blocked',
+  'backlog',
+] as const;
+
 // ─── Agent roles ──────────────────────────────────────────────────────────
 export const ROLE_DEFAULT_SKILLS: Record<string, string[]> = {
   ceo:      ['control-plane', 'plan-to-tasks', 'create-agent', 'para-memory'],
@@ -49,13 +58,24 @@ export const TOOLSET_CATALOG = [
   {
     id: 'web-search',
     label: 'Web search',
-    description: 'Search the web via MCP (when configured).',
+    description: 'Search the web via SearXNG JSON API (requires SEARXNG_URL or company settings).',
+  },
+  {
+    id: 'buffer',
+    label: 'Buffer',
+    description:
+      'Schedule X/Twitter posts and threads via Buffer MCP (requires API key). Toolset skill auto-injected from agents/{urlKey}/skills/.',
   },
   {
     id: 'code-execution',
     label: 'Code execution',
     description:
       'Run shell commands in an isolated local sandbox (execute_command, get_process_output, kill_process).',
+  },
+  {
+    id: 'nitter',
+    label: 'Nitter / X search',
+    description: 'Search tweets and users via a self-hosted Nitter instance (requires NITTER_URL).',
   },
 ] as const;
 

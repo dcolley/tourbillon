@@ -7,13 +7,10 @@ import {
   listIssues,
 } from '@/lib/issues';
 import { NewIssueDialog } from './new-issue-dialog';
-import { IssueBoard } from './issue-board';
-import { IssueTable } from './issue-table';
-import { IssueViewControls } from './issue-view-controls';
+import { IssueListShell } from './issue-list-shell';
 import {
   IssueStatusFilter,
   parseIssueFilter,
-  parseIssuePage,
   statusesForFilter,
   type IssueFilter,
 } from './issue-status-filter';
@@ -21,15 +18,13 @@ import {
 export default async function IssuesPage({
   searchParams,
 }: {
-  searchParams: Promise<{ filter?: string; page?: string }>;
+  searchParams: Promise<{ filter?: string }>;
 }) {
-  const { filter: filterParam, page: pageParam } = await searchParams;
+  const { filter: filterParam } = await searchParams;
   const filter = parseIssueFilter(filterParam);
-  const page = parseIssuePage(pageParam);
   const visibleStatuses = statusesForFilter(filter);
 
-  const [listResult, kanbanResult, agentList, goalList, projectList] = await Promise.all([
-    listIssues({ statuses: visibleStatuses, page }),
+  const [issueResult, agentList, goalList, projectList] = await Promise.all([
     listIssues({ statuses: visibleStatuses, page: 0, pageSize: ISSUE_KANBAN_LIMIT }),
     listIssueAgentOptions(),
     listGoalOptions(true),
@@ -55,31 +50,13 @@ export default async function IssuesPage({
 
       <IssueStatusFilter current={filter} />
 
-      <IssueViewControls
-        listView={
-          <IssueTable
-            issues={listResult.rows}
-            filter={filter}
-            page={listResult.page}
-            total={listResult.total}
-            pageSize={listResult.pageSize}
-            emptyMessage={emptyMsg}
-          />
-        }
-        kanbanView={
-          <div className="space-y-4">
-            <p className="text-sm text-muted-foreground">
-              {kanbanResult.total === 0
-                ? emptyMsg
-                : `${kanbanResult.total} issue${kanbanResult.total === 1 ? '' : 's'}${
-                    kanbanResult.total > ISSUE_KANBAN_LIMIT
-                      ? ` (showing first ${ISSUE_KANBAN_LIMIT})`
-                      : ''
-                  }`}
-            </p>
-            <IssueBoard issues={kanbanResult.rows} columns={[...visibleStatuses]} />
-          </div>
-        }
+      <IssueListShell
+        filter={filter}
+        visibleStatuses={visibleStatuses}
+        initialIssues={issueResult.rows}
+        initialTotal={issueResult.total}
+        agents={agentList}
+        emptyMessage={emptyMsg}
       />
     </div>
   );
@@ -89,6 +66,8 @@ function filterDescription(filter: IssueFilter): string {
   switch (filter) {
     case 'active':
       return 'Open work — todo, in progress, in review, and blocked';
+    case 'in_review':
+      return 'Issues awaiting review';
     case 'completed':
       return 'Finished issues';
     case 'all':
@@ -110,6 +89,8 @@ function emptyMessage(filter: IssueFilter): string {
       return 'No cancelled issues.';
     case 'active':
       return 'No active issues.';
+    case 'in_review':
+      return 'No issues in review.';
     case 'all':
       return 'No issues yet.';
   }

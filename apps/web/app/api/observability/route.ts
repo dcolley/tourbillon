@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
-import { getOrCreateDefaultCompany } from '@/lib/company';
+import { getActiveCompany } from '@/lib/company';
 import {
   isObservabilityEventStatus,
   isObservabilityEventType,
@@ -32,7 +32,7 @@ export async function GET(req: NextRequest) {
   }
 
   const query = parsed.data;
-  const company = await getOrCreateDefaultCompany();
+  const company = await getActiveCompany();
 
   if (query.eventType && !isObservabilityEventType(query.eventType)) {
     return NextResponse.json({ error: 'Invalid eventType' }, { status: 400 });

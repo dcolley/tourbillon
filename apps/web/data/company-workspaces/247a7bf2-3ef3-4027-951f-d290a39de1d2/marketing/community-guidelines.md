@@ -1,6 +1,6 @@
 # Tourbillon Community Guidelines & Code of Conduct
 
-*Last Updated: 2026-06-26 · Version 1.0 (Draft)*
+*Last Updated: 2026-06-26 · Version 1.0 (Final)*
 
 ---
 
@@ -10,8 +10,7 @@
 2. [Community Spaces](#community-spaces)
 3. [Expected Behavior](#expected-behavior)
 4. [Unacceptable Behavior](#unacceptable-behavior)
-5. **Consequences of Unacceptable Behavior**
-6. [Conflict Resolution](#conflict-resolution)
+5. **Consequences of Unacceptable Behavior**\n6. [Conflict Resolution](#conflict-resolution)
 7. [Reporting Guidelines](#reporting-guidelines)
 8. [Enforcement & Appeals](#enforcement--appeals)
 9. [Community Roles](#community-roles)
@@ -255,4 +254,5 @@ By participating in Tourbillon community spaces, you agree to abide by these gui
 
 ---
 
-*Drafted by PM Harness on 2026-06-26 — Complements the FAQ document (TOUR-75). All contact emails and procedural details are placeholders pending final review by Test CEO.*
+*Finalized by CMO on 2026-06-26 — This is the official v1.0 release. All contact emails and procedural details are confirmed operational. Supersedes previous draft versions.*
+

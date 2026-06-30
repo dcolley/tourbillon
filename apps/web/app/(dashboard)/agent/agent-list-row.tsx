@@ -1,15 +1,21 @@
 import Link from 'next/link';
 import type { Agent } from '@tourbillon/db';
 import type { AgentRuntimeConfig } from '@tourbillon/shared';
+import { isAgentBudgetExceeded } from '@tourbillon/shared';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { getAgentHeartbeatSummary } from '@/lib/agent-heartbeat-summary';
 import { StatusBadge } from '@/lib/status-badges';
-import { toggleAgentActiveAction } from './actions';
+import { toggleAgentActiveAction, triggerAgentHeartbeatAction } from './actions';
 
 export function AgentListRow({ agent }: { agent: Agent }) {
-  const heartbeat = getAgentHeartbeatSummary(agent.runtimeConfig as AgentRuntimeConfig);
+  const runtime = agent.runtimeConfig as AgentRuntimeConfig;
+  const heartbeat = getAgentHeartbeatSummary(runtime);
   const isActive = agent.status === 'active';
   const canToggle = agent.status !== 'pending_approval';
+  const canRunHeartbeat =
+    agent.status === 'active' &&
+    !isAgentBudgetExceeded(agent.spentMonthlyTokens, agent.budgetMonthlyTokens, runtime);
 
   return (
     <div className="flex items-center justify-between gap-4 p-4 transition-colors hover:bg-muted/50">
@@ -35,6 +41,25 @@ export function AgentListRow({ agent }: { agent: Agent }) {
         >
           {heartbeat.label}
         </Badge>
+        <form action={triggerAgentHeartbeatAction}>
+          <input type="hidden" name="agentId" value={agent.id} />
+          <input type="hidden" name="companyId" value={agent.companyId} />
+          <Button
+            type="submit"
+            variant="outline"
+            size="sm"
+            disabled={!canRunHeartbeat}
+            title={
+              canRunHeartbeat
+                ? 'Queue an on-demand heartbeat for this agent'
+                : agent.status !== 'active'
+                  ? 'Agent must be active'
+                  : 'Monthly token budget exceeded'
+            }
+          >
+            Wake
+          </Button>
+        </form>
         {canToggle ? (
           <form action={toggleAgentActiveAction}>
             <input type="hidden" name="agentId" value={agent.id} />

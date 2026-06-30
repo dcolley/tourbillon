@@ -1,0 +1,51 @@
+(version 1)
+(deny default (with message "mastra-sandbox"))
+
+; Process permissions
+(allow process-exec)
+(allow process-fork)
+(allow process-info* (target same-sandbox))
+(allow signal (target same-sandbox))
+
+; Mach IPC
+(allow mach-lookup
+  (global-name "com.apple.distributed_notifications@Uv3")
+  (global-name "com.apple.logd")
+  (global-name "com.apple.system.logger")
+  (global-name "com.apple.system.notification_center")
+  (global-name "com.apple.system.opendirectoryd.libinfo")
+  (global-name "com.apple.system.opendirectoryd.membership")
+  (global-name "com.apple.bsd.dirhelper")
+  (global-name "com.apple.securityd.xpc")
+  (global-name "com.apple.SecurityServer")
+  (global-name "com.apple.trustd.agent")
+)
+
+; IPC
+(allow ipc-posix-shm)
+(allow ipc-posix-sem)
+
+; User preferences
+(allow user-preference-read)
+
+; sysctl
+(allow sysctl-read)
+
+; Device files
+(allow file-ioctl (literal "/dev/null"))
+(allow file-ioctl (literal "/dev/zero"))
+(allow file-ioctl (literal "/dev/random"))
+(allow file-ioctl (literal "/dev/urandom"))
+(allow file-ioctl (literal "/dev/tty"))
+
+; File read access (allow all - macOS sandbox limitation)
+(allow file-read*)
+
+; File write access (restricted to workspace and temp)
+(allow file-write* (subpath "/Users/derek/Sites/tourbillon/packages/scheduler/data/execution-workspaces/247a7bf2-3ef3-4027-951f-d290a39de1d2/6c56bf8c-a62c-4174-8c81-d3a52b7f7a8c"))
+(allow file-write* (subpath "/private/tmp"))
+(allow file-write* (subpath "/var/folders"))
+(allow file-write* (subpath "/private/var/folders"))
+
+; Network
+(deny network* (with message "mastra-sandbox-network"))

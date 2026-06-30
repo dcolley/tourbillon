@@ -348,6 +348,31 @@ export function formatEventPreview(event: {
     if (fromPayload) return fromPayload;
   }
 
+  if (isModelStepEvent(event.eventType, event.name)) {
+    const step = extractModelStepOutput(event.payload);
+    if (step) return summarizeModelStepPreview(step);
+  }
+
+  if (isModelInferenceEvent(event.eventType, event.name)) {
+    const summary = extractModelInferenceSummary(event.payload, event.name);
+    if (summary) {
+      const parts = ['Provider call'];
+      if (summary.finishReason) parts.push(summary.finishReason);
+      if (summary.outputTokens != null) parts.push(`${summary.outputTokens} tok`);
+      return parts.join(' · ');
+    }
+  }
+
+  if (isModelChunkEvent(event.eventType, event.name)) {
+    const chunk = extractModelChunkOutput(event.payload, event.name);
+    if (chunk?.text?.trim()) {
+      const prefix = chunk.chunkType === 'reasoning' ? 'Reasoning' : 'Text';
+      const snippet = chunk.text.trim();
+      return `${prefix}: ${snippet.length > 100 ? `${snippet.slice(0, 100)}…` : snippet}`;
+    }
+    if (chunk) return `Chunk: ${chunk.chunkType}`;
+  }
+
   const output = event.outputPreview ?? event.inputPreview;
   if (!output) return '—';
 
@@ -402,7 +427,7 @@ function summarizeHarnessPayload(payload: Record<string, unknown>): string | nul
 }
 
 export interface TimelineEntry {
-  kind: 'tool_call' | 'tool_result' | 'text' | 'error' | 'info';
+  kind: 'tool_call' | 'tool_result' | 'text' | 'reasoning' | 'error' | 'info';
   label: string;
   detail?: string;
   isError?: boolean;
@@ -489,6 +514,92 @@ export function buildEventTimeline(event: {
     return entries;
   }
 
+  if (isModelStepEvent(event.eventType, event.name)) {
+    const step = extractModelStepOutput(payload);
+    if (step) {
+      const metaParts: string[] = [];
+      if (step.stepIndex != null) metaParts.push(`Step ${step.stepIndex}`);
+      if (step.finishReason) metaParts.push(`finish: ${step.finishReason}`);
+      if (step.outputTokens != null) metaParts.push(`${step.outputTokens} output tok`);
+      if (metaParts.length > 0) {
+        entries.push({ kind: 'info', label: metaParts.join(' · ') });
+      }
+
+      for (const call of step.toolCalls) {
+        const name = call.toolName ?? call.name ?? 'tool';
+        const args =
+          call.args && Object.keys(call.args as object).length > 0
+            ? JSON.stringify(call.args)
+            : undefined;
+        entries.push({
+          kind: 'tool_call',
+          label: name,
+          detail: args && args.length > 200 ? `${args.slice(0, 200)}…` : args,
+        });
+      }
+
+      if (step.text?.trim()) {
+        entries.push({
+          kind: 'text',
+          label: 'Response',
+          detail: step.text.trim(),
+        });
+      } else if (step.toolCalls.length === 0) {
+        entries.push({ kind: 'info', label: 'No text or tool calls in step output' });
+      }
+
+      return entries;
+    }
+  }
+
+  if (isModelInferenceEvent(event.eventType, event.name)) {
+    const summary = extractModelInferenceSummary(payload, event.name);
+    if (summary) {
+      const metaParts = ['Provider call (latency only)'];
+      if (summary.finishReason) metaParts.push(`finish: ${summary.finishReason}`);
+      if (summary.outputTokens != null) metaParts.push(`${summary.outputTokens} output tok`);
+      if (summary.inputTokens != null) metaParts.push(`${summary.inputTokens} input tok`);
+      entries.push({ kind: 'info', label: metaParts.join(' · ') });
+      entries.push({
+        kind: 'info',
+        label: 'Response text is on the sibling model_step event with the same step index',
+      });
+      return entries;
+    }
+  }
+
+  if (isModelChunkEvent(event.eventType, event.name)) {
+    const chunk = extractModelChunkOutput(payload, event.name);
+    if (chunk) {
+      if (chunk.chunkType === 'reasoning' && chunk.text?.trim()) {
+        entries.push({
+          kind: 'reasoning',
+          label: 'Reasoning',
+          detail: chunk.text.trim(),
+        });
+      } else if (chunk.chunkType === 'text' && chunk.text?.trim()) {
+        entries.push({
+          kind: 'text',
+          label: 'Streamed text',
+          detail: chunk.text.trim(),
+        });
+      } else if (chunk.chunkType.startsWith('tool')) {
+        entries.push({
+          kind: 'tool_call',
+          label: `Chunk: ${chunk.chunkType}`,
+          detail: chunk.text?.trim(),
+        });
+      } else {
+        entries.push({
+          kind: 'info',
+          label: `Chunk: ${chunk.chunkType}`,
+          detail: chunk.text?.trim(),
+        });
+      }
+      return entries;
+    }
+  }
+
   if (event.outputPreview) {
     const parsed = tryParseJson(event.outputPreview);
     entries.push({
@@ -513,6 +624,259 @@ function unwrapPayload(payload: Record<string, unknown>): Record<string, unknown
     if (inner !== null && isRecord(inner)) return inner;
   }
   return payload;
+}
+
+// --- Mastra model span helpers ---
+
+export interface ModelStepToolCall {
+  toolCallId?: string;
+  toolName?: string;
+  name?: string;
+  args?: unknown;
+}
+
+export interface ModelStepOutput {
+  text?: string;
+  toolCalls: ModelStepToolCall[];
+  finishReason?: string;
+  stepIndex?: number;
+  reasoningTokens?: number;
+  outputTokens?: number;
+  inputMessages?: PromptMessage[];
+}
+
+export interface ModelInferenceSummary {
+  stepIndex?: number;
+  finishReason?: string;
+  isLatencyOnly: true;
+  outputTokens?: number;
+  inputTokens?: number;
+  completionStartTime?: string;
+  availableToolCount?: number;
+}
+
+export interface ModelChunkOutput {
+  chunkType: string;
+  text?: string;
+}
+
+export interface PromptMessage {
+  role: string;
+  content: string;
+}
+
+function parseStepIndexFromName(name: string): number | undefined {
+  const stepMatch = name.match(/^step:\s*(\d+)$/);
+  if (stepMatch) return parseInt(stepMatch[1], 10);
+  const inferenceMatch = name.match(/^inference:\s*(\d+)$/);
+  if (inferenceMatch) return parseInt(inferenceMatch[1], 10);
+  return undefined;
+}
+
+function parseChunkTypeFromName(name: string): string | undefined {
+  const match = name.match(/^chunk:\s*'([^']+)'$/);
+  return match?.[1];
+}
+
+export function isModelStepEvent(eventType: string, name: string): boolean {
+  return eventType === 'model_step' || /^step:\s*\d+$/.test(name);
+}
+
+export function isModelInferenceEvent(eventType: string, name: string): boolean {
+  return eventType === 'model_inference' || /^inference:\s*\d+$/.test(name);
+}
+
+export function isModelChunkEvent(eventType: string, name: string): boolean {
+  return eventType === 'model_chunk' || /^chunk:\s*'/.test(name);
+}
+
+function readUsageTokens(attrs: Record<string, unknown> | undefined): {
+  outputTokens?: number;
+  reasoningTokens?: number;
+  inputTokens?: number;
+} {
+  if (!attrs) return {};
+  const usage = attrs.usage;
+  if (!isRecord(usage)) return {};
+  const outputTokens =
+    typeof usage.outputTokens === 'number' ? usage.outputTokens : undefined;
+  const reasoningTokens =
+    typeof usage.reasoningTokens === 'number'
+      ? usage.reasoningTokens
+      : isRecord(usage.outputTokens) && typeof usage.outputTokens.reasoning === 'number'
+        ? usage.outputTokens.reasoning
+        : isRecord(usage.raw) &&
+            isRecord(usage.raw.outputTokens) &&
+            typeof usage.raw.outputTokens.reasoning === 'number'
+          ? usage.raw.outputTokens.reasoning
+          : undefined;
+  const inputTokens =
+    typeof usage.inputTokens === 'number' ? usage.inputTokens : undefined;
+  return { outputTokens, reasoningTokens, inputTokens };
+}
+
+function normalizeToolCalls(raw: unknown): ModelStepToolCall[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter(isRecord)
+    .map((call) => ({
+      toolCallId: typeof call.toolCallId === 'string' ? call.toolCallId : undefined,
+      toolName:
+        typeof call.toolName === 'string'
+          ? call.toolName
+          : typeof call.name === 'string'
+            ? call.name
+            : undefined,
+      name: typeof call.name === 'string' ? call.name : undefined,
+      args: call.args,
+    }))
+    .filter((call) => call.toolName ?? call.name);
+}
+
+function normalizePromptMessages(raw: unknown): PromptMessage[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter(isRecord)
+    .map((msg) => ({
+      role: typeof msg.role === 'string' ? msg.role : 'unknown',
+      content:
+        typeof msg.content === 'string'
+          ? msg.content
+          : Array.isArray(msg.content)
+            ? JSON.stringify(msg.content)
+            : '',
+    }));
+}
+
+export function extractModelStepOutput(payload: Record<string, unknown>): ModelStepOutput | null {
+  const unwrapped = unwrapPayload(payload);
+  const output = unwrapped.output;
+  if (!isRecord(output) && !Array.isArray(unwrapped.input)) return null;
+
+  const attrs = isRecord(unwrapped.attributes) ? unwrapped.attributes : undefined;
+  const tokens = readUsageTokens(attrs);
+  const text = isRecord(output) && typeof output.text === 'string' ? output.text : undefined;
+  const toolCalls = isRecord(output) ? normalizeToolCalls(output.toolCalls) : [];
+  const finishReason =
+    attrs && typeof attrs.finishReason === 'string' ? attrs.finishReason : undefined;
+  const stepIndex =
+    attrs && typeof attrs.stepIndex === 'number'
+      ? attrs.stepIndex
+      : parseStepIndexFromName(
+          typeof unwrapped.name === 'string' ? unwrapped.name : '',
+        );
+
+  const inputMessages = normalizePromptMessages(unwrapped.input);
+
+  if (
+    !text?.trim() &&
+    toolCalls.length === 0 &&
+    inputMessages.length === 0 &&
+    finishReason === undefined &&
+    stepIndex === undefined
+  ) {
+    return null;
+  }
+
+  return {
+    text,
+    toolCalls,
+    finishReason,
+    stepIndex,
+    reasoningTokens: tokens.reasoningTokens,
+    outputTokens: tokens.outputTokens,
+    inputMessages: inputMessages.length > 0 ? inputMessages : undefined,
+  };
+}
+
+export function extractModelInferenceSummary(
+  payload: Record<string, unknown>,
+  name: string,
+): ModelInferenceSummary | null {
+  const unwrapped = unwrapPayload(payload);
+  const attrs = isRecord(unwrapped.attributes) ? unwrapped.attributes : undefined;
+  const tokens = readUsageTokens(attrs);
+  const finishReason =
+    attrs && typeof attrs.finishReason === 'string' ? attrs.finishReason : undefined;
+  const stepIndex =
+    attrs && typeof attrs.stepIndex === 'number' ? attrs.stepIndex : parseStepIndexFromName(name);
+  const completionStartTime =
+    attrs && typeof attrs.completionStartTime === 'string'
+      ? attrs.completionStartTime
+      : undefined;
+  const availableTools = attrs?.availableTools;
+  const availableToolCount = Array.isArray(availableTools) ? availableTools.length : undefined;
+
+  if (
+    stepIndex === undefined &&
+    finishReason === undefined &&
+    tokens.outputTokens === undefined &&
+    tokens.inputTokens === undefined
+  ) {
+    return null;
+  }
+
+  return {
+    stepIndex,
+    finishReason,
+    isLatencyOnly: true,
+    outputTokens: tokens.outputTokens,
+    inputTokens: tokens.inputTokens,
+    completionStartTime,
+    availableToolCount,
+  };
+}
+
+export function extractModelChunkOutput(
+  payload: Record<string, unknown>,
+  name: string,
+): ModelChunkOutput | null {
+  const unwrapped = unwrapPayload(payload);
+  const attrs = isRecord(unwrapped.attributes) ? unwrapped.attributes : undefined;
+  const chunkType =
+    (attrs && typeof attrs.chunkType === 'string' ? attrs.chunkType : undefined) ??
+    parseChunkTypeFromName(name) ??
+    'unknown';
+
+  const output = unwrapped.output;
+  let text: string | undefined;
+  if (typeof output === 'string') {
+    text = output;
+  } else if (isRecord(output) && typeof output.text === 'string') {
+    text = output.text;
+  }
+
+  if (!text?.trim() && chunkType === 'unknown') return null;
+
+  return { chunkType, text };
+}
+
+export function summarizeModelStepPreview(step: ModelStepOutput): string {
+  const toolNames = step.toolCalls
+    .map((c) => c.toolName ?? c.name)
+    .filter((n): n is string => Boolean(n));
+
+  if (toolNames.length > 0) {
+    const unique = [...new Set(toolNames)];
+    const suffix = unique.length > 3 ? ` +${unique.length - 3} more` : '';
+    return `${toolNames.length} tool call${toolNames.length === 1 ? '' : 's'}: ${unique.slice(0, 3).join(', ')}${suffix}`;
+  }
+
+  if (step.text?.trim()) {
+    const firstLine = step.text.trim().split('\n').find((line) => line.trim()) ?? step.text.trim();
+    const cleaned = firstLine.replace(/^\*\*|\*\*$/g, '').trim();
+    return cleaned.length > 120 ? `${cleaned.slice(0, 120)}…` : cleaned;
+  }
+
+  if (step.finishReason) return `finish: ${step.finishReason}`;
+  return 'Model step';
+}
+
+export function summarizePromptMessage(content: string, maxChars = 120): string {
+  const trimmed = content.trim();
+  if (!trimmed) return '(empty)';
+  const oneLine = trimmed.replace(/\s+/g, ' ');
+  return oneLine.length > maxChars ? `${oneLine.slice(0, maxChars)}…` : oneLine;
 }
 
 /** Pretty-print JSON for display, parsing nested JSON strings (e.g. payload.preview). */

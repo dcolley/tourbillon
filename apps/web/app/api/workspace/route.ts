@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getOrCreateDefaultCompany } from '@/lib/company';
+import { getActiveCompany } from '@/lib/company';
 import { listWorkspaceEntries, WorkspacePathError } from '@/lib/company-workspace';
 
 export async function GET(req: NextRequest) {
-  const company = await getOrCreateDefaultCompany();
+  const company = await getActiveCompany();
   const pathParam = req.nextUrl.searchParams.get('path') ?? '';
   const recursive = req.nextUrl.searchParams.get('recursive') === 'true';
 

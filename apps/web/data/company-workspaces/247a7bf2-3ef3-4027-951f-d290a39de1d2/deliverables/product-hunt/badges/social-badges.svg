@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Tourbillon Social Badges</title></head>
+<body style="margin:0;">
+
+<!-- TWITTER/X BADGE (1200x675) -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675">
+  <defs>
+    <linearGradient id="twGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e293b"/>
+      <stop offset="100%" stop-color="#0a0f1e"/>
+    </linearGradient>
+  </defs>
+  
+  <rect width="1200" height="675" fill="url(#twGrad)"/>
+  
+  <!-- Product Hunt logo placeholder -->
+  <circle cx="600" cy="280" r="80" fill="#da552f"/>
+  <text x="600" y="290" text-anchor="middle" font-family="'Inter',sans-serif" font-size="32" font-weight="900" fill="white">PH</text>
+  
+  <!-- Main message -->
+  <text x="600" y="430" text-anchor="middle" font-family="'Inter',sans-serif" font-size="52" font-weight="900" fill="#ffffff">Upvote Tourbillon on Product Hunt!</text>
+  
+  <!-- Subtitle -->
+  <text x="600" y="500" text-anchor="middle" font-family="'Inter',sans-serif" font-size="24" fill="#a5b4fc">Multi-Agent Orchestration Platform — Build, Orchestrate, Deploy</text>
+  
+  <!-- CTA -->
+  <rect x="500" y="540" width="200" height="60" rx="30" fill="#da552f"/>
+  <text x="600" y="578" text-anchor="middle" font-family="'Inter',sans-serif" font-size="20" font-weight="700" fill="white">VOTE NOW</text>
+  
+  <!-- Decorative -->
+  <circle cx="100" cy="100" r="60" fill="#6366f1" opacity="0.1"/>
+  <circle cx="1100" cy="575" r="40" fill="#6366f1" opacity="0.1"/>
+</svg>
+
+<!-- LINKEDIN BADGE (1200x627) -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 627" width="1200" height="627">
+  <defs>
+    <linearGradient id="liGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e3a5f"/>
+      <stop offset="100%" stop-color="#0a0f1e"/>
+    </linearGradient>
+  </defs>
+  
+  <rect width="1200" height="627" fill="url(#liGrad)"/>
+  
+  <!-- PH logo -->
+  <circle cx="600" cy="240" r="80" fill="#da552f"/>
+  <text x="600" y="250" text-anchor="middle" font-family="'Inter',sans-serif" font-size="32" font-weight="900" fill="white">PH</text>
+  
+  <!-- Main message -->
+  <text x="600" y="370" text-anchor="middle" font-family="'Inter',sans-serif" font-size="48" font-weight="900" fill="#ffffff">Support Tourbillon on Product Hunt!</text>
+  
+  <!-- Subtitle -->
+  <text x="600" y="440" text-anchor="middle" font-family="'Inter',sans-serif" font-size="22" fill="#a5b4fc">The multi-agent orchestration platform that's changing how teams build AI</text>
+  
+  <!-- CTA -->
+  <rect x="500" y="480" width="200" height="60" rx="30" fill="#da552f"/>
+  <text x="600" y="518" text-anchor="middle" font-family="'Inter',sans-serif" font-size="20" font-weight="700" fill="white">UPVOTE</text>
+  
+  <!-- Decorative -->
+  <circle cx="100" cy="80" r="50" fill="#6366f1" opacity="0.1"/>
+  <circle cx="1100" cy="547" r="35" fill="#6366f1" opacity="0.1"/>
+</svg>
+
+<!-- SLACK BADGE (800x400) -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 400" width="800" height="400">
+  <rect width="800" height="400" rx="15" fill="#0a0f1e"/>
+  
+  <!-- PH logo -->
+  <circle cx="400" cy="130" r="60" fill="#da552f"/>
+  <text x="400" y="140" text-anchor="middle" font-family="'Inter',sans-serif" font-size="28" font-weight="900" fill="white">PH</text>
+  
+  <!-- Main message -->
+  <text x="400" y="230" text-anchor="middle" font-family="'Inter',sans-serif" font-size="36" font-weight="700" fill="#ffffff">Upvote Tourbillon on Product Hunt!</text>
+  
+  <!-- Subtitle -->
+  <text x="400" y="280" text-anchor="middle" font-family="'Inter',sans-serif" font-size="18" fill="#a5b4fc">Build · Orchestrate · Deploy — Zero Code Required</text>
+  
+  <!-- CTA -->
+  <rect x="340" y="310" width="120" height="50" rx="25" fill="#da552f"/>
+  <text x="400" y="342" text-anchor="middle" font-family="'Inter',sans-serif" font-size="16" font-weight="700" fill="white">VOTE</text>
+</svg>
+
+<!-- DISCORD BADGE (800x400) -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 400" width="800" height="400">
+  <rect width="800" height="400" rx="15" fill="#0a0f1e"/>
+  
+  <!-- PH logo -->
+  <circle cx="400" cy="130" r="60" fill="#da552f"/>
+  <text x="400" y="140" text-anchor="middle" font-family="'Inter',sans-serif" font-size="28" font-weight="900" fill="white">PH</text>
+  
+  <!-- Main message -->
+  <text x="400" y="230" text-anchor="middle" font-family="'Inter',sans-serif" font-size="36" font-weight="700" fill="#ffffff">Upvote Tourbillon on Product Hunt!</text>
+  
+  <!-- Subtitle -->
+  <text x="400" y="280" text-anchor="middle" font-family="'Inter',sans-serif" font-size="18" fill="#a5b4fc">Multi-Agent Orchestration Platform</text>
+  
+  <!-- CTA -->
+  <rect x="340" y="310" width="120" height="50" rx="25" fill="#da552f"/>
+  <text x="400" y="342" text-anchor="middle" font-family="'Inter',sans-serif" font-size="16" font-weight="700" fill="white">VOTE</text>
+</svg>
+
+<!-- VOTE BADGE (320x100) -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 100" width="320" height="100">
+  <rect width="320" height="100" rx="50" fill="#276749"/>
+  <text x="160" y="58" text-anchor="middle" font-family="'Inter',sans-serif" font-size="18" font-weight="700" fill="#ffffff">Upvote Tourbillon on Product Hunt!</text>
+</svg>
+
+<!-- LARGE VOTE BADGE (420x130) -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 130" width="420" height="130">
+  <rect width="420" height="130" rx="65" fill="#276749"/>
+  <text x="210" y="78" text-anchor="middle" font-family="'Inter',sans-serif" font-size="22" font-weight="700" fill="#ffffff">Upvote Tourbillon on Product Hunt!</text>
+</svg>
+
+</body>
+</html>

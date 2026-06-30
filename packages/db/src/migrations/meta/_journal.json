@@ -43,6 +43,13 @@
       "when": 1781460328751,
       "tag": "0005_stiff_post",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1782771678001,
+      "tag": "0006_steady_stick",
+      "breakpoints": true
     }
   ]
 }

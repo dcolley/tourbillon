@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import { Card, CardContent } from '@/components/ui/card';
 import { PriorityBadge } from '@/lib/status-badges';
-import type { IssueListRow } from '@/lib/issues';
+import type { IssueListRow } from '@/lib/issue-list';
 
 export function IssueBoard({
   issues: rows,
@@ -19,10 +19,10 @@ export function IssueBoard({
   );
 
   return (
-    <div className="flex gap-4 overflow-x-auto pb-4">
+    <div className="flex flex-col gap-6 md:flex-row md:gap-4 md:overflow-x-auto md:pb-4">
       {columns.map((status) => (
-        <div key={status} className="w-72 shrink-0">
-          <div className="mb-2 flex items-center justify-between">
+        <div key={status} className="w-full md:w-72 md:shrink-0">
+          <div className="mb-2 flex items-center justify-between border-b pb-2 md:border-0 md:pb-0">
             <p className="text-sm font-semibold capitalize">{status.replace(/_/g, ' ')}</p>
             <span className="text-xs text-muted-foreground">{byStatus[status]?.length ?? 0}</span>
           </div>

@@ -25,6 +25,7 @@ export async function POST(req: NextRequest) {
       headers?: Record<string, string>;
       apiMode?: string;
       isDefault?: boolean;
+      defaultModelSettings?: Record<string, unknown>;
     };
 
     const provider = await createLlmProvider({
@@ -35,6 +36,7 @@ export async function POST(req: NextRequest) {
       headers: body.headers,
       apiMode: body.apiMode,
       isDefault: body.isDefault,
+      defaultModelSettings: body.defaultModelSettings,
     });
 
     return NextResponse.json({ provider }, { status: 201 });

@@ -8,9 +8,11 @@ import {
   toLlmProviderRecord,
   type LlmProviderRecord,
   type ModelProviderConfig,
+  type ModelProviderKind,
   type ModelProviderOverrides,
 } from '@tourbillon/shared';
 import type { LlmProvider } from '@tourbillon/db';
+import { createCoalescingFetch } from './coalesce-system-messages';
 
 const providerCache = new Map<string, OpenAIProvider>();
 
@@ -25,10 +27,14 @@ function providerCacheKey(
   return `${config.provider}|${config.baseURL}|${config.apiKey}|${headerKey}`;
 }
 
+function shouldCoalesceSystemMessages(provider: ModelProviderKind, apiMode: ModelProviderConfig['apiMode']): boolean {
+  return apiMode === 'chat' && provider !== 'openai';
+}
+
 function getOpenAIProvider(
-  config: Pick<ModelProviderConfig, 'provider' | 'baseURL' | 'apiKey' | 'headers'>,
+  config: Pick<ModelProviderConfig, 'provider' | 'baseURL' | 'apiKey' | 'headers' | 'apiMode'>,
 ): OpenAIProvider {
-  const key = providerCacheKey(config);
+  const key = `${providerCacheKey(config)}|coalesce=${shouldCoalesceSystemMessages(config.provider, config.apiMode)}`;
   const cached = providerCache.get(key);
   if (cached) return cached;
 
@@ -37,6 +43,10 @@ function getOpenAIProvider(
     baseURL: config.baseURL,
     name: config.provider,
     headers: buildProviderRequestHeaders(config),
+    fetch: createCoalescingFetch(
+      fetch,
+      shouldCoalesceSystemMessages(config.provider, config.apiMode),
+    ),
   });
   providerCache.set(key, provider);
   return provider;

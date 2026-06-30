@@ -49,12 +49,14 @@ Before calling the agents API:
 
 | Role | Boolean toolsets | Granular tools (`runtimeConfig.assignedTools`) | Tier 3 MCP |
 |---|---|---|---|
-| ceo | comments, approvals, roster, web-search | All goal/project/issue tools | searxng-local |
+| ceo | comments, approvals, roster, web-search | All goal/project/issue tools | — |
 | cto | comments, approvals, roster | All goal/project/issue tools | github-mcp |
 | engineer | comments, code-execution | `listGoals`, `getGoalDetail`, `listProjects`, `getProjectDetail`, `createIssue`, `putPlanDocument` | github-mcp, filesystem-local |
-| pm | comments, approvals, roster, web-search | All goal/project/issue tools | searxng-local |
+| pm | comments, approvals, roster, web-search | All goal/project/issue tools | — |
 | qa | comments, code-execution | Same as engineer defaults | filesystem-local |
-| designer | comments | Same as engineer defaults | filesystem-local |
+| designer | comments, buffer | Same as engineer defaults | — |
+
+When the `buffer` toolset is enabled, the Buffer publishing skill (`buffer-skills.md`) auto-injects at wake time. A copy is seeded at hire time under `agents/{urlKey}/skills/` in the company workspace — customize per agent there without changing repo templates.
 
 Granular tools are configured per-tool on the agent detail page under Capabilities. Legacy `planning` toolset maps to issue-management write tools on first save.
 
@@ -64,6 +66,7 @@ Granular tools are configured per-tool on the agent detail page under Capabiliti
 
 After the agent record is created:
 1. Verify org chart integrity (reportsTo chain is not circular)
-2. Add a comment to the originating issue with the new agent ID and role
-3. Set the originating issue to `done`
-4. If applicable, create an onboarding issue assigned to the new agent: "Introduce yourself and review your inbox"
+2. Confirm `agents/{urlKey}/skills/` was seeded in the company workspace with toolset skill templates (e.g. `buffer-skills.md`). Customize per agent in the workspace as needed.
+3. Add a comment to the originating issue with the new agent ID and role
+4. Set the originating issue to `done`
+5. If applicable, create an onboarding issue assigned to the new agent: "Introduce yourself and review your inbox"

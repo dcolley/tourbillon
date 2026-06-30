@@ -1,6 +1,8 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { extractToolRuntimeContext, tracedAgentFetch } from './api-client';
+import { NITTER_TOOLS } from './nitter-tools';
+import { SEARXNG_TOOLS } from './searxng-tools';
 
 const addCommentTool = createTool({
   id: 'addComment',
@@ -69,5 +71,6 @@ export const ROLE_TOOLS: Record<string, Record<string, unknown>> = {
   'agent-management': rosterTools, // legacy alias
   comments: { addCommentTool },
   approvals: { createApprovalTool },
-  'web-search': {},
+  'web-search': SEARXNG_TOOLS,
+  nitter: NITTER_TOOLS,
 };

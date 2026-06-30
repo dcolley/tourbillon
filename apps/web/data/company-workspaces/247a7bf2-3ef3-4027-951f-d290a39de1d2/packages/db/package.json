@@ -1,0 +1,17 @@
+{
+  "name": "@tourbillon/db",
+  "version": "1.0.0",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:push": "drizzle-kit push",
+    "db:studio": "drizzle-kit studio"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.31.2",
+    "@neondatabase/serverless": "^0.9.0",
+    "pg": "^8.11.3"
+  }
+}

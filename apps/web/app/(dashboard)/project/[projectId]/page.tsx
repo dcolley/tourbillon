@@ -1,9 +1,11 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { db, agents } from '@tourbillon/db';
-import { eq } from 'drizzle-orm';
+import { eq, and } from 'drizzle-orm';
 import { getProjectDetail } from '@/lib/projects';
 import { listGoalOptions } from '@/lib/goals';
+import { DeepLinkCompanySync } from '@/components/deep-link-company-sync';
+import { getCompanyById } from '@/lib/company';
 import { NewProjectIssueDialog } from '../new-project-issue-dialog';
 import { updateProjectAction } from '../actions';
 import { ProjectEditForm } from './project-edit-form';
@@ -18,8 +20,13 @@ export default async function ProjectDetailPage({
   const { projectId } = await params;
   const { saved } = await searchParams;
 
-  const [detail, agentList, goalList] = await Promise.all([
-    getProjectDetail(projectId),
+  const detail = await getProjectDetail(projectId);
+  if (!detail) notFound();
+
+  const { project, goal, owner, issues, stats } = detail;
+  const company = await getCompanyById(project.companyId);
+
+  const [agentList, goalList] = await Promise.all([
     db
       .select({
         id: agents.id,
@@ -29,14 +36,10 @@ export default async function ProjectDetailPage({
         title: agents.title,
       })
       .from(agents)
-      .where(eq(agents.status, 'active'))
+      .where(and(eq(agents.companyId, project.companyId), eq(agents.status, 'active')))
       .orderBy(agents.name),
-    listGoalOptions(true),
+    listGoalOptions(true, project.companyId),
   ]);
-
-  if (!detail) notFound();
-
-  const { project, goal, owner, issues, stats } = detail;
   const progressPct = stats.total > 0 ? Math.round((stats.done / stats.total) * 100) : 0;
   const savedFlag = saved === '1';
 
@@ -48,6 +51,9 @@ export default async function ProjectDetailPage({
 
   return (
     <div className="p-6 space-y-6 max-w-3xl">
+      {company ? (
+        <DeepLinkCompanySync requiredCompanyId={company.id} requiredCompanyName={company.name} />
+      ) : null}
       <div>
         <Link href="/project" className="text-sm text-muted-foreground hover:text-foreground">
           ← Back to projects

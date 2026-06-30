@@ -1,6 +1,6 @@
 import { db, goals, issues, agents, companies, activityLog, type Goal, type Issue } from '@tourbillon/db';
 import { and, desc, eq } from 'drizzle-orm';
-import { getOrCreateDefaultCompany } from './company';
+import { assertCompanyAccess, getActiveCompany } from './company';
 import { listProjectsForGoal, type GoalProjectRow } from './projects';
 
 export class GoalValidationError extends Error {
@@ -46,10 +46,15 @@ export interface CreateGoalInput {
   companyId?: string;
 }
 
-export async function listGoalOptions(activeOnly = false): Promise<GoalOption[]> {
+export async function listGoalOptions(activeOnly = false, companyId?: string): Promise<GoalOption[]> {
+  const company = companyId
+    ? await db.query.companies.findFirst({ where: eq(companies.id, companyId) })
+    : await getActiveCompany();
+  if (!company) return [];
   const rows = await db
     .select({ id: goals.id, title: goals.title, status: goals.status })
     .from(goals)
+    .where(eq(goals.companyId, company.id))
     .orderBy(desc(goals.updatedAt));
 
   if (activeOnly) {
@@ -59,7 +64,13 @@ export async function listGoalOptions(activeOnly = false): Promise<GoalOption[]>
 }
 
 export async function listGoals(statusFilter?: GoalStatus | 'all'): Promise<Goal[]> {
-  const rows = await db.select().from(goals).orderBy(desc(goals.updatedAt)).limit(100);
+  const company = await getActiveCompany();
+  const rows = await db
+    .select()
+    .from(goals)
+    .where(eq(goals.companyId, company.id))
+    .orderBy(desc(goals.updatedAt))
+    .limit(100);
   if (!statusFilter || statusFilter === 'all') return rows;
   return rows.filter((g) => g.status === statusFilter);
 }
@@ -75,7 +86,7 @@ export async function createGoal(input: CreateGoalInput): Promise<Goal> {
 
   const company = input.companyId
     ? await db.query.companies.findFirst({ where: eq(companies.id, input.companyId) })
-    : await getOrCreateDefaultCompany();
+    : await getActiveCompany();
 
   if (!company) throw new GoalValidationError('Company not found.');
 
@@ -110,9 +121,20 @@ export interface UpdateGoalInput {
   ownerAgentId?: string | null;
 }
 
-export async function updateGoal(goalId: string, input: UpdateGoalInput): Promise<Goal> {
+export async function updateGoal(
+  goalId: string,
+  input: UpdateGoalInput,
+  companyId?: string,
+): Promise<Goal> {
   const goal = await db.query.goals.findFirst({ where: eq(goals.id, goalId) });
   if (!goal) throw new GoalValidationError('Goal not found.');
+
+  if (companyId) {
+    assertCompanyAccess(goal.companyId, companyId);
+  } else {
+    const activeCompany = await getActiveCompany();
+    assertCompanyAccess(goal.companyId, activeCompany.id);
+  }
 
   const updates: Partial<Goal> & { updatedAt: Date } = { updatedAt: new Date() };
   const changed: Record<string, unknown> = {};

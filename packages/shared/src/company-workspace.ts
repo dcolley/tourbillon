@@ -186,6 +186,55 @@ export async function saveWorkspaceUpload(
   return { path: normalized, size: data.length };
 }
 
+function getToolsetSkillsTemplateDir(): string {
+  return path.join(process.cwd(), 'packages/mastra/src/skills');
+}
+
+export function getAgentSkillsDir(companyId: string, urlKey: string): string {
+  if (!urlKey || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(urlKey)) {
+    throw new WorkspacePathError('Invalid agent urlKey.');
+  }
+  return path.join(getCompanyWorkspaceDir(companyId), 'agents', urlKey, 'skills');
+}
+
+export async function ensureAgentSkillsDir(companyId: string, urlKey: string): Promise<string> {
+  await ensureCompanyWorkspace(companyId);
+  const dir = getAgentSkillsDir(companyId, urlKey);
+  await mkdir(dir, { recursive: true });
+  return dir;
+}
+
+export async function seedAgentSkillsFromTemplates(
+  companyId: string,
+  urlKey: string,
+): Promise<{ copied: string[] }> {
+  const destDir = await ensureAgentSkillsDir(companyId, urlKey);
+  const templateDir = getToolsetSkillsTemplateDir();
+  const copied: string[] = [];
+
+  let entries: string[];
+  try {
+    entries = await readdir(templateDir);
+  } catch {
+    return { copied };
+  }
+
+  for (const name of entries) {
+    if (!name.endsWith('.md')) continue;
+    const destPath = path.join(destDir, name);
+    try {
+      await stat(destPath);
+      continue;
+    } catch {
+      // file does not exist — copy
+    }
+    const content = await readFile(path.join(templateDir, name), 'utf-8');
+    await writeFile(destPath, content, 'utf-8');
+    copied.push(name);
+  }
+  return { copied };
+}
+
 export async function deleteWorkspaceEntry(
   companyId: string,
   relativePath: string

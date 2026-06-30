@@ -19,6 +19,7 @@ import {
 import type { LucideIcon } from 'lucide-react';
 import { Logo } from '@/components/logo';
 import { ThemeToggle } from '@/components/theme-toggle';
+import { CompanySwitcher, type CompanyOption } from '@/components/company-switcher';
 import {
   Sidebar,
   SidebarContent,
@@ -64,7 +65,13 @@ function SidebarCookieSync() {
   return null;
 }
 
-export function DashboardSidebar() {
+export function DashboardSidebar({
+  companies,
+  activeCompanyId,
+}: {
+  companies: CompanyOption[];
+  activeCompanyId: string | null;
+}) {
   const pathname = usePathname();
 
   return (
@@ -84,6 +91,7 @@ export function DashboardSidebar() {
               </SidebarMenuButton>
             </SidebarMenuItem>
           </SidebarMenu>
+          <CompanySwitcher companies={companies} activeCompanyId={activeCompanyId} />
         </SidebarHeader>
 
         <SidebarContent>

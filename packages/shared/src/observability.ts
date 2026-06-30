@@ -2,6 +2,8 @@ export const OBSERVABILITY_EVENT_TYPES = [
   'agent_run',
   'model_generation',
   'model_step',
+  'model_inference',
+  'model_chunk',
   'tool_call',
   'mcp_tool_call',
   'generic',

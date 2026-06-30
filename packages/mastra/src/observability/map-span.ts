@@ -12,6 +12,8 @@ const SPAN_TYPE_MAP: Partial<Record<SpanType, ObservabilityEventType>> = {
   [SpanType.AGENT_RUN]: 'agent_run',
   [SpanType.MODEL_GENERATION]: 'model_generation',
   [SpanType.MODEL_STEP]: 'model_step',
+  [SpanType.MODEL_INFERENCE]: 'model_inference',
+  [SpanType.MODEL_CHUNK]: 'model_chunk',
   [SpanType.TOOL_CALL]: 'tool_call',
   [SpanType.MCP_TOOL_CALL]: 'mcp_tool_call',
   [SpanType.CLIENT_TOOL_CALL]: 'tool_call',

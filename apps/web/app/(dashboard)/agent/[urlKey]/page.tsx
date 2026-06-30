@@ -3,44 +3,23 @@ import { notFound, redirect } from 'next/navigation';
 import { db, agents, heartbeatRuns } from '@tourbillon/db';
 import { eq, desc } from 'drizzle-orm';
 import type { AgentRuntimeConfig } from '@tourbillon/shared';
-import { modelProviderOverridesFromAgent, resolveModelProviderConfig, isAgentBudgetEnforced, isAgentBudgetExceeded, agentRuntimeLabel, resolveAssignedTools } from '@tourbillon/shared';
-import { AgentValidationError, getAgentByUrlKey, updateAgentRuntimeConfig, updateAgentCapabilities, updateAgentBudget, updateAgentInstructions, updateAgentModel, updateAgentProfile } from '@/lib/agents';
+import { modelProviderOverridesFromAgent, resolveModelProviderConfig, isAgentBudgetEnforced, isAgentBudgetExceeded, agentRuntimeLabel, resolveAssignedTools, modelSettingsFromFormData } from '@tourbillon/shared';
+import { AgentValidationError, AGENT_ROLE_OPTIONS, getAgentByUrlKey, listAgentsByUrlKey, updateAgentRuntimeConfig, updateAgentCapabilities, updateAgentBudget, updateAgentInstructions, updateAgentModel, updateAgentModelSettings, updateAgentProfile } from '@/lib/agents';
+import { AgentDisambiguation } from '@/components/agent-disambiguation';
+import { DeepLinkCompanySync } from '@/components/deep-link-company-sync';
+import { getCompanyById } from '@/lib/company';
+import { parseCompanyIdFromSearchParams } from '@/lib/company-link';
+import { deleteAgentAction, triggerAgentHeartbeatAction, updateAgentRoleAction } from '../actions';
 import { getLlmProviderRecordById, listLlmProvidersPublic } from '@/lib/llm-providers';
 import { AgentModelForm } from './agent-model-form';
+import { AgentModelSettingsForm } from './agent-model-settings-form';
 import { heartbeatJobHref } from '@/lib/heartbeats';
-import { triggerAgentHeartbeat } from '@/lib/heartbeat';
 import { listRoutinesForAgent, setRoutineEnabled } from '@/lib/routines';
 import { listGoalOptions } from '@/lib/goals';
 import { listProjectOptions } from '@/lib/projects';
 import { AgentDetailTabs } from './agent-detail-tabs';
 import { AgentObservabilityTab } from './agent-observability-tab';
 import { AgentCapabilitiesForm } from './agent-capabilities-form';
-
-async function runHeartbeat(formData: FormData) {
-  'use server';
-
-  const agentId = formData.get('agentId') as string;
-  const companyId = formData.get('companyId') as string;
-  const urlKey = formData.get('urlKey') as string;
-
-  let queueError: string | null = null;
-  let jobId: string | undefined;
-  try {
-    jobId = await triggerAgentHeartbeat(agentId, companyId);
-  } catch (err) {
-    queueError = err instanceof Error ? err.message : 'Failed to queue heartbeat.';
-  }
-
-  if (queueError) {
-    redirect(`/agent/${urlKey}?error=${encodeURIComponent(queueError)}`);
-  }
-
-  if (!jobId) {
-    redirect(`/agent/${urlKey}?error=${encodeURIComponent('Heartbeat was not queued — a job may already exist for this agent.')}`);
-  }
-
-  redirect(`/jobs/heartbeat/${jobId}?state=waiting`);
-}
 
 async function updateHeartbeatConfig(formData: FormData) {
   'use server';
@@ -83,7 +62,14 @@ async function updateCapabilities(formData: FormData) {
   ).map((entry) => entry.id);
 
   try {
-    await updateAgentCapabilities(agentId, { toolsets, assignedTools });
+    await updateAgentCapabilities(agentId, {
+      toolsets,
+      assignedTools,
+      bufferApiKey: (formData.get('bufferApiKey') as string) || undefined,
+      searxngUrl: (formData.get('searxngUrl') as string) || undefined,
+      clearBufferApiKey: formData.get('clearBufferApiKey') === 'on',
+      clearSearxngUrl: formData.get('clearSearxngUrl') === 'on',
+    });
   } catch (err) {
     const message = err instanceof AgentValidationError ? err.message : 'Failed to update capabilities.';
     redirect(`/agent/${urlKey}?error=${encodeURIComponent(message)}`);
@@ -154,6 +140,24 @@ async function updateModel(formData: FormData) {
   redirect(`/agent/${urlKey}?saved=model`);
 }
 
+async function updateModelSettings(formData: FormData) {
+  'use server';
+
+  const agentId = formData.get('agentId') as string;
+  const urlKey = formData.get('urlKey') as string;
+
+  try {
+    const patch = modelSettingsFromFormData(formData);
+    await updateAgentModelSettings(agentId, patch);
+  } catch (err) {
+    const message =
+      err instanceof AgentValidationError ? err.message : 'Failed to update generation settings.';
+    redirect(`/agent/${urlKey}?error=${encodeURIComponent(message)}`);
+  }
+
+  redirect(`/agent/${urlKey}?saved=model-settings`);
+}
+
 async function updateInstructions(formData: FormData) {
   'use server';
 
@@ -190,12 +194,27 @@ export default async function AgentDetailPage({
   searchParams,
 }: {
   params: Promise<{ urlKey: string }>;
-  searchParams: Promise<{ saved?: string; error?: string }>;
+  searchParams: Promise<{ saved?: string; error?: string; c?: string }>;
 }) {
   const { urlKey } = await params;
-  const { saved, error: errorParam } = await searchParams;
-  const agent = await getAgentByUrlKey(urlKey);
-  if (!agent) notFound();
+  const resolvedSearchParams = await searchParams;
+  const { saved, error: errorParam } = resolvedSearchParams;
+  const companyIdParam = parseCompanyIdFromSearchParams(resolvedSearchParams);
+
+  let agent = companyIdParam
+    ? await getAgentByUrlKey(urlKey, companyIdParam)
+    : await getAgentByUrlKey(urlKey);
+
+  if (!agent) {
+    const matches = await listAgentsByUrlKey(urlKey);
+    if (matches.length === 0) notFound();
+    if (matches.length > 1 && !companyIdParam) {
+      return <AgentDisambiguation urlKey={urlKey} matches={matches} />;
+    }
+    agent = matches[0]!.agent;
+  }
+
+  const company = await getCompanyById(agent.companyId);
 
   const [directReports, companyAgents, recentRuns, agentRoutines, goals, projects, providerList, providerRecord] =
     await Promise.all([
@@ -212,8 +231,8 @@ export default async function AgentDetailPage({
       .orderBy(desc(heartbeatRuns.startedAt))
       .limit(5),
     listRoutinesForAgent(agent.id),
-    listGoalOptions(),
-    listProjectOptions(),
+    listGoalOptions(false, agent.companyId),
+    listProjectOptions(undefined, agent.companyId),
     listLlmProvidersPublic(),
     agent.providerId ? getLlmProviderRecordById(agent.providerId) : Promise.resolve(null),
   ]);
@@ -242,6 +261,9 @@ export default async function AgentDetailPage({
 
   return (
     <div className="p-6 space-y-6 max-w-5xl">
+      {company ? (
+        <DeepLinkCompanySync requiredCompanyId={company.id} requiredCompanyName={company.name} />
+      ) : null}
       <div>
         <Link href="/agent" className="text-sm text-muted-foreground hover:text-foreground">
           ← Back to agents
@@ -259,7 +281,7 @@ export default async function AgentDetailPage({
           </div>
           <div className="flex items-center gap-2 shrink-0">
             <AgentStatusBadge status={agent.status} />
-            <form action={runHeartbeat}>
+            <form action={triggerAgentHeartbeatAction}>
               <input type="hidden" name="agentId" value={agent.id} />
               <input type="hidden" name="companyId" value={agent.companyId} />
               <input type="hidden" name="urlKey" value={agent.urlKey} />
@@ -305,9 +327,21 @@ export default async function AgentDetailPage({
         </div>
       )}
 
+      {saved === 'role' && (
+        <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
+          Role saved. Skills, toolsets, and assigned tools were reset to role defaults.
+        </div>
+      )}
+
       {saved === 'model' && (
         <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
           Model saved. Changes apply on the agent&apos;s next heartbeat.
+        </div>
+      )}
+
+      {saved === 'model-settings' && (
+        <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
+          Generation settings saved. Changes apply on the agent&apos;s next heartbeat.
         </div>
       )}
 
@@ -434,11 +468,53 @@ export default async function AgentDetailPage({
           }))}
           updateModel={updateModel}
         />
+        <AgentModelSettingsForm
+          agentId={agent.id}
+          urlKey={agent.urlKey}
+          initialSettings={runtime.model}
+          providerDefaults={providerRecord?.defaultModelSettings}
+          updateModelSettings={updateModelSettings}
+        />
       </section>
 
-      <section className="grid grid-cols-2 gap-4">
-        <DetailCard label="Role" value={agent.role} />
-        <DetailCard label="Title" value={agent.title} />
+      <section className="border rounded-lg p-4 space-y-4">
+        <div>
+          <h2 className="text-sm font-semibold">Role</h2>
+          <p className="text-xs text-muted-foreground mt-1">
+            Changing role resets skills, toolsets, and assigned tools to that role&apos;s defaults.
+          </p>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <form action={updateAgentRoleAction} className="space-y-4">
+            <input type="hidden" name="agentId" value={agent.id} />
+            <input type="hidden" name="urlKey" value={agent.urlKey} />
+            <div className="space-y-1.5">
+              <label htmlFor="agent-role" className="text-sm font-medium">
+                Role
+              </label>
+              <select
+                id="agent-role"
+                name="role"
+                required
+                defaultValue={agent.role}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+              >
+                {AGENT_ROLE_OPTIONS.map((role) => (
+                  <option key={role.value} value={role.value}>
+                    {role.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <button
+              type="submit"
+              className="inline-flex items-center justify-center rounded-md border px-3 py-1.5 text-sm font-medium hover:bg-muted"
+            >
+              Save role
+            </button>
+          </form>
+          <DetailCard label="Title" value={agent.title} />
+        </div>
       </section>
 
       <section className="border rounded-lg p-4 space-y-4">
@@ -461,6 +537,8 @@ export default async function AgentDetailPage({
           urlKey={agent.urlKey}
           assignedToolsets={agent.assignedToolsets}
           enabledTools={enabledTools}
+          bufferApiKeyOverride={runtime.mcpCredentials?.['buffer-mcp']}
+          searxngUrlOverride={runtime.searxngUrl}
           updateCapabilities={updateCapabilities}
         />
       </section>
@@ -677,6 +755,55 @@ export default async function AgentDetailPage({
               <RunStatusBadge status={run.status} />
             </Link>
           ))
+        )}
+      </section>
+
+      <section className="border border-destructive/30 rounded-lg p-4 space-y-4">
+        <div>
+          <h2 className="text-sm font-semibold text-destructive">Danger zone</h2>
+          <p className="text-xs text-muted-foreground mt-1">
+            Permanently deletes this agent and cascades heartbeat, cost, and routine history.
+            Assigned issues, goals, and projects become unassigned.
+          </p>
+        </div>
+        {directReports.length > 0 ? (
+          <div className="rounded-md border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            Cannot delete while this agent has direct reports:{' '}
+            {directReports.map((report, i) => (
+              <span key={report.id}>
+                {i > 0 ? ', ' : ''}
+                <Link href={`/agent/${report.urlKey}`} className="font-medium underline">
+                  {report.name}
+                </Link>
+              </span>
+            ))}
+            . Reassign them first.
+          </div>
+        ) : (
+          <form action={deleteAgentAction} className="space-y-4 max-w-md">
+            <input type="hidden" name="agentId" value={agent.id} />
+            <input type="hidden" name="urlKey" value={agent.urlKey} />
+            <div className="space-y-1.5">
+              <label htmlFor="confirm-url-key" className="text-sm font-medium">
+                Type <span className="font-mono">{agent.urlKey}</span> to confirm
+              </label>
+              <input
+                id="confirm-url-key"
+                name="confirmUrlKey"
+                type="text"
+                required
+                autoComplete="off"
+                placeholder={agent.urlKey}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+              />
+            </div>
+            <button
+              type="submit"
+              className="inline-flex items-center justify-center rounded-md border border-destructive px-3 py-1.5 text-sm font-medium text-destructive hover:bg-destructive/10"
+            >
+              Delete agent
+            </button>
+          </form>
         )}
       </section>
 

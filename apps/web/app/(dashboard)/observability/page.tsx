@@ -1,15 +1,18 @@
 import { Suspense } from 'react';
 import { db, agents } from '@tourbillon/db';
-import { desc } from 'drizzle-orm';
+import { desc, eq } from 'drizzle-orm';
 import { listGoalOptions } from '@/lib/goals';
 import { listProjectOptions } from '@/lib/projects';
+import { getActiveCompany } from '@/lib/company';
 import { ObservabilityListClient } from '@/components/observability-list-client';
 
 async function loadFilterOptions() {
+  const company = await getActiveCompany();
   const [agentRows, goals, projects] = await Promise.all([
     db
       .select({ id: agents.id, name: agents.name })
       .from(agents)
+      .where(eq(agents.companyId, company.id))
       .orderBy(desc(agents.createdAt)),
     listGoalOptions(),
     listProjectOptions(),

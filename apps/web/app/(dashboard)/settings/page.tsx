@@ -1,12 +1,12 @@
 import { redirect } from 'next/navigation';
-import { getOrCreateDefaultCompany, updateCompanySettings } from '@/lib/company';
-import { resolveModelProviderConfig } from '@tourbillon/shared';
+import { getActiveCompany, updateCompanySettings, updateCompanyIntegrations } from '@/lib/company';
+import { resolveModelProviderConfig, parseCompanySettings, isSearxngConfigured } from '@tourbillon/shared';
 import { LlmProvidersSettings } from '@/components/llm-providers-settings';
 
 async function saveSettings(formData: FormData) {
   'use server';
 
-  const company = await getOrCreateDefaultCompany();
+  const company = await getActiveCompany();
 
   try {
     await updateCompanySettings(company.id, {
@@ -23,15 +23,41 @@ async function saveSettings(formData: FormData) {
   redirect('/settings?saved=1');
 }
 
+async function saveIntegrations(formData: FormData) {
+  'use server';
+
+  const company = await getActiveCompany();
+
+  try {
+    await updateCompanyIntegrations(company.id, {
+      searxngUrl: (formData.get('searxngUrl') as string) || undefined,
+      searxngApiKey: (formData.get('searxngApiKey') as string) || undefined,
+      bufferApiKey: (formData.get('bufferApiKey') as string) || undefined,
+      clearBufferApiKey: formData.get('clearBufferApiKey') === 'on',
+      clearSearxngApiKey: formData.get('clearSearxngApiKey') === 'on',
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to save integrations.';
+    redirect(`/settings?error=${encodeURIComponent(message)}`);
+  }
+
+  redirect('/settings?saved=integrations');
+}
+
+function isConfigured(value: string | undefined, envFallback?: string): boolean {
+  return Boolean(value?.trim() || envFallback?.trim());
+}
+
 export default async function SettingsPage({
   searchParams,
 }: {
   searchParams: Promise<{ saved?: string; error?: string }>;
 }) {
   const resolvedSearchParams = await searchParams;
-  const company = await getOrCreateDefaultCompany();
-  const saved = resolvedSearchParams.saved === '1';
+  const company = await getActiveCompany();
+  const saved = resolvedSearchParams.saved;
   const error = resolvedSearchParams.error ? decodeURIComponent(resolvedSearchParams.error) : null;
+  const integrationSettings = parseCompanySettings(company.settings);
 
   const llm = resolveModelProviderConfig();
 
@@ -42,12 +68,17 @@ export default async function SettingsPage({
     { label: 'Default model', value: llm.defaultModel },
     { label: 'Redis', value: process.env.REDIS_URL ?? '—' },
     { label: 'Internal API', value: process.env.INTERNAL_API_URL ?? '—' },
-    { label: 'SearXNG', value: process.env.SEARXNG_URL ?? 'Not configured' },
     {
       label: 'Company workspace',
       value: process.env.COMPANY_WORKSPACE_ROOT ?? './data/company-workspaces',
     },
   ];
+
+  const bufferConfigured = isConfigured(
+    integrationSettings.mcpCredentials?.['buffer-mcp'],
+    process.env.BUFFER_API_KEY,
+  );
+  const searxngConfigured = isSearxngConfigured(integrationSettings);
 
   return (
     <div className="p-6 max-w-3xl space-y-8">
@@ -56,9 +87,15 @@ export default async function SettingsPage({
         <p className="text-muted-foreground">Company and runtime configuration</p>
       </div>
 
-      {saved && (
+      {saved === '1' && (
         <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
           Settings saved.
+        </div>
+      )}
+
+      {saved === 'integrations' && (
+        <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
+          Integration settings saved.
         </div>
       )}
 
@@ -139,6 +176,93 @@ export default async function SettingsPage({
         </form>
       </section>
 
+      <section className="space-y-4">
+        <h2 className="text-lg font-semibold">Integrations</h2>
+        <p className="text-sm text-muted-foreground">
+          Per-company credentials for agent toolsets. Environment variables in <code className="text-xs">.env</code> are used as fallbacks.
+        </p>
+        <form action={saveIntegrations} className="space-y-4 border rounded-lg p-4">
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <label htmlFor="searxngUrl" className="text-sm font-medium">
+                SearXNG base URL
+              </label>
+              <span
+                className={`text-xs rounded px-2 py-0.5 ${searxngConfigured ? 'bg-green-100 text-green-800' : 'bg-muted text-muted-foreground'}`}
+              >
+                {searxngConfigured ? 'Configured' : 'Not configured'}
+              </span>
+            </div>
+            <input
+              id="searxngUrl"
+              name="searxngUrl"
+              type="url"
+              defaultValue={integrationSettings.searxngUrl ?? ''}
+              placeholder={process.env.SEARXNG_URL ?? 'http://localhost:8888'}
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+            />
+            <p className="text-xs text-muted-foreground">
+              Instance root URL only (no <code>/mcp</code> suffix). Enables the web-search toolset.
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <label htmlFor="searxngApiKey" className="text-sm font-medium">
+              SearXNG API key (optional)
+            </label>
+            <input
+              id="searxngApiKey"
+              name="searxngApiKey"
+              type="password"
+              placeholder={integrationSettings.searxngApiKey ? '••••••••' : 'Optional — SEARXNG_API_KEY env'}
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+            />
+            {integrationSettings.searxngApiKey && (
+              <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                <input type="checkbox" name="clearSearxngApiKey" className="rounded border-input" />
+                Clear stored key
+              </label>
+            )}
+          </div>
+
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <label htmlFor="bufferApiKey" className="text-sm font-medium">
+                Buffer API key
+              </label>
+              <span
+                className={`text-xs rounded px-2 py-0.5 ${bufferConfigured ? 'bg-green-100 text-green-800' : 'bg-muted text-muted-foreground'}`}
+              >
+                {bufferConfigured ? 'Configured' : 'Not configured'}
+              </span>
+            </div>
+            <input
+              id="bufferApiKey"
+              name="bufferApiKey"
+              type="password"
+              placeholder={integrationSettings.mcpCredentials?.['buffer-mcp'] ? '••••••••' : 'BUFFER_API_KEY env'}
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+            />
+            {integrationSettings.mcpCredentials?.['buffer-mcp'] && (
+              <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                <input type="checkbox" name="clearBufferApiKey" className="rounded border-input" />
+                Clear stored key
+              </label>
+            )}
+            <p className="text-xs text-muted-foreground">
+              Enables the Buffer toolset (drafts, queue, posts via MCP).
+            </p>
+          </div>
+
+          <button
+            type="submit"
+            className="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+          >
+            Save integrations
+          </button>
+        </form>
+      </section>
+
       <LlmProvidersSettings />
 
       <section className="space-y-4">
@@ -154,6 +278,18 @@ export default async function SettingsPage({
               <dd className="font-mono text-xs text-right break-all">{item.value}</dd>
             </div>
           ))}
+          <div className="flex justify-between gap-4 p-3">
+            <dt className="text-muted-foreground shrink-0">SearXNG URL</dt>
+            <dd className="font-mono text-xs text-right break-all">
+              {process.env.SEARXNG_URL ?? 'Not configured'}
+            </dd>
+          </div>
+          <div className="flex justify-between gap-4 p-3">
+            <dt className="text-muted-foreground shrink-0">Buffer API key</dt>
+            <dd className="font-mono text-xs text-right break-all">
+              {process.env.BUFFER_API_KEY ? 'Set in env' : 'Not configured'}
+            </dd>
+          </div>
         </dl>
       </section>
     </div>

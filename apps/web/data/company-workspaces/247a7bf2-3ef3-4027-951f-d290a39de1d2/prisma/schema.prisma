@@ -1,0 +1,357 @@
+// Tourbillon Prisma Schema — Postgres (TOUR-144)
+// This mirrors the Drizzle ORM schema for compatibility with existing codebase.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// USERS TABLE (with RBAC - TOUR-139)
+// ============================================================================
+model User {
+  id                    String    @id @default(uuid())
+  email                 String    @unique
+  passwordHash          String?   // NULL for OAuth-only users
+  name                  String?
+  provider              String    @default("email") // 'email', 'google', 'github', 'auth0'
+  
+  // Password policy fields (TOUR-141)
+  mustResetPassword     Boolean   @default(false)
+  passwordExpired       Boolean   @default(false)
+  passwordChangedAt     DateTime?
+  
+  // RBAC fields (TOUR-139)
+  role                  UserRole  @default(member)
+  
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  
+  // Relations
+  sessions              Session[]
+  goals                 Goal[]
+  tasksAssigned         Task[]    @relation("TaskAssignee")
+  projectsOwned         Project[] @relation("ProjectOwner")
+  subscriptions         Subscription[]
+  
+  @@index([email])
+}
+
+enum UserRole {
+  admin
+  member
+  viewer
+}
+
+// ============================================================================
+// SESSIONS TABLE (TOUR-138)
+// ============================================================================
+model Session {
+  id            String   @id @default(uuid())
+  userId        String
+  token         String   @unique
+  expiresAt     DateTime
+  createdAt     DateTime @default(now())
+  
+  user          User     @relation(fields: [userId], references: [id])
+  
+  @@index([token])
+}
+
+// ============================================================================
+// FEEDBACK SUBMISSIONS TABLE (TOUR-62)
+// ============================================================================
+model FeedbackSubmission {
+  id        String   @id @default(uuid())
+  userId    String?
+  email     String?
+  type      String   // 'bug_report', 'feature_request', 'general'
+  subject   String?
+  message   String
+  priority  String   @default("normal") // 'low', 'normal', 'high', 'critical'
+  status    String   @default("open") // 'open', 'in_progress', 'resolved', 'closed'
+  createdAt DateTime @default(now())
+  
+  @@index([status])
+}
+
+// ============================================================================
+// NPS RESPONSES TABLE (TOUR-61)
+// ============================================================================
+model NpsResponse {
+  id        String   @id @default(uuid())
+  userId    String?
+  email     String?
+  score     Int
+  category  String   // 'detractor', 'passive', 'promoter'
+  comment   String?
+  createdAt DateTime @default(now())
+  
+  @@index([score])
+}
+
+// ============================================================================
+// SLACK CONNECTIONS TABLE (TOUR-97)
+// ============================================================================
+model SlackConnection {
+  id         String    @id @default(uuid())
+  teamId     String    @unique
+  appId      String
+  botToken   String
+  userId     String?
+  teamName   String?
+  channelId  String?
+  channels   String[]
+  isActive   Boolean   @default(true)
+  installedAt DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  
+  @@index([teamId])
+}
+
+// ============================================================================
+// GITHUB CONNECTIONS TABLE (TOUR-116)
+// ============================================================================
+model GithubConnection {
+  id             String   @id @default(uuid())
+  userId         String?
+  accessToken    String
+  username       String?
+  repositories   String[]
+  organizationId String?
+  isActive       Boolean  @default(true)
+  installedAt    DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  
+  @@index([userId])
+}
+
+// ============================================================================
+// GOOGLE CONNECTIONS TABLE (TOUR-116)
+// ============================================================================
+model GoogleConnection {
+  id             String   @id @default(uuid())
+  userId         String?
+  accessToken    String
+  refreshToken   String?
+  primaryDomain  String?
+  scope          String?
+  isActive       Boolean  @default(true)
+  installedAt    DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  
+  @@index([userId])
+}
+
+// ============================================================================
+// AUDIT LOGS TABLE (TOUR-140)
+// ============================================================================
+model AuditLog {
+  id          String   @id @default(uuid())
+  eventType   String   // 'goal_created', 'task_assigned', etc.
+  actorId     String?  // NULL for system events
+  entityType  String?  // 'goal', 'task', 'user', 'project'
+  entityId    String?  // UUID of the affected entity
+  metadata    Json?    // JSON string containing event-specific data
+  createdAt   DateTime @default(now())
+  
+  @@index([eventType])
+  @@index([entityType, entityId])
+}
+
+// ============================================================================
+// PROJECTS TABLE (TOUR-144)
+// ============================================================================
+model Project {
+  id          String    @id @default(uuid())
+  name        String
+  description String?
+  status      String    @default("active") // 'active', 'paused', 'completed', 'archived'
+  ownerId     String?
+  startDate   DateTime?
+  endDate     DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  
+  owner       User?     @relation("ProjectOwner", fields: [ownerId], references: [id])
+  goals       Goal[]
+  
+  @@index([status])
+}
+
+// ============================================================================
+// GOALS TABLE (TOUR-144)
+// ============================================================================
+model Goal {
+  id          String   @id @default(uuid())
+  userId      String
+  title       String
+  description String?
+  status      String   @default("active") // 'active', 'completed', 'cancelled'
+  priority    String   @default("medium") // 'low', 'medium', 'high', 'critical'
+  projectId   String?
+  startDate   DateTime?
+  endDate     DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  user        User          @relation(fields: [userId], references: [id])
+  project     Project?      @relation(fields: [projectId], references: [id])
+  tasks       Task[]
+  
+  @@index([userId])
+  @@index([status, priority])
+}
+
+// ============================================================================
+// TASKS TABLE (TOUR-144)
+// ============================================================================
+model Task {
+  id          String   @id @default(uuid())
+  goalId      String
+  title       String
+  description String?
+  status      String   @default("todo") // 'todo', 'in_progress', 'in_review', 'done'
+  assigneeId  String?
+  dueDate     DateTime?
+  priority    String   @default("medium") // 'low', 'medium', 'high', 'critical'
+  orderIndex  Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  goal        Goal          @relation(fields: [goalId], references: [id])
+  assignee    User?         @relation("TaskAssignee", fields: [assigneeId], references: [id])
+  
+  @@index([goalId])
+  @@index([status, priority])
+}
+
+// ============================================================================
+// BILLING & SUBSCRIPTIONS TABLES (TOUR-150)
+// ============================================================================
+
+enum SubscriptionInterval {
+  month
+  year
+}
+
+enum SubscriptionStatus {
+  incomplete
+  incomplete_expired
+  trialing
+  active
+  past_due
+  canceled
+  unpaid
+}
+
+model SubscriptionPlan {
+  id                  String               @id @default(uuid())
+  // Stripe identifiers
+  stripePriceId       String               @unique
+  stripeProductId     String               @unique
+  
+  // Plan details
+  name                String
+  description         String?
+  amount              Int                  // Amount in cents (e.g., 1500 = $15.00)
+  currency            String               @default("usd")
+  interval            SubscriptionInterval @default(month)
+  
+  // Metadata for plan configuration
+  isActive            Boolean              @default(true)
+  metadata            Json?                // Additional Stripe/plan metadata (features, limits, etc.)
+  
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  
+  // Relations
+  subscriptions       Subscription[]
+}
+
+model Subscription {
+  id                  String               @id @default(uuid())
+  
+  // User linkage
+  userId              String
+  user                User                 @relation(fields: [userId], references: [id])
+  
+  // Stripe identifiers
+  subscriptionId      String               @unique    // Stripe Subscription ID (sub_xxx)
+  
+  // Plan reference
+  planId              String
+  plan                SubscriptionPlan     @relation(fields: [planId], references: [id])
+  
+  // Status tracking
+  status              SubscriptionStatus   @default(incomplete)
+  
+  // Period boundaries for billing cycles
+  currentPeriodStart  DateTime?
+  currentPeriodEnd    DateTime?
+  
+  // Cancellation behavior
+  cancelAtPeriodEnd   Boolean              @default(false)
+  canceledAt          DateTime?
+  cancellationReason  String?               // User-provided reason for cancellation
+  
+  // Trial tracking
+  trialStart          DateTime?
+  trialEnd            DateTime?
+  hasTrialEnded       Boolean              @default(false)
+  
+  // Team billing
+  seats               Int                  @default(1)    // Number of team seats allocated
+  seatOverage         Int                  @default(0)    // Seats beyond the plan limit
+  
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  
+  // Relations
+  invoices            Invoice[]
+  
+  @@index([userId])
+  @@index([subscriptionId])
+  @@index([status])
+}
+
+model Invoice {
+  id                  String   @id @default(uuid())
+  
+  // User linkage
+  userId              String
+  user                User     @relation(fields: [userId], references: [id])
+  
+  // Stripe identifiers
+  invoiceId           String   @unique    // Stripe Invoice ID (in_xxx)
+  subscriptionId      String
+  subscription        Subscription @relation(fields: [subscriptionId], references: [id])
+  
+  // Status tracking
+  status              String   @default("draft") // 'draft', 'open', 'paid', 'unpaid', 'void'
+  
+  // Financial details (amounts in cents)
+  amountDue           Int      @default(0)
+  currency            String   @default("usd")
+  
+  // Timing
+  issuedAt            DateTime?    // When the invoice was generated/issued
+  dueDate             DateTime?    // Payment deadline
+  paidAt              DateTime?    // When payment was successfully processed
+  
+  // Downloadable resources
+  pdfUrl              String?      // URL to download PDF of invoice
+  hostedInvoiceUrl    String?      // Stripe-hosted invoice page URL
+  
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
+  
+  @@index([userId])
+  @@index([subscriptionId])
+  @@index([invoiceId])
+  @@index([status])
+}

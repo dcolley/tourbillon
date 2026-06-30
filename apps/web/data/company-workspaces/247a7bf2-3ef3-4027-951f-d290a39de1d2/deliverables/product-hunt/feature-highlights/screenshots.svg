@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Tourbillon Feature Screenshots</title></head>
+<body style="margin:0;">
+
+<!-- FEATURE 1: Visual Agent Builder (960x540) -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" width="960" height="540">
+  <rect width="960" height="540" fill="#0a0f1e"/>
+  
+  <!-- Top bar -->
+  <rect x="0" y="0" width="960" height="60" fill="#1e293b"/>
+  <text x="30" y="40" font-family="'Inter',sans-serif" font-size="20" font-weight="700" fill="#a5b4fc">Tourbillon</text>
+  
+  <!-- Canvas area -->
+  <rect x="40" y="80" width="880" height="380" rx="10" fill="#0f172a" stroke="#6366f1" stroke-width="2"/>
+  
+  <!-- Agent nodes on canvas -->
+  <circle cx="200" cy="200" r="40" fill="#6366f1" opacity="0.8"/>
+  <text x="200" y="205" text-anchor="middle" font-family="'Inter',sans-serif" font-size="12" fill="white">Agent A</text>
+  
+  <circle cx="400" cy="150" r="40" fill="#6366f1" opacity="0.8"/>
+  <text x="400" y="155" text-anchor="middle" font-family="'Inter',sans-serif" font-size="12" fill="white">Agent B</text>
+  
+  <circle cx="600" cy="250" r="40" fill="#6366f1" opacity="0.8"/>
+  <text x="600" y="255" text-anchor="middle" font-family="'Inter',sans-serif" font-size="12" fill="white">Agent C</text>
+  
+  <!-- Connection lines -->
+  <line x1="240" y1="200" x2="360" y2="150" stroke="#a5b4fc" stroke-width="2"/>
+  <line x1="440" y1="150" x2="560" y2="250" stroke="#a5b4fc" stroke-width="2"/>
+  
+  <!-- Title -->
+  <text x="480" y="480" text-anchor="middle" font-family="'Inter',sans-serif" font-size="36" font-weight="700" fill="#ffffff">Visual Agent Builder</text>
+  <text x="480" y="520" text-anchor="middle" font-family="'Inter',sans-serif" font-size="16" fill="#94a3b8">Drag-and-drop canvas to design multi-agent workflows</text>
+</svg>
+
+<!-- FEATURE 2: Multi-Agent Handoff (960x540) -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" width="960" height="540">
+  <rect width="960" height="540" fill="#0a0f1e"/>
+  <rect x="0" y="0" width="960" height="60" fill="#1e293b"/>
+  <text x="30" y="40" font-family="'Inter',sans-serif" font-size="20" font-weight="700" fill="#a5b4fc">Tourbillon</text>
+  
+  <!-- Handoff visualization -->
+  <rect x="100" y="100" width="200" height="300" rx="10" fill="#0f172a" stroke="#6366f1"/>
+  <text x="200" y="150" text-anchor="middle" font-family="'Inter',sans-serif" font-size="14" fill="#c7d2fe">Agent A</text>
+  <rect x="120" y="170" width="160" height="60" rx="5" fill="#6366f120"/>
+  <text x="200" y="205" text-anchor="middle" font-family="'Inter',sans-serif" font-size="11" fill="#a5b4fc">Context: Research</text>
+  
+  <!-- Arrow -->
+  <path d="M300,250 L480,250 L480,200" stroke="#6366f1" stroke-width="3" fill="none"/>
+  <polygon points="480,210 470,230 490,230" fill="#6366f1"/>
+  
+  <rect x="500" y="100" width="200" height="300" rx="10" fill="#0f172a" stroke="#6366f1"/>
+  <text x="600" y="150" text-anchor="middle" font-family="'Inter',sans-serif" font-size="14" fill="#c7d2fe">Agent B</text>
+  <rect x="520" y="170" width="160" height="60" rx="5" fill="#6366f120"/>
+  <text x="600" y="205" text-anchor="middle" font-family="'Inter',sans-serif" font-size="11" fill="#a5b4fc">Context: Analysis</text>
+  
+  <!-- Arrow -->
+  <path d="M700,250 L860,250" stroke="#6366f1" stroke-width="3"/>
+  
+  <rect x="720" y="100" width="140" height="300" rx="10" fill="#0f172a" stroke="#22c55e"/>
+  <text x="790" y="150" text-anchor="middle" font-family="'Inter',sans-serif" font-size="14" fill="#c7d2fe">Result</text>
+  
+  <!-- Bottom title -->
+  <text x="480" y="480" text-anchor="middle" font-family="'Inter',sans-serif" font-size="36" font-weight="700" fill="#ffffff">Multi-Agent Handoff</text>
+  <text x="480" y="520" text-anchor="middle" font-family="'Inter',sans-serif" font-size="16" fill="#94a3b8">Agents reason and pass rich context between each other</text>
+</svg>
+
+<!-- FEATURE 3: Human-in-the-Loop (960x540) -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" width="960" height="540">
+  <rect width="960" height="540" fill="#0a0f1e"/>
+  <rect x="0" y="0" width="960" height="60" fill="#1e293b"/>
+  <text x="30" y="40" font-family="'Inter',sans-serif" font-size="20" font-weight="700" fill="#a5b4fc">Tourbillon</text>
+  
+  <!-- Approval workflow -->
+  <rect x="100" y="100" width="180" height="300" rx="10" fill="#0f172a" stroke="#6366f1"/>
+  <text x="190" y="140" text-anchor="middle" font-family="'Inter',sans-serif" font-size="14" fill="#c7d2fe">Step 1</text>
+  <rect x="120" y="160" width="140" height="80" rx="5" fill="#6366f120"/>
+  
+  <!-- Approval gate -->
+  <polygon points="340,250 370,220 400,250 370,280" fill="#fbbf24" opacity="0.9"/>
+  <text x="370" y="255" text-anchor="middle" font-family="'Inter',sans-serif" font-size="16" fill="#1e293b" font-weight="700">?</text>
+  
+  <!-- Human icon -->
+  <circle cx="500" cy="240" r="20" fill="#6366f1"/>
+  <path d="M500,260 L500,280 M480,270 Q500,290 520,270" stroke="white" stroke-width="2" fill="none"/>
+  
+  <!-- Arrow -->
+  <path d="M400,250 L460,250" stroke="#fbbf24" stroke-width="2"/>
+  
+  <rect x="600" y="100" width="260" height="300" rx="10" fill="#0f172a" stroke="#22c55e"/>
+  <text x="730" y="140" text-anchor="middle" font-family="'Inter',sans-serif" font-size="14" fill="#c7d2fe">Approved ✓</text>
+  
+  <!-- Bottom title -->
+  <text x="480" y="480" text-anchor="middle" font-family="'Inter',sans-serif" font-size="36" font-weight="700" fill="#ffffff">Human-in-the-Loop Control</text>
+  <text x="480" y="520" text-anchor="middle" font-family="'Inter',sans-serif" font-size="16" fill="#94a3b8">Approval gates at every step - full autonomy with control</text>
+</svg>
+
+<!-- FEATURE 4: One-Click Deploy (960x540) -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" width="960" height="540">
+  <rect width="960" height="540" fill="#0a0f1e"/>
+  <rect x="0" y="0" width="960" height="60" fill="#1e293b"/>
+  <text x="30" y="40" font-family="'Inter',sans-serif" font-size="20" font-weight="700" fill="#a5b4fc">Tourbillon</text>
+  
+  <!-- Deploy visualization -->
+  <rect x="150" y="80" width="660" height="320" rx="15" fill="#0f172a" stroke="#6366f1"/>
+  
+  <!-- Server nodes -->
+  <circle cx="250" cy="180" r="30" fill="#6366f1"/>
+  <text x="250" y="185" text-anchor="middle" font-family="'Inter',sans-serif" font-size="10" fill="white">S1</text>
+  
+  <circle cx="400" cy="180" r="30" fill="#6366f1"/>
+  <text x="400" y="185" text-anchor="middle" font-family="'Inter',sans-serif" font-size="10" fill="white">S2</text>
+  
+  <circle cx="550" cy="180" r="30" fill="#6366f1"/>
+  <text x="550" y="185" text-anchor="middle" font-family="'Inter',sans-serif" font-size="10" fill="white">S3</text>
+  
+  <!-- Auto-scale indicator -->
+  <circle cx="700" cy="180" r="30" fill="#22c55e"/>
+  <text x="700" y="185" text-anchor="middle" font-family="'Inter',sans-serif" font-size="10" fill="white">+</text>
+  
+  <!-- Dashboard -->
+  <rect x="150" y="260" width="660" height="100" rx="10" fill="#1e293b"/>
+  <text x="180" y="290" font-family="'Inter',sans-serif" font-size="12" fill="#a5b4fc">Real-time Monitoring</text>
+  
+  <!-- Chart bars -->
+  <rect x="180" y="360" width="40" height="70" rx="3" fill="#6366f1"/>
+  <rect x="240" y="330" width="40" height="100" rx="3" fill="#6366f1"/>
+  <rect x="300" y="350" width="40" height="80" rx="3" fill="#6366f1"/>
+  
+  <!-- Deploy button -->
+  <rect x="380" y="420" width="200" height="50" rx="25" fill="#6366f1"/>
+  <text x="480" y="450" text-anchor="middle" font-family="'Inter',sans-serif" font-size="16" font-weight="700" fill="white">DEPLOY</text>
+  
+  <!-- Bottom title -->
+  <text x="480" y="490" text-anchor="middle" font-family="'Inter',sans-serif" font-size="36" font-weight="700" fill="#ffffff">One-Click Deploy & Monitor</text>
+  <text x="480" y="525" text-anchor="middle" font-family="'Inter',sans-serif" font-size="16" fill="#94a3b8">Auto-scaling, load balancing and real-time dashboards</text>
+</svg>
+
+</body>
+</html>

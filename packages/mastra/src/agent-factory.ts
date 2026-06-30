@@ -4,15 +4,17 @@ import { Memory } from '@mastra/memory';
 import { PostgresStore, PgVector } from '@mastra/pg';
 import type { Agent as AgentRecord } from '@tourbillon/db';
 import { getLlmProviderRowById } from '@tourbillon/db';
-import { formatTrace, modelProviderOverridesFromAgent, resolveModelProviderConfig, resolveAssignedTools, type AgentRuntimeConfig } from '@tourbillon/shared';
+import { formatTrace, modelProviderOverridesFromAgent, resolveModelProviderConfig, resolveAssignedTools, type AgentRuntimeConfig, type CompanySettings, isSearxngConfigured } from '@tourbillon/shared';
 import { getEmbeddingModel, getLanguageModelForAgent, llmProviderRowToRecord } from './provider';
 import { CONTROL_PLANE_TOOLS } from './tools/control-plane-tools';
 import { ROLE_TOOLS } from './tools/role-tools';
 import { assignableToolsForIds } from './tools/assignable-tools';
 import { loadSkillsForAgent } from './skills/skill-loader';
 import { buildMCPTools } from './tools/mcp-tools';
+import { SEARXNG_TOOLS } from './tools/searxng-tools';
 import { getInternalApiUrl } from './tools/api-client';
 import { buildCodeExecutionWorkspace } from './execution-workspace';
+import { resolveAgentModelSettings } from './model-settings';
 import { getMastraInstance } from './mastra-instance';
 import { isObservabilityEnabled } from '@tourbillon/shared';
 
@@ -52,11 +54,18 @@ export function getAgentMemory(): Memory {
   return globalForMastra.mastraMemory;
 }
 
+export interface AssembleAgentToolsOptions {
+  allowedMcpServerIds?: string[];
+  companySettings?: CompanySettings | null;
+}
+
 export async function assembleAgentTools(
   agentRecord: AgentRecord,
-  options?: { allowedMcpServerIds?: string[] },
+  options?: AssembleAgentToolsOptions,
 ): Promise<Record<string, unknown>> {
   const tools: Record<string, unknown> = { ...CONTROL_PLANE_TOOLS };
+  const runtimeConfig = agentRecord.runtimeConfig as AgentRuntimeConfig;
+  const companySettings = options?.companySettings ?? null;
 
   const booleanToolsets = (agentRecord.assignedToolsets ?? []).filter((id) => id !== 'planning');
   for (const toolsetId of booleanToolsets) {
@@ -64,19 +73,28 @@ export async function assembleAgentTools(
     if (roleTools) Object.assign(tools, roleTools);
   }
 
+  if (!isSearxngConfigured(companySettings, runtimeConfig)) {
+    for (const key of Object.keys(SEARXNG_TOOLS)) {
+      delete tools[key];
+    }
+  }
+
   const assignedToolIds = resolveAssignedTools({
     role: agentRecord.role,
     assignedToolsets: agentRecord.assignedToolsets,
-    runtimeConfig: agentRecord.runtimeConfig as AgentRuntimeConfig,
+    runtimeConfig,
   });
   Object.assign(tools, assignableToolsForIds(assignedToolIds));
 
-  if (agentRecord.mcpServerIds?.length) {
-    const mcpTools = await buildMCPTools(
-      agentRecord.mcpServerIds,
-      agentRecord.companyId,
-      options?.allowedMcpServerIds ?? [],
-    );
+  const needsMcp =
+    (agentRecord.assignedToolsets?.includes('buffer') ?? false) ||
+    (agentRecord.mcpServerIds?.length ?? 0) > 0;
+
+  if (needsMcp) {
+    const mcpTools = await buildMCPTools(agentRecord, {
+      allowedMcpServerIds: options?.allowedMcpServerIds ?? [],
+      companySettings,
+    });
     Object.assign(tools, mcpTools);
   }
 
@@ -97,7 +115,7 @@ export async function assembleAgentSystemPrompt(agentRecord: AgentRecord): Promi
  */
 export async function createAgentWithSkills(
   agentRecord: AgentRecord,
-  options?: { allowedMcpServerIds?: string[] }
+  options?: AssembleAgentToolsOptions
 ): Promise<Agent> {
   const tools = await assembleAgentTools(agentRecord, options);
 
@@ -119,6 +137,7 @@ export async function createAgentWithSkills(
   );
 
   const codeExecutionEnabled = agentRecord.assignedToolsets?.includes('code-execution') ?? false;
+  const modelSettings = resolveAgentModelSettings(agentRecord, providerRecord);
 
   console.log(
     formatTrace('agent-factory', { agentId: agentRecord.id, agentName: agentRecord.name }, 'agent ready', {
@@ -134,6 +153,7 @@ export async function createAgentWithSkills(
       tools: Object.keys(tools),
       skillCount: skillContents.length,
       codeExecutionEnabled,
+      modelSettings,
     })
   );
 
@@ -145,6 +165,7 @@ export async function createAgentWithSkills(
     tools: tools as Parameters<typeof Agent>[0]['tools'],
     memory: getAgentMemory(),
     ...(codeExecutionEnabled ? { workspace: buildCodeExecutionWorkspace() } : {}),
+    ...(modelSettings ? { defaultOptions: { modelSettings } } : {}),
   });
 
   return agent;
@@ -152,7 +173,7 @@ export async function createAgentWithSkills(
 
 export async function createDurableAgentWithSkills(
   agentRecord: AgentRecord,
-  options?: { allowedMcpServerIds?: string[]; maxSteps?: number },
+  options?: AssembleAgentToolsOptions & { maxSteps?: number },
 ): Promise<ReturnType<typeof createDurableAgent>> {
   const agent = await createAgentWithSkills(agentRecord, options);
   const durableAgent = createDurableAgent({

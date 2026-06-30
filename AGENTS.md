@@ -102,9 +102,9 @@ Each agent row in the `agents` table has:
 | Tier | Source | Gating |
 |---|---|---|
 | **Tier 1 — Control Plane** | `control-plane-tools.ts` | Every agent always gets these |
-| **Tier 2 — Boolean toolsets** | `role-tools.ts` | Gated by `assignedToolsets` (comments, roster, approvals, code-execution, web-search) |
+| **Tier 2 — Boolean toolsets** | `role-tools.ts` | Gated by `assignedToolsets` (comments, roster, approvals, code-execution, web-search, nitter, buffer) |
 | **Tier 2 — Granular tools** | `assignable-tools.ts` | Gated by `runtimeConfig.assignedTools` (per-tool toggles in goal/project/issue groups) |
-| **Tier 3 — MCP Tools** | `mcp-tools.ts` | Gated by `mcpServerIds` on the agent |
+| **Tier 3 — MCP Tools** | `mcp-tools.ts` | Gated by `mcpServerIds` and/or `buffer` toolset (Buffer MCP); company `settings.mcpCredentials` or env `BUFFER_API_KEY` |
 
 **Tier 1 tools (all agents):**
 - `getIdentity` — agent identity, role, budget
@@ -120,7 +120,9 @@ Each agent row in the `agents` table has:
 - `approvals` — `createApproval`
 - `roster` — `listAgents`
 - `code-execution` — sandbox shell tools (when enabled)
-- `web-search` — MCP web search (when configured)
+- `web-search` — `searxngSearch`, `searxngNewsSearch` via SearXNG JSON API (`SEARXNG_URL` or company settings)
+- `nitter` — X/Twitter search via self-hosted Nitter (`NITTER_URL`)
+- `buffer` — Buffer social publishing via official MCP (`BUFFER_API_KEY` or company settings)
 
 **Tier 2 granular tool groups** (each tool toggled individually in agent settings):
 
@@ -149,19 +151,21 @@ Skills are Markdown files in `packages/skills/`. At agent wake time, `agent-fact
 
 Mastra memory is keyed per agent × issue (thread). Memory keys are built in `packages/mastra/src/memory-keys.ts`:
 
-- `resource` = `company:{companyId}:agent:{agentId}` (agent's working memory)
-- `thread` = issue ID when working a task, or `agent:{agentId}:idle` when no task
+- `resource` = `{companyId}:{agentId}` (widened to project/goal when semantic recall is enabled)
+- `thread` = `{issueId}:{agentId}` when the heartbeat job includes `taskId` (assignment, approval with linked issue, etc.)
 
-Memory persists across heartbeats for the same issue. **Task history is written to issue comments**, not memory — comments are the shared record of record that all agents can read.
+**Stateless inbox wakes** — timer, on-demand, and any heartbeat without `taskId` do **not** use Mastra memory. The legacy inbox thread (`{companyId}:{agentId}:inbox`) is deleted before each stateless wake so prior heartbeat transcripts are not replayed into the LLM context. Agents rely on control-plane tools (`getInbox`, `getHeartbeatContext`, `getComments`) for task state.
+
+Memory persists across heartbeats only for assignment wakes with `taskId` (up to `lastMessages: 20`). **Task history is written to issue comments**, not memory — comments are the shared record of record that all agents can read.
 
 ### Observability
 
 When `OBSERVABILITY_ENABLED=true`, Mastra tracing exports completed spans to the `agent_observability_events` table via a custom PostgreSQL exporter (`packages/mastra/src/observability/`). Spans are denormalized with `issue_id`, `goal_id`, `project_id`, and `agent_id` for fast filtering.
 
 - **Human/debug only** — issue comments remain the agent thread of record; observability is not written to comments or BullMQ logs as primary storage.
-- **UI** — `/observability` (global timeline) and the **Observability** tab on issue detail pages.
+- **UI** — `/observability` (global timeline) and the **Observability** tab on issue detail pages. **Model step** events contain final `output.text` and `toolCalls`; **Provider call** (`model_inference`) spans are latency-only.
 - **Heartbeat runs** — `heartbeat_runs.trace_id` links a run to its Mastra trace.
-- Set `OBSERVABILITY_STORE_MODEL_CHUNKS=true` to persist per-token `MODEL_CHUNK` spans (high volume).
+- Set `OBSERVABILITY_STORE_MODEL_CHUNKS=true` to persist per-token `MODEL_CHUNK` spans including streamed reasoning text (high volume).
 
 ---
 
@@ -239,7 +243,7 @@ All variables live in `.env` at the repo root. Key ones:
 | `MEMORY_SEMANTIC_RECALL` | Enable pgvector semantic memory | `false` |
 | `MEMORY_EMBEDDING_MODEL` | Embedding model for semantic memory | `text-embedding-nomic-embed-text-v1.5` |
 | `OBSERVABILITY_ENABLED` | Export Mastra spans to PostgreSQL | `false` |
-| `OBSERVABILITY_STORE_MODEL_CHUNKS` | Persist per-token MODEL_CHUNK spans | `false` |
+| `OBSERVABILITY_STORE_MODEL_CHUNKS` | Persist streamed MODEL_CHUNK spans (text/reasoning); model_step has final text without this | `false` |
 | `OBSERVABILITY_PREVIEW_CHARS` | Truncate span previews in list UI | `500` |
 | `OBSERVABILITY_MAX_PAYLOAD_BYTES` | Cap stored span payload JSON size | `32768` |
 

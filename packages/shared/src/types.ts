@@ -1,3 +1,5 @@
+import type { AgentModelSettings } from './model-settings';
+
 // ─── Wake Loop Types ───────────────────────────────────────────────────────
 
 export type WakeReason =
@@ -64,15 +66,29 @@ export interface AgentRuntimeConfig {
     heartbeatSec: number;
     graceSec: number;
   };
-  model?: {
-    temperature?: number;
-  };
+  /** Per-agent LLM generation overrides (merged over provider defaults). */
+  model?: AgentModelSettings;
   budget?: {
     /** When false, heartbeats and UI limits ignore the monthly token cap. Default: true. */
     enforce?: boolean;
   };
   /** Tier-2 granular tool ids (goal/project/issue management). */
   assignedTools?: string[];
+  /** Per-agent API key overrides for MCP servers (server id → key). */
+  mcpCredentials?: Record<string, string>;
+  /** Per-agent SearXNG base URL override (no trailing slash). */
+  searxngUrl?: string;
+  /** Per-agent SearXNG API key override (optional). */
+  searxngApiKey?: string;
+  /** Per-server MCP tool allow/deny lists (Buffer). */
+  mcpToolPolicy?: Record<string, { allow?: string[]; deny?: string[] }>;
+}
+
+/** Company-level integration settings stored in companies.settings jsonb. */
+export interface CompanySettings {
+  mcpCredentials?: Record<string, string>;
+  searxngUrl?: string;
+  searxngApiKey?: string;
 }
 
 export const DEFAULT_RUNTIME_CONFIG: AgentRuntimeConfig = {

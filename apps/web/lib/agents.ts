@@ -10,28 +10,72 @@ import {
   resolveModelProviderConfig,
   resolveAdapterFieldsForRuntime,
   parseAgentRuntimeType,
+  applyModelSettingsPatch,
+  parseAgentModelSettings,
+  type AgentModelSettings,
   type AgentRuntimeConfig,
   type AgentRuntimeType,
 } from '@tourbillon/shared';
-import { getOrCreateDefaultCompany } from './company';
+import { seedAgentSkillsFromTemplates } from '@tourbillon/shared/company-workspace';
+import { getActiveCompany } from './company';
 import { getDefaultLlmProviderRecord } from './llm-providers';
 
 const AGENT_ROLES = ['ceo', 'cto', 'engineer', 'pm', 'qa', 'designer', 'custom'] as const;
 export type AgentRole = (typeof AGENT_ROLES)[number];
 
+export const AGENT_ROLE_OPTIONS = [
+  { value: 'ceo', label: 'CEO' },
+  { value: 'cto', label: 'CTO' },
+  { value: 'engineer', label: 'Engineer' },
+  { value: 'pm', label: 'Product Manager' },
+  { value: 'qa', label: 'QA' },
+  { value: 'designer', label: 'Designer' },
+  { value: 'custom', label: 'Custom' },
+] as const satisfies ReadonlyArray<{ value: AgentRole; label: string }>;
+
 /** Reserved path segments — cannot be used as agent IDs in /agent/:id URLs */
 const RESERVED_AGENT_IDS = new Set(['new']);
 
-export async function getAgentByUrlKey(urlKey: string): Promise<Agent | null> {
+export async function getAgentByUrlKey(urlKey: string, companyId?: string): Promise<Agent | null> {
   const normalized = urlKey?.trim();
   if (!normalized || RESERVED_AGENT_IDS.has(normalized)) return null;
 
-  const company = await getOrCreateDefaultCompany();
-  return (
-    (await db.query.agents.findFirst({
-      where: and(eq(agents.companyId, company.id), eq(agents.urlKey, normalized)),
-    })) ?? null
-  );
+  if (companyId) {
+    return (
+      (await db.query.agents.findFirst({
+        where: and(eq(agents.companyId, companyId), eq(agents.urlKey, normalized)),
+      })) ?? null
+    );
+  }
+
+  try {
+    const company = await getActiveCompany();
+    return (
+      (await db.query.agents.findFirst({
+        where: and(eq(agents.companyId, company.id), eq(agents.urlKey, normalized)),
+      })) ?? null
+    );
+  } catch {
+    return null;
+  }
+}
+
+export interface AgentUrlKeyMatch {
+  agent: Agent;
+  companyName: string;
+}
+
+export async function listAgentsByUrlKey(urlKey: string): Promise<AgentUrlKeyMatch[]> {
+  const normalized = urlKey?.trim();
+  if (!normalized || RESERVED_AGENT_IDS.has(normalized)) return [];
+
+  const rows = await db
+    .select({ agent: agents, companyName: companies.name })
+    .from(agents)
+    .innerJoin(companies, eq(agents.companyId, companies.id))
+    .where(eq(agents.urlKey, normalized));
+
+  return rows.map((row) => ({ agent: row.agent, companyName: row.companyName }));
 }
 
 export class AgentValidationError extends Error {
@@ -93,7 +137,7 @@ export async function createAgent(input: CreateAgentInput): Promise<Agent> {
 
   const company = input.companyId
     ? await db.query.companies.findFirst({ where: eq(companies.id, input.companyId) })
-    : await getOrCreateDefaultCompany();
+    : await getActiveCompany();
 
   if (!company) throw new AgentValidationError('Company not found.');
 
@@ -146,6 +190,8 @@ export async function createAgent(input: CreateAgentInput): Promise<Agent> {
     })
     .returning();
 
+  await seedAgentSkillsFromTemplates(companyId, urlKey);
+
   return created;
 }
 
@@ -167,6 +213,38 @@ export async function updateAgentRuntimeConfig(
     heartbeat: { ...current.heartbeat, ...patch.heartbeat },
     timeout: { ...current.timeout, ...patch.timeout },
     model: patch.model !== undefined ? patch.model : current.model,
+  };
+
+  const [updated] = await db
+    .update(agents)
+    .set({ runtimeConfig, updatedAt: new Date() })
+    .where(eq(agents.id, agentId))
+    .returning();
+
+  return updated;
+}
+
+export async function updateAgentModelSettings(
+  agentId: string,
+  patch: Partial<Record<keyof AgentModelSettings, number | null>>,
+): Promise<Agent> {
+  const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+  if (!agent) throw new AgentValidationError('Agent not found.');
+
+  const current = agent.runtimeConfig as AgentRuntimeConfig;
+  const merged = applyModelSettingsPatch(current.model, patch);
+
+  try {
+    parseAgentModelSettings(merged);
+  } catch (err) {
+    throw new AgentValidationError(
+      err instanceof Error ? err.message : 'Invalid generation settings.',
+    );
+  }
+
+  const runtimeConfig: AgentRuntimeConfig = {
+    ...current,
+    model: Object.keys(merged).length > 0 ? merged : undefined,
   };
 
   const [updated] = await db
@@ -202,7 +280,14 @@ export async function updateAgentAssignedToolsets(
 
 export async function updateAgentCapabilities(
   agentId: string,
-  input: { toolsets: string[]; assignedTools: string[] },
+  input: {
+    toolsets: string[];
+    assignedTools: string[];
+    bufferApiKey?: string;
+    searxngUrl?: string;
+    clearBufferApiKey?: boolean;
+    clearSearxngUrl?: boolean;
+  },
 ): Promise<Agent> {
   const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
   if (!agent) throw new AgentValidationError('Agent not found.');
@@ -226,6 +311,24 @@ export async function updateAgentCapabilities(
     ...current,
     assignedTools,
   };
+
+  if (input.clearBufferApiKey) {
+    const next = { ...runtimeConfig.mcpCredentials };
+    delete next['buffer-mcp'];
+    runtimeConfig.mcpCredentials = Object.keys(next).length > 0 ? next : undefined;
+  } else if (input.bufferApiKey?.trim()) {
+    runtimeConfig.mcpCredentials = {
+      ...current.mcpCredentials,
+      'buffer-mcp': input.bufferApiKey.trim(),
+    };
+  }
+
+  if (input.clearSearxngUrl) {
+    runtimeConfig.searxngUrl = undefined;
+  } else if (input.searxngUrl !== undefined) {
+    const trimmed = input.searxngUrl.trim();
+    runtimeConfig.searxngUrl = trimmed || undefined;
+  }
 
   const [updated] = await db
     .update(agents)
@@ -352,6 +455,64 @@ export async function setAgentActive(agentId: string, active: boolean): Promise<
     .returning();
 
   return updated;
+}
+
+export async function updateAgentRole(agentId: string, roleInput: string): Promise<Agent> {
+  const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+  if (!agent) throw new AgentValidationError('Agent not found.');
+
+  const role = roleInput?.trim();
+  if (!role || !AGENT_ROLES.includes(role as AgentRole)) {
+    throw new AgentValidationError('A valid role is required.');
+  }
+
+  if (role === agent.role) {
+    return agent;
+  }
+
+  const current = agent.runtimeConfig as AgentRuntimeConfig;
+  const runtimeConfig: AgentRuntimeConfig = {
+    ...current,
+    assignedTools: ROLE_DEFAULT_ASSIGNED_TOOLS[role] ?? [],
+  };
+
+  const [updated] = await db
+    .update(agents)
+    .set({
+      role,
+      assignedSkills: ROLE_DEFAULT_SKILLS[role] ?? ['control-plane'],
+      assignedToolsets: ROLE_DEFAULT_TOOLSETS[role] ?? [],
+      runtimeConfig,
+      updatedAt: new Date(),
+    })
+    .where(eq(agents.id, agentId))
+    .returning();
+
+  return updated;
+}
+
+export async function deleteAgent(agentId: string, confirmUrlKey: string): Promise<void> {
+  const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+  if (!agent) throw new AgentValidationError('Agent not found.');
+
+  const confirmation = confirmUrlKey?.trim();
+  if (!confirmation || confirmation !== agent.urlKey) {
+    throw new AgentValidationError(
+      `Type "${agent.urlKey}" to confirm deletion.`,
+    );
+  }
+
+  const directReports = await db.query.agents.findMany({
+    where: eq(agents.reportsToId, agentId),
+  });
+  if (directReports.length > 0) {
+    const names = directReports.map((r) => r.name).join(', ');
+    throw new AgentValidationError(
+      `Cannot delete agent with direct reports (${names}). Reassign them first.`,
+    );
+  }
+
+  await db.delete(agents).where(eq(agents.id, agentId));
 }
 
 export {

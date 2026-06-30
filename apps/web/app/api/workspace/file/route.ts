@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getOrCreateDefaultCompany } from '@/lib/company';
+import { getActiveCompany } from '@/lib/company';
 import {
   readWorkspaceText,
   writeWorkspaceText,
@@ -12,7 +12,7 @@ import { isTextEditablePath, isTextViewablePath } from '@tourbillon/shared/compa
 import { stat } from 'fs/promises';
 
 export async function GET(req: NextRequest) {
-  const company = await getOrCreateDefaultCompany();
+  const company = await getActiveCompany();
   const filePath = req.nextUrl.searchParams.get('path') ?? '';
   if (!filePath) {
     return NextResponse.json({ error: 'path is required.' }, { status: 400 });
@@ -56,7 +56,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const company = await getOrCreateDefaultCompany();
+  const company = await getActiveCompany();
   const formData = await req.formData();
   const file = formData.get('file');
   const targetDir = (formData.get('targetDir') as string | null)?.trim() ?? '';
@@ -81,7 +81,7 @@ export async function POST(req: NextRequest) {
 }
 
 export async function PUT(req: NextRequest) {
-  const company = await getOrCreateDefaultCompany();
+  const company = await getActiveCompany();
   const body = (await req.json()) as { path?: string; content?: string };
 
   if (!body.path || typeof body.content !== 'string') {

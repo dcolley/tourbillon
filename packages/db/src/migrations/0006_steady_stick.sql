@@ -1,0 +1,1 @@
+ALTER TABLE "llm_providers" ADD COLUMN "default_model_settings" jsonb DEFAULT '{}'::jsonb NOT NULL;

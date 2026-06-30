@@ -1,38 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
-import { scryptSync, timingSafeEqual } from 'crypto';
-
-const USERS_FILE = '/tmp/tourbillon_users.json';
-
-// --- Helper: Read/write users store (JSON file) ---
-function readUsers(): Array<{ id: string; email: string; passwordHash?: string }> {
-  try {
-    const fs = require('fs');
-    if (!fs.existsSync(USERS_FILE)) return [];
-    return JSON.parse(fs.readFileSync(USERS_FILE, 'utf-8'));
-  } catch {
-    return [];
-  }
-}
-
-// --- Helper: Generate a signed session token (HMAC-SHA256) ---
-function generateSessionToken(userId: string): string {
-  const secret = process.env.SESSION_SECRET || 'dev-session-secret-change-in-production';
-  const payload = JSON.stringify({ userId, iat: Date.now(), provider: 'email' });
-  const crypto = require('crypto');
-  const hmac = crypto.createHmac('sha256', secret);
-  hmac.update(payload);
-  return `${payload}.${hmac.digest('hex')}`;
-}
-
-// --- Helper: Verify a password against a stored hash ---
-function verifyPassword(password: string, storedHash: string): boolean {
-  const [salt, hash] = storedHash.split(':');
-  if (!salt || !hash) return false;
-  const derivedKey = scryptSync(password, salt, 64);
-  const storedKey = Buffer.from(hash, 'hex');
-  return timingSafeEqual(derivedKey, storedKey);
-}
+import { eq } from 'drizzle-orm';
+import { db, users } from '@tourbillon/db';
+import { generateSessionToken, verifyPassword, isValidEmail, isPasswordExpired, PASSWORD_POLICY } from '@/lib/auth';
 
 export async function POST(request: NextRequest) {
   try {
@@ -47,17 +17,17 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
+    if (!isValidEmail(email)) {
       return NextResponse.json(
         { error: 'Invalid email format' },
         { status: 400 }
       );
     }
 
-    // Check for existing user with password hash
-    const users = readUsers();
-    const user = users.find(u => u.email.toLowerCase() === email.toLowerCase());
+    // Query user from PostgreSQL instead of JSON file
+    const user = await db.query.users.findFirst({
+      where: eq(users.email, email.toLowerCase()),
+    });
 
     if (!user || !user.passwordHash) {
       // Return generic error to prevent email enumeration
@@ -67,7 +37,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Verify password
+    // Verify password using shared utility (scrypt format)
     const isValid = verifyPassword(password, user.passwordHash);
     if (!isValid) {
       return NextResponse.json(
@@ -76,8 +46,21 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Check password expiration (TOUR-141) - only for non-OAuth users
+    const isExpired = user.passwordChangedAt && isPasswordExpired(user.passwordChangedAt);
+    const mustReset = user.mustResetPassword === true;
+
+    if (isExpired || mustReset) {
+      // Don't generate session yet — require password change first
+      return NextResponse.json({
+        message: 'Password reset required',
+        requiresPasswordChange: true,
+        reason: isExpired ? 'Your password has expired. Please choose a new one.' : 'Your password needs to be updated.',
+      }, { status: 403 });
+    }
+
     // Generate session token and set cookie
-    const token = generateSessionToken(user.id);
+    const token = generateSessionToken(user.id, user.provider || 'email');
     const cookieStore = cookies();
     cookieStore.set('session', token, {
       httpOnly: true,

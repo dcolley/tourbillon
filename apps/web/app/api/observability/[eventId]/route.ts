@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getOrCreateDefaultCompany } from '@/lib/company';
+import { getActiveCompany } from '@/lib/company';
 import { getObservabilityEvent } from '@/lib/observability';
 
 export async function GET(
@@ -7,7 +7,7 @@ export async function GET(
   { params }: { params: Promise<{ eventId: string }> }
 ) {
   const { eventId } = await params;
-  const company = await getOrCreateDefaultCompany();
+  const company = await getActiveCompany();
   const event = await getObservabilityEvent(company.id, eventId);
   if (!event) {
     return NextResponse.json({ error: 'Not found' }, { status: 404 });

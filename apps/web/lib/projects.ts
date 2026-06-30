@@ -10,7 +10,7 @@ import {
   type Issue,
 } from '@tourbillon/db';
 import { and, desc, eq } from 'drizzle-orm';
-import { getOrCreateDefaultCompany } from './company';
+import { assertCompanyAccess, getActiveCompany } from './company';
 import { validateGoalId } from './goals';
 
 export class ProjectValidationError extends Error {
@@ -69,7 +69,11 @@ export interface CreateProjectInput {
   companyId?: string;
 }
 
-export async function listProjectOptions(goalId?: string): Promise<ProjectOption[]> {
+export async function listProjectOptions(goalId?: string, companyId?: string): Promise<ProjectOption[]> {
+  const company = companyId
+    ? await db.query.companies.findFirst({ where: eq(companies.id, companyId) })
+    : await getActiveCompany();
+  if (!company) return [];
   const rows = await db
     .select({
       id: projects.id,
@@ -78,6 +82,7 @@ export async function listProjectOptions(goalId?: string): Promise<ProjectOption
       status: projects.status,
     })
     .from(projects)
+    .where(eq(projects.companyId, company.id))
     .orderBy(desc(projects.updatedAt));
 
   if (goalId) {
@@ -89,7 +94,13 @@ export async function listProjectOptions(goalId?: string): Promise<ProjectOption
 export async function listProjects(
   statusFilter?: ProjectStatus | 'all'
 ): Promise<Project[]> {
-  const rows = await db.select().from(projects).orderBy(desc(projects.updatedAt)).limit(100);
+  const company = await getActiveCompany();
+  const rows = await db
+    .select()
+    .from(projects)
+    .where(eq(projects.companyId, company.id))
+    .orderBy(desc(projects.updatedAt))
+    .limit(100);
   if (!statusFilter || statusFilter === 'all') return rows;
   return rows.filter((p) => p.status === statusFilter);
 }
@@ -108,7 +119,7 @@ export async function createProject(input: CreateProjectInput): Promise<Project>
 
   const company = input.companyId
     ? await db.query.companies.findFirst({ where: eq(companies.id, input.companyId) })
-    : await getOrCreateDefaultCompany();
+    : await getActiveCompany();
 
   if (!company) throw new ProjectValidationError('Company not found.');
 
@@ -158,6 +169,9 @@ export interface UpdateProjectInput {
 export async function updateProject(projectId: string, input: UpdateProjectInput): Promise<Project> {
   const project = await db.query.projects.findFirst({ where: eq(projects.id, projectId) });
   if (!project) throw new ProjectValidationError('Project not found.');
+
+  const activeCompany = await getActiveCompany();
+  assertCompanyAccess(project.companyId, activeCompany.id);
 
   const updates: Partial<Project> & { updatedAt: Date } = { updatedAt: new Date() };
   const changed: Record<string, unknown> = {};

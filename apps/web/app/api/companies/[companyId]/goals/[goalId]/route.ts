@@ -71,7 +71,7 @@ export async function PATCH(
   );
 
   try {
-    const goal = await updateGoal(goalId, body);
+    const goal = await updateGoal(goalId, body, companyId);
     if (goal.companyId !== companyId) {
       return NextResponse.json({ error: 'Not found' }, { status: 404 });
     }

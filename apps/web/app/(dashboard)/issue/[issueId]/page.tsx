@@ -12,6 +12,8 @@ import { IssueDetailTabs } from './issue-detail-tabs';
 import { IssueEditForm } from './issue-edit-form';
 import { IssueExecutionPanel } from './issue-execution-panel';
 import { IssueObservabilityTab } from './issue-observability-tab';
+import { DeepLinkCompanySync } from '@/components/deep-link-company-sync';
+import { getCompanyById } from '@/lib/company';
 
 export default async function IssueDetailPage({
   params,
@@ -22,30 +24,41 @@ export default async function IssueDetailPage({
 }) {
   const { issueId } = await params;
   const { saved } = await searchParams;
-  const [detail, agents, goals, projectList] = await Promise.all([
-    getIssueDetail(issueId),
-    listIssueAgentOptions(),
-    listGoalOptions(),
-    listProjectOptions(),
-  ]);
-
-  const { comments } = detail
-    ? await listIssueComments(issueId, detail.issue.companyId, { order: 'desc' })
-    : { comments: [] };
-
+  const detail = await getIssueDetail(issueId);
   if (!detail) notFound();
 
+  const companyId = detail.issue.companyId;
+  const [agents, goals, projectList] = await Promise.all([
+    listIssueAgentOptions(companyId),
+    listGoalOptions(false, companyId),
+    listProjectOptions(undefined, companyId),
+  ]);
+
+  const { comments } = await listIssueComments(issueId, companyId, { order: 'desc' });
+
   const { issue, assignee, goal, project, activity, heartbeatRuns, heartbeatJobs } = detail;
+  const company = await getCompanyById(companyId);
   const savedFlag = saved === '1';
   const activeJob = heartbeatJobs.find((job) => job.state === 'active') ?? heartbeatJobs[0];
   const holdingRun = issue.checkoutRunId
     ? heartbeatRuns.find((r) => r.id === issue.checkoutRunId)
     : undefined;
+  const holdingRunHref = issue.checkoutRunId
+    ? holdingRun
+      ? (heartbeatJobHref(holdingRun) ?? `/heartbeat/${holdingRun.id}`)
+      : `/heartbeat/${issue.checkoutRunId}`
+    : null;
 
   const observabilityAgents = agents.map((a) => ({ id: a.id, name: a.name }));
 
   return (
     <div className="max-w-5xl space-y-6 p-6">
+      {company ? (
+        <DeepLinkCompanySync
+          requiredCompanyId={company.id}
+          requiredCompanyName={company.name}
+        />
+      ) : null}
       <div>
         <Link
           href="/issue"
@@ -112,8 +125,17 @@ export default async function IssueDetailPage({
         <form action={releaseCheckoutLockAction} className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
           <input type="hidden" name="issueId" value={issue.id} />
           <p className="text-sm text-amber-900">
-            This issue is checked out by heartbeat run{' '}
-            <span className="font-mono">{issue.checkoutRunId.slice(0, 8)}…</span>
+            This issue is checked out by{' '}
+            {holdingRunHref ? (
+              <Link
+                href={holdingRunHref}
+                className="font-mono text-amber-950 underline underline-offset-2 hover:text-amber-800"
+              >
+                heartbeat run {issue.checkoutRunId.slice(0, 8)}…
+              </Link>
+            ) : (
+              <span className="font-mono">heartbeat run {issue.checkoutRunId.slice(0, 8)}…</span>
+            )}
             {holdingRun ? ` (${holdingRun.status})` : ' (run not found — likely stale)'}.
             Agents will get 409 on checkout until the lock is released.
           </p>

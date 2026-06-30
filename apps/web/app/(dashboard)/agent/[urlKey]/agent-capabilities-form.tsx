@@ -9,6 +9,8 @@ interface AgentCapabilitiesFormProps {
   urlKey: string;
   assignedToolsets: string[];
   enabledTools: string[];
+  bufferApiKeyOverride?: string;
+  searxngUrlOverride?: string;
   updateCapabilities: (formData: FormData) => Promise<void>;
 }
 
@@ -17,6 +19,8 @@ export function AgentCapabilitiesForm({
   urlKey,
   assignedToolsets,
   enabledTools,
+  bufferApiKeyOverride,
+  searxngUrlOverride,
   updateCapabilities,
 }: AgentCapabilitiesFormProps) {
   const formRef = useRef<HTMLFormElement>(null);
@@ -140,6 +144,58 @@ export function AgentCapabilitiesForm({
           })}
         </ul>
       </div>
+
+      {(assignedToolsets.includes('buffer') || assignedToolsets.includes('web-search')) && (
+        <div className="space-y-3 rounded-md border p-4">
+          <p className="text-sm font-medium">Integration overrides</p>
+          <p className="text-xs text-muted-foreground">
+            Optional per-agent values. Leave blank to use company settings or environment fallbacks.
+          </p>
+
+          {assignedToolsets.includes('buffer') && (
+            <div className="space-y-2">
+              <label htmlFor="bufferApiKey" className="text-sm font-medium">
+                Buffer API key override
+              </label>
+              <input
+                id="bufferApiKey"
+                name="bufferApiKey"
+                type="password"
+                placeholder={bufferApiKeyOverride ? '••••••••' : 'Uses company or BUFFER_API_KEY'}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+              />
+              {bufferApiKeyOverride && (
+                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <input type="checkbox" name="clearBufferApiKey" className="rounded border-input" />
+                  Clear agent override
+                </label>
+              )}
+            </div>
+          )}
+
+          {assignedToolsets.includes('web-search') && (
+            <div className="space-y-2">
+              <label htmlFor="searxngUrl" className="text-sm font-medium">
+                SearXNG base URL override
+              </label>
+              <input
+                id="searxngUrl"
+                name="searxngUrl"
+                type="url"
+                defaultValue={searxngUrlOverride ?? ''}
+                placeholder="http://localhost:8888"
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+              />
+              {searxngUrlOverride && (
+                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <input type="checkbox" name="clearSearxngUrl" className="rounded border-input" />
+                  Clear agent override
+                </label>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       <button
         type="submit"

@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button';
 
 export const ISSUE_FILTERS = [
   { id: 'active', label: 'Active' },
+  { id: 'in_review', label: 'In review' },
   { id: 'completed', label: 'Completed' },
   { id: 'all', label: 'All' },
   { id: 'backlog', label: 'Backlog' },
@@ -33,6 +34,8 @@ export function statusesForFilter(filter: IssueFilter): readonly string[] {
   switch (filter) {
     case 'active':
       return ACTIVE_STATUSES;
+    case 'in_review':
+      return ['in_review'];
     case 'completed':
       return ['done'];
     case 'all':

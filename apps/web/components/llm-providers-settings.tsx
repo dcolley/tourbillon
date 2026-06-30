@@ -7,6 +7,14 @@ import {
   LLM_PROVIDER_TYPES,
   type LlmProviderType,
 } from '@tourbillon/shared/model-provider';
+import type { AgentModelSettings } from '@tourbillon/shared';
+import {
+  formValuesToModelSettings,
+  modelSettingsToFormValues,
+  ModelSettingsFields,
+  type ModelSettingsFormValues,
+  emptyModelSettingsFormValues,
+} from '@/components/model-settings-fields';
 
 interface LlmProviderPublic {
   id: string;
@@ -17,6 +25,7 @@ interface LlmProviderPublic {
   headers: Record<string, string>;
   apiMode: 'chat' | 'responses';
   isDefault: boolean;
+  defaultModelSettings: AgentModelSettings;
 }
 
 interface ProviderFormState {
@@ -27,6 +36,7 @@ interface ProviderFormState {
   apiMode: 'chat' | 'responses';
   isDefault: boolean;
   headerRows: Array<{ key: string; value: string }>;
+  modelSettings: ModelSettingsFormValues;
 }
 
 const EMPTY_FORM: ProviderFormState = {
@@ -37,6 +47,7 @@ const EMPTY_FORM: ProviderFormState = {
   apiMode: 'chat',
   isDefault: false,
   headerRows: [],
+  modelSettings: emptyModelSettingsFormValues(),
 };
 
 function headersToRows(headers: Record<string, string>): Array<{ key: string; value: string }> {
@@ -98,6 +109,7 @@ export function LlmProvidersSettings() {
       apiMode: provider.apiMode,
       isDefault: provider.isDefault,
       headerRows: headersToRows(provider.headers),
+      modelSettings: modelSettingsToFormValues(provider.defaultModelSettings),
     });
     setTestResult(null);
   }
@@ -112,6 +124,7 @@ export function LlmProvidersSettings() {
     setSaving(true);
     setError(null);
     try {
+      const defaultModelSettings = formValuesToModelSettings(form.modelSettings);
       const payload = {
         name: form.name,
         type: form.type,
@@ -119,6 +132,7 @@ export function LlmProvidersSettings() {
         headers: rowsToHeaders(form.headerRows),
         apiMode: form.apiMode,
         isDefault: form.isDefault,
+        defaultModelSettings,
         ...(form.apiKey.trim() ? { apiKey: form.apiKey.trim() } : {}),
       };
 
@@ -408,6 +422,23 @@ export function LlmProvidersSettings() {
               </div>
             )}
           </div>
+
+          <details className="rounded-md border p-3">
+            <summary className="cursor-pointer text-sm font-medium">
+              Default generation settings
+            </summary>
+            <div className="mt-4 space-y-3">
+              <p className="text-xs text-muted-foreground">
+                Agents using this provider inherit these values unless overridden on the agent.
+                Leave fields blank to defer to the endpoint&apos;s own defaults.
+              </p>
+              <ModelSettingsFields
+                values={form.modelSettings}
+                onChange={(modelSettings) => setForm((f) => ({ ...f, modelSettings }))}
+                showAdvanced
+              />
+            </div>
+          </details>
 
           <label className="flex items-center gap-2 text-sm">
             <input

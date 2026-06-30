@@ -13,7 +13,7 @@ import {
 } from '@tourbillon/db';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import type { IssuePriority, IssueStatus } from '@tourbillon/db';
-import { getOrCreateDefaultCompany } from './company';
+import { assertCompanyAccess, getActiveCompany } from './company';
 import { validateGoalId } from './goals';
 import { validateProjectId } from './projects';
 import { enqueueHeartbeat } from './queue';
@@ -132,7 +132,7 @@ export async function createIssue(input: CreateIssueInput): Promise<Issue> {
 
   const company = input.companyId
     ? await db.query.companies.findFirst({ where: eq(companies.id, input.companyId) })
-    : await getOrCreateDefaultCompany();
+    : await getActiveCompany();
 
   if (!company) throw new IssueValidationError('Company not found.');
 
@@ -284,6 +284,9 @@ export async function updateIssue(issueId: string, input: UpdateIssueInput): Pro
   const issue = await db.query.issues.findFirst({ where: eq(issues.id, issueId) });
   if (!issue) throw new IssueValidationError('Issue not found.');
 
+  const activeCompany = await getActiveCompany();
+  assertCompanyAccess(issue.companyId, activeCompany.id);
+
   const updates: Partial<Issue> & { updatedAt: Date } = { updatedAt: new Date() };
   const changed: Record<string, unknown> = {};
 
@@ -405,20 +408,13 @@ export async function updateIssue(issueId: string, input: UpdateIssueInput): Pro
   return updated;
 }
 
-export const ISSUE_LIST_PAGE_SIZE = 25;
-export const ISSUE_KANBAN_LIMIT = 500;
-
-export type IssueListRow = {
-  issue: Issue;
-  agent: { id: string; name: string; urlKey: string } | null;
-};
-
-export interface IssueListResult {
-  rows: IssueListRow[];
-  total: number;
-  page: number;
-  pageSize: number;
-}
+export {
+  ISSUE_LIST_PAGE_SIZE,
+  ISSUE_KANBAN_LIMIT,
+  type IssueListRow,
+  type IssueListResult,
+} from './issue-list';
+import { ISSUE_LIST_PAGE_SIZE, type IssueListResult } from './issue-list';
 
 export async function listIssues(opts: {
   statuses: readonly string[];
@@ -427,7 +423,7 @@ export async function listIssues(opts: {
 }): Promise<IssueListResult> {
   const page = Math.max(0, opts.page ?? 0);
   const pageSize = opts.pageSize ?? ISSUE_LIST_PAGE_SIZE;
-  const company = await getOrCreateDefaultCompany();
+  const company = await getActiveCompany();
   const statusList = opts.statuses as IssueStatus[];
 
   const where = and(
@@ -465,9 +461,14 @@ export async function listIssues(opts: {
   };
 }
 
-export async function listIssueAgentOptions(): Promise<IssueAgentOption[]> {
+export async function listIssueAgentOptions(companyId?: string): Promise<IssueAgentOption[]> {
+  const company = companyId
+    ? await db.query.companies.findFirst({ where: eq(companies.id, companyId) })
+    : await getActiveCompany();
+  if (!company) return [];
   return db
     .select({ id: agents.id, name: agents.name, urlKey: agents.urlKey })
     .from(agents)
+    .where(eq(agents.companyId, company.id))
     .orderBy(agents.name);
 }

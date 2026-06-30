@@ -1,5 +1,7 @@
 export * from './memory-keys';
+export * from './heartbeat-memory';
 export * from './provider';
+export * from './model-settings';
 export * from './agent-factory';
 export * from './harness-config';
 export * from './mastra-instance';

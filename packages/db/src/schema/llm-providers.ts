@@ -19,6 +19,7 @@ export const llmProviders = pgTable('llm_providers', {
   apiKey: text('api_key'),
   headers: jsonb('headers').notNull().default({}),
   apiMode: text('api_mode', { enum: ['chat', 'responses'] }).notNull().default('chat'),
+  defaultModelSettings: jsonb('default_model_settings').notNull().default({}),
   isDefault: boolean('is_default').notNull().default(false),
   createdAt: timestamp('created_at').notNull().defaultNow(),
   updatedAt: timestamp('updated_at').notNull().defaultNow(),

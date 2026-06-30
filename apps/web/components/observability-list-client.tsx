@@ -15,11 +15,19 @@ import {
 } from '@/lib/observability-types';
 import {
   buildEventTimeline,
+  extractModelChunkOutput,
+  extractModelInferenceSummary,
+  extractModelStepOutput,
   formatEventPreview,
   formatJsonText,
   formatPayloadForDisplay,
+  isModelChunkEvent,
+  isModelInferenceEvent,
+  isModelStepEvent,
   shortId,
+  summarizePromptMessage,
 } from '@/lib/observability-display';
+import { MarkdownContent } from '@/components/markdown-content';
 import { PageHeader } from '@/components/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -69,6 +77,8 @@ const EVENT_TYPE_LABELS: Record<ObservabilityEventType, string> = {
   agent_run: 'Agent run',
   model_generation: 'Model generation',
   model_step: 'Model step',
+  model_inference: 'Provider call',
+  model_chunk: 'Model chunk',
   tool_call: 'Tool call',
   mcp_tool_call: 'MCP tool',
   generic: 'Generic',
@@ -742,6 +752,21 @@ function ObservabilityEventDetail({
   const timeline = buildEventTimeline(event);
   const payloadDisplay = formatPayloadForDisplay(event.payload);
   const [showRawPayload, setShowRawPayload] = useState(false);
+  const [showPrompt, setShowPrompt] = useState(false);
+
+  const modelStep = isModelStepEvent(event.eventType, event.name)
+    ? extractModelStepOutput(event.payload)
+    : null;
+  const modelInference = isModelInferenceEvent(event.eventType, event.name)
+    ? extractModelInferenceSummary(event.payload, event.name)
+    : null;
+  const modelChunk = isModelChunkEvent(event.eventType, event.name)
+    ? extractModelChunkOutput(event.payload, event.name)
+    : null;
+
+  const showModelStepBlocks = modelStep != null;
+  const showInferenceBlock = modelInference != null && !showModelStepBlocks;
+  const showChunkBlock = modelChunk != null && !showModelStepBlocks && !showInferenceBlock;
 
   return (
     <div className="space-y-3 text-sm">
@@ -778,6 +803,18 @@ function ObservabilityEventDetail({
         </p>
       )}
 
+      {showModelStepBlocks && modelStep && (
+        <ModelStepDetail modelStep={modelStep} showPrompt={showPrompt} onTogglePrompt={() => setShowPrompt((v) => !v)} />
+      )}
+
+      {showInferenceBlock && modelInference && (
+        <ModelInferenceDetail summary={modelInference} />
+      )}
+
+      {showChunkBlock && modelChunk && (
+        <ModelChunkDetail chunk={modelChunk} />
+      )}
+
       {timeline.length > 0 && (
         <div>
           <p className="text-xs font-medium text-muted-foreground mb-2">Activity</p>
@@ -792,9 +829,13 @@ function ObservabilityEventDetail({
                         ? entry.isError
                           ? 'text-destructive'
                           : 'text-green-600 dark:text-green-400'
-                        : entry.kind === 'error'
-                          ? 'text-destructive'
-                          : 'text-muted-foreground'
+                        : entry.kind === 'reasoning'
+                          ? 'text-violet-600 dark:text-violet-400'
+                          : entry.kind === 'text'
+                            ? 'text-foreground'
+                            : entry.kind === 'error'
+                              ? 'text-destructive'
+                              : 'text-muted-foreground'
                   }`}
                 >
                   {entry.kind === 'tool_call'
@@ -803,9 +844,13 @@ function ObservabilityEventDetail({
                       ? entry.isError
                         ? '✗'
                         : '←'
-                      : entry.kind === 'error'
-                        ? '!'
-                        : '·'}
+                      : entry.kind === 'reasoning'
+                        ? '~'
+                        : entry.kind === 'text'
+                          ? '"'
+                          : entry.kind === 'error'
+                            ? '!'
+                            : '·'}
                 </span>
                 <div className="min-w-0">
                   <span
@@ -815,9 +860,16 @@ function ObservabilityEventDetail({
                   >
                     {entry.label}
                   </span>
-                  {entry.detail && (
+                  {entry.detail && entry.kind !== 'text' && entry.kind !== 'reasoning' && (
                     <p className="text-muted-foreground mt-0.5 break-words whitespace-pre-wrap">
                       {entry.detail}
+                    </p>
+                  )}
+                  {entry.detail && entry.kind === 'reasoning' && (
+                    <p className="text-muted-foreground mt-0.5 break-words whitespace-pre-wrap font-mono text-[11px] italic">
+                      {entry.detail.length > 600
+                        ? `${entry.detail.slice(0, 600)}…`
+                        : entry.detail}
                     </p>
                   )}
                 </div>
@@ -827,7 +879,7 @@ function ObservabilityEventDetail({
         </div>
       )}
 
-      {timeline.length === 0 && event.outputPreview && (
+      {timeline.length === 0 && !showModelStepBlocks && !showInferenceBlock && !showChunkBlock && event.outputPreview && (
         <div>
           <p className="text-xs font-medium text-muted-foreground mb-1">Output</p>
           <pre className="rounded border bg-background p-3 text-xs overflow-x-auto whitespace-pre-wrap font-mono">
@@ -836,7 +888,12 @@ function ObservabilityEventDetail({
         </div>
       )}
 
-      {timeline.length === 0 && !event.outputPreview && event.inputPreview && (
+      {timeline.length === 0 &&
+        !showModelStepBlocks &&
+        !showInferenceBlock &&
+        !showChunkBlock &&
+        !event.outputPreview &&
+        event.inputPreview && (
         <div>
           <p className="text-xs font-medium text-muted-foreground mb-1">Input</p>
           <pre className="rounded border bg-background p-3 text-xs overflow-x-auto whitespace-pre-wrap font-mono">
@@ -873,6 +930,194 @@ function ObservabilityEventDetail({
             </div>
           )}
         </div>
+      )}
+    </div>
+  );
+}
+
+function ModelStepDetail({
+  modelStep,
+  showPrompt,
+  onTogglePrompt,
+}: {
+  modelStep: NonNullable<ReturnType<typeof extractModelStepOutput>>;
+  showPrompt: boolean;
+  onTogglePrompt: () => void;
+}) {
+  const hasReasoningTokens = modelStep.reasoningTokens != null && modelStep.reasoningTokens > 0;
+
+  return (
+    <div className="space-y-3">
+      {(modelStep.stepIndex != null || modelStep.finishReason) && (
+        <div className="flex flex-wrap gap-2 text-xs">
+          {modelStep.stepIndex != null && (
+            <span className="rounded bg-muted px-2 py-0.5 font-mono">Step {modelStep.stepIndex}</span>
+          )}
+          {modelStep.finishReason && (
+            <span className="rounded bg-muted px-2 py-0.5">finish: {modelStep.finishReason}</span>
+          )}
+          {modelStep.outputTokens != null && (
+            <span className="rounded bg-muted px-2 py-0.5">{modelStep.outputTokens} output tok</span>
+          )}
+        </div>
+      )}
+
+      {modelStep.text?.trim() && (
+        <div>
+          <p className="text-xs font-medium text-muted-foreground mb-2">Response</p>
+          <div className="rounded border bg-background p-3 text-xs max-h-96 overflow-y-auto prose prose-sm dark:prose-invert max-w-none">
+            <MarkdownContent content={modelStep.text.trim()} />
+          </div>
+        </div>
+      )}
+
+      {modelStep.toolCalls.length > 0 && (
+        <div>
+          <p className="text-xs font-medium text-muted-foreground mb-2">Tool calls</p>
+          <ul className="space-y-2 rounded border bg-background p-3 text-xs">
+            {modelStep.toolCalls.map((call, index) => {
+              const name = call.toolName ?? call.name ?? 'tool';
+              const argsJson =
+                call.args && Object.keys(call.args as object).length > 0
+                  ? JSON.stringify(call.args, null, 2)
+                  : null;
+              return (
+                <li key={call.toolCallId ?? `${name}-${index}`}>
+                  <span className="font-mono font-medium text-blue-600 dark:text-blue-400">
+                    {name}
+                  </span>
+                  {argsJson && (
+                    <pre className="mt-1 text-muted-foreground overflow-x-auto whitespace-pre-wrap font-mono text-[11px]">
+                      {argsJson}
+                    </pre>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+
+      {modelStep.inputMessages && modelStep.inputMessages.length > 0 && (
+        <div>
+          <button
+            type="button"
+            className="text-xs font-medium text-muted-foreground hover:text-foreground"
+            onClick={onTogglePrompt}
+          >
+            {showPrompt ? 'Hide prompt' : `View prompt (${modelStep.inputMessages.length} messages)`}
+          </button>
+          {showPrompt && (
+            <ul className="mt-2 space-y-1.5 rounded border bg-background p-3 text-xs max-h-64 overflow-y-auto">
+              {modelStep.inputMessages.map((msg, index) => (
+                <li key={index} className="flex gap-2">
+                  <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] uppercase">
+                    {msg.role}
+                  </span>
+                  <span className="text-muted-foreground break-words">
+                    {summarizePromptMessage(msg.content)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
+      {!hasReasoningTokens && (
+        <p className="rounded border border-dashed px-3 py-2 text-xs text-muted-foreground">
+          No reasoning tokens reported for this step. To capture streamed reasoning text, set{' '}
+          <code className="font-mono text-[11px]">OBSERVABILITY_STORE_MODEL_CHUNKS=true</code> and
+          look for <span className="font-medium">Model chunk</span> events with type reasoning.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function ModelInferenceDetail({
+  summary,
+}: {
+  summary: NonNullable<ReturnType<typeof extractModelInferenceSummary>>;
+}) {
+  return (
+    <div className="rounded border bg-background p-3 text-xs space-y-2">
+      <p className="font-medium">Provider call (latency only)</p>
+      <p className="text-muted-foreground">
+        This span measures model latency and token usage. Response text and tool calls are stored on
+        the sibling <span className="font-medium">Model step</span> event
+        {summary.stepIndex != null ? ` for step ${summary.stepIndex}` : ''}.
+      </p>
+      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-muted-foreground">
+        {summary.stepIndex != null && (
+          <>
+            <dt>Step</dt>
+            <dd className="font-mono">{summary.stepIndex}</dd>
+          </>
+        )}
+        {summary.finishReason && (
+          <>
+            <dt>Finish</dt>
+            <dd>{summary.finishReason}</dd>
+          </>
+        )}
+        {summary.inputTokens != null && (
+          <>
+            <dt>Input tokens</dt>
+            <dd className="font-mono">{summary.inputTokens}</dd>
+          </>
+        )}
+        {summary.outputTokens != null && (
+          <>
+            <dt>Output tokens</dt>
+            <dd className="font-mono">{summary.outputTokens}</dd>
+          </>
+        )}
+        {summary.completionStartTime && (
+          <>
+            <dt>First token</dt>
+            <dd className="font-mono">{summary.completionStartTime}</dd>
+          </>
+        )}
+        {summary.availableToolCount != null && (
+          <>
+            <dt>Tools available</dt>
+            <dd className="font-mono">{summary.availableToolCount}</dd>
+          </>
+        )}
+      </dl>
+    </div>
+  );
+}
+
+function ModelChunkDetail({
+  chunk,
+}: {
+  chunk: NonNullable<ReturnType<typeof extractModelChunkOutput>>;
+}) {
+  const isReasoning = chunk.chunkType === 'reasoning';
+
+  return (
+    <div className="space-y-2">
+      <p className="text-xs font-medium text-muted-foreground">
+        {isReasoning ? 'Reasoning chunk' : `Chunk: ${chunk.chunkType}`}
+      </p>
+      {chunk.text?.trim() ? (
+        isReasoning ? (
+          <pre className="rounded border bg-background p-3 text-xs max-h-96 overflow-y-auto whitespace-pre-wrap font-mono italic text-muted-foreground">
+            {chunk.text.trim()}
+          </pre>
+        ) : chunk.chunkType === 'text' ? (
+          <div className="rounded border bg-background p-3 text-xs max-h-96 overflow-y-auto prose prose-sm dark:prose-invert max-w-none">
+            <MarkdownContent content={chunk.text.trim()} />
+          </div>
+        ) : (
+          <pre className="rounded border bg-background p-3 text-xs max-h-96 overflow-y-auto whitespace-pre-wrap font-mono">
+            {chunk.text.trim()}
+          </pre>
+        )
+      ) : (
+        <p className="text-xs text-muted-foreground">(empty chunk)</p>
       )}
     </div>
   );

@@ -1,19 +1,10 @@
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { db, agents } from '@tourbillon/db';
-import { desc } from 'drizzle-orm';
-import { AgentValidationError, createAgent } from '@/lib/agents';
+import { desc, eq } from 'drizzle-orm';
+import { getActiveCompany } from '@/lib/company';
+import { AgentValidationError, AGENT_ROLE_OPTIONS, createAgent } from '@/lib/agents';
 import { AgentInstructionFields } from './agent-instruction-fields';
-
-const ROLES = [
-  { value: 'ceo', label: 'CEO' },
-  { value: 'cto', label: 'CTO' },
-  { value: 'engineer', label: 'Engineer' },
-  { value: 'pm', label: 'Product Manager' },
-  { value: 'qa', label: 'QA' },
-  { value: 'designer', label: 'Designer' },
-  { value: 'custom', label: 'Custom' },
-] as const;
 
 async function hireAgent(formData: FormData) {
   'use server';
@@ -46,7 +37,12 @@ export default async function NewAgentPage({
 }: {
   searchParams: { error?: string };
 }) {
-  const existingAgents = await db.select().from(agents).orderBy(desc(agents.createdAt));
+  const company = await getActiveCompany();
+  const existingAgents = await db
+    .select()
+    .from(agents)
+    .where(eq(agents.companyId, company.id))
+    .orderBy(desc(agents.createdAt));
   const error = searchParams.error ? decodeURIComponent(searchParams.error) : null;
 
   return (
@@ -105,7 +101,7 @@ export default async function NewAgentPage({
             defaultValue="engineer"
             className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
           >
-            {ROLES.map((role) => (
+            {AGENT_ROLE_OPTIONS.map((role) => (
               <option key={role.value} value={role.value}>
                 {role.label}
               </option>

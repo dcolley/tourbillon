@@ -1,0 +1,14 @@
+# Tourbillon Discord Setup Configuration
+# ======================================
+# Copy this file to .env and fill in your values before running:
+#   python scripts/discord-setup.py
+
+# Required: Discord Bot Token
+# Get this from https://discord.com/developers/applications
+DISCORD_BOT_TOKEN=your_bot_token_here
+
+# Optional: Server Name (default: "Tourbillon - AI Agent Orchestration")
+SERVER_NAME=Tourbillon
+
+# Optional: GitHub Webhook URL for announcements
+GITHUB_WEBHOOK_URL=<your-github-webhook-url>

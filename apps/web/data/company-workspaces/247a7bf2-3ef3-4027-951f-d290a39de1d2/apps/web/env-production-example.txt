@@ -1,0 +1,57 @@
+# Tourbillon Production Environment Variables
+# Copy this to .env.local or set as environment variables in your deployment platform
+
+# ============================================================================
+# DATABASE (PostgreSQL via Neon Serverless) — TOUR-144
+# ============================================================================
+# PostgreSQL connection string for Prisma/Drizzle ORM
+# Format: postgresql://<user>:<password>@<host>:<port>/<database>?sslmode=require
+DATABASE_URL=postgresql://postgres:<password>@<cluster>.neon.tech/tourbillon_db?sslmode=require
+
+# Optional: Read-only replica URL (for scaling reads)
+# DATABASE_READ_URL=postgresql://postgres:<password>@<read-replica>.neon.tech/tourbillon_db?sslmode=require
+
+# ============================================================================
+# SESSION MANAGEMENT
+# ============================================================================
+SESSION_SECRET=<generate-with-openssl-random-pseudo-bytes-64>
+
+# ============================================================================
+# AUTHENTICATION PROVIDERS
+# ============================================================================
+# Google OAuth
+GOOGLE_CLIENT_ID=<your-google-client-id>.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=<your-google-oauth-secret>
+
+# GitHub OAuth
+GITHUB_CLIENT_ID=<your-github-client-id>
+GITHUB_CLIENT_SECRET=<your-github-oauth-secret>
+
+# Auth0 (if enabled)
+AUTH0_DOMAIN=your-tenant.auth0.com
+AUTH0_CLIENT_ID=<your-auth0-client-id>
+AUTH0_CLIENT_SECRET=<your-auth0-client-secret>
+AUTH0_ISSUER_BASE_URL=https://your-tenant.auth0.com/
+
+# ============================================================================
+# APPLICATION CONFIGURATION
+# ============================================================================
+NEXT_PUBLIC_BASE_URL=https://app.tourbillon.io
+
+# ============================================================================
+# SLACK INTEGRATION (TOUR-97)
+# ============================================================================
+SLACK_WEBHOOK_URL=<your-slack-incoming-webhook-url>
+SLACK_APP_ID=xapp-your-app-id
+SLACK_CLIENT_ID=<your-slack-client-id>
+SLACK_CLIENT_SECRET=<your-slack-secret>
+SLACK_REDIRECT_URI=https://app.tourbillon.io/api/slack/callback
+SLACK_SIGNING_SECRET=<your-slack-signing-secret>
+SLACK_BOT_TOKEN=xoxb-your-bot-token
+SLACK_DEFAULT_CHANNEL=#announcements
+
+# ============================================================================
+# MONITORING & ANALYTICS
+# ============================================================================
+GA_MEASUREMENT_ID=G-XXXXXXXXXX
+JITSU_DATADOG_URL=https://app.datadoghq.com

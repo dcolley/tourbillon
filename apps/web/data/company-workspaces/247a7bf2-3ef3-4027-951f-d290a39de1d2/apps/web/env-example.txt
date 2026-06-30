@@ -14,3 +14,26 @@ GITHUB_CLIENT_SECRET=your-github-client-secret
 
 # --- App Configuration ---
 NEXT_PUBLIC_BASE_URL=http://localhost:3000
+
+# ============================================================================
+# TOUR-97: Slack Integration — Environment Variables
+# ============================================================================
+# Configure these to enable Slack notifications and event handling.
+
+# Incoming Webhook (legacy method — simpler setup, limited to posting)
+SLACK_WEBHOOK_URL=<your-slack-incoming-webhook-url>
+# OR use OAuth Bot API (more capable — supports interactive elements, slash commands)
+
+# --- Slack OAuth App Credentials (for Bot API) ---
+SLACK_APP_ID=xapp-your-app-id
+SLACK_CLIENT_ID=your-slack-client-id
+SLACK_CLIENT_SECRET=your-slack-client-secret
+SLACK_REDIRECT_URI=http://localhost:3000/api/slack/callback
+
+# --- Slack Webhook Signing Secret (for event verification) ---
+SLACK_SIGNING_SECRET=your-slack-signing-secret
+
+# --- Bot Configuration ---
+SLACK_BOT_TOKEN=xoxb-your-bot-token
+SLACK_DEFAULT_CHANNEL=#general
+SLACK_BOT_USERNAME=Tourbillon Bot

@@ -8,6 +8,7 @@ import {
   buildHarnessThreadId,
   createTourbillonHarness,
   ensureHarnessThread,
+  clearHarnessIdleThread,
   type TourbillonHarnessState,
   HARNESS_THREAD_MESSAGE_CAP,
   getResumableHarnessRun,
@@ -16,7 +17,7 @@ import {
   type HarnessObservabilityContext,
 } from '@tourbillon/mastra';
 import type { HeartbeatJobData } from '@tourbillon/shared';
-import { buildWakeMessage, isHarnessAdapter, isObservabilityEnabled } from '@tourbillon/shared';
+import { buildWakeMessage, isHarnessAdapter, isObservabilityEnabled, parseCompanySettings, type CompanySettings } from '@tourbillon/shared';
 import { randomUUID } from 'crypto';
 
 export interface HarnessRunContext {
@@ -41,7 +42,7 @@ export async function runWithHarness(
   agentRecord: AgentRecord,
   context: HarnessRunContext,
   timeoutMs: number,
-  allowedMcpServerIds: string[],
+  options: { allowedMcpServerIds: string[]; companySettings?: CompanySettings | null },
 ): Promise<HarnessRunResult> {
   if (!isHarnessAdapter(agentRecord.adapterType)) {
     throw new Error(`Agent ${agentRecord.id} is not configured for harness execution`);
@@ -52,13 +53,17 @@ export async function runWithHarness(
   const cwd = await buildHarnessCwd(agentRecord, taskId);
 
   const harness = await createTourbillonHarness(agentRecord, {
-    allowedMcpServerIds,
+    allowedMcpServerIds: options.allowedMcpServerIds,
+    companySettings: options.companySettings ?? null,
     cwd,
   });
 
   await harness.init();
 
   const resumable = await getResumableHarnessRun(agentRecord.id, taskId);
+  if (!resumable && !taskId) {
+    await clearHarnessIdleThread(agentRecord.id);
+  }
   const threadId = resumable?.threadId ?? buildHarnessThreadId(agentRecord, taskId);
   await ensureHarnessThread(harness, threadId);
 
