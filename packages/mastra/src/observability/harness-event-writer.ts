@@ -119,7 +119,17 @@ function resolveToolName(
 
 function eventDisplayName(ctx: HarnessObservabilityContext, event: HarnessEvent): string {
   const toolName = resolveToolName(ctx, event);
-  if (toolName) return toolName;
+  if (toolName) {
+    const labels: Record<string, string> = {
+      mastra_workspace_execute_command: 'sandbox: execute',
+      mastra_workspace_get_process_output: 'sandbox: process output',
+      mastra_workspace_kill_process: 'sandbox: kill process',
+      mastra_workspace_read_file: 'sandbox: read file',
+      mastra_workspace_write_file: 'sandbox: write file',
+      mastra_workspace_edit_file: 'sandbox: edit file',
+    };
+    return labels[toolName] ?? toolName;
+  }
 
   if ('toolCallId' in event && typeof event.toolCallId === 'string') {
     return `${event.type}:${event.toolCallId.slice(0, 8)}`;

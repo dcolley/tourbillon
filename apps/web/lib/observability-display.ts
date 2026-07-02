@@ -2,6 +2,21 @@
  * Human-readable formatting for observability previews and payloads.
  */
 
+const WORKSPACE_TOOL_LABELS: Record<string, string> = {
+  mastra_workspace_execute_command: 'sandbox: execute',
+  mastra_workspace_get_process_output: 'sandbox: process output',
+  mastra_workspace_kill_process: 'sandbox: kill process',
+  mastra_workspace_read_file: 'sandbox: read file',
+  mastra_workspace_write_file: 'sandbox: write file',
+  mastra_workspace_edit_file: 'sandbox: edit file',
+  mastra_workspace_grep: 'sandbox: grep',
+  mastra_workspace_glob: 'sandbox: glob',
+};
+
+export function humanizeObservabilityToolName(name: string): string {
+  return WORKSPACE_TOOL_LABELS[name] ?? name;
+}
+
 interface MessageContentPart {
   type?: string;
   text?: string;
@@ -413,7 +428,10 @@ function summarizeHarnessPayload(payload: Record<string, unknown>): string | nul
     return summarizeMessageContent(payload.message.content);
   }
   if (payload.type === 'tool_end' || payload.type === 'tool_start') {
-    const name = typeof payload.toolName === 'string' ? payload.toolName : null;
+    const name =
+      typeof payload.toolName === 'string'
+        ? humanizeObservabilityToolName(payload.toolName)
+        : null;
     if (payload.type === 'tool_end' && 'result' in payload) {
       return name
         ? `${name} → ${summarizeToolResult(payload.result)}`
@@ -526,7 +544,7 @@ export function buildEventTimeline(event: {
       }
 
       for (const call of step.toolCalls) {
-        const name = call.toolName ?? call.name ?? 'tool';
+        const name = humanizeObservabilityToolName(call.toolName ?? call.name ?? 'tool');
         const args =
           call.args && Object.keys(call.args as object).length > 0
             ? JSON.stringify(call.args)
@@ -853,7 +871,7 @@ export function extractModelChunkOutput(
 
 export function summarizeModelStepPreview(step: ModelStepOutput): string {
   const toolNames = step.toolCalls
-    .map((c) => c.toolName ?? c.name)
+    .map((c) => humanizeObservabilityToolName(c.toolName ?? c.name ?? ''))
     .filter((n): n is string => Boolean(n));
 
   if (toolNames.length > 0) {

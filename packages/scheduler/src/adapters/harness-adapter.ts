@@ -16,7 +16,7 @@ import {
   writeHarnessObservabilityEvent,
   type HarnessObservabilityContext,
 } from '@tourbillon/mastra';
-import type { HeartbeatJobData } from '@tourbillon/shared';
+import type { HeartbeatJobData, AgentRuntimeConfig } from '@tourbillon/shared';
 import { buildWakeMessage, isHarnessAdapter, isObservabilityEnabled, parseCompanySettings, type CompanySettings } from '@tourbillon/shared';
 import { randomUUID } from 'crypto';
 
@@ -76,6 +76,7 @@ export async function runWithHarness(
     goalId,
     projectId,
     jobId: job.id ?? undefined,
+    agentRuntimeConfig: agentRecord.runtimeConfig as AgentRuntimeConfig,
   });
 
   const traceId = randomUUID();

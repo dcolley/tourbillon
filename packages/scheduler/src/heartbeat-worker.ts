@@ -16,7 +16,7 @@ import {
   shouldUseHeartbeatMemory,
   clearInboxThread,
 } from '@tourbillon/mastra';
-import type { HeartbeatJobData } from '@tourbillon/shared';
+import type { HeartbeatJobData, AgentRuntimeConfig } from '@tourbillon/shared';
 import type { AgentModelSettings } from '@tourbillon/shared';
 import {
   DEFAULT_HEARTBEAT_TIMEOUT_SEC,
@@ -42,7 +42,13 @@ const CONCURRENCY = parseInt(process.env.WORKER_CONCURRENCY ?? '1', 10);
 export const heartbeatWorker = new Worker<HeartbeatJobData>(
   QUEUE_HEARTBEAT,
   processHeartbeat,
-  { connection: workerConnection, concurrency: CONCURRENCY, stalledInterval: 30_000 }
+  {
+    connection: workerConnection,
+    concurrency: CONCURRENCY,
+    lockDuration: 120_000,
+    stalledInterval: 15_000,
+    maxStalledCount: 3,
+  }
 );
 
 heartbeatWorker.on('completed', (job) => {
@@ -420,6 +426,7 @@ async function runDurableAgentHeartbeat(params: {
     goalId: issueForTask?.goalId ?? undefined,
     projectId: issueForTask?.projectId ?? undefined,
     jobId: job.id ?? undefined,
+    agentRuntimeConfig: agentRecord.runtimeConfig as AgentRuntimeConfig,
   });
 
   const memoryKeys = buildHeartbeatMemoryKeys({
