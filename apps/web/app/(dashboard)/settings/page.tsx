@@ -1,6 +1,12 @@
 import { redirect } from 'next/navigation';
 import { getActiveCompany, updateCompanySettings, updateCompanyIntegrations } from '@/lib/company';
-import { resolveModelProviderConfig, parseCompanySettings, isSearxngConfigured } from '@tourbillon/shared';
+import {
+  getExecutionWorkspaceRoot,
+  getWorkspaceRoot,
+  resolveModelProviderConfig,
+  parseCompanySettings,
+  isSearxngConfigured,
+} from '@tourbillon/shared';
 import { LlmProvidersSettings } from '@/components/llm-providers-settings';
 
 async function saveSettings(formData: FormData) {
@@ -70,7 +76,21 @@ export default async function SettingsPage({
     { label: 'Internal API', value: process.env.INTERNAL_API_URL ?? '—' },
     {
       label: 'Company workspace',
-      value: process.env.COMPANY_WORKSPACE_ROOT ?? './data/company-workspaces',
+      value: getWorkspaceRoot(),
+    },
+    {
+      label: 'Execution workspace',
+      value: getExecutionWorkspaceRoot(),
+    },
+    {
+      label: 'Sandbox isolation',
+      value: process.env.SANDBOX_ISOLATION ?? 'platform default',
+    },
+    {
+      label: 'Sandbox timeout',
+      value: process.env.SANDBOX_COMMAND_TIMEOUT_MS
+        ? `${process.env.SANDBOX_COMMAND_TIMEOUT_MS} ms`
+        : '120000 ms (default)',
     },
   ];
 

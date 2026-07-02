@@ -6,6 +6,7 @@ export * from './model-settings';
 export * from './agent-runtime';
 export * from './wake-message';
 export * from './company-workspace-types';
+export * from './monorepo-root';
 export * from './company-workspace';
 export * from './execution-workspace';
 export * from './observability';

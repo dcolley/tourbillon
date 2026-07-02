@@ -29,6 +29,9 @@ Edit `.env` at the **repo root** (not inside `apps/web`). Important values:
 | `LM_STUDIO_BASE_URL` | LLM API endpoint | `http://localhost:1234/v1` |
 | `LM_STUDIO_DEFAULT_MODEL` | Model name in LM Studio | match your loaded model |
 | `COMPANY_WORKSPACE_ROOT` | Per-company shared document storage | `./data/company-workspaces` |
+| `EXECUTION_WORKSPACE_ROOT` | Agent code-execution sandbox dirs | `./data/execution-workspaces` |
+
+Relative paths for workspace roots resolve from the **monorepo root** (where `pnpm-workspace.yaml` lives), not from each process's working directory.
 
 Start infrastructure and apply migrations:
 
@@ -170,3 +173,39 @@ Heartbeats and tool calls will fail without a reachable LLM when workers process
 ## Should I run from the root folder?
 
 **Yes.** Always `cd` to the repo root before `pnpm install`, `pnpm dev`, `pnpm workers:dev`, or database commands. The monorepo tooling, workspace links, and environment file all assume that working directory.
+
+## Backup and restore (filesystem data)
+
+Tourbillon stores agent-created files outside Git under `./data/` at the repo root:
+
+| Directory | Contents |
+|---|---|
+| `data/company-workspaces/` | Company documents, drafts, uploads, per-agent skills |
+| `data/execution-workspaces/` | Per-issue sandbox copies from code-execution tasks |
+
+**Back up regularly** — code restores from GitHub; filesystem data does not.
+
+### Create a backup
+
+```bash
+./scripts/backup-workspace-data.sh ~/backups/tourbillon
+```
+
+This writes a timestamped `tourbillon-data-YYYYMMDD-HHMMSS.tar.gz` containing the entire `data/` directory. Store archives on an external drive, NAS, or cloud sync folder outside the repo.
+
+Example cron (daily at 2am):
+
+```cron
+0 2 * * * /path/to/tourbillon/scripts/backup-workspace-data.sh /path/to/backups/tourbillon
+```
+
+### Restore after system failure
+
+1. Clone the repo and run first-time setup (`pnpm install`, configure `.env`, `docker compose up -d`, `pnpm db:migrate`).
+2. Extract your latest backup into the repo root:
+   ```bash
+   tar -xzf tourbillon-data-YYYYMMDD-HHMMSS.tar.gz -C /path/to/tourbillon
+   ```
+3. Start `pnpm dev` and `pnpm workers:dev`.
+
+Postgres (issues, comments, agents) is separate from filesystem backups — restore the database from your own DB backup strategy if needed.

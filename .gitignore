@@ -31,6 +31,10 @@ data/company-workspaces/
 # Agent execution sandbox data
 data/execution-workspaces/
 
+# Legacy workspace paths (pre-consolidation)
+apps/web/data/
+packages/scheduler/data/
+
 # TypeScript
 *.tsbuildinfo
 
