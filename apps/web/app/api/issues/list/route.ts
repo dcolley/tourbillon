@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { ISSUE_KANBAN_LIMIT, listIssues } from '@/lib/issues';
-import { parseIssueFilter, statusesForFilter } from '@/app/(dashboard)/issue/issue-status-filter';
+import { parseIssueFilter, statusesForFilter } from '@/app/(dashboard)/issue/issue-filter';
 
 function serializeIssueRow(row: Awaited<ReturnType<typeof listIssues>>['rows'][number]) {
   const { issue, agent } = row;

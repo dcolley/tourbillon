@@ -6,14 +6,17 @@ import { listGoalOptions } from '@/lib/goals';
 import { listProjectOptions } from '@/lib/projects';
 import { listIssueComments } from '@/lib/issue-comments';
 import { getIssueDetail, listIssueAgentOptions } from '@/lib/issues';
-import { commentOnIssueAction, updateIssueAction, releaseCheckoutLockAction } from '../actions';
+import { commentOnIssueAction, updateIssueAction, updateIssueDescriptionAction, releaseCheckoutLockAction } from '../actions';
 import { IssueCommentsSection } from './issue-comments-section';
+import { IssueDescriptionSection } from './issue-description-section';
 import { IssueDetailTabs } from './issue-detail-tabs';
 import { IssueEditForm } from './issue-edit-form';
 import { IssueExecutionPanel } from './issue-execution-panel';
 import { IssueObservabilityTab } from './issue-observability-tab';
 import { DeepLinkCompanySync } from '@/components/deep-link-company-sync';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { getCompanyById } from '@/lib/company';
+import { STICKY_TOOLBAR_ROOT_ATTR } from '@/lib/sticky-toolbar';
 
 export default async function IssueDetailPage({
   params,
@@ -52,74 +55,84 @@ export default async function IssueDetailPage({
   const observabilityAgents = agents.map((a) => ({ id: a.id, name: a.name }));
 
   return (
-    <div className="max-w-5xl space-y-6 p-6">
+    <div {...{ [STICKY_TOOLBAR_ROOT_ATTR]: '' }}>
+      <IssueDetailTabs
+        identifier={issue.identifier}
+        title={issue.title}
+        overview={
+          <>
       {company ? (
         <DeepLinkCompanySync
           requiredCompanyId={company.id}
           requiredCompanyName={company.name}
         />
       ) : null}
-      <div>
-        <Link
-          href="/issue"
-          className="text-sm text-muted-foreground hover:text-foreground transition-colors"
-        >
-          ← Back to issues
-        </Link>
-        <p className="mt-2 font-mono text-sm text-muted-foreground">{issue.identifier}</p>
-        <h1 className="text-2xl font-bold tracking-tight">{issue.title}</h1>
-        {goal && (
-          <p className="mt-1 text-sm text-muted-foreground">
-            Goal:{' '}
-            <Link href={`/goal/${goal.id}`} className="text-foreground hover:underline">
-              {goal.title}
-            </Link>
-          </p>
-        )}
-        {project && (
-          <p className="mt-1 text-sm text-muted-foreground">
-            Project:{' '}
-            <Link href={`/project/${project.id}`} className="text-foreground hover:underline">
-              {project.title}
-            </Link>
-          </p>
-        )}
-        {assignee && (
-          <p className="mt-1 text-sm text-muted-foreground">
-            Assigned to{' '}
-            <Link href={`/agent/${assignee.urlKey}`} className="text-foreground hover:underline">
-              {assignee.name}
-            </Link>
-          </p>
-        )}
-      </div>
 
-      <IssueDetailTabs
-        overview={
-          <>
+      {(goal || project || assignee) && (
+        <div className="space-y-1 text-sm text-muted-foreground">
+          {goal && (
+            <p>
+              Goal:{' '}
+              <Link href={`/goal/${goal.id}`} className="text-foreground hover:underline">
+                {goal.title}
+              </Link>
+            </p>
+          )}
+          {project && (
+            <p>
+              Project:{' '}
+              <Link href={`/project/${project.id}`} className="text-foreground hover:underline">
+                {project.title}
+              </Link>
+            </p>
+          )}
+          {assignee && (
+            <p>
+              Assigned to{' '}
+              <Link href={`/agent/${assignee.urlKey}`} className="text-foreground hover:underline">
+                {assignee.name}
+              </Link>
+            </p>
+          )}
+        </div>
+      )}
+
       {savedFlag && (
         <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
           Changes saved.
         </div>
       )}
 
-      <div className="grid grid-cols-2 gap-4">
-        <DetailField label="Status" value={issue.status.replace(/_/g, ' ')} />
-        <DetailField label="Priority" value={issue.priority} />
-        <DetailField label="Source" value={issue.source} />
-        <DetailField label="Created" value={issue.createdAt.toLocaleString()} />
-        <DetailField label="Updated" value={issue.updatedAt.toLocaleString()} />
-        <DetailField
-          label="Checkout"
-          value={
-            issue.checkoutRunId
-              ? `Locked (${issue.checkoutRunId.slice(0, 8)}…${
-                  holdingRun ? ` · run ${holdingRun.status}` : ' · stale?'
-                })`
-              : 'Available'
-          }
-        />
-      </div>
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Details</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3">
+            <DetailField label="Status" value={issue.status.replace(/_/g, ' ')} />
+            <DetailField label="Priority" value={issue.priority} />
+            <DetailField label="Source" value={issue.source} />
+            <DetailField label="Created" value={issue.createdAt.toLocaleString()} />
+            <DetailField label="Updated" value={issue.updatedAt.toLocaleString()} />
+            <DetailField
+              label="Checkout"
+              value={
+                issue.checkoutRunId
+                  ? `Locked (${issue.checkoutRunId.slice(0, 8)}…${
+                      holdingRun ? ` · run ${holdingRun.status}` : ' · stale?'
+                    })`
+                  : 'Available'
+              }
+            />
+          </div>
+        </CardContent>
+      </Card>
+
+      <IssueDescriptionSection
+        issueId={issue.id}
+        description={issue.description}
+        action={updateIssueDescriptionAction}
+      />
 
       {issue.checkoutRunId && (
         <form action={releaseCheckoutLockAction} className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
@@ -276,7 +289,7 @@ export default async function IssueDetailPage({
 
 function DetailField({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-lg border p-4">
+    <div>
       <p className="text-xs text-muted-foreground">{label}</p>
       <p className="mt-1 font-medium capitalize">{value}</p>
     </div>

@@ -12,6 +12,8 @@ interface MarkdownContentProps {
   workspacePath?: string | null;
   /** Navigate to another workspace file (in-app). */
   onWorkspaceNavigate?: (path: string) => void;
+  /** Show parsed vs raw source toggle. Default true. */
+  showModeToggle?: boolean;
 }
 
 function createMarkdownComponents(
@@ -113,6 +115,7 @@ export function MarkdownContent({
   className,
   workspacePath,
   onWorkspaceNavigate,
+  showModeToggle = true,
 }: MarkdownContentProps) {
   const [mode, setMode] = useState<'parsed' | 'raw'>('parsed');
   const markdownComponents = useMemo(
@@ -122,34 +125,36 @@ export function MarkdownContent({
 
   return (
     <div className={className}>
-      <div className="flex justify-end mb-1">
-        <div className="inline-flex rounded-md border text-xs overflow-hidden">
-          <button
-            type="button"
-            onClick={() => setMode('parsed')}
-            className={`px-2 py-0.5 transition-colors ${
-              mode === 'parsed'
-                ? 'bg-muted font-medium text-foreground'
-                : 'text-muted-foreground hover:text-foreground'
-            }`}
-          >
-            Parsed
-          </button>
-          <button
-            type="button"
-            onClick={() => setMode('raw')}
-            className={`px-2 py-0.5 border-l transition-colors ${
-              mode === 'raw'
-                ? 'bg-muted font-medium text-foreground'
-                : 'text-muted-foreground hover:text-foreground'
-            }`}
-          >
-            Raw
-          </button>
+      {showModeToggle && (
+        <div className="flex justify-end mb-1">
+          <div className="inline-flex rounded-md border text-xs overflow-hidden">
+            <button
+              type="button"
+              onClick={() => setMode('parsed')}
+              className={`px-2 py-0.5 transition-colors ${
+                mode === 'parsed'
+                  ? 'bg-muted font-medium text-foreground'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              Parsed
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode('raw')}
+              className={`px-2 py-0.5 border-l transition-colors ${
+                mode === 'raw'
+                  ? 'bg-muted font-medium text-foreground'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              Raw
+            </button>
+          </div>
         </div>
-      </div>
+      )}
 
-      {mode === 'parsed' ? (
+      {(showModeToggle ? mode === 'parsed' : true) ? (
         <div className="text-sm leading-relaxed break-words">
           <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
             {content}

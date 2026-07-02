@@ -36,7 +36,9 @@ export function DashboardShell({
             {activeCompanyName ?? 'Tourbillon'}
           </span>
         </header>
-        <div className="flex flex-1 flex-col gap-6 overflow-y-auto p-4 md:p-6">{children}</div>
+        <div className="flex flex-1 flex-col gap-6 overflow-y-auto px-4 pb-4 pt-0 md:px-6 md:pb-6 [&>:not([data-sticky-toolbar-root])]:pt-4 md:[&>:not([data-sticky-toolbar-root])]:pt-6">
+          {children}
+        </div>
       </SidebarInset>
     </SidebarProvider>
   );

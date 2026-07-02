@@ -91,20 +91,6 @@ export function IssueEditForm({
           />
         </div>
 
-        <div className="space-y-1.5">
-          <label htmlFor="issue-description" className="text-sm font-medium">
-            Description
-          </label>
-          <textarea
-            id="issue-description"
-            name="description"
-            rows={4}
-            defaultValue={issue.description ?? ''}
-            placeholder="Optional details…"
-            className={`${inputClassName} resize-y`}
-          />
-        </div>
-
         <div className="grid grid-cols-2 gap-4">
           <div className="space-y-1.5">
             <label htmlFor="issue-priority" className="text-sm font-medium">

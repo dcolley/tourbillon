@@ -8,68 +8,70 @@ const STORAGE_KEY = 'tourbillon:issue-view';
 
 export type IssueViewMode = 'list' | 'kanban';
 
-export function IssueViewControls({
-  listView,
-  kanbanView,
-  toolbarActions,
-}: {
-  listView: ReactNode;
-  kanbanView: ReactNode;
-  toolbarActions?: ReactNode;
-}) {
-  const [view, setView] = useState<IssueViewMode | null>(null);
+export function useIssueViewMode(): {
+  view: IssueViewMode | null;
+  setView: (next: IssueViewMode) => void;
+} {
+  const [view, setViewState] = useState<IssueViewMode | null>(null);
 
   useEffect(() => {
     const stored = localStorage.getItem(STORAGE_KEY);
-    setView(stored === 'list' || stored === 'kanban' ? stored : 'kanban');
+    setViewState(stored === 'list' || stored === 'kanban' ? stored : 'kanban');
   }, []);
 
-  function selectView(next: IssueViewMode) {
-    setView(next);
+  function setView(next: IssueViewMode) {
+    setViewState(next);
     localStorage.setItem(STORAGE_KEY, next);
   }
 
+  return { view, setView };
+}
+
+export function IssueViewToggle({
+  view,
+  onViewChange,
+  disabled,
+}: {
+  view: IssueViewMode | null;
+  onViewChange: (next: IssueViewMode) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <>
+      <Button
+        variant={view === 'list' ? 'default' : 'outline'}
+        size="sm"
+        disabled={disabled || view === null}
+        onClick={() => onViewChange('list')}
+      >
+        <List className="size-4" />
+        List
+      </Button>
+      <Button
+        variant={view === 'kanban' ? 'default' : 'outline'}
+        size="sm"
+        disabled={disabled || view === null}
+        onClick={() => onViewChange('kanban')}
+      >
+        <LayoutGrid className="size-4" />
+        Kanban
+      </Button>
+    </>
+  );
+}
+
+export function IssueViewControls({
+  view,
+  listView,
+  kanbanView,
+}: {
+  view: IssueViewMode | null;
+  listView: ReactNode;
+  kanbanView: ReactNode;
+}) {
   if (view === null) {
-    return (
-      <div className="space-y-4">
-        <div className="flex flex-wrap items-center justify-end gap-2">
-          {toolbarActions}
-          <Button variant="outline" size="sm" disabled>
-            <List className="size-4" />
-            List
-          </Button>
-          <Button variant="default" size="sm" disabled>
-            <LayoutGrid className="size-4" />
-            Kanban
-          </Button>
-        </div>
-        {kanbanView}
-      </div>
-    );
+    return kanbanView;
   }
 
-  return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-end gap-2">
-        {toolbarActions}
-        <Button
-          variant={view === 'list' ? 'default' : 'outline'}
-          size="sm"
-          onClick={() => selectView('list')}
-        >
-          <List className="size-4" />
-          List
-        </Button>
-        <Button
-          variant={view === 'kanban' ? 'default' : 'outline'}
-          size="sm"
-          onClick={() => selectView('kanban')}
-        >
-          <LayoutGrid className="size-4" />
-          Kanban
-        </Button>
-      </div>
-      {view === 'list' ? listView : kanbanView}
-    </div>
-  );
+  return view === 'list' ? listView : kanbanView;
 }

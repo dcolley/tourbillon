@@ -45,6 +45,30 @@ export async function createIssueAction(
   return { error: null, success: true, issueId: created.id };
 }
 
+export type UpdateIssueDescriptionState = { error: string | null; success?: boolean };
+
+export async function updateIssueDescriptionAction(
+  _prev: UpdateIssueDescriptionState,
+  formData: FormData
+): Promise<UpdateIssueDescriptionState> {
+  const issueId = formData.get('issueId') as string;
+
+  try {
+    await updateIssue(issueId, {
+      description: (formData.get('description') as string) || null,
+    });
+  } catch (err) {
+    if (err instanceof IssueValidationError) {
+      return { error: err.message };
+    }
+    throw err;
+  }
+
+  revalidatePath('/issue');
+  revalidatePath(`/issue/${issueId}`);
+  return { error: null, success: true };
+}
+
 export type UpdateIssueState = { error: string | null; success?: boolean };
 
 export async function updateIssueAction(
@@ -59,7 +83,6 @@ export async function updateIssueAction(
   try {
     await updateIssue(issueId, {
       title: formData.get('title') as string,
-      description: (formData.get('description') as string) || null,
       priority: formData.get('priority') as string,
       status: formData.get('status') as string,
       assigneeAgentId: assigneeAgentId || null,

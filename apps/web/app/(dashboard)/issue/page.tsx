@@ -1,4 +1,3 @@
-import { PageHeader } from '@/components/page-header';
 import { listGoalOptions } from '@/lib/goals';
 import { listProjectOptions } from '@/lib/projects';
 import {
@@ -6,14 +5,12 @@ import {
   listIssueAgentOptions,
   listIssues,
 } from '@/lib/issues';
-import { NewIssueDialog } from './new-issue-dialog';
 import { IssueListShell } from './issue-list-shell';
 import {
-  IssueStatusFilter,
   parseIssueFilter,
   statusesForFilter,
   type IssueFilter,
-} from './issue-status-filter';
+} from './issue-filter';
 
 export default async function IssuesPage({
   searchParams,
@@ -34,49 +31,17 @@ export default async function IssuesPage({
   const emptyMsg = emptyMessage(filter);
 
   return (
-    <div className="space-y-6">
-      <PageHeader
-        title="Issues"
-        description={filterDescription(filter)}
-        actions={
-          <NewIssueDialog
-            agents={agentList}
-            goals={goalList}
-            projects={projectList}
-            buttonLabel="Add issue"
-          />
-        }
-      />
-
-      <IssueStatusFilter current={filter} />
-
-      <IssueListShell
-        filter={filter}
-        visibleStatuses={visibleStatuses}
-        initialIssues={issueResult.rows}
-        initialTotal={issueResult.total}
-        agents={agentList}
-        emptyMessage={emptyMsg}
-      />
-    </div>
+    <IssueListShell
+      filter={filter}
+      visibleStatuses={visibleStatuses}
+      initialIssues={issueResult.rows}
+      initialTotal={issueResult.total}
+      agents={agentList}
+      goals={goalList}
+      projects={projectList}
+      emptyMessage={emptyMsg}
+    />
   );
-}
-
-function filterDescription(filter: IssueFilter): string {
-  switch (filter) {
-    case 'active':
-      return 'Open work — todo, in progress, in review, and blocked';
-    case 'in_review':
-      return 'Issues awaiting review';
-    case 'completed':
-      return 'Finished issues';
-    case 'all':
-      return 'Every issue by status';
-    case 'backlog':
-      return 'Backlog';
-    case 'cancelled':
-      return 'Cancelled issues';
-  }
 }
 
 function emptyMessage(filter: IssueFilter): string {

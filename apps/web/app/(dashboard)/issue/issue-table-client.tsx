@@ -9,7 +9,7 @@ import { Input } from '@/components/ui/input';
 import { PriorityBadge, StatusBadge } from '@/lib/status-badges';
 import type { IssueListRow } from '@/lib/issue-list';
 import { compareIssueIdentifiers } from '@/lib/issue-identifiers';
-import { ALL_STATUSES } from './issue-status-filter';
+import { ALL_STATUSES } from './issue-filter';
 import {
   ISSUE_TABLE_PAGE_SIZES,
   ISSUE_TABLE_PRIORITY_FILTERS,
