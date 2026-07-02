@@ -1,5 +1,5 @@
 import { RequestContext } from '@mastra/core/request-context';
-import { formatTrace, safeJson, type TraceContext } from '@tourbillon/shared';
+import { formatTrace, safeJson, type AgentRuntimeConfig, type TraceContext } from '@tourbillon/shared';
 
 export function getInternalApiUrl(): string {
   return process.env.INTERNAL_API_URL ?? 'http://localhost:3000';
@@ -14,6 +14,7 @@ export interface HeartbeatRuntimeValues {
   goalId?: string;
   projectId?: string;
   jobId?: string;
+  agentRuntimeConfig?: AgentRuntimeConfig;
 }
 
 export interface ToolRuntimeContext extends TraceContext {
@@ -32,6 +33,9 @@ export function createHeartbeatRuntimeContext(
   if (values.goalId) requestContext.set('goalId', values.goalId);
   if (values.projectId) requestContext.set('projectId', values.projectId);
   if (values.jobId) requestContext.set('jobId', values.jobId);
+  if (values.agentRuntimeConfig) {
+    requestContext.set('codeExecutionConfig', values.agentRuntimeConfig);
+  }
   return requestContext;
 }
 

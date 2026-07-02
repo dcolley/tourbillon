@@ -10,6 +10,7 @@ import {
   assembleAgentSystemPrompt,
   assembleAgentTools,
   getAgentMemory,
+  shouldAttachCodeExecutionWorkspace,
   type AssembleAgentToolsOptions,
 } from './agent-factory';
 import { getLanguageModelForAgent, llmProviderRowToRecord } from './provider';
@@ -26,7 +27,7 @@ export async function buildHarnessCwd(
   agentRecord: AgentRecord,
   taskId?: string,
 ): Promise<string | undefined> {
-  const codeExecutionEnabled = agentRecord.assignedToolsets?.includes('code-execution') ?? false;
+  const codeExecutionEnabled = await shouldAttachCodeExecutionWorkspace(agentRecord);
   if (!codeExecutionEnabled) return undefined;
   return ensureExecutionWorkspace(agentRecord.companyId, taskId);
 }
@@ -42,8 +43,10 @@ export function buildHarnessStorageConfig(): {
   return { backend: 'pg', connectionString };
 }
 
-export function buildHarnessPermissionRules(agentRecord: AgentRecord) {
-  const codeExecutionEnabled = agentRecord.assignedToolsets?.includes('code-execution') ?? false;
+export function buildHarnessPermissionRules(
+  agentRecord: AgentRecord,
+  codeExecutionEnabled: boolean,
+) {
   const mcpEnabled =
     (agentRecord.mcpServerIds?.length ?? 0) > 0 ||
     (agentRecord.assignedToolsets?.includes('buffer') ?? false);
@@ -65,7 +68,7 @@ export async function buildHarnessWorkModes(
 ): Promise<HarnessMode<Record<string, unknown>>[]> {
   const tools = await assembleAgentTools(agentRecord, options);
   const systemPrompt = await assembleAgentSystemPrompt(agentRecord);
-  const codeExecutionEnabled = agentRecord.assignedToolsets?.includes('code-execution') ?? false;
+  const codeExecutionEnabled = await shouldAttachCodeExecutionWorkspace(agentRecord);
   const providerRow = agentRecord.providerId
     ? await getLlmProviderRowById(agentRecord.providerId)
     : null;
@@ -108,7 +111,7 @@ export async function createTourbillonHarness(
   options?: AssembleAgentToolsOptions & { cwd?: string },
 ): Promise<Harness<TourbillonHarnessState>> {
   const modes = await buildHarnessWorkModes(agentRecord, options);
-  const codeExecutionEnabled = agentRecord.assignedToolsets?.includes('code-execution') ?? false;
+  const codeExecutionEnabled = await shouldAttachCodeExecutionWorkspace(agentRecord);
 
   const harness = new HarnessClass<TourbillonHarnessState>({
     id: `tourbillon-${agentRecord.id}`,
@@ -126,7 +129,7 @@ export async function createTourbillonHarness(
     },
     initialState: {
       yolo: true,
-      permissionRules: buildHarnessPermissionRules(agentRecord),
+      permissionRules: buildHarnessPermissionRules(agentRecord, codeExecutionEnabled),
     },
     ...(codeExecutionEnabled && options?.cwd
       ? { workspace: buildCodeExecutionWorkspace() }

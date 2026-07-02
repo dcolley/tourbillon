@@ -19,6 +19,7 @@ async function hireAgent(formData: FormData) {
       urlKey: (formData.get('urlKey') as string) || undefined,
       reportsToId: reportsToId || null,
       runtimeType: (formData.get('runtimeType') as 'agent' | 'harness') || 'agent',
+      codeExecutionEnabled: formData.get('codeExecutionEnabled') === 'on',
       instructionsBundleSoulMd: (formData.get('instructionsBundleSoulMd') as string) || undefined,
       instructionsBundleAgentsMd: (formData.get('instructionsBundleAgentsMd') as string) || undefined,
     });
@@ -109,9 +110,13 @@ export default async function NewAgentPage({
           </select>
         </div>
 
-        <div className="space-y-1.5">
-          <span className="text-sm font-medium">Agent type</span>
-          <div className="space-y-2 rounded-md border border-input p-3">
+        <div className="space-y-1.5 rounded-md border border-input p-3">
+          <span className="text-sm font-medium">Code &amp; execution</span>
+          <p className="text-xs text-muted-foreground mb-2">
+            Runtime type and sandbox access are configured together. Engineer and QA roles enable code
+            execution by default.
+          </p>
+          <div className="space-y-2">
             <label className="flex items-start gap-2 cursor-pointer">
               <input
                 type="radio"
@@ -123,7 +128,7 @@ export default async function NewAgentPage({
               <span>
                 <span className="text-sm font-medium">Agent</span>
                 <span className="block text-xs text-muted-foreground">
-                  Standard heartbeat agent with durable resume (recommended)
+                  Standard heartbeat with durable resume — good for quick scripts and tests
                 </span>
               </span>
             </label>
@@ -137,11 +142,26 @@ export default async function NewAgentPage({
               <span>
                 <span className="text-sm font-medium">Harness</span>
                 <span className="block text-xs text-muted-foreground">
-                  Mastra Code harness with file tools, sandbox, and observational memory
+                  Mastra harness with persistent threads — better for multi-heartbeat coding on one issue
                 </span>
               </span>
             </label>
           </div>
+          <label className="flex items-start gap-2 cursor-pointer mt-3 pt-3 border-t">
+            <input
+              type="checkbox"
+              name="codeExecutionEnabled"
+              defaultChecked
+              className="mt-0.5 rounded border-input"
+            />
+            <span>
+              <span className="text-sm font-medium">Code execution</span>
+              <span className="block text-xs text-muted-foreground">
+                Isolated sandbox shell and file tools (mastra_workspace_execute_command). Separate from
+                the company shared workspace.
+              </span>
+            </span>
+          </label>
         </div>
 
         <div className="space-y-1.5">

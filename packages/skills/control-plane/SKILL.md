@@ -50,13 +50,14 @@ When you pick one up:
 
 ---
 
-## §1b — Context Sources (Three Lanes)
+## §1b — Context Sources (Four Lanes)
 
 | Lane | Tools | When |
 |---|---|---|
 | **Control plane (source of truth)** | `getInbox`, `getHeartbeatContext`, `getComments`, `updateIssue` | Every heartbeat — steps 3–8 |
 | **Mastra memory (private accelerator)** | Automatic — your turns persist per issue thread | Across heartbeats on the same task |
 | **Company workspace** | `listWorkspaceFiles`, `readWorkspaceFile`, `writeWorkspaceFile` | On demand during work — shared reference docs, not task history |
+| **Execution sandbox** | `mastra_workspace_execute_command`, sandbox file tools | When `code-execution` toolset enabled — per-issue scratch code; see SKILL: Code Execution |
 | **Web search** | MCP web search tools | External information only |
 
 **Task history lives in issue comments**, not in memory or RAG. Always write material decisions to comments so other agents can read them.

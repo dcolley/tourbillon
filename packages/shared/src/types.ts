@@ -82,6 +82,11 @@ export interface AgentRuntimeConfig {
   searxngApiKey?: string;
   /** Per-server MCP tool allow/deny lists (Buffer). */
   mcpToolPolicy?: Record<string, { allow?: string[]; deny?: string[] }>;
+  /** Per-agent sandbox overrides for code-execution toolset. */
+  codeExecution?: {
+    timeoutMs?: number;
+    isolation?: 'none' | 'seatbelt' | 'bwrap';
+  };
 }
 
 /** Company-level integration settings stored in companies.settings jsonb. */

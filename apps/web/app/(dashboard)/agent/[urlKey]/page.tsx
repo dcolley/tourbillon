@@ -3,8 +3,8 @@ import { notFound, redirect } from 'next/navigation';
 import { db, agents, heartbeatRuns } from '@tourbillon/db';
 import { eq, desc } from 'drizzle-orm';
 import type { AgentRuntimeConfig } from '@tourbillon/shared';
-import { modelProviderOverridesFromAgent, resolveModelProviderConfig, isAgentBudgetEnforced, isAgentBudgetExceeded, agentRuntimeLabel, resolveAssignedTools, modelSettingsFromFormData } from '@tourbillon/shared';
-import { AgentValidationError, AGENT_ROLE_OPTIONS, getAgentByUrlKey, listAgentsByUrlKey, updateAgentRuntimeConfig, updateAgentCapabilities, updateAgentBudget, updateAgentInstructions, updateAgentModel, updateAgentModelSettings, updateAgentProfile } from '@/lib/agents';
+import { modelProviderOverridesFromAgent, resolveModelProviderConfig, isAgentBudgetEnforced, isAgentBudgetExceeded, agentRuntimeLabel, agentRuntimeFromAdapter, resolveAssignedTools, modelSettingsFromFormData, isCodeExecutionAvailable, formatExecutionWorkspacePathPreview } from '@tourbillon/shared';
+import { AgentValidationError, AGENT_ROLE_OPTIONS, getAgentByUrlKey, listAgentsByUrlKey, updateAgentRuntimeConfig, updateAgentCapabilities, updateAgentBudget, updateAgentInstructions, updateAgentModel, updateAgentModelSettings, updateAgentProfile, updateAgentCodeExecution } from '@/lib/agents';
 import { AgentDisambiguation } from '@/components/agent-disambiguation';
 import { DeepLinkCompanySync } from '@/components/deep-link-company-sync';
 import { getCompanyById } from '@/lib/company';
@@ -20,6 +20,7 @@ import { listProjectOptions } from '@/lib/projects';
 import { AgentDetailTabs } from './agent-detail-tabs';
 import { AgentObservabilityTab } from './agent-observability-tab';
 import { AgentCapabilitiesForm } from './agent-capabilities-form';
+import { AgentCodeExecutionForm } from './agent-code-execution-form';
 
 async function updateHeartbeatConfig(formData: FormData) {
   'use server';
@@ -58,8 +59,13 @@ async function updateCapabilities(formData: FormData) {
   const assignedTools = allToolIds.filter((id) => formData.get(`tool_${id}`) === 'on');
 
   const toolsets = TOOLSET_CATALOG.filter(
-    (entry) => formData.get(`toolset_${entry.id}`) === 'on',
+    (entry) => entry.id !== 'code-execution' && formData.get(`toolset_${entry.id}`) === 'on',
   ).map((entry) => entry.id);
+
+  const existingAgent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+  if (existingAgent?.assignedToolsets.includes('code-execution')) {
+    toolsets.push('code-execution');
+  }
 
   try {
     await updateAgentCapabilities(agentId, {
@@ -76,6 +82,39 @@ async function updateCapabilities(formData: FormData) {
   }
 
   redirect(`/agent/${urlKey}?saved=toolsets`);
+}
+
+async function updateCodeExecution(formData: FormData) {
+  'use server';
+
+  const agentId = formData.get('agentId') as string;
+  const urlKey = formData.get('urlKey') as string;
+  const runtimeType = (formData.get('runtimeType') as 'agent' | 'harness') || 'agent';
+  const codeExecutionEnabled = formData.get('codeExecutionEnabled') === 'on';
+
+  const timeoutRaw = (formData.get('codeExecutionTimeoutMs') as string)?.trim();
+  const timeoutMs = timeoutRaw ? parseInt(timeoutRaw, 10) : undefined;
+  if (timeoutRaw && (!Number.isFinite(timeoutMs) || timeoutMs! < 1000)) {
+    redirect(`/agent/${urlKey}?error=${encodeURIComponent('Timeout must be at least 1000 ms.')}`);
+  }
+
+  const isolation = (formData.get('codeExecutionIsolation') as string) || null;
+
+  try {
+    await updateAgentCodeExecution(agentId, {
+      runtimeType,
+      codeExecutionEnabled,
+      timeoutMs: timeoutRaw ? timeoutMs : undefined,
+      isolation,
+      clearCodeExecutionOverrides: formData.get('clearCodeExecutionOverrides') === 'on',
+    });
+  } catch (err) {
+    const message =
+      err instanceof AgentValidationError ? err.message : 'Failed to update code execution settings.';
+    redirect(`/agent/${urlKey}?error=${encodeURIComponent(message)}`);
+  }
+
+  redirect(`/agent/${urlKey}?saved=code-execution`);
 }
 
 async function updateBudgetConfig(formData: FormData) {
@@ -259,6 +298,11 @@ export default async function AgentDetailPage({
     runtimeConfig: runtime,
   });
 
+  const codeExecutionAvailability = await isCodeExecutionAvailable(runtime);
+  const sandboxPathPreview = formatExecutionWorkspacePathPreview(agent.companyId);
+  const codeExecutionEnabled = agent.assignedToolsets.includes('code-execution');
+  const agentRuntimeType = agentRuntimeFromAdapter(agent.adapterType);
+
   return (
     <div className="p-6 space-y-6 max-w-5xl">
       {company ? (
@@ -306,6 +350,12 @@ export default async function AgentDetailPage({
       {saved === 'toolsets' && (
         <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
           Capabilities saved. Changes apply on the agent&apos;s next heartbeat.
+        </div>
+      )}
+
+      {saved === 'code-execution' && (
+        <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
+          Code &amp; execution settings saved. Changes apply on the agent&apos;s next heartbeat.
         </div>
       )}
 
@@ -515,6 +565,27 @@ export default async function AgentDetailPage({
           </form>
           <DetailCard label="Title" value={agent.title} />
         </div>
+      </section>
+
+      <section className="border rounded-lg p-4 space-y-4">
+        <div>
+          <h2 className="text-sm font-semibold">Code &amp; execution</h2>
+          <p className="text-xs text-muted-foreground mt-1">
+            Runtime type and isolated sandbox for writing and running code. Orthogonal to other toolsets
+            below.
+          </p>
+        </div>
+        <AgentCodeExecutionForm
+          agentId={agent.id}
+          urlKey={agent.urlKey}
+          runtimeType={agentRuntimeType}
+          codeExecutionEnabled={codeExecutionEnabled}
+          availability={codeExecutionAvailability}
+          sandboxPathPreview={sandboxPathPreview}
+          timeoutOverride={runtime.codeExecution?.timeoutMs}
+          isolationOverride={runtime.codeExecution?.isolation}
+          updateCodeExecution={updateCodeExecution}
+        />
       </section>
 
       <section className="border rounded-lg p-4 space-y-4">

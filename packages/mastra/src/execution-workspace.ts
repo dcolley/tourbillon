@@ -1,25 +1,21 @@
 import {
   Workspace,
   LocalSandbox,
-  getRecommendedIsolation,
   type IsolationBackend,
 } from '@mastra/core/workspace';
-import { ensureExecutionWorkspace } from '@tourbillon/shared';
+import {
+  ensureExecutionWorkspace,
+  resolveSandboxIsolation,
+  resolveSandboxTimeoutMs,
+  type AgentRuntimeConfig,
+} from '@tourbillon/shared';
 
-const VALID_ISOLATION = new Set<IsolationBackend>(['none', 'seatbelt', 'bwrap']);
-
-function resolveIsolation(): IsolationBackend {
-  const raw = process.env.SANDBOX_ISOLATION?.trim().toLowerCase();
-  if (raw && VALID_ISOLATION.has(raw as IsolationBackend)) {
-    return raw as IsolationBackend;
-  }
-  return getRecommendedIsolation();
-}
-
-function resolveTimeout(): number {
-  const raw = process.env.SANDBOX_COMMAND_TIMEOUT_MS?.trim();
-  const parsed = raw ? parseInt(raw, 10) : 120_000;
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 120_000;
+function readCodeExecutionConfig(requestContext: {
+  get: (key: string) => unknown;
+}): AgentRuntimeConfig | null {
+  const value = requestContext.get('codeExecutionConfig');
+  if (!value || typeof value !== 'object') return null;
+  return value as AgentRuntimeConfig;
 }
 
 export function buildCodeExecutionWorkspace(): Workspace {
@@ -32,17 +28,23 @@ export function buildCodeExecutionWorkspace(): Workspace {
         throw new Error('companyId not present in request context for code execution sandbox');
       }
       const taskId = requestContext.get('taskId') as string | undefined;
+      const runtimeConfig = readCodeExecutionConfig(requestContext);
       const cwd = await ensureExecutionWorkspace(companyId, taskId);
       return new LocalSandbox({
         workingDirectory: cwd,
-        isolation: resolveIsolation(),
-        timeout: resolveTimeout(),
+        isolation: resolveSandboxIsolation(runtimeConfig) as IsolationBackend,
+        timeout: resolveSandboxTimeoutMs(runtimeConfig),
       });
     },
     sandboxCacheKey: ({ requestContext }) => {
       const companyId = requestContext.get('companyId') as string | undefined;
       const taskId = requestContext.get('taskId') as string | undefined;
-      return companyId ? `${companyId}:${taskId ?? 'idle'}` : undefined;
+      const runtimeConfig = readCodeExecutionConfig(requestContext);
+      const isolation = resolveSandboxIsolation(runtimeConfig);
+      const timeoutMs = resolveSandboxTimeoutMs(runtimeConfig);
+      return companyId
+        ? `${companyId}:${taskId ?? 'idle'}:${isolation}:${timeoutMs}`
+        : undefined;
     },
   });
 }

@@ -121,7 +121,7 @@ export function AgentCapabilitiesForm({
       <div className="space-y-3">
         <p className="text-sm font-medium">Boolean toolsets</p>
         <ul className="space-y-3">
-          {TOOLSET_CATALOG.map((entry) => {
+          {TOOLSET_CATALOG.filter((entry) => entry.id !== 'code-execution').map((entry) => {
             const checked =
               assignedToolsets.includes(entry.id) ||
               (entry.id === 'roster' && assignedToolsets.includes('agent-management'));

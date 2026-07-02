@@ -4,7 +4,7 @@ import { Memory } from '@mastra/memory';
 import { PostgresStore, PgVector } from '@mastra/pg';
 import type { Agent as AgentRecord } from '@tourbillon/db';
 import { getLlmProviderRowById } from '@tourbillon/db';
-import { formatTrace, modelProviderOverridesFromAgent, resolveModelProviderConfig, resolveAssignedTools, type AgentRuntimeConfig, type CompanySettings, isSearxngConfigured } from '@tourbillon/shared';
+import { formatTrace, modelProviderOverridesFromAgent, resolveModelProviderConfig, resolveAssignedTools, type AgentRuntimeConfig, type CompanySettings, isSearxngConfigured, isCodeExecutionAvailable } from '@tourbillon/shared';
 import { getEmbeddingModel, getLanguageModelForAgent, llmProviderRowToRecord } from './provider';
 import { CONTROL_PLANE_TOOLS } from './tools/control-plane-tools';
 import { ROLE_TOOLS } from './tools/role-tools';
@@ -101,6 +101,28 @@ export async function assembleAgentTools(
   return tools;
 }
 
+export async function shouldAttachCodeExecutionWorkspace(
+  agentRecord: AgentRecord,
+): Promise<boolean> {
+  const toolsetOn = agentRecord.assignedToolsets?.includes('code-execution') ?? false;
+  if (!toolsetOn) return false;
+
+  const runtimeConfig = agentRecord.runtimeConfig as AgentRuntimeConfig;
+  const availability = await isCodeExecutionAvailable(runtimeConfig);
+  if (!availability.available) {
+    console.warn(
+      formatTrace(
+        'agent-factory',
+        { agentId: agentRecord.id, agentName: agentRecord.name },
+        'code execution unavailable — workspace omitted',
+        { reason: availability.reason },
+      ),
+    );
+    return false;
+  }
+  return true;
+}
+
 export async function assembleAgentSystemPrompt(agentRecord: AgentRecord): Promise<string> {
   const skillContents = await loadSkillsForAgent(agentRecord);
   return assembleSystemPrompt(agentRecord, skillContents);
@@ -136,7 +158,7 @@ export async function createAgentWithSkills(
     providerRecord,
   );
 
-  const codeExecutionEnabled = agentRecord.assignedToolsets?.includes('code-execution') ?? false;
+  const codeExecutionEnabled = await shouldAttachCodeExecutionWorkspace(agentRecord);
   const modelSettings = resolveAgentModelSettings(agentRecord, providerRecord);
 
   console.log(
