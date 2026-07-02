@@ -1,5 +1,7 @@
 import { mkdir, readFile, writeFile, readdir, stat, unlink, rmdir } from 'fs/promises';
 import path from 'path';
+import { ROLE_DEFAULT_SKILLS, TOOLSET_SKILL_FILENAME_SET } from './constants';
+import { getMonorepoRoot, resolveDataPath } from './monorepo-root';
 import {
   WORKSPACE_MAX_TEXT_BYTES,
   WORKSPACE_MAX_UPLOAD_BYTES,
@@ -24,15 +26,20 @@ export {
 } from './company-workspace-types';
 
 const RELATIVE_PATH_RE = /^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/;
+const SKILL_SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
-function defaultWorkspaceRoot(): string {
-  return path.resolve(process.cwd(), 'data', 'company-workspaces');
+function isValidSkillSlug(slug: string): boolean {
+  return SKILL_SLUG_RE.test(slug);
+}
+
+function slugFromMarkdownFilename(filename: string): string | null {
+  if (!filename.endsWith('.md') || filename === 'README.md') return null;
+  const slug = filename.slice(0, -3);
+  return isValidSkillSlug(slug) ? slug : null;
 }
 
 export function getWorkspaceRoot(): string {
-  const raw = process.env.COMPANY_WORKSPACE_ROOT?.trim();
-  const resolved = raw ? path.resolve(raw) : defaultWorkspaceRoot();
-  return resolved;
+  return resolveDataPath(process.env.COMPANY_WORKSPACE_ROOT, 'data/company-workspaces');
 }
 
 export function getCompanyWorkspaceDir(companyId: string): string {
@@ -80,6 +87,7 @@ export async function ensureCompanyWorkspace(companyId: string): Promise<string>
   for (const dir of WORKSPACE_PARA_DIRS) {
     await mkdir(path.join(companyDir, dir), { recursive: true });
   }
+  await ensureCompanySkillsDir(companyId);
   const readmePath = path.join(companyDir, 'README.md');
   try {
     await stat(readmePath);
@@ -187,7 +195,154 @@ export async function saveWorkspaceUpload(
 }
 
 function getToolsetSkillsTemplateDir(): string {
-  return path.join(process.cwd(), 'packages/mastra/src/skills');
+  return path.join(getMonorepoRoot(), 'packages/mastra/src/skills');
+}
+
+export function getCompanySkillsDir(companyId: string): string {
+  return path.join(getCompanyWorkspaceDir(companyId), 'skills');
+}
+
+export async function ensureCompanySkillsDir(companyId: string): Promise<string> {
+  const companyDir = getCompanyWorkspaceDir(companyId);
+  await mkdir(companyDir, { recursive: true });
+  const dir = getCompanySkillsDir(companyId);
+  await mkdir(dir, { recursive: true });
+  return dir;
+}
+
+export async function discoverCompanySkillSlugs(companyId: string): Promise<string[]> {
+  const skillsDir = await ensureCompanySkillsDir(companyId);
+  const slugs = new Set<string>();
+
+  let entries: string[];
+  try {
+    entries = await readdir(skillsDir);
+  } catch {
+    return [];
+  }
+
+  for (const name of entries) {
+    if (name.startsWith('.')) continue;
+    const entryPath = path.join(skillsDir, name);
+    let entryStat: Awaited<ReturnType<typeof stat>>;
+    try {
+      entryStat = await stat(entryPath);
+    } catch {
+      continue;
+    }
+
+    if (entryStat.isFile()) {
+      const slug = slugFromMarkdownFilename(name);
+      if (slug) slugs.add(slug);
+      continue;
+    }
+
+    if (!entryStat.isDirectory() || !isValidSkillSlug(name)) continue;
+    try {
+      const nestedStat = await stat(path.join(entryPath, 'SKILL.md'));
+      if (nestedStat.isFile()) slugs.add(name);
+    } catch {
+      // no SKILL.md in directory
+    }
+  }
+
+  return [...slugs].sort();
+}
+
+export async function readCompanySkillFile(companyId: string, slug: string): Promise<string | null> {
+  if (!isValidSkillSlug(slug)) return null;
+  const skillsDir = getCompanySkillsDir(companyId);
+
+  const flatPath = path.join(skillsDir, `${slug}.md`);
+  try {
+    const content = await readFile(flatPath, 'utf-8');
+    if (content.trim()) return content;
+  } catch {
+    // fall through
+  }
+
+  const nestedPath = path.join(skillsDir, slug, 'SKILL.md');
+  try {
+    const content = await readFile(nestedPath, 'utf-8');
+    if (content.trim()) return content;
+  } catch {
+    // missing
+  }
+
+  return null;
+}
+
+export async function buildAssignedSkills(companyId: string, role: string): Promise<string[]> {
+  const roleSkills = ROLE_DEFAULT_SKILLS[role] ?? ['control-plane'];
+  const companySkillSlugs = await discoverCompanySkillSlugs(companyId);
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  const push = (skillSlug: string) => {
+    if (seen.has(skillSlug)) return;
+    seen.add(skillSlug);
+    result.push(skillSlug);
+  };
+
+  push('control-plane');
+  for (const skillSlug of roleSkills) {
+    if (skillSlug !== 'control-plane') push(skillSlug);
+  }
+  for (const skillSlug of companySkillSlugs) {
+    push(skillSlug);
+  }
+
+  return result;
+}
+
+export interface AgentSkillFileRef {
+  slug: string;
+  filename: string;
+}
+
+export async function discoverAgentSkillFiles(
+  companyId: string,
+  urlKey: string,
+): Promise<AgentSkillFileRef[]> {
+  const dir = getAgentSkillsDir(companyId, urlKey);
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch {
+    return [];
+  }
+
+  const refs: AgentSkillFileRef[] = [];
+  for (const name of entries.sort()) {
+    if (name.startsWith('.') || TOOLSET_SKILL_FILENAME_SET.has(name)) continue;
+    const slug = slugFromMarkdownFilename(name);
+    if (!slug) continue;
+    const filePath = path.join(dir, name);
+    try {
+      const fileStat = await stat(filePath);
+      if (fileStat.isFile()) refs.push({ slug, filename: name });
+    } catch {
+      // skip
+    }
+  }
+  return refs;
+}
+
+export async function readAgentSkillFile(
+  companyId: string,
+  urlKey: string,
+  filename: string,
+): Promise<string | null> {
+  if (!filename.endsWith('.md') || filename.includes('/') || filename.includes('..')) {
+    return null;
+  }
+  const filePath = path.join(getAgentSkillsDir(companyId, urlKey), filename);
+  try {
+    const content = await readFile(filePath, 'utf-8');
+    return content.trim() ? content : null;
+  } catch {
+    return null;
+  }
 }
 
 export function getAgentSkillsDir(companyId: string, urlKey: string): string {

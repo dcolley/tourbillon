@@ -1,7 +1,6 @@
 import { db, agents, companies, type Agent } from '@tourbillon/db';
 import { and, eq } from 'drizzle-orm';
 import {
-  ROLE_DEFAULT_SKILLS,
   ROLE_DEFAULT_TOOLSETS,
   ROLE_DEFAULT_ASSIGNED_TOOLS,
   DEFAULT_RUNTIME_CONFIG,
@@ -10,13 +9,16 @@ import {
   resolveModelProviderConfig,
   resolveAdapterFieldsForRuntime,
   parseAgentRuntimeType,
+  isHarnessAdapter,
+  defaultAgentAdapterType,
   applyModelSettingsPatch,
   parseAgentModelSettings,
   type AgentModelSettings,
   type AgentRuntimeConfig,
   type AgentRuntimeType,
+  type SandboxIsolation,
 } from '@tourbillon/shared';
-import { seedAgentSkillsFromTemplates } from '@tourbillon/shared/company-workspace';
+import { seedAgentSkillsFromTemplates, buildAssignedSkills } from '@tourbillon/shared/company-workspace';
 import { getActiveCompany } from './company';
 import { getDefaultLlmProviderRecord } from './llm-providers';
 
@@ -107,6 +109,7 @@ export interface CreateAgentInput {
   instructionsBundleSoulMd?: string;
   instructionsBundleAgentsMd?: string;
   runtimeType?: AgentRuntimeType;
+  codeExecutionEnabled?: boolean;
 }
 
 function normalizeInstructionField(value: string | undefined | null): string | null {
@@ -163,10 +166,19 @@ export async function createAgent(input: CreateAgentInput): Promise<Agent> {
   const runtimeType = parseAgentRuntimeType(input.runtimeType) ?? 'agent';
   const { adapterType, adapterConfig } = resolveAdapterFieldsForRuntime(runtimeType);
 
+  let assignedToolsets = [...(ROLE_DEFAULT_TOOLSETS[role] ?? [])];
+  if (input.codeExecutionEnabled === false) {
+    assignedToolsets = assignedToolsets.filter((id) => id !== 'code-execution');
+  } else if (input.codeExecutionEnabled === true && !assignedToolsets.includes('code-execution')) {
+    assignedToolsets.push('code-execution');
+  }
+
   const runtimeConfig: AgentRuntimeConfig = {
     ...DEFAULT_RUNTIME_CONFIG,
     assignedTools: ROLE_DEFAULT_ASSIGNED_TOOLS[role] ?? [],
   };
+
+  const assignedSkills = await buildAssignedSkills(companyId, role);
 
   const [created] = await db
     .insert(agents)
@@ -177,8 +189,8 @@ export async function createAgent(input: CreateAgentInput): Promise<Agent> {
       role,
       urlKey,
       reportsToId: input.reportsToId ?? null,
-      assignedSkills: ROLE_DEFAULT_SKILLS[role] ?? ['control-plane'],
-      assignedToolsets: ROLE_DEFAULT_TOOLSETS[role] ?? [],
+      assignedSkills,
+      assignedToolsets,
       providerId: defaultProvider?.id ?? null,
       modelId: envProvider.defaultModel,
       adapterType,
@@ -343,6 +355,80 @@ export async function updateAgentCapabilities(
   return updated;
 }
 
+const VALID_SANDBOX_ISOLATION = new Set<SandboxIsolation>(['none', 'seatbelt', 'bwrap']);
+
+export async function updateAgentCodeExecution(
+  agentId: string,
+  input: {
+    runtimeType: AgentRuntimeType;
+    codeExecutionEnabled: boolean;
+    timeoutMs?: number | null;
+    isolation?: string | null;
+    clearCodeExecutionOverrides?: boolean;
+  },
+): Promise<Agent> {
+  const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+  if (!agent) throw new AgentValidationError('Agent not found.');
+
+  const runtimeType = parseAgentRuntimeType(input.runtimeType);
+  if (!runtimeType) throw new AgentValidationError('Invalid runtime type.');
+
+  const currentToolsets = agent.assignedToolsets ?? [];
+  const withoutCodeExecution = currentToolsets.filter((id) => id !== 'code-execution');
+  const assignedToolsets = input.codeExecutionEnabled
+    ? [...withoutCodeExecution, 'code-execution']
+    : withoutCodeExecution;
+
+  let adapterType = agent.adapterType;
+  let adapterConfig = agent.adapterConfig as Record<string, unknown>;
+
+  if (runtimeType === 'harness') {
+    const harnessFields = resolveAdapterFieldsForRuntime('harness');
+    adapterType = harnessFields.adapterType;
+    adapterConfig = harnessFields.adapterConfig;
+  } else if (isHarnessAdapter(agent.adapterType)) {
+    adapterType = defaultAgentAdapterType();
+    adapterConfig = {};
+  }
+
+  const current = agent.runtimeConfig as AgentRuntimeConfig;
+  const runtimeConfig: AgentRuntimeConfig = { ...current };
+
+  if (input.clearCodeExecutionOverrides) {
+    runtimeConfig.codeExecution = undefined;
+  } else {
+    const codeExecution = { ...current.codeExecution };
+    if (input.timeoutMs === null || input.timeoutMs === 0) {
+      delete codeExecution.timeoutMs;
+    } else if (typeof input.timeoutMs === 'number' && Number.isFinite(input.timeoutMs) && input.timeoutMs > 0) {
+      codeExecution.timeoutMs = input.timeoutMs;
+    }
+    if (input.isolation === null || input.isolation === '') {
+      delete codeExecution.isolation;
+    } else if (input.isolation && VALID_SANDBOX_ISOLATION.has(input.isolation as SandboxIsolation)) {
+      codeExecution.isolation = input.isolation as SandboxIsolation;
+    }
+    runtimeConfig.codeExecution =
+      codeExecution.timeoutMs !== undefined || codeExecution.isolation !== undefined
+        ? codeExecution
+        : undefined;
+  }
+
+  const [updated] = await db
+    .update(agents)
+    .set({
+      assignedToolsets,
+      adapterType,
+      adapterConfig,
+      runtimeConfig,
+      updatedAt: new Date(),
+    })
+    .where(eq(agents.id, agentId))
+    .returning();
+
+  return updated;
+}
+
 export async function updateAgentInstructions(
   agentId: string,
   input: { soulMd?: string; agentsMd?: string }
@@ -476,11 +562,13 @@ export async function updateAgentRole(agentId: string, roleInput: string): Promi
     assignedTools: ROLE_DEFAULT_ASSIGNED_TOOLS[role] ?? [],
   };
 
+  const assignedSkills = await buildAssignedSkills(agent.companyId, role);
+
   const [updated] = await db
     .update(agents)
     .set({
       role,
-      assignedSkills: ROLE_DEFAULT_SKILLS[role] ?? ['control-plane'],
+      assignedSkills,
       assignedToolsets: ROLE_DEFAULT_TOOLSETS[role] ?? [],
       runtimeConfig,
       updatedAt: new Date(),

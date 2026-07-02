@@ -39,6 +39,11 @@ export const ROLE_DEFAULT_SKILLS: Record<string, string[]> = {
   designer: ['control-plane', 'para-memory'],
 };
 
+/** Toolset skill markdown filenames — excluded from dynamic per-agent skill scans. */
+export const TOOLSET_SKILL_FILENAMES = ['buffer-skills.md', 'code-execution-skills.md'] as const;
+
+export const TOOLSET_SKILL_FILENAME_SET = new Set<string>(TOOLSET_SKILL_FILENAMES);
+
 export const TOOLSET_CATALOG = [
   {
     id: 'roster',
@@ -70,7 +75,7 @@ export const TOOLSET_CATALOG = [
     id: 'code-execution',
     label: 'Code execution',
     description:
-      'Run shell commands in an isolated local sandbox (execute_command, get_process_output, kill_process).',
+      'Isolated local sandbox via Mastra workspace (mastra_workspace_execute_command, file tools). Configured under Code & execution on the agent page.',
   },
   {
     id: 'nitter',

@@ -1,13 +1,19 @@
 import { readFile } from 'fs/promises';
 import path from 'path';
 import type { Agent as AgentRecord } from '@tourbillon/db';
-import { getAgentSkillsDir } from '@tourbillon/shared/company-workspace';
+import {
+  discoverAgentSkillFiles,
+  getAgentSkillsDir,
+  readAgentSkillFile,
+  readCompanySkillFile,
+} from '@tourbillon/shared/company-workspace';
 
 const SKILLS_DIR = path.join(process.cwd(), 'packages/skills');
 const TEMPLATE_SKILLS_DIR = path.join(process.cwd(), 'packages/mastra/src/skills');
 
 const TOOLSET_SKILL_FILES: Record<string, string> = {
   buffer: 'buffer-skills.md',
+  'code-execution': 'code-execution-skills.md',
 };
 
 // Sections only relevant to CEO/admin role — stripped for other agents
@@ -39,6 +45,18 @@ export async function readSkillFile(
   }
 }
 
+async function resolveAssignedSkill(
+  agentRecord: AgentRecord,
+  slug: string,
+): Promise<{ slug: string; content: string } | null> {
+  const companyContent = await readCompanySkillFile(agentRecord.companyId, slug);
+  if (companyContent) {
+    return { slug, content: companyContent };
+  }
+
+  return readSkillFile(slug, agentRecord.role);
+}
+
 async function readToolsetSkill(
   agentRecord: AgentRecord,
   toolsetId: string,
@@ -65,32 +83,49 @@ async function readToolsetSkill(
   return null;
 }
 
+async function loadDynamicAgentSkills(
+  agentRecord: AgentRecord,
+): Promise<Array<{ slug: string; content: string }>> {
+  const refs = await discoverAgentSkillFiles(agentRecord.companyId, agentRecord.urlKey);
+  const skills: Array<{ slug: string; content: string }> = [];
+
+  for (const ref of refs) {
+    const content = await readAgentSkillFile(agentRecord.companyId, agentRecord.urlKey, ref.filename);
+    if (content) skills.push({ slug: ref.slug, content });
+  }
+
+  return skills;
+}
+
 export async function loadSkillsForAgent(
   agentRecord: AgentRecord
 ): Promise<Array<{ slug: string; content: string }>> {
-  const assignedResults = await Promise.all(
-    agentRecord.assignedSkills.map((slug) =>
-      readSkillFile(slug, agentRecord.role)
-    )
-  );
-  const assigned = assignedResults.filter(
-    (r): r is { slug: string; content: string } => r !== null
-  );
+  const skillMap = new Map<string, string>();
 
-  const toolsets = agentRecord.assignedToolsets ?? [];
-  const toolsetSkills: Array<{ slug: string; content: string }> = [];
-  for (const [toolsetId, filename] of Object.entries(TOOLSET_SKILL_FILES)) {
-    if (!toolsets.includes(toolsetId)) continue;
-    const skill = await readToolsetSkill(agentRecord, toolsetId, filename);
-    if (skill) toolsetSkills.push(skill);
+  const assignedResults = await Promise.all(
+    agentRecord.assignedSkills.map((slug) => resolveAssignedSkill(agentRecord, slug))
+  );
+  for (const skill of assignedResults) {
+    if (skill) skillMap.set(skill.slug, skill.content);
   }
 
-  const seen = new Set(assigned.map((s) => s.slug));
-  const merged = [...assigned];
-  for (const skill of toolsetSkills) {
-    if (seen.has(skill.slug)) continue;
-    seen.add(skill.slug);
-    merged.push(skill);
+  const dynamicAgentSkills = await loadDynamicAgentSkills(agentRecord);
+  for (const skill of dynamicAgentSkills) {
+    skillMap.set(skill.slug, skill.content);
+  }
+
+  const merged = Array.from(skillMap.entries()).map(([slug, content]) => ({ slug, content }));
+
+  const toolsets = agentRecord.assignedToolsets ?? [];
+  const seen = new Set(merged.map((s) => s.slug));
+  for (const [toolsetId, filename] of Object.entries(TOOLSET_SKILL_FILES)) {
+    if (!toolsets.includes(toolsetId)) continue;
+    if (seen.has(toolsetId)) continue;
+    const skill = await readToolsetSkill(agentRecord, toolsetId, filename);
+    if (skill) {
+      seen.add(skill.slug);
+      merged.push(skill);
+    }
   }
 
   return merged;

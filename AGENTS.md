@@ -91,7 +91,7 @@ Each agent row in the `agents` table has:
 - `assignedToolsets` — Tier 2 boolean toolsets (e.g. `comments`, `approvals`, `roster`)
 - `runtimeConfig.assignedTools` — Tier 2 granular tools (goal/project/issue management), toggled per tool
 - `mcpServerIds` — Tier 3 MCP capability tools
-- `adapterType` — runtime adapter (`lmstudio | ollama | harness_local | process | http`)
+- `adapterType` — runtime adapter (`lmstudio | ollama | harness_local | process | http`). `harness_local` uses headless Mastra Harness (`createTourbillonHarness`) — not the `mastracode` npm package.
 - `providerId` — FK to system-wide `llm_providers` registry (preferred); configure providers at `/settings`
 - `modelId` — model identifier from the selected provider endpoint (e.g. `meta-llama/Llama-3.3-70B-Instruct`)
 - `instructionsBundleSoulMd` — agent's personality/values (SOUL.md content)
@@ -102,7 +102,7 @@ Each agent row in the `agents` table has:
 | Tier | Source | Gating |
 |---|---|---|
 | **Tier 1 — Control Plane** | `control-plane-tools.ts` | Every agent always gets these |
-| **Tier 2 — Boolean toolsets** | `role-tools.ts` | Gated by `assignedToolsets` (comments, roster, approvals, code-execution, web-search, nitter, buffer) |
+| **Tier 2 — Boolean toolsets** | `role-tools.ts` (+ workspace for `code-execution`) | Gated by `assignedToolsets` (comments, roster, approvals, web-search, nitter, buffer); `code-execution` attaches Mastra `LocalSandbox` workspace |
 | **Tier 2 — Granular tools** | `assignable-tools.ts` | Gated by `runtimeConfig.assignedTools` (per-tool toggles in goal/project/issue groups) |
 | **Tier 3 — MCP Tools** | `mcp-tools.ts` | Gated by `mcpServerIds` and/or `buffer` toolset (Buffer MCP); company `settings.mcpCredentials` or env `BUFFER_API_KEY` |
 
@@ -119,7 +119,7 @@ Each agent row in the `agents` table has:
 - `comments` — `addComment`
 - `approvals` — `createApproval`
 - `roster` — `listAgents`
-- `code-execution` — sandbox shell tools (when enabled)
+- `code-execution` — Mastra workspace sandbox (`mastra_workspace_execute_command`, `mastra_workspace_get_process_output`, `mastra_workspace_kill_process`, file tools). Gated via `buildCodeExecutionWorkspace()` in `execution-workspace.ts`, not `role-tools.ts`. Per-issue CWD under `EXECUTION_WORKSPACE_ROOT`. Toolset skill: `code-execution-skills.md`.
 - `web-search` — `searxngSearch`, `searxngNewsSearch` via SearXNG JSON API (`SEARXNG_URL` or company settings)
 - `nitter` — X/Twitter search via self-hosted Nitter (`NITTER_URL`)
 - `buffer` — Buffer social publishing via official MCP (`BUFFER_API_KEY` or company settings)
@@ -134,9 +134,33 @@ Each agent row in the `agents` table has:
 
 Defaults: CEO/CTO/PM get all granular tools; engineers get goal/project read + issue write (no `createGoal` / `createProject` / `requestConfirmation` unless enabled).
 
+### Code execution and harness runtime
+
+Two **orthogonal** agent settings (configured on the agent detail page under **Code & execution**):
+
+| Setting | Field | Effect |
+|---|---|---|
+| **Runtime** | `adapterType` (`lmstudio`/`ollama`/… vs `harness_local`) | Standard `Agent` heartbeat vs Mastra `Harness` with thread resume (`harnessRunId`) |
+| **Code execution** | `assignedToolsets` includes `code-execution` | Attaches `LocalSandbox` workspace; harness permission `edit`/`execute` = allow |
+
+- **Agent + code-execution** — quick scripts/tests in a per-issue sandbox directory.
+- **Harness + code-execution** — multi-heartbeat coding; harness threads persist on the same issue.
+- Company workspace tools (`listWorkspaceFiles`, etc.) are separate from the execution sandbox (shared docs vs ephemeral scratch).
+
+Env: `EXECUTION_WORKSPACE_ROOT`, `SANDBOX_ISOLATION` (`none` \| `seatbelt` \| `bwrap`), `SANDBOX_COMMAND_TIMEOUT_MS`. Per-agent overrides: `runtimeConfig.codeExecution`.
+
 ### Skills (Prompt Injections)
 
-Skills are Markdown files in `packages/skills/`. At agent wake time, `agent-factory.ts` reads each skill file referenced in `agent.assignedSkills` and appends it to the system prompt after SOUL.md and AGENTS.md.
+Skills are injected into the system prompt after SOUL.md and AGENTS.md. Three layers:
+
+| Layer | Location | Assignment | When loaded |
+|---|---|---|---|
+| **Bundled methodology** | `packages/skills/{slug}/SKILL.md` | Role defaults → `assignedSkills` | Wake (company workspace overrides bundled content for same slug) |
+| **Company workspace** | `{companyWorkspace}/skills/{slug}.md` or `skills/{slug}/SKILL.md` | Discovered at hire → merged into `assignedSkills` | Wake (workspace file wins over bundled) |
+| **Per-agent workspace** | `{companyWorkspace}/agents/{urlKey}/skills/*.md` | Not stored in DB — scanned each wake | Every heartbeat (overrides assigned skills for same slug) |
+| **Toolset skills** | `agents/{urlKey}/skills/buffer-skills.md`, `code-execution-skills.md` | Auto from `assignedToolsets` | Wake (excluded from per-agent dynamic scan) |
+
+At hire time, `createAgent()` calls `buildAssignedSkills()` — union of `ROLE_DEFAULT_SKILLS[role]` and slugs discovered in `skills/`. Role changes re-merge company skills via `updateAgentRole()`.
 
 | Skill slug | File | Purpose |
 |---|---|---|
@@ -322,10 +346,10 @@ API routes authenticate the agent via a run-scoped API key in the `Authorization
 
 ### New Skill
 
-1. Create `packages/skills/my-skill/SKILL.md`
-2. The slug is the directory name — `my-skill`
-3. Assign it to agents via `assignedSkills: ['control-plane', 'my-skill']` in the DB or UI
-4. Skills are read from disk at wake time — no build step needed
+1. **Bundled (all companies):** Create `packages/skills/my-skill/SKILL.md` — slug is the directory name.
+2. **Company-wide:** Add `skills/my-skill.md` or `skills/my-skill/SKILL.md` under the company workspace — discovered at hire and merged into `assignedSkills`.
+3. **Per-agent (dynamic):** Add `agents/{urlKey}/skills/my-skill.md` — injected on every wake without DB changes.
+4. Skills are read from disk at wake time — no build step needed. Company workspace content overrides bundled files for the same slug.
 
 ### New Schema Table
 
@@ -389,7 +413,7 @@ These are discussed in the project's design documents and are next on the roadma
 | Feature | Status | Notes |
 |---|---|---|
 | **Document workspaces** | Planned | `documents` table with `shared \| agent_private \| issue_scoped` visibility |
-| **Code execution** | Planned | Sandboxed `packages/executor` service; `execCode` tool gated by toolset |
+| **Remote executor service** | Planned | Optional `packages/executor` for network-isolated execution; today uses in-process `LocalSandbox` |
 | **BullMQ native cron for routines** | Planned | Replace `setInterval` polling with BullMQ repeat jobs |
 | **Routines UI** | Planned | CRUD page at `/dashboard/routines` |
 | **Review step skill** | Planned | `§ Review Protocol` in control-plane SKILL.md; no schema changes needed |
