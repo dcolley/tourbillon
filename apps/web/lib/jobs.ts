@@ -71,6 +71,7 @@ export interface HeartbeatRunSnapshot {
   status: string;
   invocationSource: string;
   startedAt: string;
+  lastSeenAt: string | null;
   finishedAt: string | null;
   errorText: string | null;
   contextSnapshot: unknown;
@@ -211,6 +212,7 @@ export async function getJobLiveSnapshot(
           status: heartbeatRun.run.status,
           invocationSource: heartbeatRun.run.invocationSource,
           startedAt: heartbeatRun.run.startedAt.toISOString(),
+          lastSeenAt: heartbeatRun.run.lastSeenAt?.toISOString() ?? null,
           finishedAt: heartbeatRun.run.finishedAt?.toISOString() ?? null,
           errorText: heartbeatRun.run.errorText,
           contextSnapshot: heartbeatRun.run.contextSnapshot,

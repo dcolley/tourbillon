@@ -14,7 +14,7 @@ import { buildMCPTools } from './tools/mcp-tools';
 import { SEARXNG_TOOLS } from './tools/searxng-tools';
 import { getInternalApiUrl } from './tools/api-client';
 import { buildCodeExecutionWorkspace } from './execution-workspace';
-import { resolveAgentModelSettings } from './model-settings';
+import { resolveAgentGenerationOptions, toMastraDefaultOptions } from './model-settings';
 import { getMastraInstance } from './mastra-instance';
 import { isObservabilityEnabled } from '@tourbillon/shared';
 
@@ -159,7 +159,7 @@ export async function createAgentWithSkills(
   );
 
   const codeExecutionEnabled = await shouldAttachCodeExecutionWorkspace(agentRecord);
-  const modelSettings = resolveAgentModelSettings(agentRecord, providerRecord);
+  const generationOptions = resolveAgentGenerationOptions(agentRecord, providerRecord);
 
   console.log(
     formatTrace('agent-factory', { agentId: agentRecord.id, agentName: agentRecord.name }, 'agent ready', {
@@ -175,7 +175,8 @@ export async function createAgentWithSkills(
       tools: Object.keys(tools),
       skillCount: skillContents.length,
       codeExecutionEnabled,
-      modelSettings,
+      modelSettings: generationOptions.modelSettings,
+      reasoning: generationOptions.reasoning,
     })
   );
 
@@ -187,7 +188,7 @@ export async function createAgentWithSkills(
     tools: tools as Parameters<typeof Agent>[0]['tools'],
     memory: getAgentMemory(),
     ...(codeExecutionEnabled ? { workspace: buildCodeExecutionWorkspace() } : {}),
-    ...(modelSettings ? { defaultOptions: { modelSettings } } : {}),
+    ...toMastraDefaultOptions(generationOptions),
   });
 
   return agent;

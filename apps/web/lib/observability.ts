@@ -2,9 +2,11 @@ import {
   db,
   agentObservabilityEvents,
   agents,
+  heartbeatRuns,
   type AgentObservabilityEvent,
+  type HeartbeatRun,
 } from '@tourbillon/db';
-import { and, count, desc, eq, gte, ilike, lte, or } from 'drizzle-orm';
+import { and, count, desc, eq, gte, ilike, inArray, lte, or } from 'drizzle-orm';
 import type {
   ListObservabilityEventsInput,
   ListObservabilityEventsResult,
@@ -25,9 +27,22 @@ export {
   isObservabilityPageSize,
 } from './observability-types';
 
+type HeartbeatRunSummary = Pick<HeartbeatRun, 'id' | 'status' | 'errorText'>;
+
+function heartbeatRunStatusForRow(
+  run: HeartbeatRunSummary | undefined,
+): ObservabilityEventRow['heartbeatRunStatus'] {
+  if (!run) return null;
+  if (run.status === 'running' || run.status === 'succeeded' || run.status === 'failed') {
+    return run.status;
+  }
+  return null;
+}
+
 function toRow(
   event: AgentObservabilityEvent,
-  agentName: string | null
+  agentName: string | null,
+  heartbeatRun?: HeartbeatRunSummary,
 ): ObservabilityEventRow {
   return {
     id: event.id,
@@ -50,12 +65,32 @@ function toRow(
     outputPreview: event.outputPreview,
     payload: (event.payload as Record<string, unknown> | null) ?? {},
     errorText: event.errorText,
+    heartbeatRunStatus: heartbeatRunStatusForRow(heartbeatRun),
+    heartbeatRunErrorText: heartbeatRun?.errorText ?? null,
     durationMs: event.durationMs,
     inputTokens: event.inputTokens,
     outputTokens: event.outputTokens,
     startedAt: event.startedAt?.toISOString() ?? null,
     occurredAt: event.occurredAt.toISOString(),
   };
+}
+
+async function loadHeartbeatRunMap(
+  runIds: string[],
+): Promise<Map<string, HeartbeatRunSummary>> {
+  const unique = [...new Set(runIds.filter(Boolean))];
+  if (unique.length === 0) return new Map();
+
+  const runs = await db
+    .select({
+      id: heartbeatRuns.id,
+      status: heartbeatRuns.status,
+      errorText: heartbeatRuns.errorText,
+    })
+    .from(heartbeatRuns)
+    .where(inArray(heartbeatRuns.id, unique));
+
+  return new Map(runs.map((run) => [run.id, run]));
 }
 
 export async function listObservabilityEvents(
@@ -112,8 +147,18 @@ export async function listObservabilityEvents(
     .limit(pageSize)
     .offset(page * pageSize);
 
+  const heartbeatRunMap = await loadHeartbeatRunMap(
+    rows.map((row) => row.event.heartbeatRunId).filter((id): id is string => Boolean(id)),
+  );
+
   return {
-    events: rows.map((row) => toRow(row.event, row.agentName)),
+    events: rows.map((row) =>
+      toRow(
+        row.event,
+        row.agentName,
+        row.event.heartbeatRunId ? heartbeatRunMap.get(row.event.heartbeatRunId) : undefined,
+      ),
+    ),
     total: totalRow?.total ?? 0,
     page,
     pageSize,
@@ -140,5 +185,14 @@ export async function getObservabilityEvent(
     .limit(1);
 
   if (!row) return null;
-  return toRow(row.event, row.agentName);
+
+  const heartbeatRunMap = row.event.heartbeatRunId
+    ? await loadHeartbeatRunMap([row.event.heartbeatRunId])
+    : new Map();
+
+  return toRow(
+    row.event,
+    row.agentName,
+    row.event.heartbeatRunId ? heartbeatRunMap.get(row.event.heartbeatRunId) : undefined,
+  );
 }

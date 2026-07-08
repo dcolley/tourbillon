@@ -7,6 +7,7 @@ import {
   type ObservabilityEventType,
 } from '@tourbillon/shared';
 import { randomUUID } from 'crypto';
+import { resolveSpanErrorText } from './resolve-span-error-text';
 
 const SPAN_TYPE_MAP: Partial<Record<SpanType, ObservabilityEventType>> = {
   [SpanType.AGENT_RUN]: 'agent_run',
@@ -175,6 +176,7 @@ export function mapExportedSpanToEvent(span: AnyExportedSpan): NewAgentObservabi
         output: span.output,
         attributes: span.attributes,
         metadata: span.metadata,
+        errorInfo: span.errorInfo,
         tags: span.tags,
         entityType: span.entityType,
         entityId: span.entityId,
@@ -182,7 +184,7 @@ export function mapExportedSpanToEvent(span: AnyExportedSpan): NewAgentObservabi
       },
       maxPayloadBytes
     ),
-    errorText: span.errorInfo?.message,
+    errorText: resolveSpanErrorText(span),
     durationMs: durationMs(span),
     inputTokens: tokens.input,
     outputTokens: tokens.output,

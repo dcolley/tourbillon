@@ -23,6 +23,9 @@
       "@tourbillon/shared": [
         "../../packages/shared/src/index.ts"
       ],
+      "@tourbillon/shared/*": [
+        "../../packages/shared/src/*"
+      ],
       "@tourbillon/mastra": [
         "../../packages/mastra/src/index.ts"
       ]

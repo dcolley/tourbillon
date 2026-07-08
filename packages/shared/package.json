@@ -9,6 +9,7 @@
     "./constants": "./src/constants.ts",
     "./model-provider": "./src/model-provider.ts",
     "./model-settings": "./src/model-settings.ts",
+    "./reasoning-capabilities": "./src/reasoning-capabilities.ts",
     "./company-workspace": "./src/company-workspace.ts",
     "./company-workspace-types": "./src/company-workspace-types.ts",
     "./execution-workspace": "./src/execution-workspace.ts",

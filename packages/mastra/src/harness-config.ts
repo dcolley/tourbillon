@@ -14,7 +14,7 @@ import {
   type AssembleAgentToolsOptions,
 } from './agent-factory';
 import { getLanguageModelForAgent, llmProviderRowToRecord } from './provider';
-import { resolveAgentModelSettings } from './model-settings';
+import { resolveAgentGenerationOptions, toMastraDefaultOptions } from './model-settings';
 import { buildCodeExecutionWorkspace } from './execution-workspace';
 
 export function buildHarnessThreadId(agentRecord: AgentRecord, taskId?: string): string {
@@ -73,7 +73,7 @@ export async function buildHarnessWorkModes(
     ? await getLlmProviderRowById(agentRecord.providerId)
     : null;
   const providerRecord = providerRow ? llmProviderRowToRecord(providerRow) : null;
-  const modelSettings = resolveAgentModelSettings(agentRecord, providerRecord);
+  const generationOptions = resolveAgentGenerationOptions(agentRecord, providerRecord);
 
   const workAgent = new Agent({
     id: agentRecord.id,
@@ -83,7 +83,7 @@ export async function buildHarnessWorkModes(
     tools: tools as Parameters<typeof Agent>[0]['tools'],
     memory: getAgentMemory(),
     ...(codeExecutionEnabled ? { workspace: buildCodeExecutionWorkspace() } : {}),
-    ...(modelSettings ? { defaultOptions: { modelSettings } } : {}),
+    ...toMastraDefaultOptions(generationOptions),
   });
 
   return [

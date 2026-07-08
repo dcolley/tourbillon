@@ -1,6 +1,15 @@
 'use client';
 
-import type { AgentModelSettings } from '@tourbillon/shared';
+import type { AgentModelSettings, NumericModelSettingKey, ReasoningLevel } from '@tourbillon/shared/model-settings';
+
+const REASONING_LEVEL_LABELS: Record<ReasoningLevel, string> = {
+  none: 'None',
+  minimal: 'Minimal',
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'Extra high',
+};
 
 export const MODEL_SETTING_FIELDS = [
   {
@@ -62,7 +71,7 @@ export const MODEL_SETTING_FIELDS = [
     advanced: true,
   },
 ] satisfies Array<{
-  key: keyof AgentModelSettings;
+  key: NumericModelSettingKey;
   label: string;
   min: number;
   max: number;
@@ -71,7 +80,9 @@ export const MODEL_SETTING_FIELDS = [
   advanced?: boolean;
 }>;
 
-export type ModelSettingsFormValues = Record<keyof AgentModelSettings, string>;
+export type ModelSettingsFormValues = Record<NumericModelSettingKey, string> & {
+  reasoningLevel: string;
+};
 
 export function emptyModelSettingsFormValues(): ModelSettingsFormValues {
   return {
@@ -82,6 +93,7 @@ export function emptyModelSettingsFormValues(): ModelSettingsFormValues {
     presencePenalty: '',
     topK: '',
     seed: '',
+    reasoningLevel: '',
   };
 }
 
@@ -96,6 +108,9 @@ export function modelSettingsToFormValues(
       values[field.key] = String(value);
     }
   }
+  if (settings.reasoningLevel) {
+    values.reasoningLevel = settings.reasoningLevel;
+  }
   return values;
 }
 
@@ -109,6 +124,10 @@ export function formValuesToModelSettings(values: ModelSettingsFormValues): Agen
       throw new Error(`${field.label} must be a number.`);
     }
     settings[field.key] = parsed;
+  }
+  const reasoningRaw = values.reasoningLevel.trim();
+  if (reasoningRaw) {
+    settings.reasoningLevel = reasoningRaw as ReasoningLevel;
   }
   return settings;
 }
@@ -164,6 +183,39 @@ export function ModelSettingsFields({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+interface ReasoningLevelFieldProps {
+  value: string;
+  allowedLevels: ReasoningLevel[];
+  onChange: (value: string) => void;
+}
+
+export function ReasoningLevelField({ value, allowedLevels, onChange }: ReasoningLevelFieldProps) {
+  return (
+    <div className="space-y-1.5 sm:col-span-2">
+      <label htmlFor="model-reasoningLevel" className="text-sm font-medium">
+        Reasoning level
+      </label>
+      <select
+        id="model-reasoningLevel"
+        name="reasoningLevel"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm sm:max-w-xs"
+      >
+        <option value="">Endpoint default</option>
+        {allowedLevels.map((level) => (
+          <option key={level} value={level}>
+            {REASONING_LEVEL_LABELS[level]}
+          </option>
+        ))}
+      </select>
+      <p className="text-xs text-muted-foreground">
+        Controls internal reasoning depth. Only applies to reasoning-capable models.
+      </p>
     </div>
   );
 }

@@ -12,15 +12,17 @@ import {
   buildHeartbeatMemoryKeys,
   getResumableDurableRun,
   persistDurableRunId,
-  resolveAgentModelSettings,
+  resolveAgentGenerationOptions,
+  toMastraCallOptions,
+  type AgentGenerationOptions,
   shouldUseHeartbeatMemory,
   clearInboxThread,
 } from '@tourbillon/mastra';
 import type { HeartbeatJobData, AgentRuntimeConfig } from '@tourbillon/shared';
-import type { AgentModelSettings } from '@tourbillon/shared';
 import {
-  DEFAULT_HEARTBEAT_TIMEOUT_SEC,
+  heartbeatStaleErrorText,
   QUEUE_HEARTBEAT,
+  resolveHeartbeatLivenessConfig,
   resolveModelProviderConfig,
   modelProviderOverridesFromAgent,
   toLlmProviderRecord,
@@ -30,12 +32,17 @@ import {
   buildWakeMessage,
   parseCompanySettings,
 } from '@tourbillon/shared';
-import type { AgentRuntimeConfig } from '@tourbillon/shared';
 import type { Agent as AgentRecord } from '@tourbillon/db';
 import { randomUUID } from 'crypto';
 import { createJobTracer } from './job-trace';
 import { runWithHarness, type HarnessRunResult } from './adapters/harness-adapter';
 import { redisPub } from './redis-pub';
+import {
+  awaitWithAbort,
+  heartbeatAbortedError,
+  isAbortLikeError,
+  resolveHeartbeatFailureError,
+} from './heartbeat-abort';
 
 const CONCURRENCY = parseInt(process.env.WORKER_CONCURRENCY ?? '1', 10);
 
@@ -57,7 +64,7 @@ heartbeatWorker.on('completed', (job) => {
     agentId: job.data.agentId,
     taskId: job.data.taskId,
     wakeReason: job.data.wakeReason,
-  });
+  }, job);
   tracer.info('job completed');
 });
 
@@ -67,7 +74,7 @@ heartbeatWorker.on('failed', (job, err) => {
     agentId: job?.data.agentId,
     taskId: job?.data.taskId,
     wakeReason: job?.data.wakeReason,
-  });
+  }, job);
   tracer.error('job failed', { error: err.message });
 });
 
@@ -113,9 +120,10 @@ async function recordHeartbeatSuccess(
       .where(eq(agents.id, agentRecord.id));
   }
 
-  const runUpdates: { status: 'succeeded'; finishedAt: Date; traceId?: string } = {
+  const runUpdates: { status: 'succeeded'; finishedAt: Date; errorText: null; traceId?: string } = {
     status: 'succeeded',
     finishedAt: new Date(),
+    errorText: null,
   };
   if (usage.traceId) {
     runUpdates.traceId = usage.traceId;
@@ -217,6 +225,7 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
 
   const runId = randomUUID();
   const runTracer = agentTracer.child({ runId, taskId });
+  const runStartedAt = new Date();
 
   await db.insert(heartbeatRuns).values({
     id: runId,
@@ -232,7 +241,8 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
       agentName: agentRecord.name,
       agentUrlKey: agentRecord.urlKey,
     },
-    startedAt: new Date(),
+    startedAt: runStartedAt,
+    lastSeenAt: runStartedAt,
   });
   runTracer.info('heartbeat run created');
 
@@ -249,7 +259,40 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
 
   const apiKey = buildRunScopedApiKey(runId, agentId, companyId);
   const wakeMessage = buildWakeMessage(job.data);
-  const timeoutMs = DEFAULT_HEARTBEAT_TIMEOUT_SEC * 1000;
+  const liveness = resolveHeartbeatLivenessConfig();
+  const staleMs = liveness.staleSec * 1000;
+  const runStartedMs = Date.now();
+  const abortController = new AbortController();
+
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
+  const resetWatchdog = () => {
+    if (watchdog) clearTimeout(watchdog);
+    watchdog = setTimeout(() => abortController.abort(), staleMs);
+  };
+  resetWatchdog();
+
+  const pingHeartbeat = () => {
+    if (abortController.signal.aborted) return;
+
+    resetWatchdog();
+    void job.extendLock(job.token!, 30_000).catch(() => undefined);
+    void job.updateProgress({ lastSeen: Date.now() }).catch(() => undefined);
+    void db.update(heartbeatRuns)
+      .set({ lastSeenAt: new Date() })
+      .where(eq(heartbeatRuns.id, runId))
+      .catch(() => undefined);
+  };
+
+  abortController.signal.addEventListener(
+    'abort',
+    () => {
+      runTracer.warn('heartbeat abort signal fired');
+    },
+    { once: true },
+  );
+
+  pingHeartbeat();
+  const pingInterval = setInterval(pingHeartbeat, liveness.pingIntervalMs);
 
   const providerRow = agentRecord.providerId
     ? await getLlmProviderRowById(agentRecord.providerId)
@@ -265,7 +308,7 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
     ? await db.query.issues.findFirst({ where: eq(issues.id, taskId) })
     : undefined;
 
-  const modelSettings = resolveAgentModelSettings(agentRecord, providerRecord);
+  const generationOptions = resolveAgentGenerationOptions(agentRecord, providerRecord);
 
   runTracer.info('invoking heartbeat runtime', {
     adapterType: agentRecord.adapterType,
@@ -275,14 +318,12 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
     providerName: providerConfig.providerName,
     apiMode: providerConfig.apiMode,
     modelBaseURL: providerConfig.baseURL,
-    modelSettings,
-    timeoutSec: DEFAULT_HEARTBEAT_TIMEOUT_SEC,
+    modelSettings: generationOptions.modelSettings,
+    reasoning: generationOptions.reasoning,
+    pingIntervalSec: liveness.pingIntervalMs / 1000,
+    staleSec: liveness.staleSec,
     wakeMessagePreview: wakeMessage.slice(0, 400),
   });
-
-  const lockExtender = setInterval(() => {
-    void job.extendLock(job.token!, 30_000).catch(() => undefined);
-  }, 20_000);
 
   try {
     if (isHarnessAdapter(agentRecord.adapterType)) {
@@ -295,10 +336,10 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
           goalId: issueForTask?.goalId ?? undefined,
           projectId: issueForTask?.projectId ?? undefined,
         },
-        timeoutMs,
         {
           allowedMcpServerIds: company.allowedMcpServerIds ?? [],
           companySettings: parseCompanySettings(company.settings),
+          abortSignal: abortController.signal,
         },
       );
 
@@ -310,6 +351,16 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
         providerConfig.provider,
         harnessResult,
       );
+
+      if (harnessResult.finishReason === 'timeout' || harnessResult.finishReason === 'error') {
+        const { staleSec } = resolveHeartbeatLivenessConfig();
+        const errorText =
+          harnessResult.finishReason === 'timeout'
+            ? heartbeatStaleErrorText(staleSec)
+            : 'Harness run failed';
+        throw new Error(errorText);
+      }
+
       runTracer.info('harness heartbeat succeeded', {
         finishReason: harnessResult.finishReason,
         traceId: harnessResult.traceId,
@@ -324,20 +375,25 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
       runTracer,
       apiKey,
       wakeMessage,
-      timeoutMs,
+      abortSignal: abortController.signal,
       taskId,
       issueForTask,
       providerConfig,
       companyId,
-      modelSettings,
+      generationOptions,
     });
   } catch (err) {
-    const errorText = err instanceof Error ? err.message : String(err);
-    runTracer.error('heartbeat run failed', { error: errorText });
+    const errorText = resolveHeartbeatFailureError(err, abortController.signal.aborted);
+    runTracer.error('heartbeat run failed', {
+      error: errorText,
+      aborted: abortController.signal.aborted,
+      durationMs: Date.now() - runStartedMs,
+    });
     await recordHeartbeatFailure(runId, errorText, companyId, agentId);
     throw err;
   } finally {
-    clearInterval(lockExtender);
+    if (watchdog) clearTimeout(watchdog);
+    clearInterval(pingInterval);
   }
 }
 
@@ -353,6 +409,7 @@ async function recordHarnessResult(
       .set({
         status: 'succeeded',
         finishedAt: new Date(),
+        errorText: null,
         traceId: result.traceId ?? undefined,
         harnessRunId: result.harnessRunId ?? undefined,
       })
@@ -365,7 +422,13 @@ async function recordHarnessResult(
   }
 
   if (result.finishReason === 'timeout') {
-    await recordHeartbeatFailure(runId, 'Heartbeat timeout', companyId, agentRecord.id);
+    const { staleSec } = resolveHeartbeatLivenessConfig();
+    await recordHeartbeatFailure(
+      runId,
+      heartbeatStaleErrorText(staleSec),
+      companyId,
+      agentRecord.id,
+    );
     return;
   }
 
@@ -388,12 +451,12 @@ async function runDurableAgentHeartbeat(params: {
   runTracer: ReturnType<typeof createJobTracer>;
   apiKey: string;
   wakeMessage: string;
-  timeoutMs: number;
+  abortSignal: AbortSignal;
   taskId?: string;
   issueForTask: Awaited<ReturnType<typeof db.query.issues.findFirst>> | undefined;
   providerConfig: ReturnType<typeof resolveModelProviderConfig>;
   companyId: string;
-  modelSettings?: AgentModelSettings;
+  generationOptions?: AgentGenerationOptions;
 }): Promise<void> {
   const {
     agentRecord,
@@ -402,12 +465,12 @@ async function runDurableAgentHeartbeat(params: {
     runTracer,
     apiKey,
     wakeMessage,
-    timeoutMs,
+    abortSignal,
     taskId,
     issueForTask,
     providerConfig,
     companyId,
-    modelSettings,
+    generationOptions,
   } = params;
 
   const company = await db.query.companies.findFirst({ where: eq(companies.id, companyId) });
@@ -474,91 +537,87 @@ async function runDurableAgentHeartbeat(params: {
       }
     : undefined;
 
-  const keepalive = setInterval(() => {
-    void job.updateProgress(0).catch(() => undefined);
-  }, 20_000);
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let traceId: string | undefined;
+  let durableRunId: string | undefined;
+  let streamResult: { cleanup: () => void } | undefined;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const onAbort = () => {
+    streamResult?.cleanup();
+  };
+  abortSignal.addEventListener('abort', onAbort);
 
   try {
-    let inputTokens = 0;
-    let outputTokens = 0;
-    let traceId: string | undefined;
-    let durableRunId: string | undefined;
-    let streamResult: { cleanup: () => void } | undefined;
-
-    try {
-      if (resumable?.durableRunId) {
-        runTracer.info('resuming durable agent run', { durableRunId: resumable.durableRunId });
-        const observed = await durableAgent.observe(resumable.durableRunId, {
-          offset: 0,
-          abortSignal: controller.signal,
-          onFinish: (result) => {
-            const usage = result.output?.usage;
-            inputTokens = usage?.promptTokens ?? usage?.inputTokens ?? inputTokens;
-            outputTokens = usage?.completionTokens ?? usage?.outputTokens ?? outputTokens;
-          },
-        } as NonNullable<Parameters<typeof durableAgent.observe>[1]> & { abortSignal: AbortSignal });
-        streamResult = observed;
-        durableRunId = observed.runId;
-        traceId = observed.runId;
-        await observed.output.text;
-        observed.cleanup();
-        streamResult = undefined;
-      } else {
-        const streamed = await durableAgent.stream(wakeMessage, {
-          requestContext: runtimeContext,
-          maxSteps: 30,
-          ...(useMemory
-            ? {
-                memory: {
-                  resource: memoryKeys.resource,
-                  thread: memoryKeys.thread,
-                },
-              }
-            : {}),
-          ...(modelSettings ? { modelSettings } : {}),
-          ...(tracingOptions ? { tracingOptions } : {}),
-          abortSignal: controller.signal,
-          onFinish: (result) => {
-            const usage = result.output?.usage;
-            inputTokens = usage?.promptTokens ?? usage?.inputTokens ?? 0;
-            outputTokens = usage?.completionTokens ?? usage?.outputTokens ?? 0;
-          },
-        } as NonNullable<Parameters<typeof durableAgent.stream>[1]> & { abortSignal: AbortSignal });
-        streamResult = streamed;
-        durableRunId = streamed.runId;
-        traceId = streamed.runId;
-        await streamed.output.text;
-        streamed.cleanup();
-        streamResult = undefined;
-      }
-    } catch (err) {
-      streamResult?.cleanup();
-      if (controller.signal.aborted) {
-        throw new Error('Heartbeat timeout');
-      }
-      throw err;
+    if (resumable?.durableRunId) {
+      runTracer.info('resuming durable agent run', { durableRunId: resumable.durableRunId });
+      const observed = await durableAgent.observe(resumable.durableRunId, {
+        offset: 0,
+        abortSignal,
+        onFinish: (result) => {
+          const usage = result.output?.usage;
+          inputTokens = usage?.promptTokens ?? usage?.inputTokens ?? inputTokens;
+          outputTokens = usage?.completionTokens ?? usage?.outputTokens ?? outputTokens;
+        },
+      } as NonNullable<Parameters<typeof durableAgent.observe>[1]> & { abortSignal: AbortSignal });
+      streamResult = observed;
+      durableRunId = observed.runId;
+      traceId = observed.runId;
+      await awaitWithAbort(observed.output.text, abortSignal);
+      observed.cleanup();
+      streamResult = undefined;
+    } else {
+      const streamed = await durableAgent.stream(wakeMessage, {
+        requestContext: runtimeContext,
+        maxSteps: 30,
+        ...(useMemory
+          ? {
+              memory: {
+                resource: memoryKeys.resource,
+                thread: memoryKeys.thread,
+              },
+            }
+          : {}),
+        ...toMastraCallOptions(generationOptions ?? {}),
+        ...(tracingOptions ? { tracingOptions } : {}),
+        abortSignal,
+        onFinish: (result) => {
+          const usage = result.output?.usage;
+          inputTokens = usage?.promptTokens ?? usage?.inputTokens ?? 0;
+          outputTokens = usage?.completionTokens ?? usage?.outputTokens ?? 0;
+        },
+      } as NonNullable<Parameters<typeof durableAgent.stream>[1]> & { abortSignal: AbortSignal });
+      streamResult = streamed;
+      durableRunId = streamed.runId;
+      traceId = streamed.runId;
+      await awaitWithAbort(streamed.output.text, abortSignal);
+      streamed.cleanup();
+      streamResult = undefined;
     }
-
-    if (durableRunId) {
-      await persistDurableRunId(runId, durableRunId);
+  } catch (err) {
+    streamResult?.cleanup();
+    streamResult = undefined;
+    if (abortSignal.aborted || isAbortLikeError(err)) {
+      throw heartbeatAbortedError();
     }
-
-    await logIssueStateAfterRun(runTracer, taskId);
-
-    await recordHeartbeatSuccess(runId, agentRecord, companyId, providerConfig.provider, {
-      inputTokens,
-      outputTokens,
-      traceId,
-    });
-
-    runTracer.info('durable agent heartbeat succeeded', { traceId, durableRunId });
+    throw err;
   } finally {
-    clearTimeout(timeout);
-    clearInterval(keepalive);
+    abortSignal.removeEventListener('abort', onAbort);
   }
+
+  if (durableRunId) {
+    await persistDurableRunId(runId, durableRunId);
+  }
+
+  await logIssueStateAfterRun(runTracer, taskId);
+
+  await recordHeartbeatSuccess(runId, agentRecord, companyId, providerConfig.provider, {
+    inputTokens,
+    outputTokens,
+    traceId,
+  });
+
+  runTracer.info('durable agent heartbeat succeeded', { traceId, durableRunId });
 }
 
 async function logIssueStateAfterRun(

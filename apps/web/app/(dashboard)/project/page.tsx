@@ -7,7 +7,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { StatusBadge } from '@/lib/status-badges';
 import { listProjects, type ProjectStatus } from '@/lib/projects';
 import { listGoalOptions } from '@/lib/goals';
-import { getActiveCompany } from '@/lib/company';
+import { getActiveCompanyOrNull } from '@/lib/company';
 import { NewProjectDialog } from './new-project-dialog';
 
 const FILTERS = [
@@ -31,7 +31,8 @@ export default async function ProjectsPage({
   searchParams: { filter?: string };
 }) {
   const filter = parseFilter(searchParams.filter);
-  const company = await getActiveCompany();
+  const company = await getActiveCompanyOrNull();
+  if (!company) return null;
 
   const [projectList, goalList, agentList, goalTitles] = await Promise.all([
     listProjects(filter),

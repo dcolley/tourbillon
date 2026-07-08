@@ -2,7 +2,7 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { db, agents } from '@tourbillon/db';
 import { desc, eq } from 'drizzle-orm';
-import { getActiveCompany } from '@/lib/company';
+import { getActiveCompany, getActiveCompanyOrNull } from '@/lib/company';
 import { AgentValidationError, AGENT_ROLE_OPTIONS, createAgent } from '@/lib/agents';
 import { AgentInstructionFields } from './agent-instruction-fields';
 
@@ -38,7 +38,8 @@ export default async function NewAgentPage({
 }: {
   searchParams: { error?: string };
 }) {
-  const company = await getActiveCompany();
+  const company = await getActiveCompanyOrNull();
+  if (!company) return null;
   const existingAgents = await db
     .select()
     .from(agents)

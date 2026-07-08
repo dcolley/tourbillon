@@ -5,9 +5,16 @@ import { config as loadDotenv } from 'dotenv';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 loadDotenv({ path: path.resolve(__dirname, '../../.env') });
 
+const allowedDevOrigins = process.env.ALLOWED_DEV_ORIGINS
+  ? process.env.ALLOWED_DEV_ORIGINS.split(',')
+      .map((origin) => origin.trim())
+      .filter(Boolean)
+  : undefined;
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  ...(allowedDevOrigins?.length ? { allowedDevOrigins } : {}),
   transpilePackages: [
     '@tourbillon/db',
     '@tourbillon/shared',

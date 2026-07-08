@@ -16,7 +16,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
         activeCompanyId={activeCompany?.id ?? null}
         activeCompanyName={activeCompany?.name ?? null}
       >
-        {children}
+        {activeCompany ? children : null}
       </DashboardShell>
     </CompanyGate>
   );

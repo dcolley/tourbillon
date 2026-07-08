@@ -19,6 +19,7 @@ import {
 import type { HeartbeatJobData, AgentRuntimeConfig } from '@tourbillon/shared';
 import { buildWakeMessage, isHarnessAdapter, isObservabilityEnabled, parseCompanySettings, type CompanySettings } from '@tourbillon/shared';
 import { randomUUID } from 'crypto';
+import { heartbeatAbortedError } from '../heartbeat-abort';
 
 export interface HarnessRunContext {
   job: Job<HeartbeatJobData>;
@@ -41,8 +42,11 @@ export interface HarnessRunResult {
 export async function runWithHarness(
   agentRecord: AgentRecord,
   context: HarnessRunContext,
-  timeoutMs: number,
-  options: { allowedMcpServerIds: string[]; companySettings?: CompanySettings | null },
+  options: {
+    allowedMcpServerIds: string[];
+    companySettings?: CompanySettings | null;
+    abortSignal?: AbortSignal;
+  },
 ): Promise<HarnessRunResult> {
   if (!isHarnessAdapter(agentRecord.adapterType)) {
     throw new Error(`Agent ${agentRecord.id} is not configured for harness execution`);
@@ -112,9 +116,8 @@ export async function runWithHarness(
       harness,
       buildWakeMessage(job.data),
       runtimeContext,
-      timeoutMs,
-      job,
       onEvent,
+      options.abortSignal,
     );
 
     const harnessRunId = harness.getCurrentRunId() ?? undefined;
@@ -132,9 +135,8 @@ async function driveHarnessHeadless(
   harness: Harness<TourbillonHarnessState>,
   wakeMessage: string,
   requestContext: ReturnType<typeof createHeartbeatRuntimeContext>,
-  timeoutMs: number,
-  job: Job<HeartbeatJobData>,
   onEvent: (event: HarnessEvent) => void,
+  abortSignal?: AbortSignal,
 ): Promise<Omit<HarnessRunResult, 'threadId' | 'harnessRunId' | 'traceId'>> {
   let inputTokens = 0;
   let outputTokens = 0;
@@ -142,17 +144,27 @@ async function driveHarnessHeadless(
   let suspendedToolCallId: string | undefined;
 
   return new Promise((resolve, reject) => {
-    const keepalive = setInterval(() => {
-      void job.updateProgress(0).catch(() => undefined);
-    }, 20_000);
+    let unsub: (() => void) | undefined;
 
-    const timer = setTimeout(() => {
-      clearInterval(keepalive);
-      finishReason = 'timeout';
-      resolve({ inputTokens, outputTokens, finishReason });
-    }, timeoutMs);
+    const finish = (result: Omit<HarnessRunResult, 'threadId' | 'harnessRunId' | 'traceId'>) => {
+      abortSignal?.removeEventListener('abort', onAbort);
+      unsub?.();
+      resolve(result);
+    };
 
-    const unsub = harness.subscribe((event) => {
+    const fail = (err: Error) => {
+      abortSignal?.removeEventListener('abort', onAbort);
+      unsub?.();
+      reject(err);
+    };
+
+    const onAbort = () => {
+      fail(heartbeatAbortedError());
+    };
+
+    abortSignal?.addEventListener('abort', onAbort, { once: true });
+
+    unsub = harness.subscribe((event) => {
       onEvent(event);
 
       switch (event.type) {
@@ -170,26 +182,17 @@ async function driveHarnessHeadless(
           } else {
             finishReason = 'complete';
           }
-          clearTimeout(timer);
-          clearInterval(keepalive);
-          unsub();
-          resolve({ inputTokens, outputTokens, finishReason, suspendedToolCallId });
+          finish({ inputTokens, outputTokens, finishReason, suspendedToolCallId });
           break;
 
         case 'tool_suspended':
           suspendedToolCallId = event.toolCallId;
           finishReason = 'suspended';
-          clearTimeout(timer);
-          clearInterval(keepalive);
-          unsub();
-          resolve({ inputTokens, outputTokens, finishReason, suspendedToolCallId });
+          finish({ inputTokens, outputTokens, finishReason, suspendedToolCallId });
           break;
 
         case 'error':
-          clearTimeout(timer);
-          clearInterval(keepalive);
-          unsub();
-          reject(event.error);
+          fail(event.error);
           break;
 
         default:
@@ -201,17 +204,11 @@ async function driveHarnessHeadless(
       .sendMessage({ content: wakeMessage, requestContext })
       .then(() => {
         if (!harness.isRunning()) {
-          clearTimeout(timer);
-          clearInterval(keepalive);
-          unsub();
-          resolve({ inputTokens, outputTokens, finishReason: 'complete', suspendedToolCallId });
+          finish({ inputTokens, outputTokens, finishReason: 'complete', suspendedToolCallId });
         }
       })
       .catch((err) => {
-        clearTimeout(timer);
-        clearInterval(keepalive);
-        unsub();
-        reject(err instanceof Error ? err : new Error(String(err)));
+        fail(err instanceof Error ? err : new Error(String(err)));
       });
   });
 }

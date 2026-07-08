@@ -14,6 +14,7 @@ import {
   applyModelSettingsPatch,
   parseAgentModelSettings,
   type AgentModelSettings,
+  type AgentModelSettingsPatch,
   type AgentRuntimeConfig,
   type AgentRuntimeType,
   type SandboxIsolation,
@@ -238,7 +239,7 @@ export async function updateAgentRuntimeConfig(
 
 export async function updateAgentModelSettings(
   agentId: string,
-  patch: Partial<Record<keyof AgentModelSettings, number | null>>,
+  patch: AgentModelSettingsPatch,
 ): Promise<Agent> {
   const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
   if (!agent) throw new AgentValidationError('Agent not found.');

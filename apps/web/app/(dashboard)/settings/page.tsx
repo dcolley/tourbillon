@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation';
-import { getActiveCompany, updateCompanySettings, updateCompanyIntegrations } from '@/lib/company';
+import { getActiveCompany, getActiveCompanyOrNull, updateCompanySettings, updateCompanyIntegrations } from '@/lib/company';
 import {
   getExecutionWorkspaceRoot,
   getWorkspaceRoot,
@@ -60,7 +60,8 @@ export default async function SettingsPage({
   searchParams: Promise<{ saved?: string; error?: string }>;
 }) {
   const resolvedSearchParams = await searchParams;
-  const company = await getActiveCompany();
+  const company = await getActiveCompanyOrNull();
+  if (!company) return null;
   const saved = resolvedSearchParams.saved;
   const error = resolvedSearchParams.error ? decodeURIComponent(resolvedSearchParams.error) : null;
   const integrationSettings = parseCompanySettings(company.settings);

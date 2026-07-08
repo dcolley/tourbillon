@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "bash -c 'set -a && source ../../.env && set +a && exec next dev -p 3002'",
+    "dev": "bash -c 'set -a && source ../../.env && set +a && exec next dev -H 0.0.0.0 -p 3002'",
     "build": "bash -c 'set -a && source ../../.env && set +a && exec next build'",
     "start": "bash -c 'set -a && source ../../.env && set +a && exec next start'",
     "lint": "eslint .",

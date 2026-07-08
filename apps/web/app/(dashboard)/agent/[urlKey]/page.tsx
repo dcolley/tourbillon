@@ -11,6 +11,7 @@ import { getCompanyById } from '@/lib/company';
 import { parseCompanyIdFromSearchParams } from '@/lib/company-link';
 import { deleteAgentAction, triggerAgentHeartbeatAction, updateAgentRoleAction } from '../actions';
 import { getLlmProviderRecordById, listLlmProvidersPublic } from '@/lib/llm-providers';
+import { getModelReasoningCapabilities } from '@/lib/model-catalog';
 import { AgentModelForm } from './agent-model-form';
 import { AgentModelSettingsForm } from './agent-model-settings-form';
 import { heartbeatJobHref } from '@/lib/heartbeats';
@@ -291,6 +292,10 @@ export default async function AgentDetailPage({
     agent.modelId,
     providerRecord,
   );
+  const reasoningCapabilities = await getModelReasoningCapabilities(
+    agent.modelId ?? providerConfig.defaultModel,
+    providerConfig,
+  );
 
   const enabledTools = resolveAssignedTools({
     role: agent.role,
@@ -521,6 +526,7 @@ export default async function AgentDetailPage({
         <AgentModelSettingsForm
           agentId={agent.id}
           urlKey={agent.urlKey}
+          reasoningCapabilities={reasoningCapabilities}
           initialSettings={runtime.model}
           providerDefaults={providerRecord?.defaultModelSettings}
           updateModelSettings={updateModelSettings}

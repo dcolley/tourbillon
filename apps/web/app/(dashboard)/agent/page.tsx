@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { PageHeader } from '@/components/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
-import { getActiveCompany } from '@/lib/company';
+import { getActiveCompanyOrNull } from '@/lib/company';
 import { AgentListRow } from './agent-list-row';
 
 export default async function AgentsPage({
@@ -13,7 +13,8 @@ export default async function AgentsPage({
   searchParams: Promise<{ error?: string; deleted?: string }>;
 }) {
   const { error, deleted } = await searchParams;
-  const company = await getActiveCompany();
+  const company = await getActiveCompanyOrNull();
+  if (!company) return null;
   const allAgents = await db
     .select()
     .from(agents)

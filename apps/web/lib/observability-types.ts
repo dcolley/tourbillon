@@ -28,6 +28,8 @@ export interface ObservabilityEventRow {
   outputPreview: string | null;
   payload: Record<string, unknown>;
   errorText: string | null;
+  heartbeatRunStatus: 'running' | 'succeeded' | 'failed' | null;
+  heartbeatRunErrorText: string | null;
   durationMs: number | null;
   inputTokens: number | null;
   outputTokens: number | null;

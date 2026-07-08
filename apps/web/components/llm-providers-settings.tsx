@@ -7,7 +7,7 @@ import {
   LLM_PROVIDER_TYPES,
   type LlmProviderType,
 } from '@tourbillon/shared/model-provider';
-import type { AgentModelSettings } from '@tourbillon/shared';
+import type { AgentModelSettings } from '@tourbillon/shared/model-settings';
 import {
   formValuesToModelSettings,
   modelSettingsToFormValues,

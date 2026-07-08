@@ -4,10 +4,11 @@ import { PageHeader } from '@/components/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { StatusBadge } from '@/lib/status-badges';
-import { getActiveCompany } from '@/lib/company';
+import { getActiveCompanyOrNull } from '@/lib/company';
 
 export default async function ApprovalsPage() {
-  const company = await getActiveCompany();
+  const company = await getActiveCompanyOrNull();
+  if (!company) return null;
   const pendingApprovals = await db
     .select({ approval: approvals, agent: agents })
     .from(approvals)

@@ -28,6 +28,7 @@ export const heartbeatRuns = pgTable('heartbeat_runs', {
   durableRunId: text('durable_run_id'),
   shortLivedJwt: text('short_lived_jwt'),  // run-scoped API key
   startedAt: timestamp('started_at').notNull().defaultNow(),
+  lastSeenAt: timestamp('last_seen_at'),
   finishedAt: timestamp('finished_at'),
 });
 

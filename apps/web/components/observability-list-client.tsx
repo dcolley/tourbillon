@@ -802,10 +802,46 @@ function ObservabilityEventDetail({
         )}
       </div>
 
-      {event.errorText && (
-        <p className="rounded border border-destructive/30 bg-destructive/10 px-3 py-2 text-destructive text-xs">
-          {event.errorText}
-        </p>
+      {(event.errorText || event.heartbeatRunErrorText) && (
+        <div className="space-y-2">
+          {event.errorText && (
+            <p className="rounded border border-destructive/30 bg-destructive/10 px-3 py-2 text-destructive text-xs">
+              {event.errorText}
+            </p>
+          )}
+          {event.heartbeatRunErrorText && !event.errorText && (
+            <p className="rounded border border-destructive/30 bg-destructive/10 px-3 py-2 text-destructive text-xs">
+              <span className="font-medium">Heartbeat run failure:</span> {event.heartbeatRunErrorText}
+              {event.jobId && (
+                <>
+                  {' '}
+                  <Link
+                    href={`/jobs/heartbeat/${encodeURIComponent(event.jobId)}`}
+                    className="underline underline-offset-2"
+                  >
+                    View job
+                  </Link>
+                </>
+              )}
+            </p>
+          )}
+          {event.heartbeatRunErrorText && event.errorText && (
+            <p className="rounded border border-destructive/20 bg-destructive/5 px-3 py-2 text-destructive text-xs">
+              <span className="font-medium">Heartbeat run:</span> {event.heartbeatRunErrorText}
+              {event.jobId && (
+                <>
+                  {' '}
+                  <Link
+                    href={`/jobs/heartbeat/${encodeURIComponent(event.jobId)}`}
+                    className="underline underline-offset-2"
+                  >
+                    View job
+                  </Link>
+                </>
+              )}
+            </p>
+          )}
+        </div>
       )}
 
       {showModelStepBlocks && modelStep && (

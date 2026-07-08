@@ -13,6 +13,7 @@ import {
 } from '@tourbillon/shared';
 import type { LlmProvider } from '@tourbillon/db';
 import { createCoalescingFetch } from './coalesce-system-messages';
+import { createNousInferenceFetch } from './nous-inference-fetch';
 
 const providerCache = new Map<string, OpenAIProvider>();
 
@@ -44,7 +45,7 @@ function getOpenAIProvider(
     name: config.provider,
     headers: buildProviderRequestHeaders(config),
     fetch: createCoalescingFetch(
-      fetch,
+      createNousInferenceFetch(fetch, config.baseURL),
       shouldCoalesceSystemMessages(config.provider, config.apiMode),
     ),
   });

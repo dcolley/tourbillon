@@ -87,6 +87,7 @@ On an agent detail page (`/agent/{urlKey}`), enable **Automatic heartbeats** and
 | `pnpm dev` | Next.js web app (`apps/web`) | Always, for UI and API routes |
 | `pnpm workers:dev` | BullMQ workers (`packages/scheduler`) | Agent heartbeats, routines, approval wakes |
 | `pnpm db:migrate` | Apply Drizzle migrations | After schema changes or fresh DB |
+| `pnpm db:strip` | Strip dev DB to one company + default LLM provider | Local Mac reset after migrating data elsewhere |
 | `pnpm db:generate` | Generate migration SQL from schema | After editing `packages/db/src/schema/` |
 | `pnpm db:studio` | Drizzle Studio (DB browser) | Inspecting or seeding data |
 | `pnpm build` | Production build of web app | Before deploy / smoke test |
@@ -209,3 +210,16 @@ Example cron (daily at 2am):
 3. Start `pnpm dev` and `pnpm workers:dev`.
 
 Postgres (issues, comments, agents) is separate from filesystem backups — restore the database from your own DB backup strategy if needed.
+
+### Strip dev database (Mac)
+
+After migrating full data to another host, shrink the local DB to one company and a default LLM provider:
+
+```bash
+docker compose up -d postgres redis
+set -a && source .env && set +a
+pnpm db:strip -- --dry-run   # preview keeper company and counts
+pnpm db:strip                # interactive confirm
+```
+
+Adds `--yes` to skip confirm and `--wipe-workspaces` to clear the keeper company's `data/` dirs too.

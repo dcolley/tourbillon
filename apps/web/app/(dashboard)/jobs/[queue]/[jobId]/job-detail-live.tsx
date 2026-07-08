@@ -179,6 +179,10 @@ function HeartbeatRunSection({ run }: { run: HeartbeatRunSnapshot }) {
         <RunField label="Wake source" value={run.invocationSource.replace(/_/g, ' ')} />
         <RunField label="Started" value={new Date(run.startedAt).toLocaleString()} />
         <RunField
+          label="Last seen"
+          value={run.lastSeenAt ? new Date(run.lastSeenAt).toLocaleString() : '—'}
+        />
+        <RunField
           label="Finished"
           value={run.finishedAt ? new Date(run.finishedAt).toLocaleString() : '—'}
         />

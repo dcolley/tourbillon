@@ -1,11 +1,12 @@
 import { Suspense } from 'react';
 import { db, agents } from '@tourbillon/db';
 import { desc, eq } from 'drizzle-orm';
-import { getActiveCompany } from '@/lib/company';
+import { getActiveCompanyOrNull } from '@/lib/company';
 import { HeartbeatListClient } from './heartbeat-list-client';
 
 async function loadAgentOptions() {
-  const company = await getActiveCompany();
+  const company = await getActiveCompanyOrNull();
+  if (!company) return [];
   return db
     .select({
       id: agents.id,

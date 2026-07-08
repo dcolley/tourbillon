@@ -334,8 +334,21 @@ export function formatEventPreview(event: {
   outputPreview: string | null;
   payload: Record<string, unknown>;
   errorText: string | null;
+  status?: 'ok' | 'error';
+  heartbeatRunErrorText?: string | null;
 }): string {
   if (event.errorText) return event.errorText;
+  if (event.status === 'error' && event.heartbeatRunErrorText) {
+    return event.heartbeatRunErrorText;
+  }
+
+  const output = event.outputPreview ?? event.inputPreview;
+  if (
+    event.status === 'error' &&
+    output?.trim() === 'terminated'
+  ) {
+    return 'Run terminated (abort, worker shutdown, or stall recovery)';
+  }
 
   if (event.eventType === 'tool_call_start' || event.eventType === 'tool_call') {
     const args = event.inputPreview ? tryParseJson(event.inputPreview) : null;
@@ -388,7 +401,6 @@ export function formatEventPreview(event: {
     if (chunk) return `Chunk: ${chunk.chunkType}`;
   }
 
-  const output = event.outputPreview ?? event.inputPreview;
   if (!output) return '—';
 
   const parsed = tryParseJson(output);
@@ -468,6 +480,30 @@ export function buildEventTimeline(event: {
   }
 
   const payload = unwrapPayload(event.payload);
+  const errorInfo = payload.errorInfo;
+  if (
+    !event.errorText &&
+    errorInfo &&
+    typeof errorInfo === 'object' &&
+    !Array.isArray(errorInfo)
+  ) {
+    const finishReason =
+      isRecord(payload.attributes) && typeof payload.attributes.finishReason === 'string'
+        ? payload.attributes.finishReason
+        : typeof payload.output === 'string'
+          ? payload.output
+          : undefined;
+    if (finishReason === 'terminated') {
+      entries.push({
+        kind: 'error',
+        label: 'Run terminated (abort, worker shutdown, or stall recovery)',
+      });
+    } else if (finishReason) {
+      entries.push({ kind: 'error', label: `Run failed: ${finishReason}` });
+    } else {
+      entries.push({ kind: 'error', label: 'Unknown error (no message from runtime)' });
+    }
+  }
 
   if (payload.type === 'message_update' && isRecord(payload.message)) {
     const content = payload.message.content;

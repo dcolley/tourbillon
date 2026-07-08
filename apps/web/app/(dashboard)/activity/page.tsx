@@ -2,10 +2,11 @@ import { db, activityLog } from '@tourbillon/db';
 import { desc, eq } from 'drizzle-orm';
 import { PageHeader } from '@/components/page-header';
 import { Card, CardContent } from '@/components/ui/card';
-import { getActiveCompany } from '@/lib/company';
+import { getActiveCompanyOrNull } from '@/lib/company';
 
 export default async function ActivityPage() {
-  const company = await getActiveCompany();
+  const company = await getActiveCompanyOrNull();
+  if (!company) return null;
   const entries = await db
     .select()
     .from(activityLog)

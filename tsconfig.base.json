@@ -14,6 +14,7 @@
     "paths": {
       "@tourbillon/db": ["./packages/db/src/index.ts"],
       "@tourbillon/shared": ["./packages/shared/src/index.ts"],
+      "@tourbillon/shared/*": ["./packages/shared/src/*"],
       "@tourbillon/mastra": ["./packages/mastra/src/index.ts"],
       "@tourbillon/scheduler": ["./packages/scheduler/src/index.ts"]
     }

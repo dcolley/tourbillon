@@ -7,10 +7,11 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { StatusBadge } from '@/lib/status-badges';
 import { heartbeatJobHref, listHeartbeatRuns } from '@/lib/heartbeats';
-import { getActiveCompany } from '@/lib/company';
+import { getActiveCompanyOrNull } from '@/lib/company';
 
 export default async function DashboardPage() {
-  const company = await getActiveCompany();
+  const company = await getActiveCompanyOrNull();
+  if (!company) return null;
 
   const [agentCount] = await db
     .select({ count: count() })

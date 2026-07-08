@@ -3,11 +3,12 @@ import { db, agents } from '@tourbillon/db';
 import { desc, eq } from 'drizzle-orm';
 import { listGoalOptions } from '@/lib/goals';
 import { listProjectOptions } from '@/lib/projects';
-import { getActiveCompany } from '@/lib/company';
+import { getActiveCompanyOrNull } from '@/lib/company';
 import { ObservabilityListClient } from '@/components/observability-list-client';
 
 async function loadFilterOptions() {
-  const company = await getActiveCompany();
+  const company = await getActiveCompanyOrNull();
+  if (!company) return { agents: [], goals: [], projects: [] };
   const [agentRows, goals, projects] = await Promise.all([
     db
       .select({ id: agents.id, name: agents.name })
