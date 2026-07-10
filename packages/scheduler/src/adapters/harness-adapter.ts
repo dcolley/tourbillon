@@ -1,28 +1,27 @@
-import type { Job } from 'bullmq';
-import type { Harness } from '@mastra/core/harness';
-import type { HarnessEvent } from '@mastra/core/harness';
 import type { Agent as AgentRecord } from '@tourbillon/db';
 import {
   createHeartbeatRuntimeContext,
-  buildHarnessCwd,
-  buildHarnessThreadId,
-  createTourbillonHarness,
-  ensureHarnessThread,
+  buildControllerCwd,
+  buildControllerThreadId,
+  createTourbillonController,
+  ensureControllerThread,
   clearHarnessIdleThread,
-  type TourbillonHarnessState,
-  HARNESS_THREAD_MESSAGE_CAP,
+  type TourbillonControllerState,
+  type Session,
+  type AgentControllerEvent,
+  CONTROLLER_THREAD_MESSAGE_CAP,
   getResumableHarnessRun,
   persistHarnessRunId,
   writeHarnessObservabilityEvent,
   type HarnessObservabilityContext,
 } from '@tourbillon/mastra';
 import type { HeartbeatJobData, AgentRuntimeConfig } from '@tourbillon/shared';
-import { buildWakeMessage, isHarnessAdapter, isObservabilityEnabled, parseCompanySettings, type CompanySettings } from '@tourbillon/shared';
+import { buildWakeMessage, isHarnessAdapter, isObservabilityEnabled, type CompanySettings } from '@tourbillon/shared';
 import { randomUUID } from 'crypto';
 import { heartbeatAbortedError } from '../heartbeat-abort';
 
 export interface HarnessRunContext {
-  job: Job<HeartbeatJobData>;
+  wake: HeartbeatJobData;
   runId: string;
   apiKey: string;
   goalId?: string;
@@ -39,6 +38,10 @@ export interface HarnessRunResult {
   traceId?: string;
 }
 
+/**
+ * Drive a headless AgentController Session for a harness_local heartbeat.
+ * Wire names (`runWithHarness`, `harnessRunId`) stay for Phase 1 compatibility.
+ */
 export async function runWithHarness(
   agentRecord: AgentRecord,
   context: HarnessRunContext,
@@ -52,24 +55,30 @@ export async function runWithHarness(
     throw new Error(`Agent ${agentRecord.id} is not configured for harness execution`);
   }
 
-  const { job, runId, apiKey, goalId, projectId } = context;
-  const taskId = job.data.taskId;
-  const cwd = await buildHarnessCwd(agentRecord, taskId);
+  const { wake, runId, apiKey, goalId, projectId } = context;
+  const taskId = wake.taskId;
+  const cwd = await buildControllerCwd(agentRecord, taskId);
 
-  const harness = await createTourbillonHarness(agentRecord, {
+  const controller = await createTourbillonController(agentRecord, {
     allowedMcpServerIds: options.allowedMcpServerIds,
     companySettings: options.companySettings ?? null,
     cwd,
   });
 
-  await harness.init();
+  await controller.init();
 
   const resumable = await getResumableHarnessRun(agentRecord.id, taskId);
   if (!resumable && !taskId) {
     await clearHarnessIdleThread(agentRecord.id);
   }
-  const threadId = resumable?.threadId ?? buildHarnessThreadId(agentRecord, taskId);
-  await ensureHarnessThread(harness, threadId);
+  const threadId = resumable?.threadId ?? buildControllerThreadId(agentRecord, taskId);
+
+  const session = await controller.createSession({
+    resourceId: `company-${agentRecord.companyId}`,
+    id: `hb-${runId}`,
+    ownerId: agentRecord.id,
+  });
+  await ensureControllerThread(session, threadId);
 
   const runtimeContext = createHeartbeatRuntimeContext({
     apiKey,
@@ -79,7 +88,7 @@ export async function runWithHarness(
     taskId,
     goalId,
     projectId,
-    jobId: job.id ?? undefined,
+    jobId: runId,
     agentRuntimeConfig: agentRecord.runtimeConfig as AgentRuntimeConfig,
   });
 
@@ -93,15 +102,15 @@ export async function runWithHarness(
         goalId,
         projectId,
         heartbeatRunId: runId,
-        jobId: job.id ?? undefined,
+        jobId: runId,
         traceId,
         toolCallNames,
       }
     : null;
 
   let harnessRunIdWritten = false;
-  const onEvent = (event: HarnessEvent) => {
-    const currentRunId = harness.getCurrentRunId();
+  const onEvent = (event: AgentControllerEvent) => {
+    const currentRunId = session.getCurrentRunId();
     if (currentRunId && !harnessRunIdWritten) {
       harnessRunIdWritten = true;
       void persistHarnessRunId(runId, currentRunId, threadId);
@@ -112,30 +121,30 @@ export async function runWithHarness(
   };
 
   try {
-    const result = await driveHarnessHeadless(
-      harness,
-      buildWakeMessage(job.data),
+    const result = await driveSessionHeadless(
+      session,
+      buildWakeMessage(wake),
       runtimeContext,
       onEvent,
       options.abortSignal,
     );
 
-    const harnessRunId = harness.getCurrentRunId() ?? undefined;
+    const harnessRunId = session.getCurrentRunId() ?? undefined;
     if (harnessRunId) {
       await persistHarnessRunId(runId, harnessRunId, threadId);
     }
 
     return { ...result, threadId, harnessRunId, traceId };
   } finally {
-    await harness.destroy().catch(() => undefined);
+    await controller.destroy().catch(() => undefined);
   }
 }
 
-async function driveHarnessHeadless(
-  harness: Harness<TourbillonHarnessState>,
+async function driveSessionHeadless(
+  session: Session<TourbillonControllerState>,
   wakeMessage: string,
   requestContext: ReturnType<typeof createHeartbeatRuntimeContext>,
-  onEvent: (event: HarnessEvent) => void,
+  onEvent: (event: AgentControllerEvent) => void,
   abortSignal?: AbortSignal,
 ): Promise<Omit<HarnessRunResult, 'threadId' | 'harnessRunId' | 'traceId'>> {
   let inputTokens = 0;
@@ -159,12 +168,13 @@ async function driveHarnessHeadless(
     };
 
     const onAbort = () => {
+      session.abort();
       fail(heartbeatAbortedError());
     };
 
     abortSignal?.addEventListener('abort', onAbort, { once: true });
 
-    unsub = harness.subscribe((event) => {
+    unsub = session.subscribe((event) => {
       onEvent(event);
 
       switch (event.type) {
@@ -175,7 +185,7 @@ async function driveHarnessHeadless(
 
         case 'agent_end':
           if (event.reason === 'suspended') {
-            suspendedToolCallId = harness.getCurrentRunId() ?? undefined;
+            suspendedToolCallId = session.getCurrentRunId() ?? undefined;
             finishReason = 'suspended';
           } else if (event.reason === 'error') {
             finishReason = 'error';
@@ -200,10 +210,10 @@ async function driveHarnessHeadless(
       }
     });
 
-    void harness
+    void session
       .sendMessage({ content: wakeMessage, requestContext })
       .then(() => {
-        if (!harness.isRunning()) {
+        if (!session.run.isRunning()) {
           finish({ inputTokens, outputTokens, finishReason: 'complete', suspendedToolCallId });
         }
       })
@@ -213,7 +223,7 @@ async function driveHarnessHeadless(
   });
 }
 
-/** Limit message history when listing threads (harness storage cap). */
+/** Limit message history when listing threads (controller storage cap). */
 export function harnessMessageLimit(): number {
-  return HARNESS_THREAD_MESSAGE_CAP;
+  return CONTROLLER_THREAD_MESSAGE_CAP;
 }

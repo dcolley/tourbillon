@@ -107,7 +107,7 @@ export function JobDetailLive({
       </section>
 
       <div className="flex gap-2">
-        {snapshot.state === 'failed' && (
+        {snapshot.state === 'failed' && queue !== QUEUE_HEARTBEAT && (
           <form action={retryJobAction}>
             <input type="hidden" name="queue" value={queue} />
             <input type="hidden" name="jobId" value={jobId} />
@@ -120,17 +120,19 @@ export function JobDetailLive({
             </button>
           </form>
         )}
-        <form action={removeJobAction}>
-          <input type="hidden" name="queue" value={queue} />
-          <input type="hidden" name="jobId" value={jobId} />
-          <input type="hidden" name="state" value={listState} />
-          <button
-            type="submit"
-            className="inline-flex items-center justify-center rounded-md border border-destructive px-4 py-2 text-sm font-medium text-destructive hover:bg-destructive/10"
-          >
-            Remove
-          </button>
-        </form>
+        {queue !== QUEUE_HEARTBEAT && (
+          <form action={removeJobAction}>
+            <input type="hidden" name="queue" value={queue} />
+            <input type="hidden" name="jobId" value={jobId} />
+            <input type="hidden" name="state" value={listState} />
+            <button
+              type="submit"
+              className="inline-flex items-center justify-center rounded-md border border-destructive px-4 py-2 text-sm font-medium text-destructive hover:bg-destructive/10"
+            >
+              Remove
+            </button>
+          </form>
+        )}
       </div>
     </>
   );

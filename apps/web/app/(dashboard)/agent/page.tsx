@@ -5,6 +5,7 @@ import { PageHeader } from '@/components/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { getActiveCompanyOrNull } from '@/lib/company';
+import { listLlmProvidersPublic } from '@/lib/llm-providers';
 import { AgentListRow } from './agent-list-row';
 
 export default async function AgentsPage({
@@ -15,11 +16,14 @@ export default async function AgentsPage({
   const { error, deleted } = await searchParams;
   const company = await getActiveCompanyOrNull();
   if (!company) return null;
-  const allAgents = await db
-    .select()
-    .from(agents)
-    .where(eq(agents.companyId, company.id))
-    .orderBy(desc(agents.createdAt));
+  const [allAgents, providers] = await Promise.all([
+    db
+      .select()
+      .from(agents)
+      .where(eq(agents.companyId, company.id))
+      .orderBy(desc(agents.createdAt)),
+    listLlmProvidersPublic(),
+  ]);
 
   return (
     <div className="space-y-6">
@@ -49,7 +53,7 @@ export default async function AgentsPage({
           ) : (
             <div className="divide-y">
               {allAgents.map((agent) => (
-                <AgentListRow key={agent.id} agent={agent} />
+                <AgentListRow key={agent.id} agent={agent} providers={providers} />
               ))}
             </div>
           )}

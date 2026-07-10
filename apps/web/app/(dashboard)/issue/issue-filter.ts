@@ -46,10 +46,11 @@ export function statusesForFilter(filter: IssueFilter): readonly string[] {
 
 export function issueListHref(filter: IssueFilter, page = 0): string {
   const params = new URLSearchParams();
-  if (filter !== 'active') params.set('filter', filter);
+  // Always include filter so Active is distinguishable from "no preference" on restore.
+  params.set('filter', filter);
   if (page > 0) params.set('page', String(page));
   const qs = params.toString();
-  return qs ? `/issue?${qs}` : '/issue';
+  return `/issue?${qs}`;
 }
 
 export function parseIssuePage(value: string | undefined): number {

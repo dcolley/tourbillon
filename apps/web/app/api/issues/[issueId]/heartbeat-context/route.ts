@@ -64,6 +64,8 @@ export async function GET(
       status: issue.status,
       priority: issue.priority,
       parentId: issue.parentId,
+      boardApprovalId: issue.boardApprovalId,
+      pendingBoardApproval: Boolean(issue.boardApprovalId),
     },
     goal: issue.goal
       ? {

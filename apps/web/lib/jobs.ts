@@ -1,9 +1,7 @@
-import type { Job, JobType } from 'bullmq';
-import type { HeartbeatJobData } from '@tourbillon/shared';
-import { QUEUE_HEARTBEAT } from '@tourbillon/shared';
-import { reconcileRunningHeartbeatRunsForJob } from '@tourbillon/db';
-import { getQueue, JOB_QUEUES, isJobQueueName, connection, type JobQueueName } from './queue';
-import { getHeartbeatRunByJobId, getHeartbeatTaskId } from './heartbeats';
+import { db, heartbeatRuns } from '@tourbillon/db';
+import { desc, eq, sql } from 'drizzle-orm';
+import { getActiveCompanyOrNull } from './company';
+import { getHeartbeatRun, getHeartbeatTaskId } from './heartbeats';
 
 export type JobState = 'waiting' | 'active' | 'completed' | 'failed' | 'delayed' | 'paused';
 
@@ -19,7 +17,7 @@ export interface QueueCounts {
 }
 
 export interface QueueOverviewItem {
-  name: JobQueueName;
+  name: string;
   label: string;
   description: string;
   counts: QueueCounts;
@@ -86,93 +84,116 @@ export class JobsError extends Error {
   }
 }
 
-export function getQueueMeta(name: string) {
-  if (!isJobQueueName(name)) return null;
-  return JOB_QUEUES.find((q) => q.name === name) ?? null;
-}
-
-export async function pingRedis(): Promise<boolean> {
-  try {
-    await connection.ping();
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function emptyCounts(): QueueCounts {
   return { waiting: 0, active: 0, completed: 0, failed: 0, delayed: 0, paused: 0 };
 }
 
-export async function getQueueOverview(): Promise<{ queues: QueueOverviewItem[]; redisOk: boolean }> {
-  const redisOk = await pingRedis();
-  if (!redisOk) {
+export function getQueueMeta(name: string) {
+  if (name === 'heartbeat') {
     return {
-      redisOk: false,
-      queues: JOB_QUEUES.map((q) => ({ ...q, counts: emptyCounts() })),
+      name: 'heartbeat',
+      label: 'Heartbeat runs',
+      description: 'Agent wakes (DB heartbeat_runs — no BullMQ)',
     };
   }
-
-  const queues = await Promise.all(
-    JOB_QUEUES.map(async (meta) => {
-      const counts = await getQueue(meta.name).getJobCounts(
-        'waiting',
-        'active',
-        'completed',
-        'failed',
-        'delayed',
-        'paused'
-      );
-      return {
-        ...meta,
-        counts: {
-          waiting: counts.waiting ?? 0,
-          active: counts.active ?? 0,
-          completed: counts.completed ?? 0,
-          failed: counts.failed ?? 0,
-          delayed: counts.delayed ?? 0,
-          paused: counts.paused ?? 0,
-        },
-      };
-    })
-  );
-
-  return { redisOk: true, queues };
+  return null;
 }
 
-async function toJobSummary(job: Job): Promise<JobSummary> {
+export async function getQueueOverview(): Promise<{ queues: QueueOverviewItem[]; redisOk: boolean }> {
+  const company = await getActiveCompanyOrNull();
+  const counts = emptyCounts();
+  if (company) {
+    const runs = await db
+      .select({ status: heartbeatRuns.status })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.companyId, company.id));
+    for (const row of runs) {
+      if (row.status === 'running') counts.active += 1;
+      else if (row.status === 'failed') counts.failed += 1;
+      else if (row.status === 'succeeded') counts.completed += 1;
+      else if (row.status === 'queued') counts.waiting += 1;
+    }
+  }
+
   return {
-    id: job.id ?? '',
-    name: job.name,
-    state: await job.getState(),
-    timestamp: job.timestamp ?? null,
-    processedOn: job.processedOn ?? null,
-    finishedOn: job.finishedOn ?? null,
-    attemptsMade: job.attemptsMade,
+    redisOk: true,
+    queues: [
+      {
+        name: 'heartbeat',
+        label: 'Heartbeat runs',
+        description: 'Agent wakes tracked in heartbeat_runs (WakeRunner — no BullMQ)',
+        counts,
+      },
+    ],
   };
 }
 
 export async function getQueueJobs(
-  queueName: JobQueueName,
-  state: JobState,
-  page = 0,
-  pageSize = 50
+  _queueName: string,
+  _state: string,
+  _page = 0,
+  _pageSize = 50,
 ): Promise<{ jobs: JobSummary[]; total: number }> {
-  if (!isJobQueueName(queueName)) throw new JobsError('Unknown queue.');
+  return { jobs: [], total: 0 };
+}
 
-  const start = page * pageSize;
-  const end = start + pageSize - 1;
-  const jobs = await getQueue(queueName).getJobs([state as JobType], start, end, false);
-
+export async function getJobDetail(_queueName: string, jobId: string): Promise<JobDetail | null> {
+  const linked = await getHeartbeatRun(jobId);
+  if (!linked) return null;
+  const { run, agent } = linked;
   return {
-    jobs: await Promise.all(jobs.filter(Boolean).map(toJobSummary)),
-    total: await getQueue(queueName).getJobCountByTypes(state as JobType),
+    id: run.id,
+    name: `wake:${agent?.name ?? run.agentId}`,
+    state: run.status === 'running' ? 'active' : run.status === 'failed' ? 'failed' : 'completed',
+    timestamp: run.startedAt.getTime(),
+    processedOn: run.startedAt.getTime(),
+    finishedOn: run.finishedAt?.getTime() ?? null,
+    attemptsMade: 1,
+    failedReason: run.errorText,
+    stacktrace: [],
+    data: run.contextSnapshot,
+    returnvalue: null,
+    opts: {},
+    logs: [],
+    logCount: 0,
+  };
+}
+
+export async function getJobLiveSnapshot(
+  _queueName: string,
+  jobId: string,
+): Promise<JobLiveSnapshot | null> {
+  const linked = await getHeartbeatRun(jobId);
+  if (!linked) return null;
+  const { run, agent } = linked;
+  return {
+    logs: [],
+    count: 0,
+    state: run.status === 'running' ? 'active' : run.status === 'failed' ? 'failed' : 'completed',
+    attemptsMade: 1,
+    timestamp: run.startedAt.getTime(),
+    processedOn: run.startedAt.getTime(),
+    finishedOn: run.finishedAt?.getTime() ?? null,
+    heartbeatRun: {
+      id: run.id,
+      status: run.status,
+      invocationSource: run.invocationSource,
+      startedAt: run.startedAt.toISOString(),
+      lastSeenAt: run.lastSeenAt?.toISOString() ?? null,
+      finishedAt: run.finishedAt?.toISOString() ?? null,
+      errorText: run.errorText,
+      contextSnapshot: run.contextSnapshot,
+      taskId: getHeartbeatTaskId(run) ?? null,
+      agent: agent
+        ? { id: agent.id, name: agent.name, urlKey: agent.urlKey, title: agent.title }
+        : null,
+    },
   };
 }
 
 export async function getJobLogs(
-  queueName: JobQueueName,
-  jobId: string
+  queueName: string,
+  jobId: string,
 ): Promise<JobLogs | null> {
   const snapshot = await getJobLiveSnapshot(queueName, jobId);
   if (!snapshot) return null;
@@ -183,104 +204,29 @@ export async function getJobLogs(
   };
 }
 
-export async function getJobLiveSnapshot(
-  queueName: JobQueueName,
-  jobId: string,
-): Promise<JobLiveSnapshot | null> {
-  if (!isJobQueueName(queueName)) throw new JobsError('Unknown queue.');
-
-  const job = await getQueue(queueName).getJob(jobId);
-  if (!job) return null;
-
-  const [{ logs, count }, state, heartbeatRun] = await Promise.all([
-    getQueue(queueName).getJobLogs(jobId),
-    job.getState(),
-    queueName === QUEUE_HEARTBEAT ? getHeartbeatRunByJobId(jobId) : Promise.resolve(null),
-  ]);
-
-  return {
-    logs,
-    count,
-    state,
-    attemptsMade: job.attemptsMade,
-    timestamp: job.timestamp ?? null,
-    processedOn: job.processedOn ?? null,
-    finishedOn: job.finishedOn ?? null,
-    heartbeatRun: heartbeatRun
-      ? {
-          id: heartbeatRun.run.id,
-          status: heartbeatRun.run.status,
-          invocationSource: heartbeatRun.run.invocationSource,
-          startedAt: heartbeatRun.run.startedAt.toISOString(),
-          lastSeenAt: heartbeatRun.run.lastSeenAt?.toISOString() ?? null,
-          finishedAt: heartbeatRun.run.finishedAt?.toISOString() ?? null,
-          errorText: heartbeatRun.run.errorText,
-          contextSnapshot: heartbeatRun.run.contextSnapshot,
-          taskId: getHeartbeatTaskId(heartbeatRun.run) ?? null,
-          agent: heartbeatRun.agent,
-        }
-      : null,
-  };
+export async function retryJob(_queueName: string, _jobId: string): Promise<void> {
+  throw new JobsError('BullMQ jobs removed — re-trigger a wake from the agent page.');
 }
 
-export async function getJobDetail(queueName: JobQueueName, jobId: string): Promise<JobDetail | null> {
-  if (!isJobQueueName(queueName)) throw new JobsError('Unknown queue.');
-
-  const job = await getQueue(queueName).getJob(jobId);
-  if (!job) return null;
-
-  const [state, { logs, count }] = await Promise.all([
-    job.getState(),
-    getQueue(queueName).getJobLogs(jobId),
-  ]);
-
-  return {
-    id: job.id ?? '',
-    name: job.name,
-    state,
-    timestamp: job.timestamp ?? null,
-    processedOn: job.processedOn ?? null,
-    finishedOn: job.finishedOn ?? null,
-    attemptsMade: job.attemptsMade,
-    failedReason: job.failedReason ?? null,
-    stacktrace: job.stacktrace ?? [],
-    data: job.data,
-    returnvalue: job.returnvalue,
-    opts: job.opts,
-    logs,
-    logCount: count,
-  };
+export async function removeJob(_queueName: string, _jobId: string): Promise<void> {
+  throw new JobsError('BullMQ jobs removed.');
 }
-
-export async function retryJob(queueName: JobQueueName, jobId: string): Promise<void> {
-  const job = await getQueue(queueName).getJob(jobId);
-  if (!job) throw new JobsError('Job not found.');
-  const state = await job.getState();
-  if (state !== 'failed') throw new JobsError('Only failed jobs can be retried.');
-  await job.retry();
-}
-
-export async function removeJob(queueName: JobQueueName, jobId: string): Promise<void> {
-  const job = await getQueue(queueName).getJob(jobId);
-  if (!job) throw new JobsError('Job not found.');
-  await job.remove();
-  if (queueName === QUEUE_HEARTBEAT) {
-    await reconcileRunningHeartbeatRunsForJob(jobId, 'BullMQ job removed manually');
-  }
-}
-
-const HEARTBEAT_JOB_STATES: JobType[] = ['active', 'waiting', 'completed', 'failed', 'delayed'];
 
 export async function findHeartbeatJobsForTask(taskId: string): Promise<JobSummary[]> {
-  const queue = getQueue(QUEUE_HEARTBEAT);
-  const batches = await Promise.all(
-    HEARTBEAT_JOB_STATES.map((state) => queue.getJobs([state], 0, 100, false))
-  );
+  const runs = await db
+    .select()
+    .from(heartbeatRuns)
+    .where(sql`${heartbeatRuns.contextSnapshot}->>'taskId' = ${taskId}`)
+    .orderBy(desc(heartbeatRuns.startedAt))
+    .limit(20);
 
-  const matching = batches
-    .flat()
-    .filter((job): job is Job<HeartbeatJobData> => Boolean(job))
-    .filter((job) => job.data?.taskId === taskId);
-
-  return Promise.all(matching.map(toJobSummary));
+  return runs.map((run) => ({
+    id: run.id,
+    name: `wake:${run.agentId}`,
+    state: run.status === 'running' ? 'active' : run.status === 'failed' ? 'failed' : 'completed',
+    timestamp: run.startedAt.getTime(),
+    processedOn: run.startedAt.getTime(),
+    finishedOn: run.finishedAt?.getTime() ?? null,
+    attemptsMade: 1,
+  }));
 }

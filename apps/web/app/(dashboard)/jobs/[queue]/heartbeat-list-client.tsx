@@ -172,7 +172,7 @@ export function HeartbeatListClient({ agents }: { agents: AgentOption[] }) {
         description={
           selectedAgent
             ? `Runs for ${selectedAgent.name}`
-            : 'Database runs augmented with live BullMQ job state'
+            : 'WakeRunner heartbeat runs'
         }
       />
 

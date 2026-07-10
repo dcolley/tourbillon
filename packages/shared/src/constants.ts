@@ -6,9 +6,12 @@ export const BUDGET_PAUSE_THRESHOLD = 1.0;      // 100%: auto-pause
 export const DEFAULT_HEARTBEAT_TIMEOUT_SEC = 300;
 export const DEFAULT_HEARTBEAT_GRACE_SEC = 30;
 
-// ─── BullMQ queue names ───────────────────────────────────────────────────
+// ─── Legacy queue name constants (heartbeats use WakeRunner; kept for URL/path compat) ─
+/** @deprecated Heartbeats use WakeRunner; constant kept for URL/path compat. */
 export const QUEUE_HEARTBEAT = 'heartbeat';
+/** @deprecated Unused. */
 export const QUEUE_ROUTINES = 'routines';
+/** @deprecated Approval wakes use WakeRunner; constant kept for path compat. */
 export const QUEUE_APPROVAL_WAKES = 'approval-wakes';
 
 // ─── Issue status ordering (for priority selection) ───────────────────────

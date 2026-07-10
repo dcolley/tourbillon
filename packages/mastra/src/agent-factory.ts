@@ -9,7 +9,10 @@ import { getEmbeddingModel, getLanguageModelForAgent, llmProviderRowToRecord } f
 import { CONTROL_PLANE_TOOLS } from './tools/control-plane-tools';
 import { ROLE_TOOLS } from './tools/role-tools';
 import { assignableToolsForIds } from './tools/assignable-tools';
-import { loadSkillsForAgent } from './skills/skill-loader';
+import {
+  formatSkillsCatalogSection,
+  prepareAgentSkills,
+} from './skills/on-demand-skills';
 import { buildMCPTools } from './tools/mcp-tools';
 import { SEARXNG_TOOLS } from './tools/searxng-tools';
 import { getInternalApiUrl } from './tools/api-client';
@@ -17,6 +20,7 @@ import { buildCodeExecutionWorkspace } from './execution-workspace';
 import { resolveAgentGenerationOptions, toMastraDefaultOptions } from './model-settings';
 import { getMastraInstance } from './mastra-instance';
 import { isObservabilityEnabled } from '@tourbillon/shared';
+import { buildHeartbeatInputProcessors } from './heartbeat-processors';
 
 const globalForMastra = globalThis as unknown as {
   mastraMemory?: Memory;
@@ -124,16 +128,18 @@ export async function shouldAttachCodeExecutionWorkspace(
 }
 
 export async function assembleAgentSystemPrompt(agentRecord: AgentRecord): Promise<string> {
-  const skillContents = await loadSkillsForAgent(agentRecord);
-  return assembleSystemPrompt(agentRecord, skillContents);
+  const prepared = await prepareAgentSkills(agentRecord);
+  return assembleSystemPrompt(agentRecord, prepared);
 }
 
 /**
  * Create a fully-equipped Mastra Agent for a given agent DB record.
  * Tool tiers:
- *   Tier 1 (universal)     — CONTROL_PLANE_TOOLS (always included)
+ *   Tier 1 (universal)     — CONTROL_PLANE_TOOLS (always included; includes listSkills/getSkill)
  *   Tier 2 (role-gated)    — boolean ROLE_TOOLS by assignedToolsets + granular tools by runtimeConfig.assignedTools
  *   Tier 3 (capability)    — MCP tools by mcpServerIds
+ *
+ * Skills: control-plane is inlined; other skills are listed in a catalog and loaded via getSkill.
  */
 export async function createAgentWithSkills(
   agentRecord: AgentRecord,
@@ -141,8 +147,8 @@ export async function createAgentWithSkills(
 ): Promise<Agent> {
   const tools = await assembleAgentTools(agentRecord, options);
 
-  const skillContents = await loadSkillsForAgent(agentRecord);
-  const systemPrompt = assembleSystemPrompt(agentRecord, skillContents);
+  const prepared = await prepareAgentSkills(agentRecord);
+  const systemPrompt = assembleSystemPrompt(agentRecord, prepared);
 
   const providerOverrides = modelProviderOverridesFromAgent(
     agentRecord.adapterType,
@@ -160,6 +166,7 @@ export async function createAgentWithSkills(
 
   const codeExecutionEnabled = await shouldAttachCodeExecutionWorkspace(agentRecord);
   const generationOptions = resolveAgentGenerationOptions(agentRecord, providerRecord);
+  const inputProcessors = buildHeartbeatInputProcessors();
 
   console.log(
     formatTrace('agent-factory', { agentId: agentRecord.id, agentName: agentRecord.name }, 'agent ready', {
@@ -173,7 +180,10 @@ export async function createAgentWithSkills(
       apiBase: getInternalApiUrl(),
       toolCount: Object.keys(tools).length,
       tools: Object.keys(tools),
-      skillCount: skillContents.length,
+      skillCount: prepared.catalog.length,
+      alwaysInlineSkills: prepared.alwaysInline.map((s) => s.slug),
+      onDemandSkills: prepared.catalog.filter((s) => !s.alwaysInline).map((s) => s.slug),
+      contextTokenLimit: inputProcessors[0]?.getMaxTokens(),
       codeExecutionEnabled,
       modelSettings: generationOptions.modelSettings,
       reasoning: generationOptions.reasoning,
@@ -187,6 +197,7 @@ export async function createAgentWithSkills(
     model: getLanguageModelForAgent(agentRecord, providerRecord),
     tools: tools as Parameters<typeof Agent>[0]['tools'],
     memory: getAgentMemory(),
+    inputProcessors,
     ...(codeExecutionEnabled ? { workspace: buildCodeExecutionWorkspace() } : {}),
     ...toMastraDefaultOptions(generationOptions),
   });
@@ -217,7 +228,7 @@ export async function createDurableAgentWithSkills(
 
 function assembleSystemPrompt(
   agentRecord: AgentRecord,
-  skillContents: Array<{ slug: string; content: string }>
+  prepared: Awaited<ReturnType<typeof prepareAgentSkills>>,
 ): string {
   const parts: string[] = [];
 
@@ -229,8 +240,13 @@ function assembleSystemPrompt(
     parts.push(`## Your Identity and Role\n\n${agentRecord.instructionsBundleAgentsMd.trim()}`);
   }
 
-  for (const skill of skillContents) {
+  for (const skill of prepared.alwaysInline) {
     parts.push(`---\n\n${skill.content}`);
+  }
+
+  const catalogSection = formatSkillsCatalogSection(prepared.catalog);
+  if (catalogSection) {
+    parts.push(`---\n\n${catalogSection}`);
   }
 
   return parts.join('\n\n');

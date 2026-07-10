@@ -13,6 +13,8 @@ Create a new agent when:
 
 **Always request board approval before creating an agent** unless you are the CEO and the company policy allows autonomous hires.
 
+Call `createApproval` with type `hire_agent`. Link any planning issue via `issueIds` so it is halted (`blocked`) until the board decides. Agent-to-agent `in_review` handoff is a different path — do not use it for board governance.
+
 ---
 
 ## §2 — Agent Creation Checklist

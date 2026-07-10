@@ -4,7 +4,7 @@ import { eq } from 'drizzle-orm';
 import { validateRunToken } from '@/lib/auth/run-token';
 import { validateSchedulerKey } from '@/lib/auth/scheduler-key';
 import { logIssueCreated } from '@/lib/issues';
-import { enqueueHeartbeat } from '@/lib/queue';
+import { enqueueHeartbeat } from '@/lib/wake-client';
 
 export async function POST(
   req: NextRequest,

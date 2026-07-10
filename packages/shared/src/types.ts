@@ -23,6 +23,8 @@ export interface HeartbeatJobData {
   wakeCommentId?: string;
   approvalId?: string;
   approvalStatus?: 'approved' | 'rejected';
+  /** Board decision note (approval_resolved wakes). */
+  approvalNote?: string;
   linkedIssueIds?: string[];
   wakePayloadJson?: string;
 }
@@ -54,10 +56,15 @@ export interface WakePayload {
   dependencyBlocked?: boolean;
 }
 
+export type HeartbeatScheduleMode = 'interval' | 'cron';
+
 export interface AgentRuntimeConfig {
   heartbeat: {
     enabled: boolean;
     intervalSec: number;
+    cronExpression?: string;
+    timezone?: string;
+    scheduleMode?: HeartbeatScheduleMode;
     wakeOnAssignment: boolean;
     wakeOnDemand: boolean;
     wakeOnAutomation: boolean;
@@ -100,6 +107,7 @@ export const DEFAULT_RUNTIME_CONFIG: AgentRuntimeConfig = {
   heartbeat: {
     enabled: false,
     intervalSec: 0,
+    scheduleMode: 'interval',
     wakeOnAssignment: true,
     wakeOnDemand: true,
     wakeOnAutomation: false,

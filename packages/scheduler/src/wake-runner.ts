@@ -1,9 +1,5 @@
-import { Worker, type Job } from 'bullmq';
-import { createConnection } from './redis';
-
-const workerConnection = createConnection();
 import { db, agents, heartbeatRuns, companies, costEvents, issues, getLlmProviderRowById } from '@tourbillon/db';
-import { eq, and, sql } from 'drizzle-orm';
+import { eq, and, sql, lt } from 'drizzle-orm';
 import {
   createDurableAgentWithSkills,
   createHeartbeatRuntimeContext,
@@ -21,7 +17,6 @@ import {
 import type { HeartbeatJobData, AgentRuntimeConfig } from '@tourbillon/shared';
 import {
   heartbeatStaleErrorText,
-  QUEUE_HEARTBEAT,
   resolveHeartbeatLivenessConfig,
   resolveModelProviderConfig,
   modelProviderOverridesFromAgent,
@@ -31,10 +26,10 @@ import {
   isHarnessAdapter,
   buildWakeMessage,
   parseCompanySettings,
+  createTraceLogger,
 } from '@tourbillon/shared';
 import type { Agent as AgentRecord } from '@tourbillon/db';
 import { randomUUID } from 'crypto';
-import { createJobTracer } from './job-trace';
 import { runWithHarness, type HarnessRunResult } from './adapters/harness-adapter';
 import { redisPub } from './redis-pub';
 import {
@@ -44,39 +39,19 @@ import {
   resolveHeartbeatFailureError,
 } from './heartbeat-abort';
 
-const CONCURRENCY = parseInt(process.env.WORKER_CONCURRENCY ?? '1', 10);
+export type WakeRequest = HeartbeatJobData;
 
-export const heartbeatWorker = new Worker<HeartbeatJobData>(
-  QUEUE_HEARTBEAT,
-  processHeartbeat,
-  {
-    connection: workerConnection,
-    concurrency: CONCURRENCY,
-    lockDuration: 120_000,
-    stalledInterval: 15_000,
-    maxStalledCount: 3,
-  }
-);
+export interface WakeResult {
+  runId: string;
+  status: 'succeeded' | 'failed' | 'skipped';
+  errorText?: string;
+}
 
-heartbeatWorker.on('completed', (job) => {
-  const tracer = createJobTracer('heartbeat', {
-    jobId: job.id,
-    agentId: job.data.agentId,
-    taskId: job.data.taskId,
-    wakeReason: job.data.wakeReason,
-  }, job);
-  tracer.info('job completed');
-});
+type WakeTracer = ReturnType<typeof createTraceLogger>;
 
-heartbeatWorker.on('failed', (job, err) => {
-  const tracer = createJobTracer('heartbeat', {
-    jobId: job?.id,
-    agentId: job?.data.agentId,
-    taskId: job?.data.taskId,
-    wakeReason: job?.data.wakeReason,
-  }, job);
-  tracer.error('job failed', { error: err.message });
-});
+/** In-process single-flight + follow-up queue per agent (replaces BullMQ dedupe). */
+const agentLocks = new Map<string, Promise<void>>();
+const agentFollowUps = new Map<string, WakeRequest[]>();
 
 interface TokenUsageResult {
   inputTokens: number;
@@ -130,7 +105,6 @@ async function recordHeartbeatSuccess(
   }
 
   await db.update(heartbeatRuns).set(runUpdates).where(eq(heartbeatRuns.id, runId));
-
   await publishHeartbeatRunUpdate(companyId, runId, 'succeeded', agentRecord.id);
 
   if (isObservabilityEnabled()) {
@@ -155,24 +129,120 @@ async function recordHeartbeatFailure(
   await publishHeartbeatRunUpdate(companyId, runId, 'failed', agentId);
 }
 
-async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
-  const { agentId, companyId, invocationSource, wakeReason, taskId } = job.data;
-  const tracer = createJobTracer(
-    'heartbeat',
-    {
-      jobId: job.id,
-      agentId,
-      companyId,
-      taskId,
-      wakeReason,
-    },
-    job
-  );
+/**
+ * Trigger an agent wake. Coalesces concurrent wakes per agent: if a run is active,
+ * queues at most one follow-up (latest wins for assignment/timer).
+ */
+export async function triggerWake(wake: WakeRequest): Promise<WakeResult> {
+  const started = await startWake(wake);
+  if (started.status !== 'started') {
+    return {
+      runId: started.runId,
+      status: 'skipped',
+      errorText: started.errorText,
+    };
+  }
+  return started.done;
+}
 
-  tracer.info('processing heartbeat job', {
+export interface StartWakeResult {
+  runId: string;
+  status: 'started' | 'queued' | 'skipped';
+  errorText?: string;
+  /** Resolves when the wake fully finishes. */
+  done: Promise<WakeResult>;
+}
+
+/**
+ * Create heartbeat_runs promptly, then run LLM work in the background so HTTP
+ * can redirect to `/heartbeat/{runId}` immediately.
+ */
+export async function startWake(wake: WakeRequest): Promise<StartWakeResult> {
+  const lock = agentLocks.get(wake.agentId);
+  if (lock) {
+    agentFollowUps.set(wake.agentId, [wake]);
+    createTraceLogger('wake', {
+      agentId: wake.agentId,
+      companyId: wake.companyId,
+      wakeReason: wake.wakeReason,
+    }).info('wake queued behind in-flight run');
+    return {
+      runId: '',
+      status: 'queued',
+      errorText: 'coalesced behind in-flight wake',
+      done: Promise.resolve({
+        runId: '',
+        status: 'skipped',
+        errorText: 'coalesced behind in-flight wake',
+      }),
+    };
+  }
+
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  agentLocks.set(wake.agentId, gate);
+
+  let resolveRunId!: (runId: string) => void;
+  const runIdReady = new Promise<string>((resolve) => {
+    resolveRunId = resolve;
+  });
+
+  const done = runWake(wake, { onRunCreated: resolveRunId })
+    .catch((err) => {
+      const errorText = err instanceof Error ? err.message : String(err);
+      resolveRunId('');
+      return { runId: '', status: 'failed' as const, errorText };
+    })
+    .finally(() => {
+      agentLocks.delete(wake.agentId);
+      release();
+      const next = agentFollowUps.get(wake.agentId);
+      agentFollowUps.delete(wake.agentId);
+      if (next?.[0]) {
+        void startWake(next[0]).catch((err) => {
+          createTraceLogger('wake', { agentId: wake.agentId }).error('follow-up wake failed', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }
+    });
+
+  const runId = await Promise.race([
+    runIdReady,
+    done.then((r) => r.runId),
+  ]);
+
+  if (!runId) {
+    const result = await done;
+    return {
+      runId: '',
+      status: 'skipped',
+      errorText: result.errorText ?? 'wake skipped',
+      done,
+    };
+  }
+
+  return { runId, status: 'started', done };
+}
+
+async function runWake(
+  wake: WakeRequest,
+  opts: { onRunCreated?: (runId: string) => void } = {},
+): Promise<WakeResult> {
+  const { agentId, companyId, invocationSource, wakeReason, taskId } = wake;
+  const tracer = createTraceLogger('wake', {
+    agentId,
+    companyId,
+    taskId,
+    wakeReason,
+  });
+
+  tracer.info('processing wake', {
     invocationSource,
     apiBase: getInternalApiUrl(),
-    jobData: job.data,
+    wake,
   });
 
   const agentRecord = await db.query.agents.findFirst({
@@ -187,11 +257,13 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
 
   if (agentRecord.status !== 'active') {
     agentTracer.warn('skipped: agent not active', { status: agentRecord.status });
-    return;
+    opts.onRunCreated?.('');
+    return { runId: '', status: 'skipped', errorText: `agent status ${agentRecord.status}` };
   }
   if (company.status !== 'active') {
     agentTracer.warn('skipped: company not active', { status: company.status });
-    return;
+    opts.onRunCreated?.('');
+    return { runId: '', status: 'skipped', errorText: `company status ${company.status}` };
   }
   if (
     isAgentBudgetExceeded(
@@ -203,9 +275,9 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
     agentTracer.warn('skipped: over token budget', {
       spentMonthlyTokens: agentRecord.spentMonthlyTokens,
       budgetMonthlyTokens: agentRecord.budgetMonthlyTokens,
-      enforceBudget: (agentRecord.runtimeConfig as AgentRuntimeConfig).budget?.enforce !== false,
     });
-    return;
+    opts.onRunCreated?.('');
+    return { runId: '', status: 'skipped', errorText: 'over token budget' };
   }
 
   let assignedIssue: Awaited<ReturnType<typeof db.query.issues.findFirst>> | undefined;
@@ -219,7 +291,6 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
       status: assignedIssue?.status,
       assigneeAgentId: assignedIssue?.assigneeAgentId,
       assigneeMatchesAgent: assignedIssue?.assigneeAgentId === agentId,
-      checkoutRunId: assignedIssue?.checkoutRunId,
     });
   }
 
@@ -235,16 +306,20 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
     status: 'running',
     contextSnapshot: {
       wakeReason,
-      wakePayloadJson: job.data.wakePayloadJson,
-      taskId: job.data.taskId,
-      jobId: job.id,
+      wakePayloadJson: wake.wakePayloadJson,
+      taskId: wake.taskId,
       agentName: agentRecord.name,
       agentUrlKey: agentRecord.urlKey,
+      approvalId: wake.approvalId,
+      approvalStatus: wake.approvalStatus,
+      approvalNote: wake.approvalNote,
+      linkedIssueIds: wake.linkedIssueIds,
     },
     startedAt: runStartedAt,
     lastSeenAt: runStartedAt,
   });
   runTracer.info('heartbeat run created');
+  opts.onRunCreated?.(runId);
 
   if (assignedIssue && assignedIssue.assigneeAgentId !== agentId) {
     const errorText = `Task ${taskId} is assigned to agent ${assignedIssue.assigneeAgentId}, not ${agentId}`;
@@ -254,11 +329,11 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
       actualAssigneeAgentId: assignedIssue.assigneeAgentId,
     });
     await recordHeartbeatFailure(runId, errorText, companyId, agentId);
-    return;
+    return { runId, status: 'failed', errorText };
   }
 
   const apiKey = buildRunScopedApiKey(runId, agentId, companyId);
-  const wakeMessage = buildWakeMessage(job.data);
+  const wakeMessage = buildWakeMessage(wake);
   const liveness = resolveHeartbeatLivenessConfig();
   const staleMs = liveness.staleSec * 1000;
   const runStartedMs = Date.now();
@@ -273,10 +348,7 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
 
   const pingHeartbeat = () => {
     if (abortController.signal.aborted) return;
-
     resetWatchdog();
-    void job.extendLock(job.token!, 30_000).catch(() => undefined);
-    void job.updateProgress({ lastSeen: Date.now() }).catch(() => undefined);
     void db.update(heartbeatRuns)
       .set({ lastSeenAt: new Date() })
       .where(eq(heartbeatRuns.id, runId))
@@ -286,7 +358,7 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
   abortController.signal.addEventListener(
     'abort',
     () => {
-      runTracer.warn('heartbeat abort signal fired');
+      runTracer.warn('wake abort signal fired');
     },
     { once: true },
   );
@@ -310,16 +382,10 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
 
   const generationOptions = resolveAgentGenerationOptions(agentRecord, providerRecord);
 
-  runTracer.info('invoking heartbeat runtime', {
+  runTracer.info('invoking wake runtime', {
     adapterType: agentRecord.adapterType,
     modelId: agentRecord.modelId ?? 'unknown',
     provider: providerConfig.provider,
-    providerId: providerConfig.providerId,
-    providerName: providerConfig.providerName,
-    apiMode: providerConfig.apiMode,
-    modelBaseURL: providerConfig.baseURL,
-    modelSettings: generationOptions.modelSettings,
-    reasoning: generationOptions.reasoning,
     pingIntervalSec: liveness.pingIntervalMs / 1000,
     staleSec: liveness.staleSec,
     wakeMessagePreview: wakeMessage.slice(0, 400),
@@ -330,7 +396,7 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
       const harnessResult = await runWithHarness(
         agentRecord,
         {
-          job,
+          wake,
           runId,
           apiKey,
           goalId: issueForTask?.goalId ?? undefined,
@@ -358,19 +424,19 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
           harnessResult.finishReason === 'timeout'
             ? heartbeatStaleErrorText(staleSec)
             : 'Harness run failed';
-        throw new Error(errorText);
+        return { runId, status: 'failed', errorText };
       }
 
-      runTracer.info('harness heartbeat succeeded', {
+      runTracer.info('harness wake succeeded', {
         finishReason: harnessResult.finishReason,
         traceId: harnessResult.traceId,
       });
-      return;
+      return { runId, status: 'succeeded' };
     }
 
-    await runDurableAgentHeartbeat({
+    await runDurableAgentWake({
       agentRecord,
-      job,
+      wake,
       runId,
       runTracer,
       apiKey,
@@ -382,15 +448,16 @@ async function processHeartbeat(job: Job<HeartbeatJobData>): Promise<void> {
       companyId,
       generationOptions,
     });
+    return { runId, status: 'succeeded' };
   } catch (err) {
     const errorText = resolveHeartbeatFailureError(err, abortController.signal.aborted);
-    runTracer.error('heartbeat run failed', {
+    runTracer.error('wake run failed', {
       error: errorText,
       aborted: abortController.signal.aborted,
       durationMs: Date.now() - runStartedMs,
     });
     await recordHeartbeatFailure(runId, errorText, companyId, agentId);
-    throw err;
+    return { runId, status: 'failed', errorText };
   } finally {
     if (watchdog) clearTimeout(watchdog);
     clearInterval(pingInterval);
@@ -444,11 +511,11 @@ async function recordHarnessResult(
   });
 }
 
-async function runDurableAgentHeartbeat(params: {
+async function runDurableAgentWake(params: {
   agentRecord: AgentRecord;
-  job: Job<HeartbeatJobData>;
+  wake: WakeRequest;
   runId: string;
-  runTracer: ReturnType<typeof createJobTracer>;
+  runTracer: WakeTracer;
   apiKey: string;
   wakeMessage: string;
   abortSignal: AbortSignal;
@@ -460,7 +527,7 @@ async function runDurableAgentHeartbeat(params: {
 }): Promise<void> {
   const {
     agentRecord,
-    job,
+    wake,
     runId,
     runTracer,
     apiKey,
@@ -488,7 +555,7 @@ async function runDurableAgentHeartbeat(params: {
     taskId,
     goalId: issueForTask?.goalId ?? undefined,
     projectId: issueForTask?.projectId ?? undefined,
-    jobId: job.id ?? undefined,
+    jobId: runId,
     agentRuntimeConfig: agentRecord.runtimeConfig as AgentRuntimeConfig,
   });
 
@@ -508,7 +575,7 @@ async function runDurableAgentHeartbeat(params: {
     runTracer.info('cleared inbox thread for stateless wake');
   }
 
-  runTracer.info('heartbeat memory', {
+  runTracer.info('wake memory', {
     useMemory,
     thread: useMemory ? memoryKeys.thread : undefined,
   });
@@ -520,9 +587,9 @@ async function runDurableAgentHeartbeat(params: {
           goalId: issueForTask?.goalId ?? undefined,
           projectId: issueForTask?.projectId ?? undefined,
           heartbeatRunId: runId,
-          jobId: job.id,
           companyId,
           agentId: agentRecord.id,
+          wakeReason: wake.wakeReason,
         },
         tags: taskId ? [`issue:${taskId}`] : [],
         requestContextKeys: [
@@ -555,9 +622,14 @@ async function runDurableAgentHeartbeat(params: {
         offset: 0,
         abortSignal,
         onFinish: (result) => {
-          const usage = result.output?.usage;
-          inputTokens = usage?.promptTokens ?? usage?.inputTokens ?? inputTokens;
-          outputTokens = usage?.completionTokens ?? usage?.outputTokens ?? outputTokens;
+          const usage = (result.totalUsage ?? result.usage) as {
+            inputTokens?: number;
+            outputTokens?: number;
+            promptTokens?: number;
+            completionTokens?: number;
+          } | undefined;
+          inputTokens = usage?.inputTokens ?? usage?.promptTokens ?? inputTokens;
+          outputTokens = usage?.outputTokens ?? usage?.completionTokens ?? outputTokens;
         },
       } as NonNullable<Parameters<typeof durableAgent.observe>[1]> & { abortSignal: AbortSignal });
       streamResult = observed;
@@ -582,9 +654,14 @@ async function runDurableAgentHeartbeat(params: {
         ...(tracingOptions ? { tracingOptions } : {}),
         abortSignal,
         onFinish: (result) => {
-          const usage = result.output?.usage;
-          inputTokens = usage?.promptTokens ?? usage?.inputTokens ?? 0;
-          outputTokens = usage?.completionTokens ?? usage?.outputTokens ?? 0;
+          const usage = (result.totalUsage ?? result.usage) as {
+            inputTokens?: number;
+            outputTokens?: number;
+            promptTokens?: number;
+            completionTokens?: number;
+          } | undefined;
+          inputTokens = usage?.inputTokens ?? usage?.promptTokens ?? 0;
+          outputTokens = usage?.outputTokens ?? usage?.completionTokens ?? 0;
         },
       } as NonNullable<Parameters<typeof durableAgent.stream>[1]> & { abortSignal: AbortSignal });
       streamResult = streamed;
@@ -617,16 +694,13 @@ async function runDurableAgentHeartbeat(params: {
     traceId,
   });
 
-  runTracer.info('durable agent heartbeat succeeded', { traceId, durableRunId });
+  runTracer.info('durable agent wake succeeded', { traceId, durableRunId });
 }
 
-async function logIssueStateAfterRun(
-  runTracer: ReturnType<typeof createJobTracer>,
-  taskId?: string,
-): Promise<void> {
+async function logIssueStateAfterRun(runTracer: WakeTracer, taskId?: string): Promise<void> {
   if (!taskId) return;
   const issueAfter = await db.query.issues.findFirst({ where: eq(issues.id, taskId) });
-  runTracer.info('issue state after heartbeat', {
+  runTracer.info('issue state after wake', {
     taskId,
     found: Boolean(issueAfter),
     status: issueAfter?.status,
@@ -638,4 +712,20 @@ async function logIssueStateAfterRun(
 function buildRunScopedApiKey(runId: string, agentId: string, companyId: string): string {
   const payload = JSON.stringify({ runId, agentId, companyId, iat: Date.now() });
   return `pm_run_${Buffer.from(payload).toString('base64url')}`;
+}
+
+/** Mark abandoned running rows as failed (DB-only stale sweep). */
+export async function sweepStaleHeartbeatRuns(): Promise<number> {
+  const { staleSec } = resolveHeartbeatLivenessConfig();
+  const cutoff = new Date(Date.now() - staleSec * 1000);
+  const stale = await db
+    .update(heartbeatRuns)
+    .set({
+      status: 'failed',
+      finishedAt: new Date(),
+      errorText: heartbeatStaleErrorText(staleSec),
+    })
+    .where(and(eq(heartbeatRuns.status, 'running'), lt(heartbeatRuns.lastSeenAt, cutoff)))
+    .returning({ id: heartbeatRuns.id });
+  return stale.length;
 }

@@ -13,6 +13,8 @@ import {
   defaultAgentAdapterType,
   applyModelSettingsPatch,
   parseAgentModelSettings,
+  normalizeHeartbeatConfig,
+  validateHeartbeatSchedule,
   type AgentModelSettings,
   type AgentModelSettingsPatch,
   type AgentRuntimeConfig,
@@ -220,19 +222,36 @@ export async function updateAgentRuntimeConfig(
   if (!agent) throw new AgentValidationError('Agent not found.');
 
   const current = agent.runtimeConfig as AgentRuntimeConfig;
+  const mergedHeartbeat = patch.heartbeat
+    ? normalizeHeartbeatConfig({ ...current.heartbeat, ...patch.heartbeat })
+    : current.heartbeat;
   const runtimeConfig: AgentRuntimeConfig = {
     ...current,
     ...patch,
-    heartbeat: { ...current.heartbeat, ...patch.heartbeat },
+    heartbeat: mergedHeartbeat,
     timeout: { ...current.timeout, ...patch.timeout },
     model: patch.model !== undefined ? patch.model : current.model,
   };
+
+  if (patch.heartbeat) {
+    const heartbeatError = validateHeartbeatSchedule(runtimeConfig.heartbeat);
+    if (heartbeatError) throw new AgentValidationError(heartbeatError);
+  }
 
   const [updated] = await db
     .update(agents)
     .set({ runtimeConfig, updatedAt: new Date() })
     .where(eq(agents.id, agentId))
     .returning();
+
+  if (patch.heartbeat) {
+    try {
+      const { requestAgentTimerScheduleSync } = await import('./wake-client');
+      await requestAgentTimerScheduleSync(updated.id);
+    } catch {
+      // Scheduler reconciles Mastra schedules on boot if wake server is down.
+    }
+  }
 
   return updated;
 }

@@ -34,6 +34,15 @@ export async function POST(
       if (!issue) throw Object.assign(new Error('Not found'), { status: 404 });
       if (issue.companyId !== runCtx.companyId) throw Object.assign(new Error('Forbidden'), { status: 403 });
 
+      if (issue.boardApprovalId) {
+        throw Object.assign(
+          new Error(
+            `Conflict: issue is halted pending board approval ${issue.boardApprovalId}`,
+          ),
+          { status: 409, code: 'board_approval_pending' },
+        );
+      }
+
       let effectiveCheckoutRunId = issue.checkoutRunId;
 
       // Stale lock: previous heartbeat finished/crashed but lock was not cleared.

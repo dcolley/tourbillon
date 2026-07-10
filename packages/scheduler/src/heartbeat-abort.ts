@@ -38,7 +38,7 @@ export function abortRejectedPromise(signal: AbortSignal): Promise<never> {
   });
 }
 
-/** Race work against abort so BullMQ job fails when the signal fires or fetch is cut off. */
+/** Race work against abort so the wake fails when the signal fires or fetch is cut off. */
 export async function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   return Promise.race([promise, abortRejectedPromise(signal)]);
 }

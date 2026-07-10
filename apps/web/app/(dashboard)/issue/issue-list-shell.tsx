@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ISSUE_KANBAN_LIMIT, type IssueListRow } from '@/lib/issue-list';
@@ -13,8 +14,12 @@ import {
   writeIssueListRefreshPrefs,
   type IssueListRefreshIntervalSec,
 } from '@/lib/issue-list-refresh-storage';
+import {
+  readIssueStatusFilter,
+  writeIssueStatusFilter,
+} from '@/lib/issue-status-filter-storage';
 import { STICKY_TOOLBAR_ROOT_ATTR } from '@/lib/sticky-toolbar';
-import type { IssueFilter } from './issue-filter';
+import { issueListHref, parseIssueFilter, type IssueFilter } from './issue-filter';
 import { IssueStatusFilter } from './issue-status-filter';
 import { IssueBoard } from './issue-board';
 import { IssuePageToolbar } from './issue-page-toolbar';
@@ -55,6 +60,8 @@ export function IssueListShell({
   projects: ProjectOption[];
   emptyMessage: string;
 }) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const { view, setView } = useIssueViewMode();
   const [issues, setIssues] = useState(initialIssues);
   const [total, setTotal] = useState(initialTotal);
@@ -63,6 +70,21 @@ export function IssueListShell({
   );
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Restore status filter from localStorage when URL has no filter; otherwise persist URL filter.
+  useEffect(() => {
+    const urlFilter = searchParams.get('filter');
+    if (urlFilter != null && urlFilter !== '') {
+      writeIssueStatusFilter(parseIssueFilter(urlFilter));
+      return;
+    }
+
+    const stored = readIssueStatusFilter();
+    writeIssueStatusFilter(stored);
+    if (stored !== filter) {
+      router.replace(issueListHref(stored), { scroll: false });
+    }
+  }, [filter, router, searchParams]);
 
   useEffect(() => {
     setRefreshIntervalSec(readIssueListRefreshPrefs().refreshIntervalSec);
@@ -82,7 +104,7 @@ export function IssueListShell({
       setError(null);
       try {
         const params = new URLSearchParams();
-        if (filter !== 'active') params.set('filter', filter);
+        params.set('filter', filter);
 
         const res = await fetch(`/api/issues/list?${params}`);
         if (!res.ok) throw new Error(`Failed to load issues (${res.status})`);

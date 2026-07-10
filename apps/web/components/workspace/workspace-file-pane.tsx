@@ -12,6 +12,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { WorkspaceCodeMirror } from '@/components/workspace/workspace-codemirror';
 import { ForwardRefEditor } from '@/components/workspace/mdx-editor/forward-ref-editor';
+import { VisualEditorErrorBoundary } from '@/components/workspace/mdx-editor/visual-editor-error-boundary';
 import type { MDXEditorMethods } from '@mdxeditor/editor';
 
 type MarkdownMode = 'preview' | 'visual' | 'source';
@@ -68,6 +69,8 @@ export function WorkspaceFilePane({
   const [textMode, setTextMode] = useState<TextMode>('view');
   const mdxRef = useRef<MDXEditorMethods>(null);
   const usedHydrationRef = useRef(false);
+  const visualSeedRef = useRef('');
+  const [visualSeed, setVisualSeed] = useState('');
 
   const isDirty =
     markdownMode !== 'preview' || textMode === 'edit'
@@ -120,7 +123,12 @@ export function WorkspaceFilePane({
 
   const enterMarkdownEdit = useCallback(
     (mode: 'visual' | 'source') => {
-      setDraft(content ?? '');
+      const seed = content ?? '';
+      setDraft(seed);
+      if (mode === 'visual') {
+        visualSeedRef.current = seed;
+        setVisualSeed(seed);
+      }
       setMarkdownMode(mode);
     },
     [content]
@@ -160,6 +168,11 @@ export function WorkspaceFilePane({
       setSaving(false);
     }
   }, [path, draft, markdown, markdownMode, onSaved]);
+
+  useEffect(() => {
+    if (markdownMode !== 'visual' || !visualSeed) return;
+    mdxRef.current?.setMarkdown(visualSeed);
+  }, [markdownMode, visualSeed]);
 
   if (!path) {
     return (
@@ -270,12 +283,14 @@ export function WorkspaceFilePane({
 
       {markdown && markdownMode === 'visual' && (
         <div className="rounded-lg border overflow-hidden">
-          <ForwardRefEditor
-            ref={mdxRef}
-            markdown={draft}
-            onChange={setDraft}
-            key={`mdx-${path}`}
-          />
+          <VisualEditorErrorBoundary onFallback={() => enterMarkdownEdit('source')}>
+            <ForwardRefEditor
+              ref={mdxRef}
+              markdown={visualSeed}
+              onChange={setDraft}
+              key={`mdx-${path}-visual`}
+            />
+          </VisualEditorErrorBoundary>
         </div>
       )}
 

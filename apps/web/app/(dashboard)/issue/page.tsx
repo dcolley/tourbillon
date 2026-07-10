@@ -1,3 +1,4 @@
+import { Suspense } from 'react';
 import { listGoalOptions } from '@/lib/goals';
 import { listProjectOptions } from '@/lib/projects';
 import {
@@ -31,16 +32,18 @@ export default async function IssuesPage({
   const emptyMsg = emptyMessage(filter);
 
   return (
-    <IssueListShell
-      filter={filter}
-      visibleStatuses={visibleStatuses}
-      initialIssues={issueResult.rows}
-      initialTotal={issueResult.total}
-      agents={agentList}
-      goals={goalList}
-      projects={projectList}
-      emptyMessage={emptyMsg}
-    />
+    <Suspense fallback={<p className="text-sm text-muted-foreground">Loading issues…</p>}>
+      <IssueListShell
+        filter={filter}
+        visibleStatuses={visibleStatuses}
+        initialIssues={issueResult.rows}
+        initialTotal={issueResult.total}
+        agents={agentList}
+        goals={goalList}
+        projects={projectList}
+        emptyMessage={emptyMsg}
+      />
+    </Suspense>
   );
 }
 

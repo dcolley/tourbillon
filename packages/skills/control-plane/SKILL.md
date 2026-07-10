@@ -15,7 +15,7 @@ You wake, you work, you exit. Every heartbeat follows these 9 steps exactly:
 5. **Checkout** — Call `checkoutIssue`. If 409 → pick next task. If no tasks:
    - **CEO only:** run the Goal Review Fallback (§1a), then EXIT
    - **All other roles:** EXIT cleanly
-6. **Understand context** — Call `getHeartbeatContext` for the checked-out issue. Then call `getComments` (omit `after` on cold start; see §1b)
+6. **Understand context** — Call `getHeartbeatContext` for the checked-out issue. Then call `getComments` (omit `after` on cold start; see §1b). If the work needs a methodology skill other than this control-plane skill, call `getSkill(slug)` first (see catalog / `listSkills`)
 7. **Do work** — Act on the task. Use all available tools. Create subtasks to delegate. Update status and add a comment at every material checkpoint
 8. **Hand off or complete** — Set status to `done`, `in_review`, or `blocked`. For `in_review`, follow §2a (assign reviewer via `assigneeAgentId`). Always include a comment explaining what is complete, what remains, and who acts next
 9. **EXIT** — The scheduler re-wakes you as needed. Do not poll or loop
@@ -29,7 +29,7 @@ When your inbox is empty and your role is `ceo`:
 3. **Triage unassigned issues** — for each issue with `assigneeAgentId: null` and status `backlog` or `todo`:
    - Call `listAgents` to pick the right role
    - Call `updateIssue` with `assigneeAgentId`, `status: 'todo'`, and a comment explaining the assignment
-4. Apply **SKILL: Plan to Tasks** — identify gaps, create issues via `createIssue` (set `goalId`, assign via `listAgents`, use `blockedByIssueIds` for sequencing)
+4. Call `getSkill('plan-to-tasks')` if needed, then apply **SKILL: Plan to Tasks** — identify gaps, create issues via `createIssue` (set `goalId`, assign via `listAgents`, use `blockedByIssueIds` for sequencing)
 5. Add a comment on each created issue summarizing the plan and next owner
 6. Do not create more than 15 issues per goal per heartbeat — break into phases if needed
 7. EXIT — assignment wakes will handle downstream agents
@@ -50,15 +50,18 @@ When you pick one up:
 
 ---
 
-## §1b — Context Sources (Four Lanes)
+## §1b — Context Sources (Five Lanes)
 
 | Lane | Tools | When |
 |---|---|---|
 | **Control plane (source of truth)** | `getInbox`, `getHeartbeatContext`, `getComments`, `updateIssue` | Every heartbeat — steps 3–8 |
+| **Methodology skills (on demand)** | `listSkills`, `getSkill` | When you need a playbook beyond this control-plane skill — e.g. plan-to-tasks, company frameworks. Call `getSkill(slug)` before following those procedures |
 | **Mastra memory (private accelerator)** | Automatic — your turns persist per issue thread | Across heartbeats on the same task |
 | **Company workspace** | `listWorkspaceFiles`, `readWorkspaceFile`, `writeWorkspaceFile` | On demand during work — shared reference docs, not task history |
 | **Execution sandbox** | `mastra_workspace_execute_command`, sandbox file tools | When `code-execution` toolset enabled — per-issue scratch code; see SKILL: Code Execution |
 | **Web search** | MCP web search tools | External information only |
+
+Only **control-plane** is fully inlined in your system prompt. Other skills appear as a short catalog — load full text with `getSkill` when you need them (saves context for tool results).
 
 **Task history lives in issue comments**, not in memory or RAG. Always write material decisions to comments so other agents can read them.
 

@@ -1,10 +1,6 @@
-import { db, agents, heartbeatRuns, reconcileRunningHeartbeatRunsForJob, type Agent, type HeartbeatRun } from '@tourbillon/db';
-import { desc, eq, and, inArray, sql, count } from 'drizzle-orm';
-import type { JobType } from 'bullmq';
-import { QUEUE_HEARTBEAT } from '@tourbillon/shared';
+import { db, agents, heartbeatRuns, type Agent, type HeartbeatRun } from '@tourbillon/db';
+import { desc, eq, and, inArray, count } from 'drizzle-orm';
 import { getActiveCompany } from './company';
-import { getQueue } from './queue';
-import type { JobSummary } from './jobs';
 
 export interface HeartbeatRunWithAgent {
   run: HeartbeatRun;
@@ -39,7 +35,6 @@ export interface HeartbeatListResult {
   filter: HeartbeatListFilter;
 }
 
-const IN_QUEUE_JOB_STATES: JobType[] = ['waiting', 'active', 'delayed'];
 const DEFAULT_PAGE_SIZE = 25;
 
 function runStatusCondition(filter: HeartbeatListFilter) {
@@ -57,9 +52,7 @@ function runStatusCondition(filter: HeartbeatListFilter) {
   }
 }
 
-async function attachAgents(
-  runs: HeartbeatRun[]
-): Promise<HeartbeatRunWithAgent[]> {
+async function attachAgents(runs: HeartbeatRun[]): Promise<HeartbeatRunWithAgent[]> {
   if (runs.length === 0) return [];
 
   const company = await getActiveCompany();
@@ -90,7 +83,7 @@ export async function listHeartbeatRuns(opts: {
     .where(
       agentId
         ? and(eq(heartbeatRuns.companyId, company.id), eq(heartbeatRuns.agentId, agentId))
-        : eq(heartbeatRuns.companyId, company.id)
+        : eq(heartbeatRuns.companyId, company.id),
     )
     .orderBy(desc(heartbeatRuns.startedAt))
     .limit(limit);
@@ -101,159 +94,34 @@ export async function listHeartbeatRuns(opts: {
 async function countHeartbeatRuns(
   companyId: string,
   filter: HeartbeatListFilter,
-  agentId?: string
+  agentId?: string,
 ): Promise<number> {
   const statusCond = runStatusCondition(filter);
   const where = and(
     eq(heartbeatRuns.companyId, companyId),
     agentId ? eq(heartbeatRuns.agentId, agentId) : undefined,
-    statusCond
+    statusCond,
   );
 
   const [row] = await db.select({ total: count() }).from(heartbeatRuns).where(where);
   return row?.total ?? 0;
 }
 
-async function fetchJobsById(jobIds: string[]): Promise<Map<string, JobSummary>> {
-  const unique = [...new Set(jobIds.filter(Boolean))];
-  if (unique.length === 0) return new Map();
-
-  const queue = getQueue(QUEUE_HEARTBEAT);
-  const jobs = await Promise.all(unique.map((id) => queue.getJob(id)));
-  const map = new Map<string, JobSummary>();
-
-  for (const job of jobs) {
-    if (!job?.id) continue;
-    map.set(job.id, {
-      id: job.id,
-      name: job.name,
-      state: await job.getState(),
-      timestamp: job.timestamp ?? null,
-      processedOn: job.processedOn ?? null,
-      finishedOn: job.finishedOn ?? null,
-      attemptsMade: job.attemptsMade,
-    });
-  }
-
-  return map;
-}
-
-function entryFromRun(
-  { run, agent }: HeartbeatRunWithAgent,
-  job?: JobSummary
-): HeartbeatListEntry {
-  const jobId = getHeartbeatJobId(run) ?? job?.id ?? null;
-  const listState = job?.state ?? heartbeatJobListState(run);
-  const href = jobId
-    ? `/jobs/${QUEUE_HEARTBEAT}/${encodeURIComponent(jobId)}?state=${listState}`
-    : `/heartbeat/${run.id}`;
-
+function entryFromRun({ run, agent }: HeartbeatRunWithAgent): HeartbeatListEntry {
   return {
     key: run.id,
     runId: run.id,
-    jobId,
+    jobId: null,
     agent,
     invocationSource: run.invocationSource,
     runStatus: run.status,
-    jobState: job?.state ?? null,
+    jobState: null,
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,
     errorText: run.errorText,
-    href,
+    href: `/heartbeat/${run.id}`,
     source: 'db',
   };
-}
-
-function entryFromOrphanJob(
-  job: JobSummary,
-  meta: { wakeReason?: string } | undefined,
-  agent?: Pick<Agent, 'id' | 'name' | 'urlKey' | 'title'> | null
-): HeartbeatListEntry {
-  return {
-    key: `job:${job.id}`,
-    runId: null,
-    jobId: job.id,
-    agent: agent ?? null,
-    invocationSource: meta?.wakeReason ?? null,
-    runStatus: null,
-    jobState: job.state,
-    startedAt: job.timestamp ? new Date(job.timestamp) : null,
-    finishedAt: job.finishedOn ? new Date(job.finishedOn) : null,
-    errorText: null,
-    href: `/jobs/${QUEUE_HEARTBEAT}/${encodeURIComponent(job.id)}?state=${job.state}`,
-    source: 'queue',
-  };
-}
-
-async function listOrphanQueueJobs(agentId?: string): Promise<HeartbeatListEntry[]> {
-  const queue = getQueue(QUEUE_HEARTBEAT);
-  const batches = await Promise.all(
-    IN_QUEUE_JOB_STATES.map((state) => queue.getJobs([state], 0, 100, false))
-  );
-
-  const jobs = batches.flat().filter(Boolean);
-  if (jobs.length === 0) return [];
-
-  const summaries = await Promise.all(
-    jobs.map(async (job) => ({
-      summary: {
-        id: job!.id ?? '',
-        name: job!.name,
-        state: await job!.getState(),
-        timestamp: job!.timestamp ?? null,
-        processedOn: job!.processedOn ?? null,
-        finishedOn: job!.finishedOn ?? null,
-        attemptsMade: job!.attemptsMade,
-      } satisfies JobSummary,
-      data: job!.data as { agentId?: string; wakeReason?: string },
-    }))
-  );
-
-  const jobIds = summaries.map((j) => j.summary.id).filter(Boolean);
-  const company = await getActiveCompany();
-
-  const runsWithJobs =
-    jobIds.length > 0
-      ? await db
-          .select({ jobId: sql<string>`${heartbeatRuns.contextSnapshot}->>'jobId'` })
-          .from(heartbeatRuns)
-          .where(
-            sql`${heartbeatRuns.contextSnapshot}->>'jobId' = ANY(ARRAY[${sql.join(
-              jobIds.map((id) => sql`${id}`),
-              sql`, `
-            )}]::text[])`
-          )
-      : [];
-
-  const linkedJobIds = new Set(runsWithJobs.map((r) => r.jobId).filter(Boolean));
-  const orphans = summaries.filter((j) => j.summary.id && !linkedJobIds.has(j.summary.id));
-
-  if (orphans.length === 0) return [];
-
-  const agentIds = [
-    ...new Set(orphans.map((j) => j.data.agentId).filter((id): id is string => Boolean(id))),
-  ];
-
-  const agentRows =
-    agentIds.length > 0
-      ? await db
-          .select({ id: agents.id, name: agents.name, urlKey: agents.urlKey, title: agents.title })
-          .from(agents)
-          .where(and(eq(agents.companyId, company.id), inArray(agents.id, agentIds)))
-      : [];
-
-  const agentById = new Map(agentRows.map((a) => [a.id, a]));
-
-  return orphans
-    .filter((j) => !agentId || j.data.agentId === agentId)
-    .map((j) =>
-      entryFromOrphanJob(
-        j.summary,
-        { wakeReason: j.data.wakeReason },
-        j.data.agentId ? agentById.get(j.data.agentId) ?? null : null
-      )
-    )
-    .sort((a, b) => (b.startedAt?.getTime() ?? 0) - (a.startedAt?.getTime() ?? 0));
 }
 
 export async function getHeartbeatList(opts: {
@@ -262,29 +130,16 @@ export async function getHeartbeatList(opts: {
   pageSize?: number;
   agentId?: string;
 } = {}): Promise<HeartbeatListResult> {
-  const filter = opts.filter ?? 'all';
+  const filter = opts.filter === 'in_queue' ? 'running' : (opts.filter ?? 'all');
   const page = Math.max(0, opts.page ?? 0);
   const pageSize = opts.pageSize ?? DEFAULT_PAGE_SIZE;
   const company = await getActiveCompany();
-
-  if (filter === 'in_queue') {
-    const orphans = await listOrphanQueueJobs(opts.agentId);
-    const total = orphans.length;
-    const start = page * pageSize;
-    return {
-      entries: orphans.slice(start, start + pageSize),
-      total,
-      page,
-      pageSize,
-      filter,
-    };
-  }
 
   const statusCond = runStatusCondition(filter);
   const where = and(
     eq(heartbeatRuns.companyId, company.id),
     opts.agentId ? eq(heartbeatRuns.agentId, opts.agentId) : undefined,
-    statusCond
+    statusCond,
   );
 
   const [runs, dbTotal] = await Promise.all([
@@ -299,49 +154,9 @@ export async function getHeartbeatList(opts: {
   ]);
 
   const withAgents = await attachAgents(runs);
-  const jobIds = withAgents.map(({ run }) => getHeartbeatJobId(run)).filter((id): id is string => Boolean(id));
-  const jobsById = await fetchJobsById(jobIds);
+  const entries = withAgents.map((item) => entryFromRun(item));
 
-  const missingJobIds = new Set<string>();
-  for (const { run } of withAgents) {
-    if (run.status !== 'running') continue;
-    const jobId = getHeartbeatJobId(run);
-    if (jobId && !jobsById.has(jobId)) missingJobIds.add(jobId);
-  }
-
-  const reconciledRunIds = new Set<string>();
-  for (const jobId of missingJobIds) {
-    const runIds = await reconcileRunningHeartbeatRunsForJob(
-      jobId,
-      'BullMQ job missing or removed',
-    );
-    runIds.forEach((id) => reconciledRunIds.add(id));
-  }
-
-  const entries = withAgents.map((item) => {
-    const jobId = getHeartbeatJobId(item.run);
-    const job = jobId ? jobsById.get(jobId) : undefined;
-    let run = item.run;
-    if (reconciledRunIds.has(run.id)) {
-      run = {
-        ...run,
-        status: 'failed',
-        finishedAt: run.finishedAt ?? new Date(),
-        errorText: run.errorText ?? 'BullMQ job missing or removed',
-      };
-    }
-    return entryFromRun({ run, agent: item.agent }, job);
-  });
-
-  const filteredEntries =
-    filter === 'running' ? entries.filter((e) => e.runStatus !== 'failed') : entries;
-
-  const total =
-    reconciledRunIds.size > 0 && filter !== 'all'
-      ? await countHeartbeatRuns(company.id, filter, opts.agentId)
-      : dbTotal;
-
-  return { entries: filteredEntries, total, page, pageSize, filter };
+  return { entries, total: dbTotal, page, pageSize, filter };
 }
 
 export async function getHeartbeatRun(runId: string): Promise<HeartbeatRunWithAgent | null> {
@@ -358,9 +173,8 @@ export async function getHeartbeatRun(runId: string): Promise<HeartbeatRunWithAg
   return { run, agent: agent ?? null };
 }
 
-export function getHeartbeatJobId(run: HeartbeatRun): string | undefined {
-  const snapshot = run.contextSnapshot as { jobId?: string } | null;
-  return snapshot?.jobId;
+export function getHeartbeatJobId(_run: HeartbeatRun): string | undefined {
+  return undefined;
 }
 
 export function getHeartbeatTaskId(run: HeartbeatRun): string | undefined {
@@ -374,26 +188,10 @@ export function heartbeatJobListState(run: HeartbeatRun): string {
   return 'completed';
 }
 
-/** Canonical URL for a heartbeat run — nested under /jobs/heartbeat/{jobId}. */
 export function heartbeatJobHref(run: HeartbeatRun): string | null {
-  const jobId = getHeartbeatJobId(run);
-  if (!jobId) return null;
-  return `/jobs/${QUEUE_HEARTBEAT}/${encodeURIComponent(jobId)}?state=${heartbeatJobListState(run)}`;
+  return `/heartbeat/${run.id}`;
 }
 
-export async function getHeartbeatRunByJobId(jobId: string): Promise<HeartbeatRunWithAgent | null> {
-  const [run] = await db
-    .select()
-    .from(heartbeatRuns)
-    .where(sql`${heartbeatRuns.contextSnapshot}->>'jobId' = ${jobId}`)
-    .orderBy(desc(heartbeatRuns.startedAt))
-    .limit(1);
-  if (!run) return null;
-
-  const agent = await db.query.agents.findFirst({
-    where: eq(agents.id, run.agentId),
-    columns: { id: true, name: true, urlKey: true, title: true },
-  });
-
-  return { run, agent: agent ?? null };
+export async function getHeartbeatRunByJobId(_jobId: string): Promise<HeartbeatRunWithAgent | null> {
+  return null;
 }

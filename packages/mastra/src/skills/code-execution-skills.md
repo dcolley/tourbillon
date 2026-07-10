@@ -76,14 +76,14 @@ Tool names may appear with or without the `mastra_workspace_` prefix depending o
 
 ---
 
-## §6 — Agent vs Harness Runtime
+## §6 — Agent vs AgentController Runtime
 
 | Runtime | When to use |
 |---|---|
 | **Agent** | Quick scripts, single-heartbeat tasks, tests |
-| **Harness** | Multi-step coding that spans several heartbeats on the same issue — harness threads persist workspace state between wakes |
+| **AgentController** (`harness_local`) | Multi-step coding that spans several heartbeats on the same issue — Session threads persist message history between wakes |
 
-Harness without `code-execution` cannot edit or execute files (permissions deny). Both runtimes need the toolset for shell access.
+AgentController without `code-execution` cannot edit or execute files (permissions deny). Both runtimes need the toolset for shell access.
 
 ---
 

@@ -1,6 +1,5 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { QUEUE_HEARTBEAT } from '@tourbillon/shared';
 import { heartbeatJobHref } from '@/lib/heartbeats';
 import { listGoalOptions } from '@/lib/goals';
 import { listProjectOptions } from '@/lib/projects';
@@ -100,6 +99,21 @@ export default async function IssueDetailPage({
       {savedFlag && (
         <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
           Changes saved.
+        </div>
+      )}
+
+      {issue.boardApprovalId && (
+        <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+          <p className="font-medium">Pending board approval</p>
+          <p className="mt-1 text-amber-900">
+            This issue is halted until the board decides.{' '}
+            <Link href="/approval" className="underline underline-offset-2 hover:text-amber-800">
+              Open approvals
+            </Link>
+            <span className="ml-1 font-mono text-xs text-amber-800">
+              ({issue.boardApprovalId.slice(0, 8)}…)
+            </span>
+          </p>
         </div>
       )}
 
@@ -254,7 +268,7 @@ export default async function IssueDetailPage({
 
       {activeJob && (
         <IssueExecutionPanel
-          queue={QUEUE_HEARTBEAT}
+          queue="heartbeat"
           jobId={activeJob.id}
           jobState={activeJob.state}
         />
@@ -262,12 +276,12 @@ export default async function IssueDetailPage({
 
       {heartbeatJobs.length > 0 && (
         <div>
-          <h2 className="mb-2 text-lg font-semibold">Related jobs</h2>
+          <h2 className="mb-2 text-lg font-semibold">Related wakes</h2>
           <div className="rounded-lg border divide-y">
             {heartbeatJobs.map((job) => (
               <Link
                 key={job.id}
-                href={`/jobs/${QUEUE_HEARTBEAT}/${job.id}?state=${job.state}`}
+                href={`/heartbeat/${job.id}`}
                 className="flex items-center justify-between gap-4 p-3 hover:bg-accent/50 transition-colors"
               >
                 <span className="font-mono text-xs">{job.id}</span>

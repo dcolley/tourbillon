@@ -4,6 +4,7 @@ import { revalidatePath } from 'next/cache';
 import {
   CompanyValidationError,
   createCompany,
+  getActiveCompanyOrNull,
   getCompanyById,
   setActiveCompanyCookie,
 } from '@/lib/company';
@@ -12,15 +13,25 @@ export type CreateCompanyResult =
   | { ok: true; id: string; name: string }
   | { ok: false; error: string };
 
-export async function syncActiveCompanyAction(companyId: string): Promise<{ ok: boolean; error?: string }> {
+export async function syncActiveCompanyAction(
+  companyId: string,
+  opts: { revalidate?: boolean } = {},
+): Promise<{ ok: boolean; error?: string; changed?: boolean }> {
   const company = await getCompanyById(companyId);
   if (!company) {
     return { ok: false, error: 'Company not found.' };
   }
 
+  const current = await getActiveCompanyOrNull();
+  if (current?.id === company.id) {
+    return { ok: true, changed: false };
+  }
+
   await setActiveCompanyCookie(company.id);
-  revalidatePath('/', 'layout');
-  return { ok: true };
+  if (opts.revalidate !== false) {
+    revalidatePath('/', 'layout');
+  }
+  return { ok: true, changed: true };
 }
 
 export async function createCompanyAction(formData: FormData): Promise<CreateCompanyResult> {

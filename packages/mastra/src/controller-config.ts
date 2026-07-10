@@ -1,0 +1,238 @@
+import type { Agent as AgentRecord } from '@tourbillon/db';
+import { getLlmProviderRowById } from '@tourbillon/db';
+import type {
+  AgentController,
+  AgentControllerEvent,
+  AgentControllerMode,
+  Session,
+} from '@mastra/core/agent-controller';
+import { AgentController as AgentControllerClass } from '@mastra/core/agent-controller';
+import { PostgresStore } from '@mastra/pg';
+import { Agent } from '@mastra/core/agent';
+import { ensureExecutionWorkspace } from '@tourbillon/shared';
+import {
+  assembleAgentSystemPrompt,
+  assembleAgentTools,
+  getAgentMemory,
+  shouldAttachCodeExecutionWorkspace,
+  type AssembleAgentToolsOptions,
+} from './agent-factory';
+import { getLanguageModelForAgent, llmProviderRowToRecord } from './provider';
+import { resolveAgentGenerationOptions, toMastraDefaultOptions } from './model-settings';
+import { buildCodeExecutionWorkspace } from './execution-workspace';
+import { buildHeartbeatInputProcessors } from './heartbeat-processors';
+
+export type { AgentController, AgentControllerEvent, AgentControllerMode, Session };
+
+export function buildControllerThreadId(agentRecord: AgentRecord, taskId?: string): string {
+  return taskId
+    ? `issue-${agentRecord.companyId}-${taskId}`
+    : `agent-${agentRecord.id}`;
+}
+
+/** @deprecated Prefer {@link buildControllerThreadId}. */
+export const buildHarnessThreadId = buildControllerThreadId;
+
+export async function buildControllerCwd(
+  agentRecord: AgentRecord,
+  taskId?: string,
+): Promise<string | undefined> {
+  const codeExecutionEnabled = await shouldAttachCodeExecutionWorkspace(agentRecord);
+  if (!codeExecutionEnabled) return undefined;
+  return ensureExecutionWorkspace(agentRecord.companyId, taskId);
+}
+
+/** @deprecated Prefer {@link buildControllerCwd}. */
+export const buildHarnessCwd = buildControllerCwd;
+
+export function buildControllerStorageConfig(): {
+  backend: 'pg';
+  connectionString: string;
+} {
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) {
+    throw new Error('DATABASE_URL is required for controller storage');
+  }
+  return { backend: 'pg', connectionString };
+}
+
+/** @deprecated Prefer {@link buildControllerStorageConfig}. */
+export const buildHarnessStorageConfig = buildControllerStorageConfig;
+
+export function buildControllerPermissionRules(
+  agentRecord: AgentRecord,
+  codeExecutionEnabled: boolean,
+) {
+  const mcpEnabled =
+    (agentRecord.mcpServerIds?.length ?? 0) > 0 ||
+    (agentRecord.assignedToolsets?.includes('buffer') ?? false);
+
+  return {
+    categories: {
+      read: 'allow' as const,
+      edit: codeExecutionEnabled ? ('allow' as const) : ('deny' as const),
+      execute: codeExecutionEnabled ? ('allow' as const) : ('deny' as const),
+      mcp: mcpEnabled ? ('allow' as const) : ('deny' as const),
+    },
+    tools: {},
+  };
+}
+
+/** @deprecated Prefer {@link buildControllerPermissionRules}. */
+export const buildHarnessPermissionRules = buildControllerPermissionRules;
+
+async function buildBackingAgent(
+  agentRecord: AgentRecord,
+  options?: AssembleAgentToolsOptions,
+): Promise<Agent> {
+  const tools = await assembleAgentTools(agentRecord, options);
+  const systemPrompt = await assembleAgentSystemPrompt(agentRecord);
+  const codeExecutionEnabled = await shouldAttachCodeExecutionWorkspace(agentRecord);
+  const providerRow = agentRecord.providerId
+    ? await getLlmProviderRowById(agentRecord.providerId)
+    : null;
+  const providerRecord = providerRow ? llmProviderRowToRecord(providerRow) : null;
+  const generationOptions = resolveAgentGenerationOptions(agentRecord, providerRecord);
+
+  return new Agent({
+    id: agentRecord.id,
+    name: agentRecord.name,
+    instructions: systemPrompt,
+    model: getLanguageModelForAgent(agentRecord, providerRecord),
+    tools: tools as Agent['tools'] & Record<string, unknown>,
+    memory: getAgentMemory(),
+    inputProcessors: buildHeartbeatInputProcessors(),
+    ...(codeExecutionEnabled ? { workspace: buildCodeExecutionWorkspace() } : {}),
+    ...toMastraDefaultOptions(generationOptions),
+  });
+}
+
+/**
+ * Build AgentController modes. Phase 1 ships a single default `work` mode;
+ * plan/build/review modes can extend this later.
+ */
+export async function buildControllerModes(
+  agentRecord: AgentRecord,
+  options?: AssembleAgentToolsOptions,
+): Promise<{ agent: Agent; modes: AgentControllerMode[] }> {
+  const agent = await buildBackingAgent(agentRecord, options);
+  return {
+    agent,
+    modes: [
+      {
+        id: 'work',
+        name: 'Work',
+        metadata: { default: true },
+      },
+    ],
+  };
+}
+
+/** @deprecated Prefer {@link buildControllerModes}. */
+export async function buildHarnessWorkModes(
+  agentRecord: AgentRecord,
+  options?: AssembleAgentToolsOptions,
+): Promise<AgentControllerMode[]> {
+  const { modes, agent } = await buildControllerModes(agentRecord, options);
+  // Preserve prior shape (per-mode agent) for any callers that still expect it.
+  return modes.map((mode) => ({ ...mode, agent }));
+}
+
+export interface TourbillonControllerState {
+  yolo?: boolean;
+  permissionRules?: ReturnType<typeof buildControllerPermissionRules>;
+  /** Allow createSession tags / projectPath without clobbering typed state. */
+  projectPath?: string;
+  [key: string]: unknown;
+}
+
+/** @deprecated Prefer {@link TourbillonControllerState}. */
+export type TourbillonHarnessState = TourbillonControllerState;
+
+/**
+ * Headless AgentController for Tourbillon heartbeats — uses the agent's LM Studio /
+ * Ollama model directly instead of mastracode's cloud model router.
+ */
+export async function createTourbillonController(
+  agentRecord: AgentRecord,
+  options?: AssembleAgentToolsOptions & { cwd?: string },
+): Promise<AgentController<TourbillonControllerState>> {
+  const { agent, modes } = await buildControllerModes(agentRecord, options);
+  const codeExecutionEnabled = await shouldAttachCodeExecutionWorkspace(agentRecord);
+
+  return new AgentControllerClass<TourbillonControllerState>({
+    id: `tourbillon-${agentRecord.id}`,
+    resourceId: `company-${agentRecord.companyId}`,
+    storage: getControllerThreadStorage(),
+    memory: getAgentMemory(),
+    agent,
+    modes,
+    initialState: {
+      yolo: true,
+      permissionRules: buildControllerPermissionRules(agentRecord, codeExecutionEnabled),
+    },
+    ...(codeExecutionEnabled && options?.cwd
+      ? { workspace: buildCodeExecutionWorkspace() }
+      : {}),
+    disableBuiltinTools: ['ask_user', 'submit_plan', 'subagent'],
+  });
+}
+
+/** @deprecated Prefer {@link createTourbillonController}. */
+export const createTourbillonHarness = createTourbillonController;
+
+/** Cap controller thread history to avoid unbounded growth across heartbeats. */
+export const CONTROLLER_THREAD_MESSAGE_CAP = 40;
+
+/** @deprecated Prefer {@link CONTROLLER_THREAD_MESSAGE_CAP}. */
+export const HARNESS_THREAD_MESSAGE_CAP = CONTROLLER_THREAD_MESSAGE_CAP;
+
+let controllerThreadStorage: PostgresStore | null = null;
+
+function getControllerThreadStorage(): PostgresStore {
+  if (!controllerThreadStorage) {
+    const connectionString = process.env.DATABASE_URL;
+    if (!connectionString) {
+      throw new Error('DATABASE_URL is required for controller thread storage');
+    }
+    controllerThreadStorage = new PostgresStore({
+      id: 'tourbillon-harness-threads',
+      connectionString,
+    });
+  }
+  return controllerThreadStorage;
+}
+
+/**
+ * Bind the session to a deterministic Tourbillon thread id, creating it in
+ * storage first if it does not exist. `createSession()` may auto-select a
+ * different (most-recent or generated) thread — this always overrides it.
+ */
+export async function ensureControllerThread(
+  session: Session<TourbillonControllerState>,
+  threadId: string,
+): Promise<void> {
+  const existing = await session.thread.getById({ threadId });
+  if (!existing) {
+    const resourceId = session.identity.getResourceId();
+    const now = new Date();
+    const memory = await getControllerThreadStorage().getStore('memory');
+    if (!memory) {
+      throw new Error('Controller memory store unavailable');
+    }
+    await memory.saveThread({
+      thread: {
+        id: threadId,
+        resourceId,
+        title: threadId,
+        createdAt: now,
+        updatedAt: now,
+      },
+    });
+  }
+
+  await session.thread.switch({ threadId });
+}
+
+/** @deprecated Prefer {@link ensureControllerThread}. */
+export const ensureHarnessThread = ensureControllerThread;

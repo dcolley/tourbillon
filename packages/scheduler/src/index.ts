@@ -1,31 +1,33 @@
+import { getMastraInstance } from '@tourbillon/mastra';
 import { createTraceLogger, isObservabilityEnabled } from '@tourbillon/shared';
-import { startReconciler } from './heartbeat-run-reconciler';
+import { startWakeServer, startStaleSweepInterval } from './wake-server';
+import { bootMastraSchedules } from './schedule-boot';
 
 async function main(): Promise<void> {
-  await startReconciler();
-
-  const [{ heartbeatWorker }, { approvalWakeWorker }, { heartbeatQueue }] = await Promise.all([
-    import('./heartbeat-worker'),
-    import('./approval-wake-worker'),
-    import('./heartbeat-queue'),
-  ]);
-  await import('./agent-interval-scheduler');
-  await import('./routine-scheduler');
+  const wakeServer = startWakeServer();
+  const staleSweep = startStaleSweepInterval();
+  await bootMastraSchedules();
 
   async function shutdown(): Promise<void> {
-    await heartbeatWorker.close();
-    await approvalWakeWorker.close();
-    await heartbeatQueue.close();
+    clearInterval(staleSweep);
+    await getMastraInstance().stopWorkers();
+    await new Promise<void>((resolve) => {
+      wakeServer.close(() => resolve());
+    });
     process.exit(0);
   }
 
-  process.on('SIGTERM', () => { void shutdown(); });
-  process.on('SIGINT', () => { void shutdown(); });
+  process.on('SIGTERM', () => {
+    void shutdown();
+  });
+  process.on('SIGINT', () => {
+    void shutdown();
+  });
 
-  createTraceLogger('scheduler', {}).info('all workers started', {
+  createTraceLogger('scheduler', {}).info('scheduler started (no BullMQ heartbeats)', {
     apiBase: process.env.INTERNAL_API_URL,
+    wakePort: process.env.SCHEDULER_WAKE_PORT ?? '3003',
     redisUrl: process.env.REDIS_URL,
-    workerConcurrency: process.env.WORKER_CONCURRENCY ?? '1',
     observabilityEnabled: isObservabilityEnabled(),
   });
 }

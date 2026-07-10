@@ -35,6 +35,9 @@ data/execution-workspaces/
 apps/web/data/
 packages/scheduler/data/
 
+# Ephemeral macOS seatbelt sandbox profiles (generated at runtime)
+packages/scheduler/.sandbox-profiles/
+
 # TypeScript
 *.tsbuildinfo
 

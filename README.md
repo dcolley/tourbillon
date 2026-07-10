@@ -8,11 +8,11 @@
 
 An open-source clone of [Paperclip AI](https://github.com/paperclipai/paperclip) built with:
 
-- **[Mastra.ai](https://mastra.ai)** — TypeScript agent orchestration (agents, workflows, memory, MCP)
+- **[Mastra.ai](https://mastra.ai)** — TypeScript agent orchestration (agents, workflows, memory, MCP, Schedules)
 - **[LM Studio](https://lmstudio.ai)** — local OpenAI-compatible API running open-source HuggingFace models
 - **[Next.js 14](https://nextjs.org)** App Router + **[shadcn/ui](https://ui.shadcn.com)** + Tailwind CSS
 - **[Drizzle ORM](https://orm.drizzle.team)** + **PostgreSQL** + pgvector
-- **[BullMQ](https://bullmq.io)** — heartbeat job scheduling
+- **WakeRunner + Mastra Schedules** — timer/assignment/approval wakes (no BullMQ heartbeats)
 - **[Better Auth](https://better-auth.com)** — API key + session auth
 
 ## What It Does
@@ -73,7 +73,7 @@ apps/
 packages/
   db/                   Drizzle ORM schema + migrations
   mastra/               Mastra agents, workflows, tools
-  scheduler/            BullMQ heartbeat workers
+  scheduler/            WakeRunner + Mastra schedule boot
   shared/               Shared types and utilities
   skills/               SKILL.md files (agent methodology)
     control-plane/

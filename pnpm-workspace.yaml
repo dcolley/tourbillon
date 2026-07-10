@@ -4,6 +4,9 @@ packages:
 
 # Reject package versions published less than 7 days ago (supply-chain protection).
 minimumReleaseAge: 10080
+# Phase 2 needs @mastra/* 1.50.x (Schedules API); exclude from maturity gate.
+minimumReleaseAgeExclude:
+  - '@mastra/*'
 
 overrides:
   ioredis: ^5.11.0
@@ -32,5 +35,3 @@ allowBuilds:
   koffi: false
   onnxruntime-node: false
 
-patchedDependencies:
-  '@mastra/core@1.45.0': patches/@mastra__core@1.45.0.patch

@@ -16,7 +16,7 @@ import type { IssuePriority, IssueStatus } from '@tourbillon/db';
 import { assertCompanyAccess, getActiveCompany } from './company';
 import { validateGoalId } from './goals';
 import { validateProjectId } from './projects';
-import { enqueueHeartbeat } from './queue';
+import { enqueueHeartbeat } from '@/lib/wake-client';
 import { findHeartbeatJobsForTask, type JobSummary } from './jobs';
 import {
   CHECKOUT_LOCK_CLEAR_FIELDS,
@@ -322,6 +322,15 @@ export async function updateIssue(issueId: string, input: UpdateIssueInput): Pro
     const status = input.status as IssueStatus;
     if (!STATUSES.includes(status)) {
       throw new IssueValidationError('Invalid status.');
+    }
+    if (
+      issue.boardApprovalId &&
+      status !== 'blocked' &&
+      status !== issue.status
+    ) {
+      throw new IssueValidationError(
+        `Issue is halted pending board approval ${issue.boardApprovalId}. Status cannot change until the board decides.`,
+      );
     }
     if (status !== issue.status) {
       updates.status = status;

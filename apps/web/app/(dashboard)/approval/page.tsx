@@ -1,5 +1,6 @@
-import { db, approvals, agents } from '@tourbillon/db';
-import { desc, eq } from 'drizzle-orm';
+import Link from 'next/link';
+import { db, approvals, agents, issues } from '@tourbillon/db';
+import { desc, eq, inArray } from 'drizzle-orm';
 import { PageHeader } from '@/components/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -17,6 +18,23 @@ export default async function ApprovalsPage() {
     .orderBy(desc(approvals.createdAt))
     .limit(50);
 
+  const allIssueIds = [
+    ...new Set(pendingApprovals.flatMap(({ approval }) => approval.issueIds ?? [])),
+  ];
+  const linkedIssues =
+    allIssueIds.length > 0
+      ? await db
+          .select({
+            id: issues.id,
+            identifier: issues.identifier,
+            title: issues.title,
+            boardApprovalId: issues.boardApprovalId,
+          })
+          .from(issues)
+          .where(inArray(issues.id, allIssueIds))
+      : [];
+  const issuesById = new Map(linkedIssues.map((row) => [row.id, row]));
+
   const pending = pendingApprovals.filter((r) => r.approval.status === 'pending');
   const decided = pendingApprovals.filter((r) => r.approval.status !== 'pending');
 
@@ -31,7 +49,14 @@ export default async function ApprovalsPage() {
           </h2>
           <div className="space-y-3">
             {pending.map(({ approval, agent }) => (
-              <ApprovalCard key={approval.id} approval={approval} agent={agent} />
+              <ApprovalCard
+                key={approval.id}
+                approval={approval}
+                agent={agent}
+                linkedIssues={(approval.issueIds ?? [])
+                  .map((id) => issuesById.get(id))
+                  .filter((row): row is NonNullable<typeof row> => Boolean(row))}
+              />
             ))}
           </div>
         </section>
@@ -55,6 +80,9 @@ export default async function ApprovalsPage() {
                       </p>
                       <p className="text-xs text-muted-foreground">
                         Requested by {agent?.name ?? 'Unknown'}
+                        {(approval.issueIds?.length ?? 0) > 0
+                          ? ` · ${approval.issueIds.length} linked issue${approval.issueIds.length === 1 ? '' : 's'}`
+                          : ''}
                       </p>
                     </div>
                     <StatusBadge status={approval.status} />
@@ -72,9 +100,16 @@ export default async function ApprovalsPage() {
 function ApprovalCard({
   approval,
   agent,
+  linkedIssues,
 }: {
-  approval: { id: string; type: string; payload: unknown; createdAt: Date };
+  approval: { id: string; type: string; payload: unknown; createdAt: Date; issueIds: string[] };
   agent: { name: string } | null;
+  linkedIssues: Array<{
+    id: string;
+    identifier: string;
+    title: string;
+    boardApprovalId: string | null;
+  }>;
 }) {
   const payload = approval.payload as { title?: string; summary?: string };
   return (
@@ -91,6 +126,26 @@ function ApprovalCard({
           <StatusBadge status="pending" />
         </div>
         {payload?.summary && <p className="text-sm text-muted-foreground">{payload.summary}</p>}
+        {linkedIssues.length > 0 && (
+          <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm">
+            <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              Halted issues
+            </p>
+            <ul className="mt-1 space-y-1">
+              {linkedIssues.map((issue) => (
+                <li key={issue.id}>
+                  <Link href={`/issue/${issue.id}`} className="hover:underline">
+                    <span className="font-mono text-xs">{issue.identifier}</span>
+                    <span className="text-muted-foreground"> — {issue.title}</span>
+                    {issue.boardApprovalId === approval.id ? (
+                      <span className="ml-2 text-xs text-amber-700">halted</span>
+                    ) : null}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         <div className="flex gap-2">
           <form action={`/api/approvals/${approval.id}/decide`} method="POST">
             <input type="hidden" name="decision" value="approved" />

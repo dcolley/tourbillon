@@ -14,6 +14,8 @@ export const routines = pgTable('routines', {
   concurrencyPolicy: text('concurrency_policy', { enum: ['allow', 'forbid', 'replace'] }).notNull().default('forbid'),
   catchUpPolicy: text('catch_up_policy', { enum: ['skip', 'run'] }).notNull().default('skip'),
   taskTemplate: jsonb('task_template').notNull(),  // { title, description, priority, goalId }
+  /** Mastra schedules row id (e.g. agent_routine-<uuid>); synced on enable/update. */
+  mastraScheduleId: text('mastra_schedule_id'),
   lastFiredAt: timestamp('last_fired_at'),
   createdAt: timestamp('created_at').notNull().defaultNow(),
   updatedAt: timestamp('updated_at').notNull().defaultNow(),

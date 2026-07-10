@@ -2,6 +2,7 @@ import { createTool } from '@mastra/core/tools';
 import { CHECKOUT_EXPECTED_STATUSES } from '@tourbillon/shared';
 import { z } from 'zod';
 import { extractToolRuntimeContext, tracedAgentFetch } from './api-client';
+import { SKILL_TOOLS } from './skill-tools';
 
 export const getIdentityTool = createTool({
   id: 'getIdentity',
@@ -109,6 +110,7 @@ export const updateIssueTool = createTool({
   description:
     'Update issue status, add a comment, change priority or assignee. ' +
     'When status is in_review, you MUST set assigneeAgentId to the reviewer (task requester first, else reportsTo from getIdentity) so they receive it in their inbox. ' +
+    'If the issue is board-halted (pendingBoardApproval / boardApprovalId), do not change status — wait for wakeReason approval_resolved after the board decides. Comments are still allowed. ' +
     'Always include a comment explaining what changed and the next action.',
   inputSchema: z.object({
     issueId: z.string(),
@@ -281,4 +283,5 @@ export const CONTROL_PLANE_TOOLS = {
   writeWorkspaceFileTool,
   deleteWorkspaceFileTool,
   createSubtaskTool,
+  ...SKILL_TOOLS,
 };

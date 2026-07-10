@@ -5,7 +5,10 @@ import {
   observabilityMaxPayloadBytes,
   observabilityPreviewChars,
 } from '@tourbillon/shared';
-import type { HarnessEvent } from '@mastra/core/harness';
+import type { AgentControllerEvent } from '@mastra/core/agent-controller';
+
+/** @deprecated Prefer AgentControllerEvent — wire name kept for observability helpers. */
+type HarnessEvent = AgentControllerEvent;
 
 export const HARNESS_OBSERVABLE_EVENT_TYPES = new Set<string>([
   'agent_start',

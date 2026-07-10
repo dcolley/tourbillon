@@ -22,6 +22,7 @@ import { AgentDetailTabs } from './agent-detail-tabs';
 import { AgentObservabilityTab } from './agent-observability-tab';
 import { AgentCapabilitiesForm } from './agent-capabilities-form';
 import { AgentCodeExecutionForm } from './agent-code-execution-form';
+import { AgentHeartbeatForm } from './agent-heartbeat-form';
 
 async function updateHeartbeatConfig(formData: FormData) {
   'use server';
@@ -29,16 +30,24 @@ async function updateHeartbeatConfig(formData: FormData) {
   const agentId = formData.get('agentId') as string;
   const urlKey = formData.get('urlKey') as string;
   const enabled = formData.get('heartbeatEnabled') === 'on';
-  const intervalSec = parseInt(formData.get('intervalSec') as string, 10);
+  const scheduleMode = (formData.get('scheduleMode') as 'interval' | 'cron') || 'interval';
 
-  if (!Number.isFinite(intervalSec) || intervalSec < 60) {
-    redirect(`/agent/${urlKey}?error=${encodeURIComponent('Interval must be at least 60 seconds.')}`);
+  const heartbeat: Partial<AgentRuntimeConfig['heartbeat']> = {
+    enabled,
+    scheduleMode,
+  };
+
+  if (scheduleMode === 'interval') {
+    const intervalSec = parseInt(formData.get('intervalSec') as string, 10);
+    heartbeat.intervalSec = Number.isFinite(intervalSec) ? intervalSec : 300;
+  } else {
+    heartbeat.cronExpression = ((formData.get('cronExpression') as string) ?? '').trim();
+    heartbeat.timezone = ((formData.get('timezone') as string) || 'UTC').trim() || 'UTC';
+    heartbeat.intervalSec = 0;
   }
 
   try {
-    await updateAgentRuntimeConfig(agentId, {
-      heartbeat: { enabled, intervalSec },
-    });
+    await updateAgentRuntimeConfig(agentId, { heartbeat });
   } catch (err) {
     const message = err instanceof AgentValidationError ? err.message : 'Failed to update heartbeat settings.';
     redirect(`/agent/${urlKey}?error=${encodeURIComponent(message)}`);
@@ -667,40 +676,12 @@ export default async function AgentDetailPage({
 
       <section className="border rounded-lg p-4 space-y-4">
         <h2 className="text-sm font-semibold">Automatic heartbeats</h2>
-        <form action={updateHeartbeatConfig} className="space-y-4 text-sm">
-          <input type="hidden" name="agentId" value={agent.id} />
-          <input type="hidden" name="urlKey" value={agent.urlKey} />
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              name="heartbeatEnabled"
-              defaultChecked={runtime.heartbeat?.enabled ?? false}
-              className="rounded border-input"
-            />
-            <span>Enable automatic heartbeats</span>
-          </label>
-          <div>
-            <label htmlFor="intervalSec" className="text-muted-foreground block mb-1">
-              Interval (seconds)
-            </label>
-            <input
-              id="intervalSec"
-              name="intervalSec"
-              type="number"
-              min={60}
-              step={60}
-              defaultValue={runtime.heartbeat?.intervalSec || 300}
-              className="w-32 rounded-md border border-input bg-background px-3 py-1.5 text-sm"
-            />
-            <p className="text-xs text-muted-foreground mt-1">Minimum 60s. Requires workers running.</p>
-          </div>
-          <button
-            type="submit"
-            className="inline-flex items-center justify-center rounded-md border px-3 py-1.5 text-sm font-medium hover:bg-muted"
-          >
-            Save heartbeat settings
-          </button>
-        </form>
+        <AgentHeartbeatForm
+          agentId={agent.id}
+          urlKey={agent.urlKey}
+          heartbeat={runtime.heartbeat}
+          updateHeartbeatConfig={updateHeartbeatConfig}
+        />
         <dl className="grid grid-cols-2 gap-3 text-sm border-t pt-3">
           <div>
             <dt className="text-muted-foreground">Timeout</dt>

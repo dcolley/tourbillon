@@ -5,6 +5,17 @@ const WAKE_COMMENTS_MAX_CHARS = 3000;
 export function buildWakeMessage(data: HeartbeatJobData): string {
   const parts = [`Wake reason: ${data.wakeReason}`];
   if (data.taskId) parts.push(`Assigned task ID: ${data.taskId}`);
+  if (data.wakeReason === 'approval_resolved') {
+    if (data.approvalId) parts.push(`Approval ID: ${data.approvalId}`);
+    if (data.approvalStatus) parts.push(`Board decision: ${data.approvalStatus}`);
+    if (data.approvalNote?.trim()) {
+      const note = data.approvalNote.trim();
+      parts.push(`Board note: ${note.length > 500 ? `${note.slice(0, 500)}…` : note}`);
+    }
+    if (data.linkedIssueIds?.length) {
+      parts.push(`Linked issue IDs: ${data.linkedIssueIds.join(', ')}`);
+    }
+  }
   if (data.wakePayloadJson) {
     try {
       const payload = JSON.parse(data.wakePayloadJson) as WakePayload;

@@ -38,6 +38,12 @@ export const issues = pgTable('issues', {
   billingCode: text('billing_code').default('default'),
   // Source
   source: text('source', { enum: ['manual', 'agent', 'routine', 'import'] }).notNull().default('manual'),
+  // Issue plan document (putPlanDocument) — single markdown plan per issue
+  planDocumentBody: text('plan_document_body'),
+  planDocumentRevisionId: text('plan_document_revision_id'),
+  planDocumentUpdatedAt: timestamp('plan_document_updated_at'),
+  // Board approval halt — set while pending createApproval; cleared on decide
+  boardApprovalId: text('board_approval_id'),
   // Timestamps
   startedAt: timestamp('started_at'),
   completedAt: timestamp('completed_at'),

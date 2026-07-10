@@ -20,9 +20,9 @@ export async function triggerAgentHeartbeatAction(formData: FormData) {
   const errorBase = urlKey ? `/agent/${urlKey}` : '/agent';
 
   let queueError: string | null = null;
-  let jobId: string | undefined;
+  let result: Awaited<ReturnType<typeof triggerAgentHeartbeat>> | undefined;
   try {
-    jobId = await triggerAgentHeartbeat(agentId, companyId);
+    result = await triggerAgentHeartbeat(agentId, companyId);
   } catch (err) {
     queueError = err instanceof Error ? err.message : 'Failed to queue heartbeat.';
   }
@@ -31,13 +31,15 @@ export async function triggerAgentHeartbeatAction(formData: FormData) {
     redirect(`${errorBase}?error=${encodeURIComponent(queueError)}`);
   }
 
-  if (!jobId) {
-    redirect(
-      `${errorBase}?error=${encodeURIComponent('Heartbeat was not queued — a job may already exist for this agent.')}`
-    );
+  if (!result?.jobId) {
+    const message =
+      result?.outcome === 'skipped'
+        ? (result.skipReason ?? 'Agent cannot be woken right now.')
+        : 'Heartbeat was not queued — a wake may already be in flight for this agent.';
+    redirect(`${errorBase}?error=${encodeURIComponent(message)}`);
   }
 
-  redirect(`/jobs/heartbeat/${jobId}?state=waiting`);
+  redirect(`/heartbeat/${result.jobId}`);
 }
 
 export async function toggleAgentActiveAction(formData: FormData) {

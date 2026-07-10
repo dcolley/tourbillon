@@ -24,7 +24,10 @@ const addCommentTool = createTool({
 
 const createApprovalTool = createTool({
   id: 'createApproval',
-  description: 'Submit a governance approval request to the board. Use for hires, large spend, irreversible actions.',
+  description:
+    'Submit a board governance approval (hires, large spend, irreversible actions). ' +
+    'Linked issues in issueIds are halted (status blocked) until the board decides at /approval. ' +
+    'Post a comment on linked issues explaining why. This is not agent-to-agent review — use in_review + reassign for that.',
   inputSchema: z.object({
     type: z.string().default('request_board_approval'),
     issueIds: z.array(z.string()).default([]),

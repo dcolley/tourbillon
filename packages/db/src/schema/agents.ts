@@ -38,7 +38,7 @@ export const agents = pgTable('agents', {
   status: text('status', { enum: ['active', 'paused', 'archived', 'pending_approval'] }).notNull().default('active'),
   // Runtime config
   runtimeConfig: jsonb('runtime_config').notNull().default({
-    heartbeat: { enabled: false, intervalSec: 0, wakeOnAssignment: true, wakeOnDemand: true },
+    heartbeat: { enabled: false, intervalSec: 0, scheduleMode: 'interval', wakeOnAssignment: true, wakeOnDemand: true },
     timeout: { heartbeatSec: 300, graceSec: 30 },
   }),
   defaultBillingCode: text('default_billing_code').default('default'),

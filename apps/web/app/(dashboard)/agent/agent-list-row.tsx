@@ -5,12 +5,21 @@ import { isAgentBudgetExceeded } from '@tourbillon/shared';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { getAgentHeartbeatSummary } from '@/lib/agent-heartbeat-summary';
+import { getAgentModelSummary } from '@/lib/agent-model-summary';
+import type { LlmProviderPublic } from '@/lib/llm-providers';
 import { StatusBadge } from '@/lib/status-badges';
 import { toggleAgentActiveAction, triggerAgentHeartbeatAction } from './actions';
 
-export function AgentListRow({ agent }: { agent: Agent }) {
+export function AgentListRow({
+  agent,
+  providers,
+}: {
+  agent: Agent;
+  providers: LlmProviderPublic[];
+}) {
   const runtime = agent.runtimeConfig as AgentRuntimeConfig;
   const heartbeat = getAgentHeartbeatSummary(runtime);
+  const model = getAgentModelSummary(agent, providers);
   const isActive = agent.status === 'active';
   const canToggle = agent.status !== 'pending_approval';
   const canRunHeartbeat =
@@ -26,16 +35,21 @@ export function AgentListRow({ agent }: { agent: Agent }) {
         <div className="min-w-0">
           <p className="font-medium">{agent.name}</p>
           <p className="text-sm text-muted-foreground">{agent.title}</p>
+          <p className="text-xs text-muted-foreground mt-0.5 truncate" title={`${model.providerName} · ${model.modelName}`}>
+            <span>{model.providerName}</span>
+            <span className="mx-1.5">·</span>
+            <span className="font-mono">{model.modelName}</span>
+          </p>
         </div>
       </Link>
       <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 text-sm">
         <span className="text-muted-foreground capitalize">{agent.role}</span>
         <Badge
-          variant={heartbeat.timerEnabled ? 'default' : 'outline'}
+          variant={heartbeat.timerEnabled ? (heartbeat.misconfigured ? 'destructive' : 'default') : 'outline'}
           className="font-normal"
           title={
             heartbeat.timerEnabled
-              ? `Automatic heartbeat every ${heartbeat.intervalSec}s`
+              ? heartbeat.label
               : 'Automatic timer heartbeats disabled'
           }
         >

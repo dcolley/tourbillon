@@ -1,10 +1,10 @@
-import { enqueueHeartbeat } from '@/lib/queue';
+import { enqueueHeartbeat, type EnqueueHeartbeatResult } from '@/lib/wake-client';
 
 export async function triggerAgentHeartbeat(
   agentId: string,
   companyId: string
-): Promise<string | undefined> {
-  const { jobId } = await enqueueHeartbeat(
+): Promise<EnqueueHeartbeatResult> {
+  return enqueueHeartbeat(
     {
       agentId,
       companyId,
@@ -13,5 +13,4 @@ export async function triggerAgentHeartbeat(
     },
     { deduplicate: false }
   );
-  return jobId;
 }

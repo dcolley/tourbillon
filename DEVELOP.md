@@ -22,10 +22,12 @@ Edit `.env` at the **repo root** (not inside `apps/web`). Important values:
 | Variable | Purpose | Local default |
 |---|---|---|
 | `DATABASE_URL` | Postgres connection | `postgresql://postgres:postgres@localhost:5432/tourbillon` |
-| `REDIS_URL` | BullMQ job queue | `redis://localhost:6379` |
+| `REDIS_URL` | Redis (SSE pub/sub) | `redis://localhost:6379` |
 | `BETTER_AUTH_URL` | Auth callback base URL | `http://localhost:3002` |
-| `INTERNAL_API_URL` | Workers → Next.js API | `http://localhost:3002` |
-| `SCHEDULER_API_KEY` | Routine scheduler → issue API | `dev-scheduler-key` (match in `.env`) |
+| `INTERNAL_API_URL` | Scheduler → Next.js API | `http://localhost:3002` |
+| `SCHEDULER_API_KEY` | Wake/schedule sync + internal issue create | `dev-scheduler-key` (match in `.env`) |
+| `SCHEDULER_WAKE_PORT` | WakeRunner HTTP port | `3003` |
+| `SCHEDULER_WAKE_URL` | Web → scheduler base URL | `http://127.0.0.1:3003` |
 | `LM_STUDIO_BASE_URL` | LLM API endpoint | `http://localhost:1234/v1` |
 | `LM_STUDIO_DEFAULT_MODEL` | Model name in LM Studio | match your loaded model |
 | `COMPANY_WORKSPACE_ROOT` | Per-company shared document storage | `./data/company-workspaces` |
@@ -64,28 +66,28 @@ pnpm dev
 
 Opens **http://localhost:3002**. Port 3002 is intentional — Cursor and other tools often bind port 3000 on macOS.
 
-**Terminal 3 — heartbeat workers** (needed for agent scheduling):
+**Terminal 3 — WakeRunner + Mastra schedules** (needed for agent wakes):
 
 ```bash
 pnpm workers:dev
 ```
 
-**Queue monitor** — browse BullMQ jobs at **http://localhost:3002/jobs**. Requires Redis for stats; workers must be running for jobs to process (not just appear in the queue).
+Listens on **http://127.0.0.1:3003** (`SCHEDULER_WAKE_PORT`). Web triggers assignment / Wake Now / approval wakes via `POST /internal/wake`. Timers and routines are Mastra Schedules reconciled on boot.
 
-**Bull Board (hidden)** — official queue inspector at **http://localhost:3002/bullmq** (not in sidebar). Requires Redis; complements `/jobs`.
+**Heartbeat monitor** — browse `heartbeat_runs` at **http://localhost:3002/jobs** and **http://localhost:3002/jobs/heartbeat**.
 
 ### Automatic heartbeats
 
-On an agent detail page (`/agent/{urlKey}`), enable **Automatic heartbeats** and set an interval (minimum 60s). The agent-interval scheduler in `packages/scheduler` polls every 30s and enqueues timer wakes for active agents with `heartbeat.enabled` set.
+On an agent detail page (`/agent/{urlKey}`), enable **Automatic heartbeats** and set an interval (minimum 60s). The scheduler upserts a Mastra schedule (`agent-timer-{agentId}`); each fire invokes WakeRunner (threadless).
 
-**Cron routines** (optional): insert rows into the `routines` table with `enabled`, `cron_expression`, `timezone`, and `task_template` JSON. Routines appear on the agent page for enable/disable. Set `SCHEDULER_API_KEY` in `.env` so the routine scheduler can create issues via the internal API.
+**Cron routines** (optional): insert rows into the `routines` table with `enabled`, `cron_expression`, `timezone`, and `task_template` JSON. Routines appear on the agent page for enable/disable. Set `SCHEDULER_API_KEY` in `.env` so schedule fires can create issues via the internal API.
 
 ### Root scripts reference
 
 | Command | What it runs | When you need it |
 |---|---|---|
 | `pnpm dev` | Next.js web app (`apps/web`) | Always, for UI and API routes |
-| `pnpm workers:dev` | BullMQ workers (`packages/scheduler`) | Agent heartbeats, routines, approval wakes |
+| `pnpm workers:dev` | WakeRunner + Mastra schedules (`packages/scheduler`) | Agent wakes, timers, routines |
 | `pnpm db:migrate` | Apply Drizzle migrations | After schema changes or fresh DB |
 | `pnpm db:strip` | Strip dev DB to one company + default LLM provider | Local Mac reset after migrating data elsewhere |
 | `pnpm db:generate` | Generate migration SQL from schema | After editing `packages/db/src/schema/` |
@@ -115,7 +117,7 @@ apps/
 packages/
   db/               Drizzle schema + migrations (library, no dev server)
   mastra/           Agent factory, tools, LM Studio provider (library)
-  scheduler/        BullMQ workers (runnable via workers:dev)
+  scheduler/        WakeRunner + Mastra schedules (runnable via workers:dev)
   shared/           Shared types and constants (library)
   skills/           SKILL.md files read at agent wake time (no build step)
 ```

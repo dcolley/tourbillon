@@ -3,7 +3,7 @@ import { db, issues, activityLog } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
 import { validateRunToken } from '@/lib/auth/run-token';
 import { logAgentApiRequest, logAgentApiResponse, summarizeBody } from '@/lib/agent-api-trace';
-import { enqueueHeartbeat } from '@/lib/queue';
+import { enqueueHeartbeat } from '@/lib/wake-client';
 import { statusesThatReleaseCheckoutLock, CHECKOUT_LOCK_CLEAR_FIELDS } from '@/lib/checkout-lock';
 import { resolveReviewAssignee } from '@/lib/review-routing';
 
@@ -42,6 +42,23 @@ export async function PATCH(
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
   }
 
+  // Board-halted: only decide may unhalt; agents cannot leave blocked.
+  if (issue.boardApprovalId && body.status && body.status !== 'blocked') {
+    logAgentApiResponse(`/api/issues/${issueId}`, 'PATCH', runCtx, 409, {
+      issueId: issueId,
+      code: 'board_approval_pending',
+      boardApprovalId: issue.boardApprovalId,
+    });
+    return NextResponse.json(
+      {
+        error: `Issue is halted pending board approval ${issue.boardApprovalId}`,
+        code: 'board_approval_pending',
+        boardApprovalId: issue.boardApprovalId,
+      },
+      { status: 409 },
+    );
+  }
+
   let effectiveAssigneeId = body.assigneeAgentId;
   let reviewAssigneeAutoResolved = false;
   let reviewAssigneeReason: string | undefined;
@@ -60,14 +77,16 @@ export async function PATCH(
   }
 
   const updates: Record<string, unknown> = { updatedAt: new Date() };
-  if (body.status) updates.status = body.status;
+  // While halted, status:'blocked' is a noop — skip writing status to avoid noisy activity.
+  const applyStatus = Boolean(body.status) && !(issue.boardApprovalId && body.status === 'blocked');
+  if (applyStatus && body.status) updates.status = body.status;
   if (body.priority) updates.priority = body.priority;
   if (effectiveAssigneeId !== undefined) updates.assigneeAgentId = effectiveAssigneeId;
   if (body.blockedByIssueIds !== undefined) updates.blockedByIssueIds = body.blockedByIssueIds;
-  if (body.status === 'done') updates.completedAt = new Date();
+  if (applyStatus && body.status === 'done') updates.completedAt = new Date();
 
   // Release checkout lock when leaving active work
-  if (body.status && statusesThatReleaseCheckoutLock(body.status)) {
+  if (applyStatus && body.status && statusesThatReleaseCheckoutLock(body.status)) {
     Object.assign(updates, CHECKOUT_LOCK_CLEAR_FIELDS);
   }
 

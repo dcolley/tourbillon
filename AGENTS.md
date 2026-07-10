@@ -9,8 +9,8 @@
 Tourbillon is an **open-source, locally-run AI agent operating system** — a platform for running a team of autonomous agents that plan, delegate, execute, and review work through a continuous heartbeat loop. It is a TypeScript monorepo built on:
 
 - **Next.js + React** (web app and REST API)
-- **Mastra** (agent runtime, tool calling, memory)
-- **BullMQ + Redis** (job scheduling and heartbeat queue)
+- **Mastra** (agent runtime, tool calling, memory, Schedules)
+- **Redis** (SSE fan-out; optional legacy tooling)
 - **Drizzle ORM + PostgreSQL** (persistent state)
 - **LM Studio / Ollama / vLLM** (local OpenAI-compatible LLM inference — no cloud required)
 - **shadcn/ui + Tailwind CSS** (component library)
@@ -28,7 +28,7 @@ tourbillon/
 ├── packages/
 │   ├── db/                    # Drizzle schema, migrations, query helpers
 │   ├── mastra/                # Agent factory, tools, LM Studio provider config
-│   ├── scheduler/             # BullMQ workers (heartbeat, routines, approvals)
+│   ├── scheduler/             # WakeRunner + Mastra schedule boot (timers/routines)
 │   ├── shared/                # Types, constants, logger — imported everywhere
 │   └── skills/                # SKILL.md files injected into agent prompts at wake time
 │       ├── control-plane/     # Core heartbeat procedure (every agent gets this)
@@ -49,23 +49,25 @@ tourbillon/
 
 ### The Wake Loop
 
-Every agent runs via a **heartbeat**. A heartbeat is a single BullMQ job processed by `packages/scheduler/src/heartbeat-worker.ts`. The sequence is:
+Every agent runs via a **heartbeat** driven by Tourbillon `WakeRunner` (`packages/scheduler/src/wake-runner.ts`). Triggers are HTTP (`POST /internal/wake`) or Mastra Schedules (`prepare` → WakeRunner). The sequence is:
 
 ```
-BullMQ job dequeued
+Wake request received (HTTP or schedule)
   → load agent record from DB
   → check status (active?), company status, budget
-  → create heartbeat run record
+  → create heartbeat_runs row
   → build wake message (reason + task context + recent comments)
-  → call agent.generate() via Mastra with up to 30 tool-call steps
+  → call agent.generate() via Mastra (or AgentController Session for harness_local)
   → record token usage
   → mark run succeeded/failed
 ```
 
-Agents are woken by three triggers:
-1. **Assignment wake** — a new issue is assigned; `enqueueHeartbeat` is called from the API route
-2. **Timer wake** — `agent.runtimeConfig.heartbeat.enabled = true` with an interval; `agent-interval-scheduler.ts` enqueues on the interval
-3. **Routine wake** — a `routines` row fires via cron; `routine-scheduler.ts` creates an issue and that triggers an assignment wake
+Agents are woken by:
+1. **Assignment wake** — a new issue is assigned; web calls `enqueueHeartbeat` → scheduler WakeRunner
+2. **Timer wake** — `agent.runtimeConfig.heartbeat.enabled = true`; Mastra schedule `agent-timer-{agentId}` fires → WakeRunner (threadless)
+3. **Routine wake** — a `routines` row’s Mastra schedule fires → creates an issue (assignment wake) via internal API
+4. **Approval wake** — human decides an approval → `enqueueApprovalWake` → WakeRunner (`approval_resolved`)
+5. **On-demand** — Wake Now UI → same WakeRunner path
 
 ### The Object Hierarchy
 
@@ -87,11 +89,11 @@ Issue status machine: `backlog → todo → in_progress → in_review → done |
 Each agent row in the `agents` table has:
 - `role` — `ceo | cto | engineer | pm | qa | designer | custom`
 - `urlKey` — short slug used in URLs and wake routing (e.g. `cto`)
-- `assignedSkills` — array of skill slugs injected into the system prompt (always includes `control-plane`)
+- `assignedSkills` — array of skill slugs available to the agent (always includes `control-plane`). Only `control-plane` is fully inlined in the system prompt; other skills appear as a catalog and are loaded via `listSkills` / `getSkill`
 - `assignedToolsets` — Tier 2 boolean toolsets (e.g. `comments`, `approvals`, `roster`)
 - `runtimeConfig.assignedTools` — Tier 2 granular tools (goal/project/issue management), toggled per tool
 - `mcpServerIds` — Tier 3 MCP capability tools
-- `adapterType` — runtime adapter (`lmstudio | ollama | harness_local | process | http`). `harness_local` uses headless Mastra Harness (`createTourbillonHarness`) — not the `mastracode` npm package.
+- `adapterType` — runtime adapter (`lmstudio | ollama | harness_local | process | http`). `harness_local` uses headless Mastra AgentController (`createTourbillonController` + Session) — not the `mastracode` npm package. Wire value remains `harness_local`.
 - `providerId` — FK to system-wide `llm_providers` registry (preferred); configure providers at `/settings`
 - `modelId` — model identifier from the selected provider endpoint (e.g. `meta-llama/Llama-3.3-70B-Instruct`)
 - `instructionsBundleSoulMd` — agent's personality/values (SOUL.md content)
@@ -114,6 +116,7 @@ Each agent row in the `agents` table has:
 - `getComments` — full or incremental comment thread
 - `updateIssue` — status, comment, priority, assignee, blockers
 - `createSubtask` — create delegated child issue
+- `listSkills` / `getSkill` — skill catalog + on-demand full skill body (non-`control-plane`)
 
 **Tier 2 boolean toolsets:**
 - `comments` — `addComment`
@@ -140,25 +143,31 @@ Two **orthogonal** agent settings (configured on the agent detail page under **C
 
 | Setting | Field | Effect |
 |---|---|---|
-| **Runtime** | `adapterType` (`lmstudio`/`ollama`/… vs `harness_local`) | Standard `Agent` heartbeat vs Mastra `Harness` with thread resume (`harnessRunId`) |
+| **Runtime** | `adapterType` (`lmstudio`/`ollama`/… vs `harness_local`) | Standard `Agent` heartbeat vs Mastra `AgentController` Session with thread resume (`harnessRunId`) |
 | **Code execution** | `assignedToolsets` includes `code-execution` | Attaches `LocalSandbox` workspace; harness permission `edit`/`execute` = allow |
 
 - **Agent + code-execution** — quick scripts/tests in a per-issue sandbox directory.
-- **Harness + code-execution** — multi-heartbeat coding; harness threads persist on the same issue.
+- **AgentController (`harness_local`) + code-execution** — multi-heartbeat coding; controller threads persist on the same issue via Session.
 - Company workspace tools (`listWorkspaceFiles`, etc.) are separate from the execution sandbox (shared docs vs ephemeral scratch).
 
 Env: `EXECUTION_WORKSPACE_ROOT`, `SANDBOX_ISOLATION` (`none` \| `seatbelt` \| `bwrap`), `SANDBOX_COMMAND_TIMEOUT_MS`. Per-agent overrides: `runtimeConfig.codeExecution`.
 
 ### Skills (Prompt Injections)
 
-Skills are injected into the system prompt after SOUL.md and AGENTS.md. Three layers:
+Skills teach methodology. At wake time:
+
+1. **`control-plane` is always inlined** in the system prompt.
+2. **All other assigned skills** are listed as a compact catalog (slug + short description). The agent calls `getSkill(slug)` to load the full body when needed.
+3. Company / per-agent workspace files still resolve the same way; they are simply not all dumped into the system prompt.
 
 | Layer | Location | Assignment | When loaded |
 |---|---|---|---|
-| **Bundled methodology** | `packages/skills/{slug}/SKILL.md` | Role defaults → `assignedSkills` | Wake (company workspace overrides bundled content for same slug) |
-| **Company workspace** | `{companyWorkspace}/skills/{slug}.md` or `skills/{slug}/SKILL.md` | Discovered at hire → merged into `assignedSkills` | Wake (workspace file wins over bundled) |
-| **Per-agent workspace** | `{companyWorkspace}/agents/{urlKey}/skills/*.md` | Not stored in DB — scanned each wake | Every heartbeat (overrides assigned skills for same slug) |
-| **Toolset skills** | `agents/{urlKey}/skills/buffer-skills.md`, `code-execution-skills.md` | Auto from `assignedToolsets` | Wake (excluded from per-agent dynamic scan) |
+| **Bundled methodology** | `packages/skills/{slug}/SKILL.md` | Role defaults → `assignedSkills` | Catalog at wake; full body via `getSkill` (`control-plane` always inline) |
+| **Company workspace** | `{companyWorkspace}/skills/{slug}.md` or `skills/{slug}/SKILL.md` | Discovered at hire → merged into `assignedSkills` | Same — workspace file wins over bundled for same slug |
+| **Per-agent workspace** | `{companyWorkspace}/agents/{urlKey}/skills/*.md` | Not stored in DB — scanned each wake | Catalog / `getSkill` each wake (overrides assigned skills for same slug) |
+| **Toolset skills** | `agents/{urlKey}/skills/buffer-skills.md`, `code-execution-skills.md` | Auto from `assignedToolsets` | Catalog / `getSkill` (excluded from per-agent dynamic scan duplication) |
+
+Per-step `TokenLimiterProcessor` (`HEARTBEAT_CONTEXT_TOKEN_LIMIT`, default `120000`) prunes older tool/assistant messages when a multi-step heartbeat approaches the context ceiling.
 
 At hire time, `createAgent()` calls `buildAssignedSkills()` — union of `ROLE_DEFAULT_SKILLS[role]` and slugs discovered in `skills/`. Role changes re-merge company skills via `updateAgentRole()`.
 
@@ -240,7 +249,7 @@ pnpm workers:dev
 | Command | What it does |
 |---|---|
 | `pnpm dev` | Next.js app on :3002 |
-| `pnpm workers:dev` | BullMQ workers (heartbeat, routines, approvals) |
+| `pnpm workers:dev` | WakeRunner + Mastra schedules (timers, routines) |
 | `pnpm db:migrate` | Apply pending Drizzle migrations |
 | `pnpm db:generate` | Generate new migration SQL from schema changes |
 | `pnpm db:studio` | Drizzle Studio DB browser |
@@ -255,13 +264,15 @@ All variables live in `.env` at the repo root. Key ones:
 | Variable | Purpose | Default |
 |---|---|---|
 | `DATABASE_URL` | Postgres connection string | `postgresql://postgres:postgres@localhost:5432/tourbillon` |
-| `REDIS_URL` | BullMQ / Redis | `redis://localhost:6379` |
+| `REDIS_URL` | Redis (SSE pub/sub) | `redis://localhost:6379` |
 | `LM_STUDIO_BASE_URL` | LM Studio API | `http://localhost:1234/v1` |
 | `LM_STUDIO_DEFAULT_MODEL` | Default model identifier | match your loaded model |
 | `LLM_PROVIDER` | Env fallback + seeds default registry entry | `lmstudio` |
 | `LLM_API_MODE` | `chat` or `responses` API mode | `chat` |
-| `INTERNAL_API_URL` | Workers → Next.js API | `http://localhost:3002` |
-| `SCHEDULER_API_KEY` | Routine scheduler auth | `change-me-in-production` |
+| `INTERNAL_API_URL` | Scheduler → Next.js API | `http://localhost:3002` |
+| `SCHEDULER_API_KEY` | Wake/schedule sync + internal issue create | `change-me-in-production` |
+| `SCHEDULER_WAKE_PORT` | WakeRunner HTTP port | `3003` |
+| `SCHEDULER_WAKE_URL` | Web → scheduler base URL | `http://127.0.0.1:3003` |
 | `BETTER_AUTH_SECRET` | Auth signing secret | generate with `openssl rand -base64 32` |
 | `BETTER_AUTH_URL` | Auth callback base URL | `http://localhost:3002` |
 | `MEMORY_SEMANTIC_RECALL` | Enable pgvector semantic memory | `false` |
@@ -327,7 +338,7 @@ All routes live in `apps/web/app/api/`. Key endpoints:
 | `POST` | `/api/issues/:id/comments` | Add comment |
 | `GET` | `/api/issues/:id/heartbeat-context` | Task state + comment cursor |
 | `GET` | `/api/companies/:id/goals` | List goals |
-| `POST` | `/api/companies/:id/issues` | Create issue (also called by routine-scheduler) |
+| `POST` | `/api/companies/:id/issues` | Create issue (also called by Mastra routine schedules) |
 | `POST` | `/api/companies/:id/approvals` | Submit board approval request |
 
 API routes authenticate the agent via a run-scoped API key in the `Authorization: Bearer` header. The key encodes `{ runId, agentId, companyId }` and is generated per heartbeat in the worker.
@@ -400,7 +411,15 @@ Unit and integration tests are not yet implemented — contributions welcome. Th
 
 ## Governance and Approvals
 
-Agents that need irreversible or high-cost actions (hiring a new agent, large spend, external integrations) must call `createApproval` and set the issue to `in_review`. This creates a pending `approvals` row. A human reviews it at `/dashboard/approvals` and approves or rejects. An approval wake worker (`approval-wake-worker.ts`) re-wakes the requesting agent when the decision is made.
+Tourbillon has three distinct approval paths — do not conflate them:
+
+| Kind | Mechanism | Behavior |
+|---|---|---|
+| **Issue review** | Comment + reassign (`status: in_review`, `assigneeAgentId` = reviewer) | Agent-to-agent or agent-to-human review handoff. Control-plane §2a. |
+| **Board approval** | `createApproval` → `/approval` UI → decide | Linked issues are **halted** (`blocked` + `boardApprovalId`). Checkout and non-`blocked` status updates return 409 until decided. Approve restores prior status; reject clears the halt id but leaves `blocked`. Decide triggers WakeRunner `approval_resolved` (not Mastra ToolApprovals / Signals). |
+| **Tool access** | Agent config (`assignedToolsets`, `assignedTools`, MCP) | Tools are granted at hire/settings time. Per-tool HITL is intentionally out of scope. |
+
+Agents that need irreversible or high-cost actions (hiring a new agent, large spend, external integrations) must call `createApproval` with linked `issueIds`. Prefer a comment on those issues explaining why. Do **not** use `in_review` for board governance — that status is for agent review handoff.
 
 Approval types: `request_board_approval`, `hire_agent` (extensible — add new types as needed).
 
@@ -414,7 +433,6 @@ These are discussed in the project's design documents and are next on the roadma
 |---|---|---|
 | **Document workspaces** | Planned | `documents` table with `shared \| agent_private \| issue_scoped` visibility |
 | **Remote executor service** | Planned | Optional `packages/executor` for network-isolated execution; today uses in-process `LocalSandbox` |
-| **BullMQ native cron for routines** | Planned | Replace `setInterval` polling with BullMQ repeat jobs |
 | **Routines UI** | Planned | CRUD page at `/dashboard/routines` |
 | **Review step skill** | Planned | `§ Review Protocol` in control-plane SKILL.md; no schema changes needed |
 | **Agents/new-hire UI** | Planned | `/dashboard/agents/new` page |
@@ -430,7 +448,7 @@ These are discussed in the project's design documents and are next on the roadma
 
 **Port 3002 not 3000** — Port 3000 is intentionally avoided (Cursor and other tools bind it). Always use http://localhost:3002.
 
-**Workers not processing jobs** — Check that `pnpm workers:dev` is running. Jobs will queue in Redis but not execute without the worker process.
+**Workers not processing jobs** — Check that `pnpm workers:dev` is running (WakeRunner on port 3003). Assignment / Wake Now call the scheduler HTTP API; timers/routines need Mastra schedule boot on that process.
 
 **Agent generates but does nothing useful** — Check that the model is loaded and running in LM Studio, and that `LM_STUDIO_DEFAULT_MODEL` in `.env` exactly matches the model identifier shown in LM Studio.
 

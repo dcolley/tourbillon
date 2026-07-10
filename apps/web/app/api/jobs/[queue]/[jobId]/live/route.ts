@@ -11,6 +11,7 @@ export async function GET(
     return NextResponse.json({ error: 'Unknown queue.' }, { status: 404 });
   }
 
+  // jobId is the heartbeat_runs.id after Phase 2
   const snapshot = await getJobLiveSnapshot(queue, jobId);
   if (!snapshot) {
     return NextResponse.json({ error: 'Job not found.' }, { status: 404 });

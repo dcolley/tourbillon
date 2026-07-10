@@ -6,8 +6,10 @@ import { markdown } from '@codemirror/lang-markdown';
 import { json } from '@codemirror/lang-json';
 import { yaml } from '@codemirror/lang-yaml';
 import { javascript } from '@codemirror/lang-javascript';
+import { EditorView } from '@codemirror/view';
 import { vscodeDark, vscodeLight } from '@uiw/codemirror-theme-vscode';
 import { useTheme } from 'next-themes';
+import { cn } from '@/lib/utils';
 
 function languageForPath(path: string) {
   const lower = path.toLowerCase();
@@ -48,6 +50,11 @@ function languageForPath(path: string) {
   return undefined;
 }
 
+const editorTheme = EditorView.theme({
+  '&.cm-editor .cm-content': { fontSize: '12px' },
+  '&.cm-editor .cm-gutters': { fontSize: '12px' },
+});
+
 export function WorkspaceCodeMirror({
   path,
   value,
@@ -64,7 +71,7 @@ export function WorkspaceCodeMirror({
   const { resolvedTheme } = useTheme();
   const extensions = useMemo(() => {
     const lang = languageForPath(path);
-    return lang ? [lang] : [];
+    return [EditorView.lineWrapping, editorTheme, ...(lang ? [lang] : [])];
   }, [path]);
 
   const theme = resolvedTheme === 'dark' ? vscodeDark : vscodeLight;
@@ -77,7 +84,7 @@ export function WorkspaceCodeMirror({
       extensions={extensions}
       editable={!readOnly}
       onChange={onChange}
-      className={className}
+      className={cn('max-w-full overflow-hidden', className)}
       basicSetup={{
         lineNumbers: true,
         foldGutter: true,

@@ -3,11 +3,16 @@ export * from './heartbeat-memory';
 export * from './provider';
 export * from './model-settings';
 export * from './agent-factory';
-export * from './harness-config';
+export * from './controller-config';
+// harness-config.ts re-exports controller-config for deprecated import paths only;
+// do not also `export * from './harness-config'` here (duplicate bindings).
 export * from './mastra-instance';
+export * from './schedules';
 export * from './tools/api-client';
 export * from './tools/control-plane-tools';
 export * from './tools/role-tools';
-export * from './workflows/approval-flow';
 export * from './skills/skill-loader';
+export * from './skills/on-demand-skills';
+export * from './heartbeat-processors';
+export * from './tools/skill-tools';
 export * from './observability/harness-event-writer';
