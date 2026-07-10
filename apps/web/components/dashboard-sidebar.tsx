@@ -18,7 +18,9 @@ import {
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { Logo } from '@/components/logo';
+import { SidebarBuildInfo } from '@/components/sidebar-build-info';
 import { ThemeToggle } from '@/components/theme-toggle';
+import type { BuildInfo } from '@/lib/build-info';
 import { CompanySwitcher, type CompanyOption } from '@/components/company-switcher';
 import {
   Sidebar,
@@ -68,9 +70,11 @@ function SidebarCookieSync() {
 export function DashboardSidebar({
   companies,
   activeCompanyId,
+  buildInfo,
 }: {
   companies: CompanyOption[];
   activeCompanyId: string | null;
+  buildInfo: BuildInfo;
 }) {
   const pathname = usePathname();
 
@@ -120,6 +124,7 @@ export function DashboardSidebar({
         </SidebarContent>
 
         <SidebarFooter>
+          <SidebarBuildInfo buildInfo={buildInfo} />
           <SidebarMenu>
             <SidebarMenuItem>
               <div className="flex items-center justify-between gap-2 px-2 py-1 group-data-[collapsible=icon]:justify-center">

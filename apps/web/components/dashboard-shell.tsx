@@ -2,7 +2,8 @@
 
 import type { CSSProperties, ReactNode } from 'react';
 import { DashboardSidebar } from '@/components/dashboard-sidebar';
-import { CompanySwitcher, type CompanyOption } from '@/components/company-switcher';
+import type { CompanyOption } from '@/components/company-switcher';
+import type { BuildInfo } from '@/lib/build-info';
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar';
 import { Separator } from '@/components/ui/separator';
 
@@ -11,11 +12,13 @@ export function DashboardShell({
   companies,
   activeCompanyId,
   activeCompanyName,
+  buildInfo,
 }: {
   children: ReactNode;
   companies: CompanyOption[];
   activeCompanyId: string | null;
   activeCompanyName: string | null;
+  buildInfo: BuildInfo;
 }) {
   return (
     <SidebarProvider
@@ -27,7 +30,11 @@ export function DashboardShell({
         } as CSSProperties
       }
     >
-      <DashboardSidebar companies={companies} activeCompanyId={activeCompanyId} />
+      <DashboardSidebar
+        companies={companies}
+        activeCompanyId={activeCompanyId}
+        buildInfo={buildInfo}
+      />
       <SidebarInset>
         <header className="flex h-12 shrink-0 items-center gap-2 border-b px-4 md:hidden">
           <SidebarTrigger />

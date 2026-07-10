@@ -1,9 +1,14 @@
 import { CompanyGate } from '@/components/company-gate';
 import { DashboardShell } from '@/components/dashboard-shell';
 import { getActiveCompanyOrNull, listCompanies } from '@/lib/company';
+import { getBuildInfo } from '@/lib/build-info';
 
 export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
-  const [companies, activeCompany] = await Promise.all([listCompanies(), getActiveCompanyOrNull()]);
+  const [companies, activeCompany] = await Promise.all([
+    listCompanies(),
+    getActiveCompanyOrNull(),
+  ]);
+  const buildInfo = getBuildInfo();
 
   return (
     <CompanyGate>
@@ -15,6 +20,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
         }))}
         activeCompanyId={activeCompany?.id ?? null}
         activeCompanyName={activeCompany?.name ?? null}
+        buildInfo={buildInfo}
       >
         {activeCompany ? children : null}
       </DashboardShell>
