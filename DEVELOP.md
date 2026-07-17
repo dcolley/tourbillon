@@ -155,7 +155,7 @@ set -a && source .env && set +a && pnpm db:studio
 |---|---|---|
 | **LM Studio** | Desktop app, local server on `:1234` | Agent LLM calls |
 | **SearXNG** | Uncomment in `docker-compose.yml` or set `SEARXNG_URL` | Web search MCP tool |
-| **Tavily** | Set `TAVILY_API_KEY` in `.env` | Cloud web search fallback |
+| **Tavily** | Set `TAVILY_API_KEY` in `.env` (or company/agent settings) | Enables `web-search-tavily` toolset (`webSearchTavily`) |
 
 Heartbeats and tool calls will fail without a reachable LLM when workers process jobs.
 

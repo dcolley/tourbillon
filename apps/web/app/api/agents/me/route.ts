@@ -3,7 +3,12 @@ import { db, agents, companies } from '@tourbillon/db';
 import { eq, and } from 'drizzle-orm';
 import { validateRunToken } from '@/lib/auth/run-token';
 import { logAgentApiRequest, logAgentApiResponse } from '@/lib/agent-api-trace';
-import { isAgentBudgetEnforced, isAgentBudgetExceeded } from '@tourbillon/shared';
+import {
+  BOARD_DISPLAY_NAME,
+  BOARD_USER_ID,
+  isAgentBudgetEnforced,
+  isAgentBudgetExceeded,
+} from '@tourbillon/shared';
 import type { AgentRuntimeConfig } from '@tourbillon/shared';
 
 export async function GET(req: NextRequest) {
@@ -55,5 +60,9 @@ export async function GET(req: NextRequest) {
     budgetWarning: budgetEnforced && budgetRatio >= 0.8,
     budgetExhausted: budgetExceeded,
     status: agent.status,
+    board: {
+      assigneeUserId: BOARD_USER_ID,
+      displayName: BOARD_DISPLAY_NAME,
+    },
   });
 }

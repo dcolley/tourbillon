@@ -11,7 +11,6 @@ import { getCompanyById } from '@/lib/company';
 import { parseCompanyIdFromSearchParams } from '@/lib/company-link';
 import { deleteAgentAction, triggerAgentHeartbeatAction, updateAgentRoleAction } from '../actions';
 import { getLlmProviderRecordById, listLlmProvidersPublic } from '@/lib/llm-providers';
-import { getModelReasoningCapabilities } from '@/lib/model-catalog';
 import { AgentModelForm } from './agent-model-form';
 import { AgentModelSettingsForm } from './agent-model-settings-form';
 import { heartbeatJobHref } from '@/lib/heartbeats';
@@ -77,14 +76,23 @@ async function updateCapabilities(formData: FormData) {
     toolsets.push('code-execution');
   }
 
+  const integrationKeys = formData.getAll('integrationKey').map(String);
+  const integrationValues = formData.getAll('integrationValue').map(String);
+  const integrations: Record<string, string> = {};
+  for (let i = 0; i < integrationKeys.length; i++) {
+    const key = integrationKeys[i]?.trim();
+    const value = integrationValues[i]?.trim();
+    if (!key || !value) continue;
+    integrations[key] = value;
+  }
+  const clearIntegrations = formData.getAll('clearIntegration').map(String);
+
   try {
     await updateAgentCapabilities(agentId, {
       toolsets,
       assignedTools,
-      bufferApiKey: (formData.get('bufferApiKey') as string) || undefined,
-      searxngUrl: (formData.get('searxngUrl') as string) || undefined,
-      clearBufferApiKey: formData.get('clearBufferApiKey') === 'on',
-      clearSearxngUrl: formData.get('clearSearxngUrl') === 'on',
+      integrations,
+      clearIntegrations,
     });
   } catch (err) {
     const message = err instanceof AgentValidationError ? err.message : 'Failed to update capabilities.';
@@ -301,11 +309,6 @@ export default async function AgentDetailPage({
     agent.modelId,
     providerRecord,
   );
-  const reasoningCapabilities = await getModelReasoningCapabilities(
-    agent.modelId ?? providerConfig.defaultModel,
-    providerConfig,
-  );
-
   const enabledTools = resolveAssignedTools({
     role: agent.role,
     assignedToolsets: agent.assignedToolsets,
@@ -535,7 +538,6 @@ export default async function AgentDetailPage({
         <AgentModelSettingsForm
           agentId={agent.id}
           urlKey={agent.urlKey}
-          reasoningCapabilities={reasoningCapabilities}
           initialSettings={runtime.model}
           providerDefaults={providerRecord?.defaultModelSettings}
           updateModelSettings={updateModelSettings}
@@ -623,8 +625,14 @@ export default async function AgentDetailPage({
           urlKey={agent.urlKey}
           assignedToolsets={agent.assignedToolsets}
           enabledTools={enabledTools}
-          bufferApiKeyOverride={runtime.mcpCredentials?.['buffer-mcp']}
-          searxngUrlOverride={runtime.searxngUrl}
+          integrationOverrides={{
+            ...(runtime.tavilyApiKey ? { tavilyApiKey: runtime.tavilyApiKey } : {}),
+            ...(runtime.mcpCredentials?.['buffer-mcp']
+              ? { bufferApiKey: runtime.mcpCredentials['buffer-mcp'] }
+              : {}),
+            ...(runtime.searxngUrl ? { searxngUrl: runtime.searxngUrl } : {}),
+            ...(runtime.searxngApiKey ? { searxngApiKey: runtime.searxngApiKey } : {}),
+          }}
           updateCapabilities={updateCapabilities}
         />
       </section>

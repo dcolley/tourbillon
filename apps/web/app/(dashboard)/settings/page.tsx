@@ -6,6 +6,7 @@ import {
   resolveModelProviderConfig,
   parseCompanySettings,
   isSearxngConfigured,
+  isTavilyConfigured,
 } from '@tourbillon/shared';
 import { LlmProvidersSettings } from '@/components/llm-providers-settings';
 
@@ -38,9 +39,11 @@ async function saveIntegrations(formData: FormData) {
     await updateCompanyIntegrations(company.id, {
       searxngUrl: (formData.get('searxngUrl') as string) || undefined,
       searxngApiKey: (formData.get('searxngApiKey') as string) || undefined,
+      tavilyApiKey: (formData.get('tavilyApiKey') as string) || undefined,
       bufferApiKey: (formData.get('bufferApiKey') as string) || undefined,
       clearBufferApiKey: formData.get('clearBufferApiKey') === 'on',
       clearSearxngApiKey: formData.get('clearSearxngApiKey') === 'on',
+      clearTavilyApiKey: formData.get('clearTavilyApiKey') === 'on',
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Failed to save integrations.';
@@ -100,6 +103,7 @@ export default async function SettingsPage({
     process.env.BUFFER_API_KEY,
   );
   const searxngConfigured = isSearxngConfigured(integrationSettings);
+  const tavilyConfigured = isTavilyConfigured(integrationSettings);
 
   return (
     <div className="p-6 max-w-3xl space-y-8">
@@ -248,6 +252,35 @@ export default async function SettingsPage({
 
           <div className="space-y-2">
             <div className="flex items-center justify-between gap-2">
+              <label htmlFor="tavilyApiKey" className="text-sm font-medium">
+                Tavily API key
+              </label>
+              <span
+                className={`text-xs rounded px-2 py-0.5 ${tavilyConfigured ? 'bg-green-100 text-green-800' : 'bg-muted text-muted-foreground'}`}
+              >
+                {tavilyConfigured ? 'Configured' : 'Not configured'}
+              </span>
+            </div>
+            <input
+              id="tavilyApiKey"
+              name="tavilyApiKey"
+              type="password"
+              placeholder={integrationSettings.tavilyApiKey ? '••••••••' : 'TAVILY_API_KEY env'}
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+            />
+            {integrationSettings.tavilyApiKey && (
+              <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                <input type="checkbox" name="clearTavilyApiKey" className="rounded border-input" />
+                Clear stored key
+              </label>
+            )}
+            <p className="text-xs text-muted-foreground">
+              Enables the web-search-tavily toolset (cloud web search via Tavily).
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-2">
               <label htmlFor="bufferApiKey" className="text-sm font-medium">
                 Buffer API key
               </label>
@@ -303,6 +336,12 @@ export default async function SettingsPage({
             <dt className="text-muted-foreground shrink-0">SearXNG URL</dt>
             <dd className="font-mono text-xs text-right break-all">
               {process.env.SEARXNG_URL ?? 'Not configured'}
+            </dd>
+          </div>
+          <div className="flex justify-between gap-4 p-3">
+            <dt className="text-muted-foreground shrink-0">Tavily API key</dt>
+            <dd className="font-mono text-xs text-right break-all">
+              {process.env.TAVILY_API_KEY ? 'Set in env' : 'Not configured'}
             </dd>
           </div>
           <div className="flex justify-between gap-4 p-3">

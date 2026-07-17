@@ -155,9 +155,11 @@ export async function updateCompanyIntegrations(
   input: {
     searxngUrl?: string;
     searxngApiKey?: string;
+    tavilyApiKey?: string;
     bufferApiKey?: string;
     clearBufferApiKey?: boolean;
     clearSearxngApiKey?: boolean;
+    clearTavilyApiKey?: boolean;
   },
 ): Promise<Company> {
   const company = await db.query.companies.findFirst({ where: eq(companies.id, companyId) });
@@ -174,6 +176,12 @@ export async function updateCompanyIntegrations(
     patch.searxngApiKey = '';
   } else if (input.searxngApiKey !== undefined && input.searxngApiKey.trim()) {
     patch.searxngApiKey = input.searxngApiKey.trim();
+  }
+
+  if (input.clearTavilyApiKey) {
+    patch.tavilyApiKey = '';
+  } else if (input.tavilyApiKey !== undefined && input.tavilyApiKey.trim()) {
+    patch.tavilyApiKey = input.tavilyApiKey.trim();
   }
 
   const mcpCredentials = { ...current.mcpCredentials };

@@ -4,7 +4,7 @@ import { Memory } from '@mastra/memory';
 import { PostgresStore, PgVector } from '@mastra/pg';
 import type { Agent as AgentRecord } from '@tourbillon/db';
 import { getLlmProviderRowById } from '@tourbillon/db';
-import { formatTrace, modelProviderOverridesFromAgent, resolveModelProviderConfig, resolveAssignedTools, type AgentRuntimeConfig, type CompanySettings, isSearxngConfigured, isCodeExecutionAvailable } from '@tourbillon/shared';
+import { formatTrace, modelProviderOverridesFromAgent, resolveModelProviderConfig, resolveAssignedTools, type AgentRuntimeConfig, type CompanySettings, isSearxngConfigured, isTavilyConfigured, isCodeExecutionAvailable } from '@tourbillon/shared';
 import { getEmbeddingModel, getLanguageModelForAgent, llmProviderRowToRecord } from './provider';
 import { CONTROL_PLANE_TOOLS } from './tools/control-plane-tools';
 import { ROLE_TOOLS } from './tools/role-tools';
@@ -15,12 +15,16 @@ import {
 } from './skills/on-demand-skills';
 import { buildMCPTools } from './tools/mcp-tools';
 import { SEARXNG_TOOLS } from './tools/searxng-tools';
+import { TAVILY_TOOLS } from './tools/tavily-tools';
 import { getInternalApiUrl } from './tools/api-client';
 import { buildCodeExecutionWorkspace } from './execution-workspace';
 import { resolveAgentGenerationOptions, toMastraDefaultOptions } from './model-settings';
 import { getMastraInstance } from './mastra-instance';
 import { isObservabilityEnabled } from '@tourbillon/shared';
-import { buildHeartbeatInputProcessors } from './heartbeat-processors';
+import {
+  buildHeartbeatInputProcessors,
+  resolveHeartbeatContextTokenLimit,
+} from './heartbeat-processors';
 
 const globalForMastra = globalThis as unknown as {
   mastraMemory?: Memory;
@@ -79,6 +83,12 @@ export async function assembleAgentTools(
 
   if (!isSearxngConfigured(companySettings, runtimeConfig)) {
     for (const key of Object.keys(SEARXNG_TOOLS)) {
+      delete tools[key];
+    }
+  }
+
+  if (!isTavilyConfigured(companySettings, runtimeConfig)) {
+    for (const key of Object.keys(TAVILY_TOOLS)) {
       delete tools[key];
     }
   }
@@ -183,7 +193,7 @@ export async function createAgentWithSkills(
       skillCount: prepared.catalog.length,
       alwaysInlineSkills: prepared.alwaysInline.map((s) => s.slug),
       onDemandSkills: prepared.catalog.filter((s) => !s.alwaysInline).map((s) => s.slug),
-      contextTokenLimit: inputProcessors[0]?.getMaxTokens(),
+      contextTokenLimit: resolveHeartbeatContextTokenLimit(),
       codeExecutionEnabled,
       modelSettings: generationOptions.modelSettings,
       reasoning: generationOptions.reasoning,

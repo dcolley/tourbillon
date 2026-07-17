@@ -14,6 +14,7 @@ import {
   ISSUE_TABLE_PAGE_SIZES,
   ISSUE_TABLE_PRIORITY_FILTERS,
   ISSUE_TABLE_UNASSIGNED,
+  ISSUE_TABLE_BOARD,
   readIssueTablePrefs,
   writeIssueTablePrefs,
   isIssueTablePageSize,
@@ -21,6 +22,8 @@ import {
   type IssueTablePrefs,
   type IssueTableSortColumn,
 } from '@/lib/issue-list-storage';
+import { BOARD_DISPLAY_NAME } from '@tourbillon/shared/constants';
+import { isBoardAssignee } from '@tourbillon/shared/issue-assignee';
 
 const PRIORITY_ORDER: Record<string, number> = {
   critical: 0,
@@ -65,8 +68,12 @@ function compareRows(
         ((PRIORITY_ORDER[a.issue.priority] ?? 99) - (PRIORITY_ORDER[b.issue.priority] ?? 99))
       );
     case 'assignee': {
-      const aName = a.agent?.name ?? '';
-      const bName = b.agent?.name ?? '';
+      const aName = isBoardAssignee(a.issue.assigneeUserId)
+        ? BOARD_DISPLAY_NAME
+        : (a.agent?.name ?? '');
+      const bName = isBoardAssignee(b.issue.assigneeUserId)
+        ? BOARD_DISPLAY_NAME
+        : (b.agent?.name ?? '');
       return factor * aName.localeCompare(bName);
     }
     case 'updated':
@@ -81,7 +88,9 @@ function filterRows(rows: IssueListRow[], prefs: IssueTablePrefs): IssueListRow[
     if (prefs.priority && issue.priority !== prefs.priority) return false;
 
     if (prefs.assigneeKey === ISSUE_TABLE_UNASSIGNED) {
-      if (agent) return false;
+      if (agent || isBoardAssignee(issue.assigneeUserId)) return false;
+    } else if (prefs.assigneeKey === ISSUE_TABLE_BOARD) {
+      if (!isBoardAssignee(issue.assigneeUserId)) return false;
     } else if (prefs.assigneeKey && agent?.urlKey !== prefs.assigneeKey) {
       return false;
     }
@@ -233,6 +242,7 @@ export function IssueTableClient({
           >
             <option value="">All assignees</option>
             <option value={ISSUE_TABLE_UNASSIGNED}>Unassigned</option>
+            <option value={ISSUE_TABLE_BOARD}>{BOARD_DISPLAY_NAME}</option>
             {agents.map((agent) => (
               <option key={agent.id} value={agent.urlKey}>
                 {agent.name}
@@ -322,8 +332,13 @@ export function IssueTableClient({
                       <PriorityBadge priority={issue.priority} />
                     </td>
                     <td className="px-4 py-3 text-muted-foreground">
-                      {agent ? (
-                        <Link href={`/agent/${agent.urlKey}`} className="hover:underline">
+                      {isBoardAssignee(issue.assigneeUserId) ? (
+                        BOARD_DISPLAY_NAME
+                      ) : agent ? (
+                        <Link
+                          href={`/agent/${agent.urlKey}`}
+                          className="hover:underline hover:text-foreground"
+                        >
                           {agent.name}
                         </Link>
                       ) : (

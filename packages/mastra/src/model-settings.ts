@@ -1,6 +1,5 @@
 import type { Agent as AgentRecord } from '@tourbillon/db';
 import {
-  inferReasoningCapabilities,
   resolveModelSettings,
   toMastraModelSettings,
   type AgentModelSettings,
@@ -36,17 +35,7 @@ export function resolveAgentGenerationOptions(
 
   const { reasoningLevel: _ignored, ...numericMerged } = merged;
   const modelSettings = toMastraModelSettings(numericMerged);
-  const capabilities = inferReasoningCapabilities(
-    agentRecord.modelId ?? '',
-    providerRecord?.type,
-  );
-
-  const reasoning =
-    capabilities.supported &&
-    reasoningLevel &&
-    capabilities.allowedLevels.includes(reasoningLevel)
-      ? reasoningLevel
-      : undefined;
+  const reasoning = reasoningLevel ?? undefined;
 
   return {
     ...(modelSettings ? { modelSettings } : {}),

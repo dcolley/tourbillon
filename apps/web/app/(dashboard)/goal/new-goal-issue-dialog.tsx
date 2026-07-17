@@ -14,6 +14,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
+import { BOARD_ASSIGNEE_SELECT_VALUE, BOARD_DISPLAY_NAME } from '@tourbillon/shared/constants';
 import { nativeSelectClassName } from '@/lib/native-select';
 import { createGoalIssueAction, type CreateGoalIssueState } from './actions';
 
@@ -132,17 +133,16 @@ export function NewGoalIssueDialog({
                 </div>
               </div>
 
-              {agents.length > 0 && (
-                <div className="space-y-2">
-                  <Label htmlFor="goal-issue-assignee">Assign to agent</Label>
+              <div className="space-y-2">
+                  <Label htmlFor="goal-issue-assignee">Assignee</Label>
                   <select
                     id="goal-issue-assignee"
                     name="assigneeAgentId"
                     defaultValue=""
-                    required
                     className={nativeSelectClassName}
                   >
-                    <option value="">Select agent…</option>
+                    <option value="">Unassigned</option>
+                    <option value={BOARD_ASSIGNEE_SELECT_VALUE}>{BOARD_DISPLAY_NAME}</option>
                     {agents.map((agent) => (
                       <option key={agent.id} value={agent.id}>
                         {agent.name} — {agent.title} ({agent.role})
@@ -150,10 +150,9 @@ export function NewGoalIssueDialog({
                     ))}
                   </select>
                   <p className="text-xs text-muted-foreground">
-                    Assigning queues a heartbeat so the agent can start work.
+                    Assigning an agent queues a heartbeat. Board assignments appear under Issues → Mine.
                   </p>
                 </div>
-              )}
             </div>
 
             <DialogFooter className="border-t bg-background">

@@ -7,8 +7,8 @@ import { SKILL_TOOLS } from './skill-tools';
 export const getIdentityTool = createTool({
   id: 'getIdentity',
   description:
-    'Get your agent identity, role, budget status, and chain of command. ' +
-    'Call at start of heartbeat if not already in context.',
+    'Get your agent identity, role, budget status, chain of command, and board.assigneeUserId ' +
+    '(use that id when assigning human/Board work). Call at start of heartbeat if not already in context.',
   inputSchema: z.object({}),
   execute: async (_inputData, { requestContext }) => {
     const res = await tracedAgentFetch('getIdentity', requestContext, '/api/agents/me');
@@ -110,6 +110,8 @@ export const updateIssueTool = createTool({
   description:
     'Update issue status, add a comment, change priority or assignee. ' +
     'When status is in_review, you MUST set assigneeAgentId to the reviewer (task requester first, else reportsTo from getIdentity) so they receive it in their inbox. ' +
+    'To assign human/board work, set assigneeUserId to getIdentity.board.assigneeUserId (clears assigneeAgentId). ' +
+    'Do not set both assigneeAgentId and assigneeUserId. ' +
     'If the issue is board-halted (pendingBoardApproval / boardApprovalId), do not change status — wait for wakeReason approval_resolved after the board decides. Comments are still allowed. ' +
     'Always include a comment explaining what changed and the next action.',
   inputSchema: z.object({
@@ -122,8 +124,11 @@ export const updateIssueTool = createTool({
     assigneeAgentId: z
       .string()
       .optional()
-      .describe('Required when setting status to in_review — assign the reviewer so they see it in getInbox'),
-    assigneeUserId: z.string().optional(),
+      .describe('Required when setting status to in_review — assign the reviewer so they see it in getInbox. Mutually exclusive with assigneeUserId'),
+    assigneeUserId: z
+      .string()
+      .optional()
+      .describe('Use getIdentity.board.assigneeUserId for Board/human work. Mutually exclusive with assigneeAgentId'),
     blockedByIssueIds: z.array(z.string()).optional().describe('Replaces current blockers. Send [] to clear all.'),
   }),
   execute: async (inputData, { requestContext }) => {
@@ -243,15 +248,23 @@ export const deleteWorkspaceFileTool = createTool({
 export const createSubtaskTool = createTool({
   id: 'createSubtask',
   description:
-    'Create a child issue to delegate work to another agent. ' +
+    'Create a child issue to delegate work to another agent or the Board. ' +
     'Always set parentId and goalId — no orphan tasks allowed. ' +
-    'assigneeAgentId is required for work to start; omit only to defer assignment to CEO (creates backlog).',
+    'Assign with assigneeAgentId (listAgents) or assigneeUserId (getIdentity.board.assigneeUserId); ' +
+    'omit both only to defer assignment to CEO (creates backlog).',
   inputSchema: z.object({
     title: z.string(),
     description: z.string().optional(),
     parentId: z.string().describe('Parent issue ID — required'),
     goalId: z.string().describe('Goal/initiative ID — required for traceability'),
-    assigneeAgentId: z.string().optional(),
+    assigneeAgentId: z
+      .string()
+      .optional()
+      .describe('Agent UUID from listAgents — mutually exclusive with assigneeUserId'),
+    assigneeUserId: z
+      .string()
+      .optional()
+      .describe('Use getIdentity.board.assigneeUserId for Board/human work — mutually exclusive with assigneeAgentId'),
     priority: z.enum(['critical', 'high', 'medium', 'low']).default('medium'),
     blockedByIssueIds: z.array(z.string()).optional(),
     billingCode: z.string().optional(),

@@ -28,6 +28,7 @@ export const ISSUE_TABLE_PRIORITY_FILTERS: Array<{
 ];
 
 export const ISSUE_TABLE_UNASSIGNED = '__unassigned__';
+export const ISSUE_TABLE_BOARD = '__board__';
 
 export interface IssueTablePrefs {
   sortColumn: IssueTableSortColumn;

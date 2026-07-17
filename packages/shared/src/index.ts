@@ -1,5 +1,6 @@
 export * from './types';
 export * from './constants';
+export * from './issue-assignee';
 export * from './heartbeat-liveness';
 export * from './heartbeat-schedule-mode';
 export * from './heartbeat-schedule';

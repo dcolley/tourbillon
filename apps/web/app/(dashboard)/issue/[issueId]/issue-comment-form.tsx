@@ -3,6 +3,8 @@
 import { useActionState } from 'react';
 import { useFormStatus } from 'react-dom';
 import type { Issue } from '@tourbillon/db';
+import { BOARD_ASSIGNEE_SELECT_VALUE, BOARD_DISPLAY_NAME } from '@tourbillon/shared/constants';
+import { formSelectValueFromAssignees } from '@tourbillon/shared/issue-assignee';
 import type { IssueAgentOption } from '@/lib/issues';
 import type { CommentOnIssueState } from '../actions';
 
@@ -107,10 +109,14 @@ export function IssueCommentForm({
               <select
                 id="comment-assignee"
                 name="assigneeAgentId"
-                defaultValue={issue.assigneeAgentId ?? ''}
+                defaultValue={formSelectValueFromAssignees(
+                  issue.assigneeAgentId,
+                  issue.assigneeUserId,
+                )}
                 className={selectClassName}
               >
                 <option value="">Unassigned</option>
+                <option value={BOARD_ASSIGNEE_SELECT_VALUE}>{BOARD_DISPLAY_NAME}</option>
                 {agents.map((agent) => (
                   <option key={agent.id} value={agent.id}>
                     {agent.name}

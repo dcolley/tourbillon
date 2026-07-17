@@ -1,6 +1,11 @@
 'use client';
 
-import type { AgentModelSettings, NumericModelSettingKey, ReasoningLevel } from '@tourbillon/shared/model-settings';
+import {
+  REASONING_LEVELS,
+  type AgentModelSettings,
+  type NumericModelSettingKey,
+  type ReasoningLevel,
+} from '@tourbillon/shared/model-settings';
 
 const REASONING_LEVEL_LABELS: Record<ReasoningLevel, string> = {
   none: 'None',
@@ -189,11 +194,15 @@ export function ModelSettingsFields({
 
 interface ReasoningLevelFieldProps {
   value: string;
-  allowedLevels: ReasoningLevel[];
+  allowedLevels?: ReasoningLevel[];
   onChange: (value: string) => void;
 }
 
-export function ReasoningLevelField({ value, allowedLevels, onChange }: ReasoningLevelFieldProps) {
+export function ReasoningLevelField({
+  value,
+  allowedLevels = [...REASONING_LEVELS],
+  onChange,
+}: ReasoningLevelFieldProps) {
   return (
     <div className="space-y-1.5 sm:col-span-2">
       <label htmlFor="model-reasoningLevel" className="text-sm font-medium">
@@ -214,7 +223,7 @@ export function ReasoningLevelField({ value, allowedLevels, onChange }: Reasonin
         ))}
       </select>
       <p className="text-xs text-muted-foreground">
-        Controls internal reasoning depth. Only applies to reasoning-capable models.
+        Controls internal reasoning depth when the selected model and provider support it.
       </p>
     </div>
   );

@@ -1,4 +1,6 @@
 import Link from 'next/link';
+import { BOARD_DISPLAY_NAME } from '@tourbillon/shared/constants';
+import { isBoardAssignee } from '@tourbillon/shared/issue-assignee';
 import { Card, CardContent } from '@/components/ui/card';
 import { PriorityBadge } from '@/lib/status-badges';
 import type { IssueListRow } from '@/lib/issue-list';
@@ -44,13 +46,17 @@ export function IssueBoard({
 }
 
 function IssueCard({ issue, agent }: IssueListRow) {
+  const assigneeLabel = isBoardAssignee(issue.assigneeUserId)
+    ? BOARD_DISPLAY_NAME
+    : agent?.name;
+
   return (
     <Link href={`/issue/${issue.id}`}>
       <Card className="transition-colors hover:bg-muted/50">
         <CardContent className="space-y-1 p-3">
           <p className="font-mono text-xs text-muted-foreground">{issue.identifier}</p>
           <p className="text-sm font-medium">{issue.title}</p>
-          {agent && <p className="text-xs text-muted-foreground">{agent.name}</p>}
+          {assigneeLabel && <p className="text-xs text-muted-foreground">{assigneeLabel}</p>}
           <PriorityBadge priority={issue.priority} />
         </CardContent>
       </Card>

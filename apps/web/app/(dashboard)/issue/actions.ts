@@ -2,6 +2,7 @@
 
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
+import { assigneesFromFormSelect } from '@tourbillon/shared';
 import { addIssueComment } from '@/lib/issue-comments';
 import { createIssue, updateIssue, IssueValidationError } from '@/lib/issues';
 import { releaseIssueCheckoutLock } from '@/lib/checkout-lock';
@@ -14,7 +15,7 @@ export async function createIssueAction(
   _prev: CreateIssueState,
   formData: FormData
 ): Promise<CreateIssueState> {
-  const assigneeAgentId = formData.get('assigneeAgentId') as string;
+  const assignees = assigneesFromFormSelect(formData.get('assigneeAgentId') as string);
   const goalId = formData.get('goalId') as string;
   const projectId = formData.get('projectId') as string;
 
@@ -25,7 +26,8 @@ export async function createIssueAction(
       description: (formData.get('description') as string) || undefined,
       priority: formData.get('priority') as string,
       status: formData.get('status') as string,
-      assigneeAgentId: assigneeAgentId || null,
+      assigneeAgentId: assignees.assigneeAgentId,
+      assigneeUserId: assignees.assigneeUserId,
       goalId: goalId || null,
       projectId: projectId || null,
     });
@@ -76,7 +78,7 @@ export async function updateIssueAction(
   formData: FormData
 ): Promise<UpdateIssueState> {
   const issueId = formData.get('issueId') as string;
-  const assigneeAgentId = formData.get('assigneeAgentId') as string;
+  const assignees = assigneesFromFormSelect(formData.get('assigneeAgentId') as string);
   const goalId = formData.get('goalId') as string;
   const projectId = formData.get('projectId') as string;
 
@@ -85,7 +87,8 @@ export async function updateIssueAction(
       title: formData.get('title') as string,
       priority: formData.get('priority') as string,
       status: formData.get('status') as string,
-      assigneeAgentId: assigneeAgentId || null,
+      assigneeAgentId: assignees.assigneeAgentId,
+      assigneeUserId: assignees.assigneeUserId,
       goalId: goalId || null,
       projectId: projectId || null,
     });
@@ -115,7 +118,7 @@ export async function commentOnIssueAction(
   const comment = (formData.get('comment') as string)?.trim();
   const status = formData.get('status') as string;
   const priority = formData.get('priority') as string;
-  const assigneeAgentId = (formData.get('assigneeAgentId') as string) || null;
+  const assignees = assigneesFromFormSelect(formData.get('assigneeAgentId') as string);
 
   if (!comment) {
     return { error: 'Comment is required.' };
@@ -136,8 +139,12 @@ export async function commentOnIssueAction(
     const updates: Parameters<typeof updateIssue>[1] = {};
     if (status && status !== issue.status) updates.status = status;
     if (priority && priority !== issue.priority) updates.priority = priority;
-    if (assigneeAgentId !== issue.assigneeAgentId) {
-      updates.assigneeAgentId = assigneeAgentId;
+    if (
+      assignees.assigneeAgentId !== issue.assigneeAgentId ||
+      assignees.assigneeUserId !== issue.assigneeUserId
+    ) {
+      updates.assigneeAgentId = assignees.assigneeAgentId;
+      updates.assigneeUserId = assignees.assigneeUserId;
     }
 
     if (Object.keys(updates).length > 0) {

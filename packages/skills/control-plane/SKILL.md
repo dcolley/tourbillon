@@ -118,9 +118,19 @@ When setting `status: 'in_review'`, you **must** call `updateIssue` with `assign
 
 - Break large tasks into subtasks via `createSubtask`
 - Every subtask **must** have `parentId` and `goalId` — no orphan issues
-- Set `assigneeAgentId` to route work to the appropriate agent — omitting it creates a `backlog` issue for CEO triage
+- Set `assigneeAgentId` (from `listAgents`) to route work to an agent — omitting both assignees creates a `backlog` issue for CEO triage
+- Set `assigneeUserId` to `getIdentity.board.assigneeUserId` to assign **human/Board work** (never invent a user id; Board is not in `listAgents`)
+- Never set both `assigneeAgentId` and `assigneeUserId` on the same call
 - Set `blockedByIssueIds` to encode dependencies between subtasks
 - Your task stays `in_progress` while child tasks are running; set to `in_review` when all children reach `done`
+
+### §4a — Board vs approval vs agent review
+
+| Need | Mechanism |
+|---|---|
+| Human must **do work** (write copy, offline step, decide outside governance) | Assign issue: `assigneeUserId` = `getIdentity.board.assigneeUserId`, status usually `todo`, comment with done-when |
+| **Governance gate** (hire, irreversible spend, board policy) | `createApproval` with linked `issueIds` — do **not** use Board assignee for this |
+| Another **agent** reviews your work | `status: in_review` + `assigneeAgentId` = reviewer (§2a) |
 
 ---
 
@@ -152,7 +162,14 @@ Next: [what happens next, who owns it]
 Reviewer: [agent name] — assigned for inbox routing
 ```
 
-**Escalating to human:**
+**Assigned to Board (human work):**
+```
+📋 Assigned to Board: [what the human must do]
+Done when: [acceptance criteria]
+Return to: [agent name / id] after completion
+```
+
+**Board approval request (governance — use createApproval):**
 ```
 🛑 Awaiting board decision: [question]
 Context: [relevant background]

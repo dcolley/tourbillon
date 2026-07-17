@@ -1,4 +1,9 @@
-import { TokenLimiterProcessor } from '@mastra/core/processors';
+import {
+  ProviderHistoryCompat,
+  TokenLimiterProcessor,
+  type InputProcessorOrWorkflow,
+} from '@mastra/core/processors';
+import { stripToolLoopAssistantMonologue } from './responses-tool-loop-compat';
 
 /**
  * Cap model input tokens per agentic step so mid-heartbeat tool loops cannot
@@ -16,12 +21,15 @@ export function resolveHeartbeatContextTokenLimit(): number {
   return 120_000;
 }
 
-export function buildHeartbeatInputProcessors(): TokenLimiterProcessor[] {
+export function buildHeartbeatInputProcessors(): InputProcessorOrWorkflow[] {
   return [
     new TokenLimiterProcessor({
       limit: resolveHeartbeatContextTokenLimit(),
       // Prefer contiguous recent history so the current tool loop stays coherent.
       trimMode: 'contiguous',
+    }),
+    new ProviderHistoryCompat({
+      additionalRules: [stripToolLoopAssistantMonologue],
     }),
   ];
 }

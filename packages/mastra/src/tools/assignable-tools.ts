@@ -7,13 +7,21 @@ const createIssueTool = createTool({
   description:
     'Create a top-level issue linked to a goal. Use for first-layer tasks under a goal. ' +
     'For sub-issues under an existing task, use createSubtask instead. ' +
-    'assigneeAgentId is required for work to start; omit only to defer assignment to CEO (creates backlog).',
+    'Assign with assigneeAgentId (from listAgents) for agent work, or assigneeUserId from getIdentity.board ' +
+    'for human/board work. Set exactly one; omit both only to defer to CEO (creates backlog).',
   inputSchema: z.object({
     title: z.string(),
     description: z.string().optional(),
     goalId: z.string().describe('Goal ID — required for traceability'),
     parentId: z.string().optional().describe('Optional parent issue ID for nested work'),
-    assigneeAgentId: z.string().optional(),
+    assigneeAgentId: z
+      .string()
+      .optional()
+      .describe('Agent UUID from listAgents — mutually exclusive with assigneeUserId'),
+    assigneeUserId: z
+      .string()
+      .optional()
+      .describe('Use getIdentity.board.assigneeUserId for Board/human work — mutually exclusive with assigneeAgentId'),
     priority: z.enum(['critical', 'high', 'medium', 'low']).default('medium'),
     blockedByIssueIds: z.array(z.string()).optional(),
     billingCode: z.string().optional(),

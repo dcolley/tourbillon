@@ -6,6 +6,7 @@ import {
   DEFAULT_RUNTIME_CONFIG,
   VALID_TOOLSET_IDS,
   VALID_ASSIGNABLE_TOOL_IDS,
+  VALID_AGENT_INTEGRATION_CREDENTIAL_IDS,
   resolveModelProviderConfig,
   resolveAdapterFieldsForRuntime,
   parseAgentRuntimeType,
@@ -315,10 +316,8 @@ export async function updateAgentCapabilities(
   input: {
     toolsets: string[];
     assignedTools: string[];
-    bufferApiKey?: string;
-    searxngUrl?: string;
-    clearBufferApiKey?: boolean;
-    clearSearxngUrl?: boolean;
+    integrations?: Partial<Record<string, string>>;
+    clearIntegrations?: string[];
   },
 ): Promise<Agent> {
   const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
@@ -338,29 +337,43 @@ export async function updateAgentCapabilities(
     throw new AgentValidationError(`Unknown tools: ${invalidTools.join(', ')}`);
   }
 
+  const clearIntegrations = [...new Set((input.clearIntegrations ?? []).map((k) => k.trim()).filter(Boolean))];
+  const invalidClears = clearIntegrations.filter((id) => !VALID_AGENT_INTEGRATION_CREDENTIAL_IDS.has(id));
+  if (invalidClears.length > 0) {
+    throw new AgentValidationError(`Unknown integration keys: ${invalidClears.join(', ')}`);
+  }
+
+  const integrations = input.integrations ?? {};
+  const invalidSets = Object.keys(integrations).filter((id) => !VALID_AGENT_INTEGRATION_CREDENTIAL_IDS.has(id));
+  if (invalidSets.length > 0) {
+    throw new AgentValidationError(`Unknown integration keys: ${invalidSets.join(', ')}`);
+  }
+
   const current = agent.runtimeConfig as AgentRuntimeConfig;
   const runtimeConfig: AgentRuntimeConfig = {
     ...current,
     assignedTools,
   };
 
-  if (input.clearBufferApiKey) {
-    const next = { ...runtimeConfig.mcpCredentials };
-    delete next['buffer-mcp'];
-    runtimeConfig.mcpCredentials = Object.keys(next).length > 0 ? next : undefined;
-  } else if (input.bufferApiKey?.trim()) {
-    runtimeConfig.mcpCredentials = {
-      ...current.mcpCredentials,
-      'buffer-mcp': input.bufferApiKey.trim(),
-    };
+  const mcpCredentials = { ...current.mcpCredentials };
+
+  for (const key of clearIntegrations) {
+    if (key === 'tavilyApiKey') runtimeConfig.tavilyApiKey = undefined;
+    if (key === 'searxngUrl') runtimeConfig.searxngUrl = undefined;
+    if (key === 'searxngApiKey') runtimeConfig.searxngApiKey = undefined;
+    if (key === 'bufferApiKey') delete mcpCredentials['buffer-mcp'];
   }
 
-  if (input.clearSearxngUrl) {
-    runtimeConfig.searxngUrl = undefined;
-  } else if (input.searxngUrl !== undefined) {
-    const trimmed = input.searxngUrl.trim();
-    runtimeConfig.searxngUrl = trimmed || undefined;
+  for (const [key, rawValue] of Object.entries(integrations)) {
+    const value = rawValue?.trim();
+    if (!value) continue;
+    if (key === 'tavilyApiKey') runtimeConfig.tavilyApiKey = value;
+    if (key === 'searxngUrl') runtimeConfig.searxngUrl = value;
+    if (key === 'searxngApiKey') runtimeConfig.searxngApiKey = value;
+    if (key === 'bufferApiKey') mcpCredentials['buffer-mcp'] = value;
   }
+
+  runtimeConfig.mcpCredentials = Object.keys(mcpCredentials).length > 0 ? mcpCredentials : undefined;
 
   const [updated] = await db
     .update(agents)

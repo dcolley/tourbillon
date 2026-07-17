@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { BOARD_USER_ID } from '@tourbillon/shared';
 import { ISSUE_KANBAN_LIMIT, listIssues } from '@/lib/issues';
 import { parseIssueFilter, statusesForFilter } from '@/app/(dashboard)/issue/issue-filter';
 
@@ -25,6 +26,7 @@ export async function GET(req: NextRequest) {
     statuses: visibleStatuses,
     page: 0,
     pageSize: ISSUE_KANBAN_LIMIT,
+    assigneeUserId: filter === 'mine' ? BOARD_USER_ID : undefined,
   });
 
   return NextResponse.json({

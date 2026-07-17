@@ -32,6 +32,13 @@ export const CHECKOUT_EXPECTED_STATUSES = [
   'backlog',
 ] as const;
 
+// ─── Board (human) assignee ───────────────────────────────────────────────
+/** Stable v1 user id for issues assigned to the human board (dashboard operator). */
+export const BOARD_USER_ID = 'board';
+export const BOARD_DISPLAY_NAME = 'Board';
+/** Form/select sentinel for “assign to board” (maps to BOARD_USER_ID). */
+export const BOARD_ASSIGNEE_SELECT_VALUE = '__board__';
+
 // ─── Agent roles ──────────────────────────────────────────────────────────
 export const ROLE_DEFAULT_SKILLS: Record<string, string[]> = {
   ceo:      ['control-plane', 'plan-to-tasks', 'create-agent', 'para-memory'],
@@ -69,6 +76,11 @@ export const TOOLSET_CATALOG = [
     description: 'Search the web via SearXNG JSON API (requires SEARXNG_URL or company settings).',
   },
   {
+    id: 'web-search-tavily',
+    label: 'Web search (Tavily)',
+    description: 'Cloud web search via Tavily (requires TAVILY_API_KEY or company/agent key).',
+  },
+  {
     id: 'buffer',
     label: 'Buffer',
     description:
@@ -99,3 +111,37 @@ export const ROLE_DEFAULT_TOOLSETS: Record<string, string[]> = {
   qa:       ['comments', 'code-execution'],
   designer: ['comments'],
 };
+
+/** Per-agent integration credential keys (overrides company/env). */
+export const AGENT_INTEGRATION_CREDENTIALS = [
+  {
+    id: 'tavilyApiKey',
+    label: 'Tavily API key',
+    envHint: 'TAVILY_API_KEY',
+    inputType: 'password' as const,
+  },
+  {
+    id: 'bufferApiKey',
+    label: 'Buffer API key',
+    envHint: 'BUFFER_API_KEY',
+    inputType: 'password' as const,
+  },
+  {
+    id: 'searxngUrl',
+    label: 'SearXNG URL',
+    envHint: 'SEARXNG_URL',
+    inputType: 'url' as const,
+  },
+  {
+    id: 'searxngApiKey',
+    label: 'SearXNG API key',
+    envHint: 'SEARXNG_API_KEY',
+    inputType: 'password' as const,
+  },
+] as const;
+
+export type AgentIntegrationCredentialId = (typeof AGENT_INTEGRATION_CREDENTIALS)[number]['id'];
+
+export const VALID_AGENT_INTEGRATION_CREDENTIAL_IDS = new Set<string>(
+  AGENT_INTEGRATION_CREDENTIALS.map((entry) => entry.id),
+);

@@ -1,5 +1,5 @@
 import { db } from '@tourbillon/db';
-import { agents, issues } from '@tourbillon/db';
+import { agents, approvals, issues } from '@tourbillon/db';
 import { and, eq, count } from 'drizzle-orm';
 import Link from 'next/link';
 import { PageHeader } from '@/components/page-header';
@@ -25,6 +25,10 @@ export default async function DashboardPage() {
     .select({ count: count() })
     .from(issues)
     .where(and(eq(issues.companyId, company.id), eq(issues.status, 'in_progress')));
+  const [pendingApprovalCount] = await db
+    .select({ count: count() })
+    .from(approvals)
+    .where(and(eq(approvals.companyId, company.id), eq(approvals.status, 'pending')));
 
   const recentRuns = await listHeartbeatRuns({ limit: 10 });
 
@@ -32,10 +36,15 @@ export default async function DashboardPage() {
     <div className="space-y-6">
       <PageHeader title="Dashboard" description="Company overview" />
 
-      <div className="grid gap-4 sm:grid-cols-3">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard label="Total Agents" value={agentCount.count} />
         <StatCard label="Total Issues" value={issueCount.count} />
         <StatCard label="In Progress" value={activeIssueCount.count} />
+        <StatCard
+          label="Approvals Pending"
+          value={pendingApprovalCount.count}
+          href="/approval"
+        />
       </div>
 
       <div className="space-y-3">
@@ -80,15 +89,33 @@ export default async function DashboardPage() {
   );
 }
 
-function StatCard({ label, value }: { label: string; value: number }) {
-  return (
-    <Card>
+function StatCard({
+  label,
+  value,
+  href,
+}: {
+  label: string;
+  value: number;
+  href?: string;
+}) {
+  const content = (
+    <>
       <CardHeader className="pb-2">
         <CardTitle className="text-sm font-medium text-muted-foreground">{label}</CardTitle>
       </CardHeader>
       <CardContent>
         <p className="text-3xl font-bold tracking-tight">{value}</p>
       </CardContent>
-    </Card>
+    </>
   );
+
+  if (href) {
+    return (
+      <Link href={href} className="block transition-colors hover:opacity-90">
+        <Card className="h-full hover:bg-muted/40">{content}</Card>
+      </Link>
+    );
+  }
+
+  return <Card>{content}</Card>;
 }

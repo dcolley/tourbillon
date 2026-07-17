@@ -1,17 +1,43 @@
 'use client';
 
-import { useRef } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { GRANULAR_TOOL_GROUPS, type ToolCapability } from '@tourbillon/shared/tool-catalog';
-import { TOOLSET_CATALOG } from '@tourbillon/shared/constants';
+import {
+  AGENT_INTEGRATION_CREDENTIALS,
+  TOOLSET_CATALOG,
+  type AgentIntegrationCredentialId,
+} from '@tourbillon/shared/constants';
+
+export type AgentIntegrationOverrides = Partial<Record<AgentIntegrationCredentialId, string>>;
+
+interface IntegrationRow {
+  rowId: string;
+  key: AgentIntegrationCredentialId | '';
+  /** True when this row was loaded from a stored override (empty password = keep). */
+  hasStoredValue: boolean;
+}
 
 interface AgentCapabilitiesFormProps {
   agentId: string;
   urlKey: string;
   assignedToolsets: string[];
   enabledTools: string[];
-  bufferApiKeyOverride?: string;
-  searxngUrlOverride?: string;
+  integrationOverrides?: AgentIntegrationOverrides;
   updateCapabilities: (formData: FormData) => Promise<void>;
+}
+
+function nextRowId(): string {
+  return `row_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function initialRows(overrides: AgentIntegrationOverrides): IntegrationRow[] {
+  const rows: IntegrationRow[] = [];
+  for (const entry of AGENT_INTEGRATION_CREDENTIALS) {
+    if (overrides[entry.id]?.trim()) {
+      rows.push({ rowId: nextRowId(), key: entry.id, hasStoredValue: true });
+    }
+  }
+  return rows;
 }
 
 export function AgentCapabilitiesForm({
@@ -19,11 +45,19 @@ export function AgentCapabilitiesForm({
   urlKey,
   assignedToolsets,
   enabledTools,
-  bufferApiKeyOverride,
-  searxngUrlOverride,
+  integrationOverrides = {},
   updateCapabilities,
 }: AgentCapabilitiesFormProps) {
   const formRef = useRef<HTMLFormElement>(null);
+  const [rows, setRows] = useState<IntegrationRow[]>(() => initialRows(integrationOverrides));
+  const [clearedKeys, setClearedKeys] = useState<AgentIntegrationCredentialId[]>([]);
+
+  const usedKeys = useMemo(
+    () => new Set(rows.map((row) => row.key).filter(Boolean) as AgentIntegrationCredentialId[]),
+    [rows],
+  );
+
+  const availableKeys = AGENT_INTEGRATION_CREDENTIALS.filter((entry) => !usedKeys.has(entry.id));
 
   function toggleGroupCapability(groupId: string, capability: ToolCapability | 'none') {
     const form = formRef.current;
@@ -44,10 +78,41 @@ export function AgentCapabilitiesForm({
     }
   }
 
+  function addRow() {
+    if (availableKeys.length === 0) return;
+    setRows((prev) => [
+      ...prev,
+      { rowId: nextRowId(), key: availableKeys[0]!.id, hasStoredValue: false },
+    ]);
+  }
+
+  function updateRowKey(rowId: string, key: AgentIntegrationCredentialId | '') {
+    const row = rows.find((r) => r.rowId === rowId);
+    if (row?.key && row.hasStoredValue && row.key !== key) {
+      const previousKey = row.key;
+      setClearedKeys((keys) => (keys.includes(previousKey) ? keys : [...keys, previousKey]));
+    }
+    setRows((prev) =>
+      prev.map((r) => (r.rowId === rowId ? { ...r, key, hasStoredValue: false } : r)),
+    );
+  }
+
+  function removeRow(rowId: string) {
+    const row = rows.find((r) => r.rowId === rowId);
+    if (row?.key && row.hasStoredValue) {
+      const key = row.key;
+      setClearedKeys((keys) => (keys.includes(key) ? keys : [...keys, key]));
+    }
+    setRows((prev) => prev.filter((r) => r.rowId !== rowId));
+  }
+
   return (
     <form ref={formRef} action={updateCapabilities} className="space-y-6 border-t pt-4">
       <input type="hidden" name="agentId" value={agentId} />
       <input type="hidden" name="urlKey" value={urlKey} />
+      {clearedKeys.map((key) => (
+        <input key={`clear_${key}`} type="hidden" name="clearIntegration" value={key} />
+      ))}
 
       <div>
         <p className="text-sm font-medium">Tools</p>
@@ -145,57 +210,92 @@ export function AgentCapabilitiesForm({
         </ul>
       </div>
 
-      {(assignedToolsets.includes('buffer') || assignedToolsets.includes('web-search')) && (
-        <div className="space-y-3 rounded-md border p-4">
-          <p className="text-sm font-medium">Integration overrides</p>
-          <p className="text-xs text-muted-foreground">
-            Optional per-agent values. Leave blank to use company settings or environment fallbacks.
-          </p>
-
-          {assignedToolsets.includes('buffer') && (
-            <div className="space-y-2">
-              <label htmlFor="bufferApiKey" className="text-sm font-medium">
-                Buffer API key override
-              </label>
-              <input
-                id="bufferApiKey"
-                name="bufferApiKey"
-                type="password"
-                placeholder={bufferApiKeyOverride ? '••••••••' : 'Uses company or BUFFER_API_KEY'}
-                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-              />
-              {bufferApiKeyOverride && (
-                <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <input type="checkbox" name="clearBufferApiKey" className="rounded border-input" />
-                  Clear agent override
-                </label>
-              )}
-            </div>
-          )}
-
-          {assignedToolsets.includes('web-search') && (
-            <div className="space-y-2">
-              <label htmlFor="searxngUrl" className="text-sm font-medium">
-                SearXNG base URL override
-              </label>
-              <input
-                id="searxngUrl"
-                name="searxngUrl"
-                type="url"
-                defaultValue={searxngUrlOverride ?? ''}
-                placeholder="http://localhost:8888"
-                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
-              />
-              {searxngUrlOverride && (
-                <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <input type="checkbox" name="clearSearxngUrl" className="rounded border-input" />
-                  Clear agent override
-                </label>
-              )}
-            </div>
-          )}
+      <div className="space-y-3 rounded-md border p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <p className="text-sm font-medium">Integration credentials</p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Optional per-agent key/value overrides. Leave blank to keep an existing secret, or remove a row to clear
+              it. Falls back to company settings or env.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={addRow}
+            disabled={availableKeys.length === 0}
+            className="text-xs rounded border px-2 py-1 hover:bg-muted disabled:opacity-50"
+          >
+            Add credential
+          </button>
         </div>
-      )}
+
+        {rows.length === 0 ? (
+          <p className="text-xs text-muted-foreground">No agent-level overrides. Company or env values still apply.</p>
+        ) : (
+          <ul className="space-y-3">
+            {rows.map((row) => {
+              const meta = AGENT_INTEGRATION_CREDENTIALS.find((entry) => entry.id === row.key);
+              const keyOptions = AGENT_INTEGRATION_CREDENTIALS.filter(
+                (entry) => entry.id === row.key || !usedKeys.has(entry.id),
+              );
+              return (
+                <li key={row.rowId} className="grid gap-2 sm:grid-cols-[minmax(0,14rem)_1fr_auto] sm:items-end">
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-muted-foreground" htmlFor={`integration_key_${row.rowId}`}>
+                      Key
+                    </label>
+                    <select
+                      id={`integration_key_${row.rowId}`}
+                      name="integrationKey"
+                      value={row.key}
+                      onChange={(e) =>
+                        updateRowKey(row.rowId, e.target.value as AgentIntegrationCredentialId | '')
+                      }
+                      className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                      required
+                    >
+                      {keyOptions.map((entry) => (
+                        <option key={entry.id} value={entry.id}>
+                          {entry.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <label
+                      className="text-xs font-medium text-muted-foreground"
+                      htmlFor={`integration_value_${row.rowId}`}
+                    >
+                      Value
+                    </label>
+                    <input
+                      id={`integration_value_${row.rowId}`}
+                      name="integrationValue"
+                      type={meta?.inputType ?? 'text'}
+                      placeholder={
+                        row.hasStoredValue
+                          ? '•••••••• (leave blank to keep)'
+                          : meta
+                            ? `Uses company or ${meta.envHint}`
+                            : 'Value'
+                      }
+                      className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+                      autoComplete="off"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => removeRow(row.rowId)}
+                    className="text-xs rounded border px-2 py-2 hover:bg-muted self-end"
+                  >
+                    Remove
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
 
       <button
         type="submit"

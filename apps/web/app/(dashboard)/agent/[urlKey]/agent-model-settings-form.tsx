@@ -2,7 +2,6 @@
 
 import { useState } from 'react';
 import type { AgentModelSettings } from '@tourbillon/shared/model-settings';
-import type { ModelReasoningCapabilities } from '@tourbillon/shared/reasoning-capabilities';
 import {
   ModelSettingsFields,
   ReasoningLevelField,
@@ -13,7 +12,6 @@ import {
 interface AgentModelSettingsFormProps {
   agentId: string;
   urlKey: string;
-  reasoningCapabilities: ModelReasoningCapabilities;
   initialSettings?: AgentModelSettings;
   providerDefaults?: AgentModelSettings;
   updateModelSettings: (formData: FormData) => Promise<void>;
@@ -22,7 +20,6 @@ interface AgentModelSettingsFormProps {
 export function AgentModelSettingsForm({
   agentId,
   urlKey,
-  reasoningCapabilities,
   initialSettings,
   providerDefaults,
   updateModelSettings,
@@ -30,11 +27,6 @@ export function AgentModelSettingsForm({
   const [values, setValues] = useState<ModelSettingsFormValues>(
     modelSettingsToFormValues(initialSettings),
   );
-
-  const staleReasoningLevel =
-    !reasoningCapabilities.supported && initialSettings?.reasoningLevel
-      ? initialSettings.reasoningLevel
-      : undefined;
 
   return (
     <form action={updateModelSettings} className="space-y-4 border-t pt-4">
@@ -56,20 +48,12 @@ export function AgentModelSettingsForm({
         showAdvanced
       />
 
-      {reasoningCapabilities.supported ? (
-        <div className="grid gap-4 sm:grid-cols-2">
-          <ReasoningLevelField
-            value={values.reasoningLevel}
-            allowedLevels={reasoningCapabilities.allowedLevels}
-            onChange={(reasoningLevel) => setValues({ ...values, reasoningLevel })}
-          />
-        </div>
-      ) : staleReasoningLevel ? (
-        <p className="text-xs text-muted-foreground">
-          Saved reasoning level ({staleReasoningLevel}) is ignored because the current model does not
-          support reasoning.
-        </p>
-      ) : null}
+      <div className="grid gap-4 sm:grid-cols-2">
+        <ReasoningLevelField
+          value={values.reasoningLevel}
+          onChange={(reasoningLevel) => setValues({ ...values, reasoningLevel })}
+        />
+      </div>
 
       <button
         type="submit"

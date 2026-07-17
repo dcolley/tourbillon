@@ -87,6 +87,8 @@ export interface AgentRuntimeConfig {
   searxngUrl?: string;
   /** Per-agent SearXNG API key override (optional). */
   searxngApiKey?: string;
+  /** Per-agent Tavily API key override. */
+  tavilyApiKey?: string;
   /** Per-server MCP tool allow/deny lists (Buffer). */
   mcpToolPolicy?: Record<string, { allow?: string[]; deny?: string[] }>;
   /** Per-agent sandbox overrides for code-execution toolset. */
@@ -101,6 +103,7 @@ export interface CompanySettings {
   mcpCredentials?: Record<string, string>;
   searxngUrl?: string;
   searxngApiKey?: string;
+  tavilyApiKey?: string;
 }
 
 export const DEFAULT_RUNTIME_CONFIG: AgentRuntimeConfig = {

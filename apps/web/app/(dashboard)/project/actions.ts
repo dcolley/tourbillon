@@ -1,6 +1,7 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
+import { assigneesFromFormSelect } from '@tourbillon/shared';
 import { createProject, updateProject, ProjectValidationError, getProjectDetail } from '@/lib/projects';
 import { createIssue, IssueValidationError } from '@/lib/issues';
 
@@ -79,7 +80,7 @@ export async function createProjectIssueAction(
   formData: FormData
 ): Promise<CreateProjectIssueState> {
   const projectId = formData.get('projectId') as string;
-  const assigneeAgentId = formData.get('assigneeAgentId') as string;
+  const assignees = assigneesFromFormSelect(formData.get('assigneeAgentId') as string);
 
   try {
     await createIssue({
@@ -87,7 +88,8 @@ export async function createProjectIssueAction(
       description: (formData.get('description') as string) || undefined,
       priority: formData.get('priority') as string,
       status: (formData.get('status') as string) || 'todo',
-      assigneeAgentId: assigneeAgentId || null,
+      assigneeAgentId: assignees.assigneeAgentId,
+      assigneeUserId: assignees.assigneeUserId,
       projectId,
     });
   } catch (err) {

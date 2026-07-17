@@ -1,4 +1,5 @@
 import { Suspense } from 'react';
+import { BOARD_USER_ID } from '@tourbillon/shared';
 import { listGoalOptions } from '@/lib/goals';
 import { listProjectOptions } from '@/lib/projects';
 import {
@@ -23,7 +24,12 @@ export default async function IssuesPage({
   const visibleStatuses = statusesForFilter(filter);
 
   const [issueResult, agentList, goalList, projectList] = await Promise.all([
-    listIssues({ statuses: visibleStatuses, page: 0, pageSize: ISSUE_KANBAN_LIMIT }),
+    listIssues({
+      statuses: visibleStatuses,
+      page: 0,
+      pageSize: ISSUE_KANBAN_LIMIT,
+      assigneeUserId: filter === 'mine' ? BOARD_USER_ID : undefined,
+    }),
     listIssueAgentOptions(),
     listGoalOptions(true),
     listProjectOptions(),
@@ -57,8 +63,12 @@ function emptyMessage(filter: IssueFilter): string {
       return 'No cancelled issues.';
     case 'active':
       return 'No active issues.';
+    case 'mine':
+      return 'No issues assigned to you (Board).';
     case 'in_review':
       return 'No issues in review.';
+    case 'blocked':
+      return 'No blocked issues.';
     case 'all':
       return 'No issues yet.';
   }

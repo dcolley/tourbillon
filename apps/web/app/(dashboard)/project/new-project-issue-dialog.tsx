@@ -14,6 +14,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
+import { BOARD_ASSIGNEE_SELECT_VALUE, BOARD_DISPLAY_NAME } from '@tourbillon/shared/constants';
 import { nativeSelectClassName } from '@/lib/native-select';
 import { createProjectIssueAction, type CreateProjectIssueState } from './actions';
 
@@ -130,9 +131,8 @@ export function NewProjectIssueDialog({
                 </div>
               </div>
 
-              {agents.length > 0 && (
-                <div className="space-y-2">
-                  <Label htmlFor="project-issue-assignee">Assign to agent</Label>
+              <div className="space-y-2">
+                  <Label htmlFor="project-issue-assignee">Assignee</Label>
                   <select
                     id="project-issue-assignee"
                     name="assigneeAgentId"
@@ -140,6 +140,7 @@ export function NewProjectIssueDialog({
                     className={nativeSelectClassName}
                   >
                     <option value="">Unassigned</option>
+                    <option value={BOARD_ASSIGNEE_SELECT_VALUE}>{BOARD_DISPLAY_NAME}</option>
                     {agents.map((agent) => (
                       <option key={agent.id} value={agent.id}>
                         {agent.name} ({agent.urlKey})
@@ -147,7 +148,6 @@ export function NewProjectIssueDialog({
                     ))}
                   </select>
                 </div>
-              )}
             </div>
 
             <DialogFooter className="border-t bg-background">

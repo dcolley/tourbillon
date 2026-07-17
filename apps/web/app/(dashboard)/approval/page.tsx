@@ -4,6 +4,8 @@ import { desc, eq, inArray } from 'drizzle-orm';
 import { PageHeader } from '@/components/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
+import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
 import { StatusBadge } from '@/lib/status-badges';
 import { getActiveCompanyOrNull } from '@/lib/company';
 
@@ -73,8 +75,8 @@ export default async function ApprovalsPage() {
             ) : (
               <div className="divide-y">
                 {decided.map(({ approval, agent }) => (
-                  <div key={approval.id} className="flex items-center justify-between p-4">
-                    <div>
+                  <div key={approval.id} className="flex items-center justify-between gap-4 p-4">
+                    <div className="min-w-0">
                       <p className="text-sm font-medium">
                         {(approval.payload as { title?: string })?.title ?? approval.type}
                       </p>
@@ -84,6 +86,9 @@ export default async function ApprovalsPage() {
                           ? ` · ${approval.issueIds.length} linked issue${approval.issueIds.length === 1 ? '' : 's'}`
                           : ''}
                       </p>
+                      {approval.note ? (
+                        <p className="mt-1 text-sm text-muted-foreground">{approval.note}</p>
+                      ) : null}
                     </div>
                     <StatusBadge status={approval.status} />
                   </div>
@@ -146,20 +151,26 @@ function ApprovalCard({
             </ul>
           </div>
         )}
-        <div className="flex gap-2">
-          <form action={`/api/approvals/${approval.id}/decide`} method="POST">
-            <input type="hidden" name="decision" value="approved" />
-            <Button type="submit" size="sm">
+        <form action={`/api/approvals/${approval.id}/decide`} method="POST" className="space-y-3">
+          <div className="space-y-2">
+            <Label htmlFor={`approval-note-${approval.id}`}>Reason</Label>
+            <Textarea
+              id={`approval-note-${approval.id}`}
+              name="note"
+              rows={3}
+              placeholder="Optional reason (posted to linked issues)"
+              className="resize-y"
+            />
+          </div>
+          <div className="flex gap-2">
+            <Button type="submit" name="decision" value="approved" size="sm">
               Approve
             </Button>
-          </form>
-          <form action={`/api/approvals/${approval.id}/decide`} method="POST">
-            <input type="hidden" name="decision" value="rejected" />
-            <Button type="submit" size="sm" variant="destructive">
+            <Button type="submit" name="decision" value="rejected" size="sm" variant="destructive">
               Reject
             </Button>
-          </form>
-        </div>
+          </div>
+        </form>
       </CardContent>
     </Card>
   );

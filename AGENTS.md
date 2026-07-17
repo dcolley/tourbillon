@@ -104,7 +104,7 @@ Each agent row in the `agents` table has:
 | Tier | Source | Gating |
 |---|---|---|
 | **Tier 1 — Control Plane** | `control-plane-tools.ts` | Every agent always gets these |
-| **Tier 2 — Boolean toolsets** | `role-tools.ts` (+ workspace for `code-execution`) | Gated by `assignedToolsets` (comments, roster, approvals, web-search, nitter, buffer); `code-execution` attaches Mastra `LocalSandbox` workspace |
+| **Tier 2 — Boolean toolsets** | `role-tools.ts` (+ workspace for `code-execution`) | Gated by `assignedToolsets` (comments, roster, approvals, web-search, web-search-tavily, nitter, buffer); `code-execution` attaches Mastra `LocalSandbox` workspace |
 | **Tier 2 — Granular tools** | `assignable-tools.ts` | Gated by `runtimeConfig.assignedTools` (per-tool toggles in goal/project/issue groups) |
 | **Tier 3 — MCP Tools** | `mcp-tools.ts` | Gated by `mcpServerIds` and/or `buffer` toolset (Buffer MCP); company `settings.mcpCredentials` or env `BUFFER_API_KEY` |
 
@@ -124,6 +124,7 @@ Each agent row in the `agents` table has:
 - `roster` — `listAgents`
 - `code-execution` — Mastra workspace sandbox (`mastra_workspace_execute_command`, `mastra_workspace_get_process_output`, `mastra_workspace_kill_process`, file tools). Gated via `buildCodeExecutionWorkspace()` in `execution-workspace.ts`, not `role-tools.ts`. Per-issue CWD under `EXECUTION_WORKSPACE_ROOT`. Toolset skill: `code-execution-skills.md`.
 - `web-search` — `searxngSearch`, `searxngNewsSearch` via SearXNG JSON API (`SEARXNG_URL` or company settings)
+- `web-search-tavily` — `webSearchTavily` via Tavily cloud API (`TAVILY_API_KEY` or company/agent key)
 - `nitter` — X/Twitter search via self-hosted Nitter (`NITTER_URL`)
 - `buffer` — Buffer social publishing via official MCP (`BUFFER_API_KEY` or company settings)
 

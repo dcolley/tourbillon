@@ -345,8 +345,14 @@ function summarizeDetails(
   if (details.priority) parts.push(`priority → ${details.priority}`);
   if (details.title) parts.push(`title → ${details.title}`);
   if (details.comment) parts.push(String(details.comment));
-  if (details.assigneeAgentId !== undefined) {
-    parts.push(details.assigneeAgentId ? 'assignee changed' : 'unassigned');
+  if (details.assigneeAgentId !== undefined || details.assigneeUserId !== undefined) {
+    if (details.assigneeUserId) {
+      parts.push('assigned to Board');
+    } else if (details.assigneeAgentId) {
+      parts.push('assignee changed');
+    } else {
+      parts.push('unassigned');
+    }
   }
   if (details.runId) parts.push(`run ${String(details.runId).slice(0, 8)}…`);
   return parts.join(', ') || JSON.stringify(details);

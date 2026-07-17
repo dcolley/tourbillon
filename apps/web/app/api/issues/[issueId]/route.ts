@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db, issues, activityLog } from '@tourbillon/db';
-import { eq } from 'drizzle-orm';
+import { db, issues, activityLog, agents } from '@tourbillon/db';
+import { and, eq } from 'drizzle-orm';
+import { IssueAssigneeError, resolveIssueAssignees } from '@tourbillon/shared';
 import { validateRunToken } from '@/lib/auth/run-token';
 import { logAgentApiRequest, logAgentApiResponse, summarizeBody } from '@/lib/agent-api-trace';
 import { enqueueHeartbeat } from '@/lib/wake-client';
@@ -18,11 +19,12 @@ export async function PATCH(
   if (!runCtx) return NextResponse.json({ error: 'Invalid token' }, { status: 401 });
 
   const runId = req.headers.get('x-paperclip-run-id');
-  const body = await req.json() as {
+  const body = (await req.json()) as {
     status?: string;
     comment?: string;
     priority?: string;
     assigneeAgentId?: string;
+    assigneeUserId?: string;
     blockedByIssueIds?: string[];
   };
 
@@ -59,19 +61,64 @@ export async function PATCH(
     );
   }
 
-  let effectiveAssigneeId = body.assigneeAgentId;
+  let effectiveAssigneeAgentId = body.assigneeAgentId;
+  let effectiveAssigneeUserId = body.assigneeUserId;
   let reviewAssigneeAutoResolved = false;
   let reviewAssigneeReason: string | undefined;
 
-  if (body.status === 'in_review') {
+  const assigningToBoard =
+    body.assigneeUserId !== undefined && Boolean(body.assigneeUserId?.trim());
+
+  if (body.status === 'in_review' && !assigningToBoard) {
     const needsAutoResolve =
       body.assigneeAgentId === undefined || body.assigneeAgentId === runCtx.agentId;
-    if (needsAutoResolve) {
+    if (needsAutoResolve && body.assigneeUserId === undefined) {
       const resolved = await resolveReviewAssignee(issue, runCtx.agentId);
       if (resolved) {
-        effectiveAssigneeId = resolved.agentId;
+        effectiveAssigneeAgentId = resolved.agentId;
         reviewAssigneeAutoResolved = true;
         reviewAssigneeReason = resolved.reason;
+      }
+    }
+  }
+
+  const assigneeTouched =
+    effectiveAssigneeAgentId !== undefined || effectiveAssigneeUserId !== undefined;
+
+  let resolvedAssignees:
+    | { assigneeAgentId: string | null; assigneeUserId: string | null }
+    | undefined;
+  if (assigneeTouched) {
+    try {
+      resolvedAssignees = resolveIssueAssignees({
+        currentAgentId: issue.assigneeAgentId,
+        currentUserId: issue.assigneeUserId,
+        assigneeAgentId: effectiveAssigneeAgentId,
+        assigneeUserId: effectiveAssigneeUserId,
+      });
+    } catch (err) {
+      if (err instanceof IssueAssigneeError) {
+        logAgentApiResponse(`/api/issues/${issueId}`, 'PATCH', runCtx, 400, {
+          issueId,
+          error: err.message,
+        });
+        return NextResponse.json({ error: err.message }, { status: 400 });
+      }
+      throw err;
+    }
+    if (resolvedAssignees.assigneeAgentId) {
+      const agent = await db.query.agents.findFirst({
+        where: and(
+          eq(agents.id, resolvedAssignees.assigneeAgentId),
+          eq(agents.companyId, issue.companyId),
+        ),
+      });
+      if (!agent) {
+        logAgentApiResponse(`/api/issues/${issueId}`, 'PATCH', runCtx, 400, {
+          issueId,
+          error: 'Assignee agent not found',
+        });
+        return NextResponse.json({ error: 'Assignee agent not found' }, { status: 400 });
       }
     }
   }
@@ -81,7 +128,10 @@ export async function PATCH(
   const applyStatus = Boolean(body.status) && !(issue.boardApprovalId && body.status === 'blocked');
   if (applyStatus && body.status) updates.status = body.status;
   if (body.priority) updates.priority = body.priority;
-  if (effectiveAssigneeId !== undefined) updates.assigneeAgentId = effectiveAssigneeId;
+  if (resolvedAssignees) {
+    updates.assigneeAgentId = resolvedAssignees.assigneeAgentId;
+    updates.assigneeUserId = resolvedAssignees.assigneeUserId;
+  }
   if (body.blockedByIssueIds !== undefined) updates.blockedByIssueIds = body.blockedByIssueIds;
   if (applyStatus && body.status === 'done') updates.completedAt = new Date();
 
@@ -112,14 +162,16 @@ export async function PATCH(
     details: activityDetails,
   });
 
+  const nextAgentId = resolvedAssignees?.assigneeAgentId;
   const assigneeChanged =
-    effectiveAssigneeId !== undefined &&
-    effectiveAssigneeId !== issue.assigneeAgentId &&
-    effectiveAssigneeId !== runCtx.agentId;
+    nextAgentId !== undefined &&
+    nextAgentId !== null &&
+    nextAgentId !== issue.assigneeAgentId &&
+    nextAgentId !== runCtx.agentId;
 
-  if (assigneeChanged && effectiveAssigneeId) {
+  if (assigneeChanged && nextAgentId) {
     await enqueueHeartbeat({
-      agentId: effectiveAssigneeId,
+      agentId: nextAgentId,
       companyId: runCtx.companyId,
       invocationSource: 'assignment',
       wakeReason: 'assignment',
@@ -133,6 +185,7 @@ export async function PATCH(
     status: updated.status,
     priority: updated.priority,
     assigneeAgentId: updated.assigneeAgentId,
+    assigneeUserId: updated.assigneeUserId,
     updates,
     reviewAssigneeAutoResolved,
     reviewAssigneeReason,

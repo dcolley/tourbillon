@@ -19,6 +19,8 @@ export function parseCompanySettings(raw: unknown): CompanySettings {
     searxngUrl: typeof record.searxngUrl === 'string' ? record.searxngUrl.trim() || undefined : undefined,
     searxngApiKey:
       typeof record.searxngApiKey === 'string' ? record.searxngApiKey.trim() || undefined : undefined,
+    tavilyApiKey:
+      typeof record.tavilyApiKey === 'string' ? record.tavilyApiKey.trim() || undefined : undefined,
   };
 }
 
@@ -34,6 +36,9 @@ export function mergeCompanySettings(
   }
   if (patch.searxngApiKey !== undefined) {
     next.searxngApiKey = patch.searxngApiKey.trim() || undefined;
+  }
+  if (patch.tavilyApiKey !== undefined) {
+    next.tavilyApiKey = patch.tavilyApiKey.trim() || undefined;
   }
   if (patch.mcpCredentials !== undefined) {
     const merged = { ...base.mcpCredentials, ...patch.mcpCredentials };
@@ -87,4 +92,27 @@ export function isSearxngConfigured(
   agentRuntime?: AgentRuntimeConfig | null,
 ): boolean {
   return resolveSearxngBaseUrl(companySettings, agentRuntime) !== null;
+}
+
+export function resolveTavilyApiKey(
+  companySettings?: CompanySettings | null,
+  agentRuntime?: AgentRuntimeConfig | null,
+): string | null {
+  const fromAgent = agentRuntime?.tavilyApiKey?.trim();
+  if (fromAgent) return fromAgent;
+
+  const fromCompany = companySettings?.tavilyApiKey?.trim();
+  if (fromCompany) return fromCompany;
+
+  const fromEnv = process.env.TAVILY_API_KEY?.trim();
+  if (fromEnv) return fromEnv;
+
+  return null;
+}
+
+export function isTavilyConfigured(
+  companySettings?: CompanySettings | null,
+  agentRuntime?: AgentRuntimeConfig | null,
+): boolean {
+  return resolveTavilyApiKey(companySettings, agentRuntime) !== null;
 }

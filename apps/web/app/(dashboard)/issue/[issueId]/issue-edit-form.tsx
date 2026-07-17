@@ -4,6 +4,8 @@ import { startTransition, useEffect, useState, useActionState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useFormStatus } from 'react-dom';
 import type { Issue } from '@tourbillon/db';
+import { BOARD_ASSIGNEE_SELECT_VALUE, BOARD_DISPLAY_NAME } from '@tourbillon/shared/constants';
+import { formSelectValueFromAssignees } from '@tourbillon/shared/issue-assignee';
 import type { GoalOption } from '@/lib/goals';
 import type { ProjectOption } from '@/lib/projects';
 import type { IssueAgentOption } from '@/lib/issues';
@@ -177,18 +179,21 @@ export function IssueEditForm({
           </div>
         )}
 
-        {agents.length > 0 && (
-          <div className="space-y-1.5">
+        <div className="space-y-1.5">
             <label htmlFor="issue-assignee" className="text-sm font-medium">
-              Assign to agent
+              Assignee
             </label>
             <select
               id="issue-assignee"
               name="assigneeAgentId"
-              defaultValue={issue.assigneeAgentId ?? ''}
+              defaultValue={formSelectValueFromAssignees(
+                issue.assigneeAgentId,
+                issue.assigneeUserId,
+              )}
               className={selectClassName}
             >
               <option value="">Unassigned</option>
+              <option value={BOARD_ASSIGNEE_SELECT_VALUE}>{BOARD_DISPLAY_NAME}</option>
               {agents.map((agent) => (
                 <option key={agent.id} value={agent.id}>
                   {agent.name} ({agent.urlKey})
@@ -196,7 +201,6 @@ export function IssueEditForm({
               ))}
             </select>
           </div>
-        )}
 
         <div className="flex justify-end pt-2">
           <SaveButton />

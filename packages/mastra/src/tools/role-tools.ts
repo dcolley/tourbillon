@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { extractToolRuntimeContext, tracedAgentFetch } from './api-client';
 import { NITTER_TOOLS } from './nitter-tools';
 import { SEARXNG_TOOLS } from './searxng-tools';
+import { TAVILY_TOOLS } from './tavily-tools';
 
 const addCommentTool = createTool({
   id: 'addComment',
@@ -75,5 +76,6 @@ export const ROLE_TOOLS: Record<string, Record<string, unknown>> = {
   comments: { addCommentTool },
   approvals: { createApprovalTool },
   'web-search': SEARXNG_TOOLS,
+  'web-search-tavily': TAVILY_TOOLS,
   nitter: NITTER_TOOLS,
 };

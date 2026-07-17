@@ -14,6 +14,7 @@ import {
 import type { LlmProvider } from '@tourbillon/db';
 import { createCoalescingFetch } from './coalesce-system-messages';
 import { createNousInferenceFetch } from './nous-inference-fetch';
+import { createReasoningTextFetch } from './reasoning-text-fetch';
 
 const providerCache = new Map<string, OpenAIProvider>();
 
@@ -44,9 +45,11 @@ function getOpenAIProvider(
     baseURL: config.baseURL,
     name: config.provider,
     headers: buildProviderRequestHeaders(config),
-    fetch: createCoalescingFetch(
-      createNousInferenceFetch(fetch, config.baseURL),
-      shouldCoalesceSystemMessages(config.provider, config.apiMode),
+    fetch: createReasoningTextFetch(
+      createCoalescingFetch(
+        createNousInferenceFetch(fetch, config.baseURL),
+        shouldCoalesceSystemMessages(config.provider, config.apiMode),
+      ),
     ),
   });
   providerCache.set(key, provider);

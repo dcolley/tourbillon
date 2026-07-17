@@ -16,6 +16,10 @@ import type { IssuePriority, IssueStatus } from '@tourbillon/db';
 import { assertCompanyAccess, getActiveCompany } from './company';
 import { validateGoalId } from './goals';
 import { validateProjectId } from './projects';
+import {
+  IssueAssigneeError,
+  resolveIssueAssignees,
+} from '@tourbillon/shared';
 import { enqueueHeartbeat } from '@/lib/wake-client';
 import { findHeartbeatJobsForTask, type JobSummary } from './jobs';
 import {
@@ -53,6 +57,7 @@ export interface CreateIssueInput {
   priority?: string;
   status?: string;
   assigneeAgentId?: string | null;
+  assigneeUserId?: string | null;
   goalId?: string | null;
   projectId?: string | null;
   companyId?: string;
@@ -82,6 +87,7 @@ export async function logIssueCreated(
       goalId: issue.goalId,
       projectId: issue.projectId,
       assigneeAgentId: issue.assigneeAgentId,
+      assigneeUserId: issue.assigneeUserId,
       parentId: issue.parentId,
       createdBy: actor.name ?? actor.id,
       createdByType: actor.type,
@@ -123,9 +129,21 @@ export async function createIssue(input: CreateIssueInput): Promise<Issue> {
     throw new IssueValidationError('Invalid priority.');
   }
 
-  const status = (
-    input.assigneeAgentId ? (input.status ?? 'todo') : 'backlog'
-  ) as IssueStatus;
+  let assignees;
+  try {
+    assignees = resolveIssueAssignees({
+      assigneeAgentId: input.assigneeAgentId,
+      assigneeUserId: input.assigneeUserId,
+    });
+  } catch (err) {
+    if (err instanceof IssueAssigneeError) {
+      throw new IssueValidationError(err.message);
+    }
+    throw err;
+  }
+
+  const hasAssignee = Boolean(assignees.assigneeAgentId || assignees.assigneeUserId);
+  const status = (hasAssignee ? (input.status ?? 'todo') : 'backlog') as IssueStatus;
   if (!STATUSES.includes(status)) {
     throw new IssueValidationError('Invalid status.');
   }
@@ -136,9 +154,9 @@ export async function createIssue(input: CreateIssueInput): Promise<Issue> {
 
   if (!company) throw new IssueValidationError('Company not found.');
 
-  if (input.assigneeAgentId) {
+  if (assignees.assigneeAgentId) {
     const agent = await db.query.agents.findFirst({
-      where: and(eq(agents.id, input.assigneeAgentId), eq(agents.companyId, company.id)),
+      where: and(eq(agents.id, assignees.assigneeAgentId), eq(agents.companyId, company.id)),
     });
     if (!agent) throw new IssueValidationError('Assignee agent not found.');
   }
@@ -166,16 +184,17 @@ export async function createIssue(input: CreateIssueInput): Promise<Issue> {
       description: input.description?.trim() || null,
       status,
       priority,
-      assigneeAgentId: input.assigneeAgentId ?? null,
+      assigneeAgentId: assignees.assigneeAgentId,
+      assigneeUserId: assignees.assigneeUserId,
       goalId,
       projectId,
       source: 'manual',
     })
     .returning();
 
-  if (input.assigneeAgentId) {
+  if (assignees.assigneeAgentId) {
     await enqueueHeartbeat({
-      agentId: input.assigneeAgentId,
+      agentId: assignees.assigneeAgentId,
       companyId: company.id,
       invocationSource: 'assignment',
       wakeReason: 'assignment',
@@ -276,6 +295,7 @@ export interface UpdateIssueInput {
   priority?: string;
   status?: string;
   assigneeAgentId?: string | null;
+  assigneeUserId?: string | null;
   goalId?: string | null;
   projectId?: string | null;
 }
@@ -349,17 +369,39 @@ export async function updateIssue(issueId: string, input: UpdateIssueInput): Pro
     }
   }
 
-  if (input.assigneeAgentId !== undefined) {
-    const assigneeAgentId = input.assigneeAgentId || null;
-    if (assigneeAgentId) {
+  const assigneeTouched =
+    input.assigneeAgentId !== undefined || input.assigneeUserId !== undefined;
+  if (assigneeTouched) {
+    let assignees;
+    try {
+      assignees = resolveIssueAssignees({
+        currentAgentId: issue.assigneeAgentId,
+        currentUserId: issue.assigneeUserId,
+        assigneeAgentId: input.assigneeAgentId,
+        assigneeUserId: input.assigneeUserId,
+      });
+    } catch (err) {
+      if (err instanceof IssueAssigneeError) {
+        throw new IssueValidationError(err.message);
+      }
+      throw err;
+    }
+    if (assignees.assigneeAgentId) {
       const agent = await db.query.agents.findFirst({
-        where: and(eq(agents.id, assigneeAgentId), eq(agents.companyId, issue.companyId)),
+        where: and(
+          eq(agents.id, assignees.assigneeAgentId),
+          eq(agents.companyId, issue.companyId),
+        ),
       });
       if (!agent) throw new IssueValidationError('Assignee agent not found.');
     }
-    if (assigneeAgentId !== issue.assigneeAgentId) {
-      updates.assigneeAgentId = assigneeAgentId;
-      changed.assigneeAgentId = assigneeAgentId;
+    if (assignees.assigneeAgentId !== issue.assigneeAgentId) {
+      updates.assigneeAgentId = assignees.assigneeAgentId;
+      changed.assigneeAgentId = assignees.assigneeAgentId;
+    }
+    if (assignees.assigneeUserId !== issue.assigneeUserId) {
+      updates.assigneeUserId = assignees.assigneeUserId;
+      changed.assigneeUserId = assignees.assigneeUserId;
     }
   }
 
@@ -401,12 +443,13 @@ export async function updateIssue(issueId: string, input: UpdateIssueInput): Pro
     details: changed,
   });
 
-  if (
-    input.assigneeAgentId &&
-    input.assigneeAgentId !== issue.assigneeAgentId
-  ) {
+  const nextAgentId =
+    (changed.assigneeAgentId as string | null | undefined) !== undefined
+      ? (changed.assigneeAgentId as string | null)
+      : issue.assigneeAgentId;
+  if (nextAgentId && nextAgentId !== issue.assigneeAgentId) {
     await enqueueHeartbeat({
-      agentId: input.assigneeAgentId,
+      agentId: nextAgentId,
       companyId: issue.companyId,
       invocationSource: 'assignment',
       wakeReason: 'assignment',
@@ -429,6 +472,8 @@ export async function listIssues(opts: {
   statuses: readonly string[];
   page?: number;
   pageSize?: number;
+  /** When set, only issues assigned to this user id (e.g. board). */
+  assigneeUserId?: string;
 }): Promise<IssueListResult> {
   const page = Math.max(0, opts.page ?? 0);
   const pageSize = opts.pageSize ?? ISSUE_LIST_PAGE_SIZE;
@@ -438,6 +483,7 @@ export async function listIssues(opts: {
   const where = and(
     eq(issues.companyId, company.id),
     statusList.length > 0 ? inArray(issues.status, statusList) : undefined,
+    opts.assigneeUserId ? eq(issues.assigneeUserId, opts.assigneeUserId) : undefined,
   );
 
   const [rows, countRow] = await Promise.all([

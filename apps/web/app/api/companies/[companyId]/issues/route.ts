@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db, issues, companies, agents } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
+import { IssueAssigneeError, resolveIssueAssignees } from '@tourbillon/shared';
 import { validateRunToken } from '@/lib/auth/run-token';
 import { validateSchedulerKey } from '@/lib/auth/scheduler-key';
 import { logIssueCreated } from '@/lib/issues';
@@ -24,12 +25,13 @@ export async function POST(
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
   }
 
-  const body = await req.json() as {
+  const body = (await req.json()) as {
     title: string;
     description?: string;
     parentId?: string;
     goalId?: string;
     assigneeAgentId?: string;
+    assigneeUserId?: string;
     priority?: string;
     blockedByIssueIds?: string[];
     billingCode?: string;
@@ -37,9 +39,31 @@ export async function POST(
     source?: string;
   };
 
+  let assignees;
+  try {
+    assignees = resolveIssueAssignees({
+      assigneeAgentId: body.assigneeAgentId,
+      assigneeUserId: body.assigneeUserId,
+    });
+  } catch (err) {
+    if (err instanceof IssueAssigneeError) {
+      return NextResponse.json({ error: err.message }, { status: 400 });
+    }
+    throw err;
+  }
+
   // Generate identifier: ACME-42
   const company = await db.query.companies.findFirst({ where: eq(companies.id, companyId) });
   if (!company) return NextResponse.json({ error: 'Company not found' }, { status: 404 });
+
+  if (assignees.assigneeAgentId) {
+    const agent = await db.query.agents.findFirst({
+      where: eq(agents.id, assignees.assigneeAgentId),
+    });
+    if (!agent || agent.companyId !== companyId) {
+      return NextResponse.json({ error: 'Assignee agent not found' }, { status: 400 });
+    }
+  }
 
   const [updatedCompany] = await db
     .update(companies)
@@ -48,23 +72,28 @@ export async function POST(
     .returning();
 
   const identifier = `${company.issuePrefix}-${updatedCompany.issueCounter}`;
-  const status = body.assigneeAgentId ? 'todo' : 'backlog';
+  const hasAssignee = Boolean(assignees.assigneeAgentId || assignees.assigneeUserId);
+  const status = hasAssignee ? 'todo' : 'backlog';
 
-  const [newIssue] = await db.insert(issues).values({
-    companyId: companyId,
-    identifier,
-    title: body.title,
-    description: body.description,
-    status,
-    priority: (body.priority as 'critical' | 'high' | 'medium' | 'low') ?? 'medium',
-    parentId: body.parentId,
-    goalId: body.goalId,
-    assigneeAgentId: body.assigneeAgentId,
-    blockedByIssueIds: body.blockedByIssueIds ?? [],
-    billingCode: body.billingCode ?? 'default',
-    routineId: body.routineId,
-    source: (body.source as 'agent' | 'routine' | 'manual') ?? 'agent',
-  }).returning();
+  const [newIssue] = await db
+    .insert(issues)
+    .values({
+      companyId: companyId,
+      identifier,
+      title: body.title,
+      description: body.description,
+      status,
+      priority: (body.priority as 'critical' | 'high' | 'medium' | 'low') ?? 'medium',
+      parentId: body.parentId,
+      goalId: body.goalId,
+      assigneeAgentId: assignees.assigneeAgentId,
+      assigneeUserId: assignees.assigneeUserId,
+      blockedByIssueIds: body.blockedByIssueIds ?? [],
+      billingCode: body.billingCode ?? 'default',
+      routineId: body.routineId,
+      source: (body.source as 'agent' | 'routine' | 'manual') ?? 'agent',
+    })
+    .returning();
 
   if (runCtx) {
     const creator = await db.query.agents.findFirst({ where: eq(agents.id, runCtx.agentId) });
@@ -83,10 +112,9 @@ export async function POST(
     );
   }
 
-  // Wake the assignee agent
-  if (body.assigneeAgentId) {
+  if (assignees.assigneeAgentId) {
     await enqueueHeartbeat({
-      agentId: body.assigneeAgentId,
+      agentId: assignees.assigneeAgentId,
       companyId: companyId,
       invocationSource: 'assignment',
       wakeReason: 'assignment',
