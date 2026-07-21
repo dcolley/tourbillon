@@ -44,7 +44,19 @@ export default async function HeartbeatRunPage({
         <h1 className="text-2xl font-bold tracking-tight mt-2">Heartbeat</h1>
         <p className="font-mono text-sm text-muted-foreground mt-1 break-all">{run.id}</p>
         <p className="text-muted-foreground">
-          {agent ? `${agent.name} · ${run.invocationSource}` : run.invocationSource}
+          {agent ? (
+            <>
+              <Link
+                href={`/agent/${agent.urlKey}`}
+                className="hover:text-foreground underline-offset-4 hover:underline"
+              >
+                {agent.name}
+              </Link>
+              {` · ${run.invocationSource}`}
+            </>
+          ) : (
+            run.invocationSource
+          )}
         </p>
         {taskId && (
           <p className="text-sm mt-1">

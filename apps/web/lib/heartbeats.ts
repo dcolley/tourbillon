@@ -192,6 +192,27 @@ export function heartbeatJobHref(run: HeartbeatRun): string | null {
   return `/heartbeat/${run.id}`;
 }
 
+/** Latest queued or running heartbeat for an agent, if any. */
+export async function getInFlightHeartbeatRun(
+  agentId: string,
+): Promise<{ id: string; status: 'queued' | 'running' } | null> {
+  const [run] = await db
+    .select({ id: heartbeatRuns.id, status: heartbeatRuns.status })
+    .from(heartbeatRuns)
+    .where(
+      and(
+        eq(heartbeatRuns.agentId, agentId),
+        inArray(heartbeatRuns.status, ['queued', 'running']),
+      ),
+    )
+    .orderBy(desc(heartbeatRuns.startedAt))
+    .limit(1);
+
+  if (!run) return null;
+  if (run.status !== 'queued' && run.status !== 'running') return null;
+  return { id: run.id, status: run.status };
+}
+
 export async function getHeartbeatRunByJobId(_jobId: string): Promise<HeartbeatRunWithAgent | null> {
   return null;
 }

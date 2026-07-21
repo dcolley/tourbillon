@@ -9,11 +9,11 @@ import { AgentDisambiguation } from '@/components/agent-disambiguation';
 import { DeepLinkCompanySync } from '@/components/deep-link-company-sync';
 import { getCompanyById } from '@/lib/company';
 import { parseCompanyIdFromSearchParams } from '@/lib/company-link';
-import { deleteAgentAction, triggerAgentHeartbeatAction, updateAgentRoleAction } from '../actions';
+import { deleteAgentAction, updateAgentRoleAction } from '../actions';
 import { getLlmProviderRecordById, listLlmProvidersPublic } from '@/lib/llm-providers';
 import { AgentModelForm } from './agent-model-form';
 import { AgentModelSettingsForm } from './agent-model-settings-form';
-import { heartbeatJobHref } from '@/lib/heartbeats';
+import { getInFlightHeartbeatRun, heartbeatJobHref } from '@/lib/heartbeats';
 import { listRoutinesForAgent, setRoutineEnabled } from '@/lib/routines';
 import { listGoalOptions } from '@/lib/goals';
 import { listProjectOptions } from '@/lib/projects';
@@ -22,6 +22,7 @@ import { AgentObservabilityTab } from './agent-observability-tab';
 import { AgentCapabilitiesForm } from './agent-capabilities-form';
 import { AgentCodeExecutionForm } from './agent-code-execution-form';
 import { AgentHeartbeatForm } from './agent-heartbeat-form';
+import { AgentHeartbeatHeaderActions } from './agent-heartbeat-header-actions';
 
 async function updateHeartbeatConfig(formData: FormData) {
   'use server';
@@ -273,8 +274,17 @@ export default async function AgentDetailPage({
 
   const company = await getCompanyById(agent.companyId);
 
-  const [directReports, companyAgents, recentRuns, agentRoutines, goals, projects, providerList, providerRecord] =
-    await Promise.all([
+  const [
+    directReports,
+    companyAgents,
+    recentRuns,
+    inFlightHeartbeat,
+    agentRoutines,
+    goals,
+    projects,
+    providerList,
+    providerRecord,
+  ] = await Promise.all([
     db.select().from(agents).where(eq(agents.reportsToId, agent.id)),
     db
       .select({ id: agents.id, name: agents.name, urlKey: agents.urlKey, title: agents.title })
@@ -287,6 +297,7 @@ export default async function AgentDetailPage({
       .where(eq(heartbeatRuns.agentId, agent.id))
       .orderBy(desc(heartbeatRuns.startedAt))
       .limit(5),
+    getInFlightHeartbeatRun(agent.id),
     listRoutinesForAgent(agent.id),
     listGoalOptions(false, agent.companyId),
     listProjectOptions(undefined, agent.companyId),
@@ -342,18 +353,13 @@ export default async function AgentDetailPage({
           </div>
           <div className="flex items-center gap-2 shrink-0">
             <AgentStatusBadge status={agent.status} />
-            <form action={triggerAgentHeartbeatAction}>
-              <input type="hidden" name="agentId" value={agent.id} />
-              <input type="hidden" name="companyId" value={agent.companyId} />
-              <input type="hidden" name="urlKey" value={agent.urlKey} />
-              <button
-                type="submit"
-                disabled={!canRunHeartbeat}
-                className="inline-flex items-center justify-center rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Run heartbeat
-              </button>
-            </form>
+            <AgentHeartbeatHeaderActions
+              agentId={agent.id}
+              companyId={agent.companyId}
+              urlKey={agent.urlKey}
+              canRunHeartbeat={canRunHeartbeat}
+              initialInFlight={inFlightHeartbeat}
+            />
           </div>
         </div>
       </div>
