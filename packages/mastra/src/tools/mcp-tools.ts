@@ -2,13 +2,21 @@ import { MCPClient } from '@mastra/mcp';
 import type { Agent as AgentRecord } from '@tourbillon/db';
 import {
   getMcpServerDefinition,
-  getMcpServerForToolset,
   resolveMcpCredential,
   resolveMcpServerUrl,
+  resolveAgentMcpServerIds,
+  agentNeedsMcpTools,
   type AgentRuntimeConfig,
   type CompanySettings,
 } from '@tourbillon/shared';
-import { ensureCompanyWorkspace, getCompanyWorkspaceDir } from '@tourbillon/shared/company-workspace';
+import {
+  ensureAgentMemoryDir,
+  ensureCompanyMemoryDir,
+  ensureCompanyWorkspace,
+  getAgentMemoryFilePath,
+  getCompanyMemoryFilePath,
+  getCompanyWorkspaceDir,
+} from '@tourbillon/shared/company-workspace';
 import { filterMcpTools } from './mcp-tool-filter';
 
 const mcpClientCache = new Map<string, MCPClient>();
@@ -23,17 +31,28 @@ function buildHttpFetch(apiKey: string | undefined) {
   };
 }
 
+export interface GetMcpClientOptions {
+  companyId: string;
+  urlKey?: string;
+  apiKey?: string;
+}
+
 async function getMCPClient(
   serverId: string,
-  companyId: string,
-  apiKey?: string,
+  options: GetMcpClientOptions,
 ): Promise<MCPClient | null> {
+  const { companyId, urlKey, apiKey } = options;
+
   const cacheKey =
     serverId === 'filesystem-local'
       ? `${serverId}:${companyId}`
-      : serverId === 'buffer-mcp' && apiKey
-        ? `${serverId}:${apiKey.slice(0, 8)}`
-        : serverId;
+      : serverId === 'memory-mcp-private' && urlKey
+        ? `${serverId}:${companyId}:${urlKey}`
+        : serverId === 'memory-mcp-company'
+          ? `${serverId}:${companyId}`
+          : serverId === 'buffer-mcp' && apiKey
+            ? `${serverId}:${apiKey.slice(0, 8)}`
+            : serverId;
 
   if (mcpClientCache.has(cacheKey)) return mcpClientCache.get(cacheKey)!;
 
@@ -78,6 +97,33 @@ async function getMCPClient(
         },
       },
     });
+  } else if (serverId === 'memory-mcp-private') {
+    if (!urlKey) return null;
+    await ensureAgentMemoryDir(companyId, urlKey);
+    const memoryFilePath = getAgentMemoryFilePath(companyId, urlKey);
+    client = new MCPClient({
+      id: `memory-mcp-private-${companyId}-${urlKey}`,
+      servers: {
+        memory_private: {
+          command: 'npx',
+          args: ['-y', '@modelcontextprotocol/server-memory'],
+          env: { MEMORY_FILE_PATH: memoryFilePath },
+        },
+      },
+    });
+  } else if (serverId === 'memory-mcp-company') {
+    await ensureCompanyMemoryDir(companyId);
+    const memoryFilePath = getCompanyMemoryFilePath(companyId);
+    client = new MCPClient({
+      id: `memory-mcp-company-${companyId}`,
+      servers: {
+        memory_company: {
+          command: 'npx',
+          args: ['-y', '@modelcontextprotocol/server-memory'],
+          env: { MEMORY_FILE_PATH: memoryFilePath },
+        },
+      },
+    });
   }
 
   if (!client) return null;
@@ -85,6 +131,8 @@ async function getMCPClient(
   mcpClientCache.set(cacheKey, client);
   return client;
 }
+
+export { resolveAgentMcpServerIds, agentNeedsMcpTools };
 
 export interface BuildMCPToolsOptions {
   allowedMcpServerIds?: string[];
@@ -98,24 +146,10 @@ export async function buildMCPTools(
   const tools: Record<string, unknown> = {};
   const companySettings = options.companySettings ?? null;
   const runtimeConfig = agentRecord.runtimeConfig as AgentRuntimeConfig;
-  const allowedMcpServerIds = options.allowedMcpServerIds ?? [];
-
-  const serverIds = new Set<string>();
-
-  const bufferDef = getMcpServerForToolset('buffer');
-  if (bufferDef && agentRecord.assignedToolsets?.includes('buffer')) {
-    serverIds.add(bufferDef.id);
-  }
-
-  for (const serverId of agentRecord.mcpServerIds ?? []) {
-    if (serverId === 'searxng-local') continue;
-    serverIds.add(serverId);
-  }
-
-  const allowed =
-    allowedMcpServerIds.length > 0
-      ? [...serverIds].filter((id) => allowedMcpServerIds.includes(id))
-      : [...serverIds];
+  const allowed = resolveAgentMcpServerIds(agentRecord, {
+    allowedMcpServerIds: options.allowedMcpServerIds,
+    agentRuntime: runtimeConfig,
+  });
 
   for (const serverId of allowed) {
     const def = getMcpServerDefinition(serverId);
@@ -132,7 +166,11 @@ export async function buildMCPTools(
       apiKey = resolved || undefined;
     }
 
-    const client = await getMCPClient(serverId, agentRecord.companyId, apiKey);
+    const client = await getMCPClient(serverId, {
+      companyId: agentRecord.companyId,
+      urlKey: agentRecord.urlKey,
+      apiKey,
+    });
     if (!client) continue;
 
     try {
@@ -145,4 +183,119 @@ export async function buildMCPTools(
   }
 
   return tools;
+}
+
+export interface McpToolCatalogEntry {
+  name: string;
+  description?: string;
+}
+
+export interface McpServerToolCatalog {
+  serverId: string;
+  label: string;
+  tools: McpToolCatalogEntry[];
+  /** Registry defaults for UI when no agent policy.allow is stored. */
+  toolWhitelist?: string[];
+  toolBlacklist?: string[];
+  error?: string;
+}
+
+export interface ListMcpToolsForAgentOptions {
+  allowedMcpServerIds?: string[];
+  companySettings?: CompanySettings | null;
+  /** Preview unsaved toolset selection. */
+  assignedToolsets?: string[];
+  mcpServerIds?: string[];
+  /** Preview unsaved knowledge-graph mounts. */
+  knowledgeGraph?: AgentRuntimeConfig['knowledgeGraph'];
+}
+
+export async function listMcpToolsForAgent(
+  agentRecord: AgentRecord,
+  options: ListMcpToolsForAgentOptions = {},
+): Promise<McpServerToolCatalog[]> {
+  const companySettings = options.companySettings ?? null;
+  const runtimeConfig = agentRecord.runtimeConfig as AgentRuntimeConfig;
+  const previewRuntime: AgentRuntimeConfig =
+    options.knowledgeGraph !== undefined
+      ? { ...runtimeConfig, knowledgeGraph: options.knowledgeGraph }
+      : runtimeConfig;
+
+  const allowed = resolveAgentMcpServerIds(agentRecord, {
+    allowedMcpServerIds: options.allowedMcpServerIds,
+    assignedToolsets: options.assignedToolsets,
+    mcpServerIds: options.mcpServerIds,
+    agentRuntime: previewRuntime,
+  });
+
+  const results: McpServerToolCatalog[] = [];
+
+  for (const serverId of allowed) {
+    const def = getMcpServerDefinition(serverId);
+    if (!def) {
+      results.push({
+        serverId,
+        label: serverId,
+        tools: [],
+        error: 'Unknown MCP server id',
+      });
+      continue;
+    }
+
+    const base: McpServerToolCatalog = {
+      serverId,
+      label: def.label,
+      tools: [],
+      toolWhitelist: def.toolWhitelist,
+      toolBlacklist: def.toolBlacklist,
+    };
+
+    let apiKey: string | undefined;
+    if (def.auth) {
+      const resolved = resolveMcpCredential({
+        serverId,
+        agentRuntime: runtimeConfig,
+        companySettings,
+      });
+      if (resolved === null) {
+        results.push({
+          ...base,
+          error: `Missing credentials for ${def.label} (configure API key)`,
+        });
+        continue;
+      }
+      apiKey = resolved || undefined;
+    }
+
+    try {
+      const client = await getMCPClient(serverId, {
+        companyId: agentRecord.companyId,
+        urlKey: agentRecord.urlKey,
+        apiKey,
+      });
+      if (!client) {
+        results.push({ ...base, error: `Failed to connect to ${def.label}` });
+        continue;
+      }
+
+      const clientTools = await client.listTools();
+      const tools: McpToolCatalogEntry[] = Object.entries(clientTools).map(([name, tool]) => {
+        const description =
+          tool &&
+          typeof tool === 'object' &&
+          'description' in tool &&
+          typeof (tool as { description?: unknown }).description === 'string'
+            ? (tool as { description: string }).description
+            : undefined;
+        return { name, description };
+      });
+
+      results.push({ ...base, tools });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      results.push({ ...base, error: message });
+    }
+  }
+
+  return results;
 }

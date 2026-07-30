@@ -89,12 +89,20 @@ export interface AgentRuntimeConfig {
   searxngApiKey?: string;
   /** Per-agent Tavily API key override. */
   tavilyApiKey?: string;
-  /** Per-server MCP tool allow/deny lists (Buffer). */
+  /** Per-server MCP tool allow/deny lists (agent capabilities UI). */
   mcpToolPolicy?: Record<string, { allow?: string[]; deny?: string[] }>;
   /** Per-agent sandbox overrides for code-execution toolset. */
   codeExecution?: {
     timeoutMs?: number;
     isolation?: 'none' | 'seatbelt' | 'bwrap';
+  };
+  /**
+   * Knowledge-graph memory mounts (when `knowledge-graph` toolset is enabled).
+   * Defaults: private on, company off.
+   */
+  knowledgeGraph?: {
+    private?: boolean;
+    company?: boolean;
   };
 }
 

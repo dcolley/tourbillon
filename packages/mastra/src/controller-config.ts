@@ -20,6 +20,7 @@ import {
 import { getLanguageModelForAgent, llmProviderRowToRecord } from './provider';
 import { resolveAgentGenerationOptions, toMastraDefaultOptions } from './model-settings';
 import { buildCodeExecutionWorkspace } from './execution-workspace';
+import { agentNeedsMcpTools } from '@tourbillon/shared';
 import { buildHeartbeatInputProcessors } from './heartbeat-processors';
 
 export type { AgentController, AgentControllerEvent, AgentControllerMode, Session };
@@ -63,9 +64,7 @@ export function buildControllerPermissionRules(
   agentRecord: AgentRecord,
   codeExecutionEnabled: boolean,
 ) {
-  const mcpEnabled =
-    (agentRecord.mcpServerIds?.length ?? 0) > 0 ||
-    (agentRecord.assignedToolsets?.includes('buffer') ?? false);
+  const mcpEnabled = agentNeedsMcpTools(agentRecord);
 
   return {
     categories: {

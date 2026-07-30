@@ -28,6 +28,9 @@
       ],
       "@tourbillon/mastra": [
         "../../packages/mastra/src/index.ts"
+      ],
+      "@tourbillon/mastra/mcp-tools": [
+        "../../packages/mastra/src/tools/mcp-tools.ts"
       ]
     },
     "allowJs": true,

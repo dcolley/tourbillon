@@ -4,10 +4,11 @@
  * (e.g. Traders Corner) do not consume the context window every wake.
  */
 import type { Agent as AgentRecord } from '@tourbillon/db';
-import { loadSkillsForAgent } from './skill-loader';
+import { CONTROL_PLANE_SKILL_SLUG } from '@tourbillon/shared';
+import { loadSkillsForAgent, readSkillFile } from './skill-loader';
 
 /** Skills whose full body is injected into the system prompt every wake. */
-export const ALWAYS_INLINE_SKILL_SLUGS = new Set(['control-plane']);
+export const ALWAYS_INLINE_SKILL_SLUGS = new Set([CONTROL_PLANE_SKILL_SLUG]);
 
 export interface SkillCatalogEntry {
   slug: string;
@@ -46,6 +47,25 @@ export async function prepareAgentSkills(agentRecord: AgentRecord): Promise<Prep
     });
   }
 
+  // Hard guarantee: every agent gets control-plane inlined in the system prompt.
+  if (!alwaysInline.some((s) => s.slug === CONTROL_PLANE_SKILL_SLUG)) {
+    const bundled = await readSkillFile(CONTROL_PLANE_SKILL_SLUG, agentRecord.role);
+    if (!bundled) {
+      throw new Error(
+        `Failed to load baked-in skill "${CONTROL_PLANE_SKILL_SLUG}" for agent ${agentRecord.urlKey}`,
+      );
+    }
+    alwaysInline.unshift(bundled);
+    if (!catalog.some((c) => c.slug === CONTROL_PLANE_SKILL_SLUG)) {
+      catalog.unshift({
+        slug: bundled.slug,
+        description: extractSkillDescription(bundled.content),
+        approxChars: bundled.content.length,
+        alwaysInline: true,
+      });
+    }
+  }
+
   return { alwaysInline, catalog };
 }
 
@@ -57,13 +77,14 @@ export function formatSkillsCatalogSection(catalog: SkillCatalogEntry[]): string
   const lines = [
     '## Available Skills (on demand)',
     '',
-    'Only skills marked always-inline are fully included above. For the rest, call `listSkills` or `getSkill` before following that methodology.',
+    `\`${CONTROL_PLANE_SKILL_SLUG}\` (Control Plane Operations) is baked into every agent and already fully included above — follow it on every wake. Do not call getSkill for it.`,
+    'For other skills, call `listSkills` or `getSkill` before following that methodology.',
     'Do not guess skill contents — load them when needed.',
     '',
   ];
 
   for (const entry of catalog) {
-    const tag = entry.alwaysInline ? ' [already in system prompt]' : '';
+    const tag = entry.alwaysInline ? ' [baked into system prompt]' : '';
     lines.push(
       `- **${entry.slug}** (~${entry.approxChars} chars)${tag}: ${entry.description}`,
     );

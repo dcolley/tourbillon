@@ -1,5 +1,5 @@
 import { getMastraInstance } from '@tourbillon/mastra';
-import { createTraceLogger, isObservabilityEnabled } from '@tourbillon/shared';
+import { createTraceLogger, isObservabilityEnabled, isPhoenixCollectorEnabled } from '@tourbillon/shared';
 import { startWakeServer, startStaleSweepInterval } from './wake-server';
 import { bootMastraSchedules } from './schedule-boot';
 
@@ -29,6 +29,7 @@ async function main(): Promise<void> {
     wakePort: process.env.SCHEDULER_WAKE_PORT ?? '3003',
     redisUrl: process.env.REDIS_URL,
     observabilityEnabled: isObservabilityEnabled(),
+    phoenixCollectorEnabled: isPhoenixCollectorEnabled(),
   });
 }
 

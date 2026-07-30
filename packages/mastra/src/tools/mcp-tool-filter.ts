@@ -10,8 +10,10 @@ function isDenied(toolName: string, denyList: string[] | undefined): boolean {
   return denyList.some((pattern) => matchesToolName(toolName, pattern));
 }
 
+/** `undefined` = no allow filter; `[]` = allow none; non-empty = allow matching names. */
 function isAllowed(toolName: string, allowList: string[] | undefined): boolean {
-  if (!allowList?.length) return true;
+  if (allowList === undefined) return true;
+  if (allowList.length === 0) return false;
   return allowList.some((pattern) => matchesToolName(toolName, pattern));
 }
 
@@ -20,9 +22,13 @@ export function filterMcpTools(
   serverDef: McpServerDefinition,
   agentRuntime?: AgentRuntimeConfig | null,
 ): Record<string, unknown> {
-  const policy = agentRuntime?.mcpToolPolicy?.[serverDef.id];
+  const policy =
+    agentRuntime?.mcpToolPolicy?.[serverDef.id] ??
+    (serverDef.id === 'memory-mcp-private'
+      ? agentRuntime?.mcpToolPolicy?.['memory-mcp']
+      : undefined);
   const deny = [...(serverDef.toolBlacklist ?? []), ...(policy?.deny ?? [])];
-  const allow = policy?.allow?.length ? policy.allow : serverDef.toolWhitelist;
+  const allow = policy?.allow !== undefined ? policy.allow : serverDef.toolWhitelist;
 
   const filtered: Record<string, unknown> = {};
   for (const [name, tool] of Object.entries(tools)) {

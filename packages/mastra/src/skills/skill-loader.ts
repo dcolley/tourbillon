@@ -7,13 +7,27 @@ import {
   readAgentSkillFile,
   readCompanySkillFile,
 } from '@tourbillon/shared/company-workspace';
+import { getMonorepoRoot, resolveKnowledgeGraphMounts, CONTROL_PLANE_SKILL_SLUG, type AgentRuntimeConfig } from '@tourbillon/shared';
 
-const SKILLS_DIR = path.join(process.cwd(), 'packages/skills');
-const TEMPLATE_SKILLS_DIR = path.join(process.cwd(), 'packages/mastra/src/skills');
+/** Bundled methodology skills — always resolve from repo root, not process.cwd(). */
+function getBundledSkillsDir(): string {
+  const fromEnv = process.env.SKILLS_DIR?.trim();
+  if (fromEnv) {
+    return path.isAbsolute(fromEnv)
+      ? fromEnv
+      : path.join(getMonorepoRoot(), fromEnv.replace(/^\.\//, ''));
+  }
+  return path.join(getMonorepoRoot(), 'packages/skills');
+}
+
+function getToolsetSkillsTemplateDir(): string {
+  return path.join(getMonorepoRoot(), 'packages/mastra/src/skills');
+}
 
 const TOOLSET_SKILL_FILES: Record<string, string> = {
   buffer: 'buffer-skills.md',
   'code-execution': 'code-execution-skills.md',
+  'knowledge-graph': 'knowledge-graph-skills.md',
 };
 
 // Sections only relevant to CEO/admin role — stripped for other agents
@@ -29,7 +43,7 @@ export async function readSkillFile(
   agentRole?: string
 ): Promise<{ slug: string; content: string } | null> {
   try {
-    const filePath = path.join(SKILLS_DIR, slug, 'SKILL.md');
+    const filePath = path.join(getBundledSkillsDir(), slug, 'SKILL.md');
     let content = await readFile(filePath, 'utf-8');
 
     // Strip CEO-only sections for non-CEO agents (~30% token reduction)
@@ -74,7 +88,7 @@ async function readToolsetSkill(
   }
 
   try {
-    const content = await readFile(path.join(TEMPLATE_SKILLS_DIR, filename), 'utf-8');
+    const content = await readFile(path.join(getToolsetSkillsTemplateDir(), filename), 'utf-8');
     if (content.trim()) return { slug: toolsetId, content };
   } catch {
     // missing
@@ -102,16 +116,34 @@ export async function loadSkillsForAgent(
 ): Promise<Array<{ slug: string; content: string }>> {
   const skillMap = new Map<string, string>();
 
-  const assignedResults = await Promise.all(
-    agentRecord.assignedSkills.map((slug) => resolveAssignedSkill(agentRecord, slug))
-  );
-  for (const skill of assignedResults) {
-    if (skill) skillMap.set(skill.slug, skill.content);
+  // control-plane is baked into every agent — load first, independent of assignedSkills.
+  // Company workspace override still wins via resolveAssignedSkill.
+  const controlPlane = await resolveAssignedSkill(agentRecord, CONTROL_PLANE_SKILL_SLUG);
+  if (controlPlane) {
+    skillMap.set(CONTROL_PLANE_SKILL_SLUG, controlPlane.content);
+  } else {
+    const bundled = await readSkillFile(CONTROL_PLANE_SKILL_SLUG, agentRecord.role);
+    if (bundled) skillMap.set(CONTROL_PLANE_SKILL_SLUG, bundled.content);
+  }
+
+  for (const slug of agentRecord.assignedSkills) {
+    if (slug === CONTROL_PLANE_SKILL_SLUG) continue;
+    const skill = await resolveAssignedSkill(agentRecord, slug);
+    if (skill) {
+      skillMap.set(skill.slug, skill.content);
+    }
   }
 
   const dynamicAgentSkills = await loadDynamicAgentSkills(agentRecord);
   for (const skill of dynamicAgentSkills) {
+    // Never let a dynamic file drop control-plane; allow same-slug override only.
     skillMap.set(skill.slug, skill.content);
+  }
+
+  // Re-assert after dynamic merge in case a bad override cleared it.
+  if (!skillMap.has(CONTROL_PLANE_SKILL_SLUG)) {
+    const bundled = await readSkillFile(CONTROL_PLANE_SKILL_SLUG, agentRecord.role);
+    if (bundled) skillMap.set(CONTROL_PLANE_SKILL_SLUG, bundled.content);
   }
 
   const merged = Array.from(skillMap.entries()).map(([slug, content]) => ({ slug, content }));
@@ -124,7 +156,29 @@ export async function loadSkillsForAgent(
     const skill = await readToolsetSkill(agentRecord, toolsetId, filename);
     if (skill) {
       seen.add(skill.slug);
-      merged.push(skill);
+      if (toolsetId === 'knowledge-graph') {
+        const mounts = resolveKnowledgeGraphMounts(
+          agentRecord.runtimeConfig as AgentRuntimeConfig,
+        );
+        const mountLines = [
+          '## Enabled mounts (this agent)',
+          '',
+          `- Private memory (\`agents/${agentRecord.urlKey}/memory.jsonl\`): **${mounts.private ? 'on' : 'off'}**`,
+          `- Company memory (\`memory.jsonl\`): **${mounts.company ? 'on' : 'off'}**`,
+          '',
+          mounts.private && mounts.company
+            ? 'Use the matching tool namespace (`memory_private_*` vs `memory_company_*`) for each write.'
+            : mounts.private
+              ? 'Only private memory is mounted — use private tools exclusively.'
+              : mounts.company
+                ? 'Only company memory is mounted — use company tools exclusively.'
+                : 'No memory mounts enabled — knowledge-graph tools will be unavailable.',
+          '',
+        ].join('\n');
+        merged.push({ slug: skill.slug, content: `${mountLines}\n${skill.content}` });
+      } else {
+        merged.push(skill);
+      }
     }
   }
 

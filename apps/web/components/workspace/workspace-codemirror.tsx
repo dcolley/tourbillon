@@ -14,7 +14,7 @@ import { cn } from '@/lib/utils';
 function languageForPath(path: string) {
   const lower = path.toLowerCase();
   if (lower.endsWith('.md')) return markdown();
-  if (lower.endsWith('.json')) return json();
+  if (lower.endsWith('.json') || lower.endsWith('.jsonl')) return json();
   if (lower.endsWith('.yaml') || lower.endsWith('.yml')) return yaml();
   if (lower.endsWith('.tsx')) return javascript({ jsx: true, typescript: true });
   if (lower.endsWith('.ts') || lower.endsWith('.mts') || lower.endsWith('.cts')) {

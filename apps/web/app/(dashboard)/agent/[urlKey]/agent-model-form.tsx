@@ -1,6 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { useActionState, useState } from 'react';
+import type { ActionResult } from '@/lib/action-result';
+import { useActionToast } from '@/hooks/use-action-toast';
+import { ActionSubmitButton } from '@/components/action-form';
 
 interface ProviderOption {
   id: string;
@@ -16,7 +19,7 @@ interface AgentModelFormProps {
   initialModelId: string;
   initialProviderId: string | null;
   providers: ProviderOption[];
-  updateModel: (formData: FormData) => Promise<void>;
+  updateModel: (prev: ActionResult | null, formData: FormData) => Promise<ActionResult>;
 }
 
 export function AgentModelForm({
@@ -27,6 +30,9 @@ export function AgentModelForm({
   providers,
   updateModel,
 }: AgentModelFormProps) {
+  const [state, formAction] = useActionState(updateModel, null);
+  useActionToast(state);
+
   const defaultProviderId =
     initialProviderId ?? providers.find((p) => p.isDefault)?.id ?? providers[0]?.id ?? '';
 
@@ -69,7 +75,7 @@ export function AgentModelForm({
   }
 
   return (
-    <form action={updateModel} className="space-y-4">
+    <form action={formAction} className="space-y-4">
       <input type="hidden" name="agentId" value={agentId} />
       <input type="hidden" name="urlKey" value={urlKey} />
 
@@ -161,12 +167,7 @@ export function AgentModelForm({
         </p>
       )}
 
-      <button
-        type="submit"
-        className="inline-flex items-center justify-center rounded-md border px-3 py-1.5 text-sm font-medium hover:bg-muted"
-      >
-        Save model
-      </button>
+      <ActionSubmitButton label="Save model" />
     </form>
   );
 }

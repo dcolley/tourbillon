@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useActionState, useMemo, useState } from 'react';
 import cronstrue from 'cronstrue';
 import type { AgentRuntimeConfig } from '@tourbillon/shared/types';
 import { inferHeartbeatScheduleMode } from '@tourbillon/shared/heartbeat-schedule-mode';
@@ -16,12 +16,18 @@ import {
   presetIdForCron,
   presetLabel,
 } from '@/lib/cron-presets';
+import type { ActionResult } from '@/lib/action-result';
+import { useActionToast } from '@/hooks/use-action-toast';
+import { ActionSubmitButton } from '@/components/action-form';
 
 interface AgentHeartbeatFormProps {
   agentId: string;
   urlKey: string;
   heartbeat: AgentRuntimeConfig['heartbeat'];
-  updateHeartbeatConfig: (formData: FormData) => Promise<void>;
+  updateHeartbeatConfig: (
+    prev: ActionResult | null,
+    formData: FormData,
+  ) => Promise<ActionResult>;
 }
 
 export function AgentHeartbeatForm({
@@ -30,6 +36,9 @@ export function AgentHeartbeatForm({
   heartbeat,
   updateHeartbeatConfig,
 }: AgentHeartbeatFormProps) {
+  const [state, formAction] = useActionState(updateHeartbeatConfig, null);
+  useActionToast(state);
+
   const initialMode = inferHeartbeatScheduleMode(heartbeat);
   const initialCron = (heartbeat.cronExpression ?? '').trim();
   const initialPresetId = presetIdForCron(initialCron);
@@ -60,7 +69,7 @@ export function AgentHeartbeatForm({
   }, [scheduleMode, cronExpression]);
 
   return (
-    <form action={updateHeartbeatConfig} className="space-y-4 text-sm">
+    <form action={formAction} className="space-y-4 text-sm">
       <input type="hidden" name="agentId" value={agentId} />
       <input type="hidden" name="urlKey" value={urlKey} />
       <input type="hidden" name="scheduleMode" value={scheduleMode} />
@@ -182,12 +191,7 @@ export function AgentHeartbeatForm({
         </div>
       )}
 
-      <button
-        type="submit"
-        className="inline-flex items-center justify-center rounded-md border px-3 py-1.5 text-sm font-medium hover:bg-muted"
-      >
-        Save heartbeat settings
-      </button>
+      <ActionSubmitButton label="Save heartbeat settings" />
     </form>
   );
 }

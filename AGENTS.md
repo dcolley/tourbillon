@@ -196,6 +196,8 @@ Memory persists across heartbeats only for assignment wakes with `taskId` (up to
 
 When `OBSERVABILITY_ENABLED=true`, Mastra tracing exports completed spans to the `agent_observability_events` table via a custom PostgreSQL exporter (`packages/mastra/src/observability/`). Spans are denormalized with `issue_id`, `goal_id`, `project_id`, and `agent_id` for fast filtering.
 
+When `PHOENIX_COLLECTOR_ENABLED=true`, the same spans are also exported to Arize Phoenix via `@mastra/arize` (`PHOENIX_COLLECTOR_ENDPOINT`, default `http://localhost:6006/v1/traces`). Postgres and Phoenix exporters are independent — either or both may be enabled.
+
 - **Human/debug only** — issue comments remain the agent thread of record; observability is not written to comments or BullMQ logs as primary storage.
 - **UI** — `/observability` (global timeline) and the **Observability** tab on issue detail pages. **Model step** events contain final `output.text` and `toolCalls`; **Provider call** (`model_inference`) spans are latency-only.
 - **Heartbeat runs** — `heartbeat_runs.trace_id` links a run to its Mastra trace.
@@ -282,6 +284,10 @@ All variables live in `.env` at the repo root. Key ones:
 | `OBSERVABILITY_STORE_MODEL_CHUNKS` | Persist streamed MODEL_CHUNK spans (text/reasoning); model_step has final text without this | `false` |
 | `OBSERVABILITY_PREVIEW_CHARS` | Truncate span previews in list UI | `500` |
 | `OBSERVABILITY_MAX_PAYLOAD_BYTES` | Cap stored span payload JSON size | `32768` |
+| `PHOENIX_COLLECTOR_ENABLED` | Export Mastra spans to Arize Phoenix (OTLP) | `false` |
+| `PHOENIX_COLLECTOR_ENDPOINT` | Phoenix OTLP traces URL | `http://localhost:6006/v1/traces` |
+| `PHOENIX_PROJECT_NAME` | Phoenix project name | `tourbillon` |
+| `PHOENIX_API_KEY` | Optional Phoenix auth key | — |
 
 ---
 

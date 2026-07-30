@@ -1,8 +1,11 @@
 'use client';
 
-import { useState } from 'react';
+import { useActionState, useState } from 'react';
 import type { AgentRuntimeType, SandboxIsolation } from '@tourbillon/shared';
 import type { CodeExecutionAvailability } from '@tourbillon/shared';
+import type { ActionResult } from '@/lib/action-result';
+import { useActionToast } from '@/hooks/use-action-toast';
+import { ActionSubmitButton } from '@/components/action-form';
 
 interface AgentCodeExecutionFormProps {
   agentId: string;
@@ -13,7 +16,10 @@ interface AgentCodeExecutionFormProps {
   sandboxPathPreview: string;
   timeoutOverride?: number;
   isolationOverride?: SandboxIsolation;
-  updateCodeExecution: (formData: FormData) => Promise<void>;
+  updateCodeExecution: (
+    prev: ActionResult | null,
+    formData: FormData,
+  ) => Promise<ActionResult>;
 }
 
 export function AgentCodeExecutionForm({
@@ -27,10 +33,12 @@ export function AgentCodeExecutionForm({
   isolationOverride,
   updateCodeExecution,
 }: AgentCodeExecutionFormProps) {
+  const [state, formAction] = useActionState(updateCodeExecution, null);
+  useActionToast(state);
   const [enabled, setEnabled] = useState(codeExecutionEnabled);
 
   return (
-    <form action={updateCodeExecution} className="space-y-4 border-t pt-4">
+    <form action={formAction} className="space-y-4 border-t pt-4">
       <input type="hidden" name="agentId" value={agentId} />
       <input type="hidden" name="urlKey" value={urlKey} />
 
@@ -168,12 +176,7 @@ export function AgentCodeExecutionForm({
         </div>
       )}
 
-      <button
-        type="submit"
-        className="inline-flex items-center justify-center rounded-md border px-3 py-1.5 text-sm font-medium hover:bg-muted"
-      >
-        Save code &amp; execution
-      </button>
+      <ActionSubmitButton label="Save code & execution" />
     </form>
   );
 }

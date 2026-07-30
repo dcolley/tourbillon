@@ -35,6 +35,30 @@ export function isObservabilityEnabled(): boolean {
   return process.env.OBSERVABILITY_ENABLED === 'true';
 }
 
+/** Export Mastra spans to Arize Phoenix via OTLP (`@mastra/arize`). */
+export function isPhoenixCollectorEnabled(): boolean {
+  return process.env.PHOENIX_COLLECTOR_ENABLED === 'true';
+}
+
+/**
+ * True when any Mastra span exporter should run (Postgres UI and/or Phoenix).
+ * Use this for attaching tracing options and registering agents on the Mastra instance.
+ */
+export function isMastraTracingEnabled(): boolean {
+  return isObservabilityEnabled() || isPhoenixCollectorEnabled();
+}
+
+export function phoenixCollectorEndpoint(): string {
+  return (
+    process.env.PHOENIX_COLLECTOR_ENDPOINT?.trim() ||
+    'http://localhost:6006/v1/traces'
+  );
+}
+
+export function phoenixProjectName(): string {
+  return process.env.PHOENIX_PROJECT_NAME?.trim() || 'tourbillon';
+}
+
 export function shouldStoreModelChunks(): boolean {
   return process.env.OBSERVABILITY_STORE_MODEL_CHUNKS === 'true';
 }

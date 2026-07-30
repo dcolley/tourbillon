@@ -46,6 +46,7 @@ const nextConfig = {
   serverExternalPackages: [
     '@mastra/core',
     '@mastra/memory',
+    '@mastra/mcp',
     'bullmq',
     'ioredis',
     'drizzle-orm',

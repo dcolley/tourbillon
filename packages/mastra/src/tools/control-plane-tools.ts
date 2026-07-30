@@ -4,6 +4,77 @@ import { z } from 'zod';
 import { extractToolRuntimeContext, tracedAgentFetch } from './api-client';
 import { SKILL_TOOLS } from './skill-tools';
 
+function formatInTimezone(date: Date, timeZone: string) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+    weekday: 'long',
+    timeZoneName: 'shortOffset',
+  }).formatToParts(date);
+
+  const get = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((p) => p.type === type)?.value ?? '';
+
+  const year = get('year');
+  const month = get('month');
+  const day = get('day');
+  // Some locales emit "24" for midnight with hour12: false; normalize to 00.
+  const hour = get('hour') === '24' ? '00' : get('hour');
+  const minute = get('minute');
+  const second = get('second');
+
+  return {
+    date: `${year}-${month}-${day}`,
+    time: `${hour}:${minute}:${second}`,
+    dayOfWeek: get('weekday'),
+    utcOffset: get('timeZoneName') || 'UTC',
+    local: `${year}-${month}-${day}T${hour}:${minute}:${second}`,
+  };
+}
+
+export const getDateTimeTool = createTool({
+  id: 'getDateTime',
+  description:
+    'Get the current date and time. Defaults to UTC. ' +
+    'Pass an IANA timezone (e.g. America/New_York, Europe/London) for local wall-clock time. ' +
+    'Use whenever you need today\'s date, the current time, day of week, or to reason about deadlines/schedules.',
+  inputSchema: z.object({
+    timezone: z
+      .string()
+      .optional()
+      .describe('IANA timezone, e.g. Europe/London. Defaults to UTC.'),
+  }),
+  execute: async (inputData) => {
+    const now = new Date();
+    const timezone = inputData.timezone?.trim() || 'UTC';
+
+    try {
+      const local = formatInTimezone(now, timezone);
+      return {
+        utc: now.toISOString(),
+        unixMs: now.getTime(),
+        timezone,
+        ...local,
+      };
+    } catch {
+      return {
+        error: 'invalid_timezone',
+        message: `Unrecognized IANA timezone "${timezone}". Try UTC, America/New_York, Europe/London, etc.`,
+        utc: now.toISOString(),
+        unixMs: now.getTime(),
+        timezone: 'UTC',
+        ...formatInTimezone(now, 'UTC'),
+      };
+    }
+  },
+});
+
 export const getIdentityTool = createTool({
   id: 'getIdentity',
   description:
@@ -285,6 +356,7 @@ export const createSubtaskTool = createTool({
 });
 
 export const CONTROL_PLANE_TOOLS = {
+  getDateTimeTool,
   getIdentityTool,
   getInboxTool,
   checkoutIssueTool,

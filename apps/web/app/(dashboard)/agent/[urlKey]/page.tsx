@@ -1,12 +1,15 @@
 import Link from 'next/link';
-import { notFound, redirect } from 'next/navigation';
+import { notFound } from 'next/navigation';
+import { revalidatePath } from 'next/cache';
 import { db, agents, heartbeatRuns } from '@tourbillon/db';
 import { eq, desc } from 'drizzle-orm';
 import type { AgentRuntimeConfig } from '@tourbillon/shared';
 import { modelProviderOverridesFromAgent, resolveModelProviderConfig, isAgentBudgetEnforced, isAgentBudgetExceeded, agentRuntimeLabel, agentRuntimeFromAdapter, resolveAssignedTools, modelSettingsFromFormData, isCodeExecutionAvailable, formatExecutionWorkspacePathPreview } from '@tourbillon/shared';
-import { AgentValidationError, AGENT_ROLE_OPTIONS, getAgentByUrlKey, listAgentsByUrlKey, updateAgentRuntimeConfig, updateAgentCapabilities, updateAgentBudget, updateAgentInstructions, updateAgentModel, updateAgentModelSettings, updateAgentProfile, updateAgentCodeExecution } from '@/lib/agents';
+import { AgentValidationError, AGENT_ROLE_OPTIONS, getAgentByUrlKey, listAgentsByUrlKey, updateAgentRuntimeConfig, updateAgentCapabilities, updateAgentBudget, updateAgentInstructions, updateAgentModel, updateAgentModelSettings, updateAgentProfile, updateAgentCodeExecution, cloneAgent, suggestCloneUrlKey } from '@/lib/agents';
+import { actionError, actionSuccess, type ActionResult } from '@/lib/action-result';
 import { AgentDisambiguation } from '@/components/agent-disambiguation';
 import { DeepLinkCompanySync } from '@/components/deep-link-company-sync';
+import { ActionForm, ActionSubmitButton } from '@/components/action-form';
 import { getCompanyById } from '@/lib/company';
 import { parseCompanyIdFromSearchParams } from '@/lib/company-link';
 import { deleteAgentAction, updateAgentRoleAction } from '../actions';
@@ -19,16 +22,22 @@ import { listGoalOptions } from '@/lib/goals';
 import { listProjectOptions } from '@/lib/projects';
 import { AgentDetailTabs } from './agent-detail-tabs';
 import { AgentObservabilityTab } from './agent-observability-tab';
+import { AgentMemoryTab } from './agent-memory-tab';
 import { AgentCapabilitiesForm } from './agent-capabilities-form';
 import { AgentCodeExecutionForm } from './agent-code-execution-form';
 import { AgentHeartbeatForm } from './agent-heartbeat-form';
 import { AgentHeartbeatHeaderActions } from './agent-heartbeat-header-actions';
+import { AgentQueryToast } from './agent-query-toast';
+import { AgentRoutineToggle } from './agent-routine-toggle';
+import { AgentCloneForm } from './agent-clone-form';
 
-async function updateHeartbeatConfig(formData: FormData) {
+async function updateHeartbeatConfig(
+  _prev: ActionResult | null,
+  formData: FormData,
+): Promise<ActionResult> {
   'use server';
 
   const agentId = formData.get('agentId') as string;
-  const urlKey = formData.get('urlKey') as string;
   const enabled = formData.get('heartbeatEnabled') === 'on';
   const scheduleMode = (formData.get('scheduleMode') as 'interval' | 'cron') || 'interval';
 
@@ -49,14 +58,20 @@ async function updateHeartbeatConfig(formData: FormData) {
   try {
     await updateAgentRuntimeConfig(agentId, { heartbeat });
   } catch (err) {
-    const message = err instanceof AgentValidationError ? err.message : 'Failed to update heartbeat settings.';
-    redirect(`/agent/${urlKey}?error=${encodeURIComponent(message)}`);
+    return actionError(
+      err instanceof AgentValidationError ? err.message : 'Failed to update heartbeat settings.',
+    );
   }
 
-  redirect(`/agent/${urlKey}?saved=heartbeat`);
+  return actionSuccess(
+    'Heartbeat settings saved. Ensure pnpm workers:dev is running for automatic heartbeats.',
+  );
 }
 
-async function updateCapabilities(formData: FormData) {
+async function updateCapabilities(
+  _prev: ActionResult | null,
+  formData: FormData,
+): Promise<ActionResult> {
   'use server';
 
   const agentId = formData.get('agentId') as string;
@@ -88,33 +103,55 @@ async function updateCapabilities(formData: FormData) {
   }
   const clearIntegrations = formData.getAll('clearIntegration').map(String);
 
+  const mcpToolPolicy: Record<string, { allow: string[] }> = {};
+  for (const serverId of formData.getAll('mcpServerPolicy').map(String)) {
+    if (!serverId.trim()) continue;
+    mcpToolPolicy[serverId] = {
+      allow: formData.getAll(`mcpAllow_${serverId}`).map(String).filter(Boolean),
+    };
+  }
+
+  const knowledgeGraph = {
+    private: formData.get('kgMountPrivate') === 'on',
+    company: formData.get('kgMountCompany') === 'on',
+  };
+
   try {
     await updateAgentCapabilities(agentId, {
       toolsets,
       assignedTools,
       integrations,
       clearIntegrations,
+      mcpToolPolicy,
+      knowledgeGraph,
     });
   } catch (err) {
-    const message = err instanceof AgentValidationError ? err.message : 'Failed to update capabilities.';
-    redirect(`/agent/${urlKey}?error=${encodeURIComponent(message)}`);
+    return actionError(
+      err instanceof AgentValidationError ? err.message : 'Failed to update capabilities.',
+    );
   }
 
-  redirect(`/agent/${urlKey}?saved=toolsets`);
+  if (urlKey) {
+    revalidatePath(`/agent/${urlKey}`);
+  }
+
+  return actionSuccess("Capabilities saved. Changes apply on the agent's next heartbeat.");
 }
 
-async function updateCodeExecution(formData: FormData) {
+async function updateCodeExecution(
+  _prev: ActionResult | null,
+  formData: FormData,
+): Promise<ActionResult> {
   'use server';
 
   const agentId = formData.get('agentId') as string;
-  const urlKey = formData.get('urlKey') as string;
   const runtimeType = (formData.get('runtimeType') as 'agent' | 'harness') || 'agent';
   const codeExecutionEnabled = formData.get('codeExecutionEnabled') === 'on';
 
   const timeoutRaw = (formData.get('codeExecutionTimeoutMs') as string)?.trim();
   const timeoutMs = timeoutRaw ? parseInt(timeoutRaw, 10) : undefined;
   if (timeoutRaw && (!Number.isFinite(timeoutMs) || timeoutMs! < 1000)) {
-    redirect(`/agent/${urlKey}?error=${encodeURIComponent('Timeout must be at least 1000 ms.')}`);
+    return actionError('Timeout must be at least 1000 ms.');
   }
 
   const isolation = (formData.get('codeExecutionIsolation') as string) || null;
@@ -128,37 +165,47 @@ async function updateCodeExecution(formData: FormData) {
       clearCodeExecutionOverrides: formData.get('clearCodeExecutionOverrides') === 'on',
     });
   } catch (err) {
-    const message =
-      err instanceof AgentValidationError ? err.message : 'Failed to update code execution settings.';
-    redirect(`/agent/${urlKey}?error=${encodeURIComponent(message)}`);
+    return actionError(
+      err instanceof AgentValidationError
+        ? err.message
+        : 'Failed to update code execution settings.',
+    );
   }
 
-  redirect(`/agent/${urlKey}?saved=code-execution`);
+  return actionSuccess(
+    "Code & execution settings saved. Changes apply on the agent's next heartbeat.",
+  );
 }
 
-async function updateBudgetConfig(formData: FormData) {
+async function updateBudgetConfig(
+  _prev: ActionResult | null,
+  formData: FormData,
+): Promise<ActionResult> {
   'use server';
 
   const agentId = formData.get('agentId') as string;
-  const urlKey = formData.get('urlKey') as string;
   const enforce = formData.get('enforceBudget') === 'on';
   const budgetMonthlyTokens = parseInt(formData.get('budgetMonthlyTokens') as string, 10);
 
   if (!Number.isInteger(budgetMonthlyTokens) || budgetMonthlyTokens < 0) {
-    redirect(`/agent/${urlKey}?error=${encodeURIComponent('Monthly token budget must be a non-negative integer.')}`);
+    return actionError('Monthly token budget must be a non-negative integer.');
   }
 
   try {
     await updateAgentBudget(agentId, { budgetMonthlyTokens, enforce });
   } catch (err) {
-    const message = err instanceof AgentValidationError ? err.message : 'Failed to update budget settings.';
-    redirect(`/agent/${urlKey}?error=${encodeURIComponent(message)}`);
+    return actionError(
+      err instanceof AgentValidationError ? err.message : 'Failed to update budget settings.',
+    );
   }
 
-  redirect(`/agent/${urlKey}?saved=budget`);
+  return actionSuccess('Budget settings saved.');
 }
 
-async function updateProfile(formData: FormData) {
+async function updateProfile(
+  _prev: ActionResult | null,
+  formData: FormData,
+): Promise<ActionResult> {
   'use server';
 
   const agentId = formData.get('agentId') as string;
@@ -173,54 +220,67 @@ async function updateProfile(formData: FormData) {
       reportsToId: reportsToRaw || null,
     });
   } catch (err) {
-    const message = err instanceof AgentValidationError ? err.message : 'Failed to update agent profile.';
-    redirect(`/agent/${currentUrlKey}?error=${encodeURIComponent(message)}`);
+    return actionError(
+      err instanceof AgentValidationError ? err.message : 'Failed to update agent profile.',
+    );
   }
 
-  redirect(`/agent/${updated.urlKey}?saved=profile`);
+  if (updated.urlKey !== currentUrlKey) {
+    return actionSuccess('Agent profile saved.', `/agent/${updated.urlKey}`);
+  }
+  return actionSuccess('Agent profile saved.');
 }
 
-async function updateModel(formData: FormData) {
+async function updateModel(
+  _prev: ActionResult | null,
+  formData: FormData,
+): Promise<ActionResult> {
   'use server';
 
   const agentId = formData.get('agentId') as string;
-  const urlKey = formData.get('urlKey') as string;
   const modelId = formData.get('modelId') as string;
   const providerId = formData.get('providerId') as string | null;
 
   try {
     await updateAgentModel(agentId, { modelId, providerId });
   } catch (err) {
-    const message = err instanceof AgentValidationError ? err.message : 'Failed to update model.';
-    redirect(`/agent/${urlKey}?error=${encodeURIComponent(message)}`);
+    return actionError(
+      err instanceof AgentValidationError ? err.message : 'Failed to update model.',
+    );
   }
 
-  redirect(`/agent/${urlKey}?saved=model`);
+  return actionSuccess("Model saved. Changes apply on the agent's next heartbeat.");
 }
 
-async function updateModelSettings(formData: FormData) {
+async function updateModelSettings(
+  _prev: ActionResult | null,
+  formData: FormData,
+): Promise<ActionResult> {
   'use server';
 
   const agentId = formData.get('agentId') as string;
-  const urlKey = formData.get('urlKey') as string;
 
   try {
     const patch = modelSettingsFromFormData(formData);
     await updateAgentModelSettings(agentId, patch);
   } catch (err) {
-    const message =
-      err instanceof AgentValidationError ? err.message : 'Failed to update generation settings.';
-    redirect(`/agent/${urlKey}?error=${encodeURIComponent(message)}`);
+    return actionError(
+      err instanceof AgentValidationError
+        ? err.message
+        : 'Failed to update generation settings.',
+    );
   }
 
-  redirect(`/agent/${urlKey}?saved=model-settings`);
+  return actionSuccess("Generation settings saved. Changes apply on the agent's next heartbeat.");
 }
 
-async function updateInstructions(formData: FormData) {
+async function updateInstructions(
+  _prev: ActionResult | null,
+  formData: FormData,
+): Promise<ActionResult> {
   'use server';
 
   const agentId = formData.get('agentId') as string;
-  const urlKey = formData.get('urlKey') as string;
 
   try {
     await updateAgentInstructions(agentId, {
@@ -228,23 +288,57 @@ async function updateInstructions(formData: FormData) {
       agentsMd: formData.get('instructionsBundleAgentsMd') as string,
     });
   } catch (err) {
-    const message = err instanceof AgentValidationError ? err.message : 'Failed to update instructions.';
-    redirect(`/agent/${urlKey}?error=${encodeURIComponent(message)}`);
+    return actionError(
+      err instanceof AgentValidationError ? err.message : 'Failed to update instructions.',
+    );
   }
 
-  redirect(`/agent/${urlKey}?saved=instructions`);
+  return actionSuccess("Instructions saved. Changes apply on the agent's next heartbeat.");
 }
 
-async function toggleRoutine(formData: FormData) {
+async function toggleRoutine(
+  _prev: ActionResult | null,
+  formData: FormData,
+): Promise<ActionResult> {
   'use server';
 
   const routineId = formData.get('routineId') as string;
   const agentId = formData.get('agentId') as string;
-  const urlKey = formData.get('urlKey') as string;
   const enabled = formData.get('enabled') === 'true';
 
-  await setRoutineEnabled(routineId, agentId, enabled);
-  redirect(`/agent/${urlKey}`);
+  try {
+    await setRoutineEnabled(routineId, agentId, enabled);
+  } catch (err) {
+    return actionError(err instanceof Error ? err.message : 'Failed to update routine.');
+  }
+
+  return actionSuccess(enabled ? 'Routine enabled.' : 'Routine disabled.');
+}
+
+async function cloneAgentAction(
+  _prev: ActionResult | null,
+  formData: FormData,
+): Promise<ActionResult> {
+  'use server';
+
+  const sourceAgentId = formData.get('sourceAgentId') as string;
+  const name = formData.get('name') as string;
+  const urlKey = formData.get('urlKey') as string;
+  const copyCredentials = formData.get('copyCredentials') === 'on';
+
+  try {
+    const created = await cloneAgent({
+      sourceAgentId,
+      name,
+      urlKey,
+      copyCredentials,
+    });
+    return actionSuccess(`Cloned as ${created.name}.`, `/agent/${created.urlKey}`);
+  } catch (err) {
+    return actionError(
+      err instanceof AgentValidationError ? err.message : 'Failed to clone agent.',
+    );
+  }
 }
 
 export default async function AgentDetailPage({
@@ -284,6 +378,7 @@ export default async function AgentDetailPage({
     projects,
     providerList,
     providerRecord,
+    suggestedCloneUrlKey,
   ] = await Promise.all([
     db.select().from(agents).where(eq(agents.reportsToId, agent.id)),
     db
@@ -303,6 +398,7 @@ export default async function AgentDetailPage({
     listProjectOptions(undefined, agent.companyId),
     listLlmProvidersPublic(),
     agent.providerId ? getLlmProviderRecordById(agent.providerId) : Promise.resolve(null),
+    suggestCloneUrlKey(agent.companyId, agent.urlKey),
   ]);
 
   const runtime = agent.runtimeConfig as AgentRuntimeConfig;
@@ -364,65 +460,7 @@ export default async function AgentDetailPage({
         </div>
       </div>
 
-      {saved === 'heartbeat' && (
-        <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
-          Heartbeat settings saved. Ensure <code className="text-xs">pnpm workers:dev</code> is running for automatic heartbeats.
-        </div>
-      )}
-
-      {saved === 'toolsets' && (
-        <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
-          Capabilities saved. Changes apply on the agent&apos;s next heartbeat.
-        </div>
-      )}
-
-      {saved === 'code-execution' && (
-        <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
-          Code &amp; execution settings saved. Changes apply on the agent&apos;s next heartbeat.
-        </div>
-      )}
-
-      {saved === 'budget' && (
-        <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800 dark:border-green-900 dark:bg-green-950 dark:text-green-200">
-          Budget settings saved.
-        </div>
-      )}
-
-      {saved === 'instructions' && (
-        <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
-          Instructions saved. Changes apply on the agent&apos;s next heartbeat.
-        </div>
-      )}
-
-      {saved === 'profile' && (
-        <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
-          Agent profile saved.
-        </div>
-      )}
-
-      {saved === 'role' && (
-        <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
-          Role saved. Skills, toolsets, and assigned tools were reset to role defaults.
-        </div>
-      )}
-
-      {saved === 'model' && (
-        <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
-          Model saved. Changes apply on the agent&apos;s next heartbeat.
-        </div>
-      )}
-
-      {saved === 'model-settings' && (
-        <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
-          Generation settings saved. Changes apply on the agent&apos;s next heartbeat.
-        </div>
-      )}
-
-      {error && (
-        <div className="rounded-md border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-          {error}
-        </div>
-      )}
+      <AgentQueryToast saved={saved} error={error} urlKey={agent.urlKey} />
 
       <AgentDetailTabs
         overview={
@@ -432,7 +470,7 @@ export default async function AgentDetailPage({
           <h2 className="text-sm font-semibold">Profile</h2>
           <p className="text-xs text-muted-foreground mt-1">Name, URL slug, and reporting line.</p>
         </div>
-        <form action={updateProfile} className="space-y-4">
+        <ActionForm action={updateProfile} className="space-y-4">
           <input type="hidden" name="agentId" value={agent.id} />
           <input type="hidden" name="currentUrlKey" value={agent.urlKey} />
           <div className="grid gap-4 sm:grid-cols-2">
@@ -488,13 +526,8 @@ export default async function AgentDetailPage({
                 ))}
             </select>
           </div>
-          <button
-            type="submit"
-            className="inline-flex items-center justify-center rounded-md border px-3 py-1.5 text-sm font-medium hover:bg-muted"
-          >
-            Save profile
-          </button>
-        </form>
+          <ActionSubmitButton label="Save profile" />
+        </ActionForm>
         {directReports.length > 0 && (
           <div className="border-t pt-4 text-sm">
             <p className="text-muted-foreground mb-2">Direct reports</p>
@@ -631,6 +664,8 @@ export default async function AgentDetailPage({
           urlKey={agent.urlKey}
           assignedToolsets={agent.assignedToolsets}
           enabledTools={enabledTools}
+          mcpToolPolicy={runtime.mcpToolPolicy}
+          knowledgeGraph={runtime.knowledgeGraph}
           integrationOverrides={{
             ...(runtime.tavilyApiKey ? { tavilyApiKey: runtime.tavilyApiKey } : {}),
             ...(runtime.mcpCredentials?.['buffer-mcp']
@@ -649,8 +684,15 @@ export default async function AgentDetailPage({
           <p className="text-xs text-muted-foreground mt-1">
             Injected into the system prompt on every heartbeat — SOUL first, then AGENTS, then assigned skills.
           </p>
+          {agent.assignedToolsets.includes('knowledge-graph') && (
+            <p className="text-xs text-muted-foreground mt-2 rounded-md border border-dashed p-2">
+              Knowledge graph tip for SOUL/AGENTS: name which mounts this agent has (private / company), prefer
+              company for shared durable facts, private for hypotheses and sensitive notes, and always search the
+              target scope before writing. Full protocol is in the knowledge-graph skill.
+            </p>
+          )}
         </div>
-        <form action={updateInstructions} className="space-y-4">
+        <ActionForm action={updateInstructions} className="space-y-4">
           <input type="hidden" name="agentId" value={agent.id} />
           <input type="hidden" name="urlKey" value={agent.urlKey} />
           <div className="space-y-1.5">
@@ -679,13 +721,8 @@ export default async function AgentDetailPage({
               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
             />
           </div>
-          <button
-            type="submit"
-            className="inline-flex items-center justify-center rounded-md border px-3 py-1.5 text-sm font-medium hover:bg-muted"
-          >
-            Save instructions
-          </button>
-        </form>
+          <ActionSubmitButton label="Save instructions" />
+        </ActionForm>
       </section>
 
       <section className="border rounded-lg p-4 space-y-4">
@@ -717,20 +754,13 @@ export default async function AgentDetailPage({
                 <p className="text-xs font-mono text-muted-foreground mt-0.5">{routine.cronExpression}</p>
                 <p className="text-xs text-muted-foreground">{routine.timezone}</p>
               </div>
-              <form action={toggleRoutine}>
-                <input type="hidden" name="routineId" value={routine.id} />
-                <input type="hidden" name="agentId" value={agent.id} />
-                <input type="hidden" name="urlKey" value={agent.urlKey} />
-                <input type="hidden" name="enabled" value={routine.enabled ? 'false' : 'true'} />
-                <button
-                  type="submit"
-                  className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${
-                    routine.enabled ? 'bg-green-100 text-green-700' : 'bg-muted text-muted-foreground'
-                  }`}
-                >
-                  {routine.enabled ? 'Enabled' : 'Disabled'}
-                </button>
-              </form>
+              <AgentRoutineToggle
+                routineId={routine.id}
+                agentId={agent.id}
+                urlKey={agent.urlKey}
+                initiallyEnabled={routine.enabled}
+                toggleRoutine={toggleRoutine}
+              />
             </div>
           ))}
         </section>
@@ -754,7 +784,7 @@ export default async function AgentDetailPage({
           </p>
         </div>
 
-        <form action={updateBudgetConfig} className="space-y-4 border-t pt-4 text-sm">
+        <ActionForm action={updateBudgetConfig} className="space-y-4 border-t pt-4 text-sm">
           <input type="hidden" name="agentId" value={agent.id} />
           <input type="hidden" name="urlKey" value={agent.urlKey} />
 
@@ -787,13 +817,8 @@ export default async function AgentDetailPage({
             />
           </div>
 
-          <button
-            type="submit"
-            className="inline-flex items-center justify-center rounded-md border px-3 py-1.5 text-sm font-medium hover:bg-muted"
-          >
-            Save budget settings
-          </button>
-        </form>
+          <ActionSubmitButton label="Save budget settings" />
+        </ActionForm>
       </section>
 
       <section className="border rounded-lg divide-y">
@@ -829,6 +854,13 @@ export default async function AgentDetailPage({
           ))
         )}
       </section>
+
+      <AgentCloneForm
+        sourceAgentId={agent.id}
+        defaultName={`${agent.name} (copy)`}
+        defaultUrlKey={suggestedCloneUrlKey}
+        cloneAgentAction={cloneAgentAction}
+      />
 
       <section className="border border-destructive/30 rounded-lg p-4 space-y-4">
         <div>
@@ -883,6 +915,15 @@ export default async function AgentDetailPage({
         Created {new Date(agent.createdAt).toLocaleString()}
       </p>
           </>
+        }
+        memory={
+          <section className="border rounded-lg p-4">
+            <AgentMemoryTab
+              agentId={agent.id}
+              urlKey={agent.urlKey}
+              hasKnowledgeGraphToolset={agent.assignedToolsets.includes('knowledge-graph')}
+            />
+          </section>
         }
         observability={
           <AgentObservabilityTab

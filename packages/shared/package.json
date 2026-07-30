@@ -22,7 +22,9 @@
     "./tool-catalog": "./src/tool-catalog.ts",
     "./company-settings": "./src/company-settings.ts",
     "./mcp-registry": "./src/mcp-registry.ts",
-    "./mcp-credentials": "./src/mcp-credentials.ts"
+    "./mcp-credentials": "./src/mcp-credentials.ts",
+    "./knowledge-graph": "./src/knowledge-graph.ts",
+    "./knowledge-graph-config": "./src/knowledge-graph-config.ts"
   },
   "dependencies": {
     "croner": "^10.0.1",

@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile, readdir, stat, unlink, rmdir } from 'fs/promises';
 import path from 'path';
-import { ROLE_DEFAULT_SKILLS, TOOLSET_SKILL_FILENAME_SET } from './constants';
+import { ROLE_DEFAULT_SKILLS, TOOLSET_SKILL_FILENAME_SET, ensureControlPlaneInSkills, CONTROL_PLANE_SKILL_SLUG } from './constants';
 import { getMonorepoRoot, resolveDataPath } from './monorepo-root';
 import {
   WORKSPACE_MAX_TEXT_BYTES,
@@ -273,7 +273,7 @@ export async function readCompanySkillFile(companyId: string, slug: string): Pro
 }
 
 export async function buildAssignedSkills(companyId: string, role: string): Promise<string[]> {
-  const roleSkills = ROLE_DEFAULT_SKILLS[role] ?? ['control-plane'];
+  const roleSkills = ROLE_DEFAULT_SKILLS[role] ?? [CONTROL_PLANE_SKILL_SLUG];
   const companySkillSlugs = await discoverCompanySkillSlugs(companyId);
   const seen = new Set<string>();
   const result: string[] = [];
@@ -284,15 +284,15 @@ export async function buildAssignedSkills(companyId: string, role: string): Prom
     result.push(skillSlug);
   };
 
-  push('control-plane');
+  push(CONTROL_PLANE_SKILL_SLUG);
   for (const skillSlug of roleSkills) {
-    if (skillSlug !== 'control-plane') push(skillSlug);
+    if (skillSlug !== CONTROL_PLANE_SKILL_SLUG) push(skillSlug);
   }
   for (const skillSlug of companySkillSlugs) {
     push(skillSlug);
   }
 
-  return result;
+  return ensureControlPlaneInSkills(result);
 }
 
 export interface AgentSkillFileRef {
@@ -345,11 +345,41 @@ export async function readAgentSkillFile(
   }
 }
 
-export function getAgentSkillsDir(companyId: string, urlKey: string): string {
+function assertValidAgentUrlKey(urlKey: string): void {
   if (!urlKey || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(urlKey)) {
     throw new WorkspacePathError('Invalid agent urlKey.');
   }
-  return path.join(getCompanyWorkspaceDir(companyId), 'agents', urlKey, 'skills');
+}
+
+export function getAgentDir(companyId: string, urlKey: string): string {
+  assertValidAgentUrlKey(urlKey);
+  return path.join(getCompanyWorkspaceDir(companyId), 'agents', urlKey);
+}
+
+export function getAgentSkillsDir(companyId: string, urlKey: string): string {
+  return path.join(getAgentDir(companyId, urlKey), 'skills');
+}
+
+/** Per-agent MCP knowledge-graph JSONL path (`MEMORY_FILE_PATH`). */
+export function getAgentMemoryFilePath(companyId: string, urlKey: string): string {
+  return path.join(getAgentDir(companyId, urlKey), 'memory.jsonl');
+}
+
+/** Company-shared MCP knowledge-graph JSONL at workspace root. */
+export function getCompanyMemoryFilePath(companyId: string): string {
+  return path.join(getCompanyWorkspaceDir(companyId), 'memory.jsonl');
+}
+
+export async function ensureCompanyMemoryDir(companyId: string): Promise<string> {
+  await ensureCompanyWorkspace(companyId);
+  return getCompanyWorkspaceDir(companyId);
+}
+
+export async function ensureAgentDir(companyId: string, urlKey: string): Promise<string> {
+  await ensureCompanyWorkspace(companyId);
+  const dir = getAgentDir(companyId, urlKey);
+  await mkdir(dir, { recursive: true });
+  return dir;
 }
 
 export async function ensureAgentSkillsDir(companyId: string, urlKey: string): Promise<string> {
@@ -357,6 +387,60 @@ export async function ensureAgentSkillsDir(companyId: string, urlKey: string): P
   const dir = getAgentSkillsDir(companyId, urlKey);
   await mkdir(dir, { recursive: true });
   return dir;
+}
+
+export async function ensureAgentMemoryDir(companyId: string, urlKey: string): Promise<string> {
+  return ensureAgentDir(companyId, urlKey);
+}
+
+/**
+ * Copy per-agent workspace files (skills/) from one urlKey to another.
+ * Does not copy memory.jsonl — clones start with an empty knowledge graph.
+ * Missing source dir is a no-op. Existing dest files are not overwritten.
+ */
+export async function copyAgentWorkspaceSkills(
+  companyId: string,
+  sourceUrlKey: string,
+  destUrlKey: string,
+): Promise<{ copied: string[] }> {
+  assertValidAgentUrlKey(sourceUrlKey);
+  assertValidAgentUrlKey(destUrlKey);
+  if (sourceUrlKey === destUrlKey) {
+    throw new WorkspacePathError('Source and destination agent urlKeys must differ.');
+  }
+
+  await ensureCompanyWorkspace(companyId);
+  const sourceDir = getAgentSkillsDir(companyId, sourceUrlKey);
+  const destDir = await ensureAgentSkillsDir(companyId, destUrlKey);
+  const copied: string[] = [];
+
+  let entries: string[];
+  try {
+    entries = await readdir(sourceDir);
+  } catch {
+    return { copied };
+  }
+
+  for (const name of entries) {
+    if (!name.endsWith('.md')) continue;
+    const srcPath = path.join(sourceDir, name);
+    const destPath = path.join(destDir, name);
+    try {
+      await stat(destPath);
+      continue;
+    } catch {
+      // missing — copy
+    }
+    try {
+      const content = await readFile(srcPath, 'utf-8');
+      await writeFile(destPath, content, 'utf-8');
+      copied.push(name);
+    } catch {
+      // skip unreadable source files
+    }
+  }
+
+  return { copied };
 }
 
 export async function seedAgentSkillsFromTemplates(

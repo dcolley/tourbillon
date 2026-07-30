@@ -22,7 +22,7 @@ import {
   modelProviderOverridesFromAgent,
   toLlmProviderRecord,
   isAgentBudgetExceeded,
-  isObservabilityEnabled,
+  isMastraTracingEnabled,
   isHarnessAdapter,
   buildWakeMessage,
   parseCompanySettings,
@@ -107,7 +107,7 @@ async function recordHeartbeatSuccess(
   await db.update(heartbeatRuns).set(runUpdates).where(eq(heartbeatRuns.id, runId));
   await publishHeartbeatRunUpdate(companyId, runId, 'succeeded', agentRecord.id);
 
-  if (isObservabilityEnabled()) {
+  if (isMastraTracingEnabled()) {
     await flushObservability();
   }
 }
@@ -118,7 +118,7 @@ async function recordHeartbeatFailure(
   companyId: string,
   agentId: string,
 ): Promise<void> {
-  if (isObservabilityEnabled()) {
+  if (isMastraTracingEnabled()) {
     await flushObservability().catch(() => undefined);
   }
 
@@ -482,7 +482,7 @@ async function recordHarnessResult(
       })
       .where(eq(heartbeatRuns.id, runId));
 
-    if (isObservabilityEnabled()) {
+    if (isMastraTracingEnabled()) {
       await flushObservability();
     }
     return;
@@ -580,7 +580,7 @@ async function runDurableAgentWake(params: {
     thread: useMemory ? memoryKeys.thread : undefined,
   });
 
-  const tracingOptions = isObservabilityEnabled()
+  const tracingOptions = isMastraTracingEnabled()
     ? {
         metadata: {
           issueId: taskId,
@@ -589,9 +589,17 @@ async function runDurableAgentWake(params: {
           heartbeatRunId: runId,
           companyId,
           agentId: agentRecord.id,
+          agentUrlKey: agentRecord.urlKey,
           wakeReason: wake.wakeReason,
         },
-        tags: taskId ? [`issue:${taskId}`] : [],
+        // Phoenix/Arize: tags land on root span as OpenInference tag.tags (filterable).
+        // metadata is also exported into the OpenInference metadata JSON blob.
+        tags: [
+          `company:${companyId}`,
+          `agent:${agentRecord.urlKey}`,
+          `wake:${wake.wakeReason}`,
+          ...(taskId ? [`issue:${taskId}`] : []),
+        ],
         requestContextKeys: [
           'runId',
           'agentId',

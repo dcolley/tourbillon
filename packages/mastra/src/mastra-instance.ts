@@ -1,10 +1,15 @@
 import { Agent } from '@mastra/core/agent';
 import { PostgresStore } from '@mastra/pg';
 import { Mastra } from '@mastra/core';
+import { ArizeExporter } from '@mastra/arize';
 import { Observability, SensitiveDataFilter } from '@mastra/observability';
-import { SpanType } from '@mastra/core/observability';
+import { SpanType, type ObservabilityExporter } from '@mastra/core/observability';
 import {
   isObservabilityEnabled,
+  isPhoenixCollectorEnabled,
+  isMastraTracingEnabled,
+  phoenixCollectorEndpoint,
+  phoenixProjectName,
   shouldStoreModelChunks,
   createTraceLogger,
 } from '@tourbillon/shared';
@@ -17,8 +22,31 @@ const globalForMastra = globalThis as unknown as {
 
 const tracer = createTraceLogger('mastra-instance', {});
 
+function buildExporters(): ObservabilityExporter[] {
+  const exporters: ObservabilityExporter[] = [];
+
+  if (isObservabilityEnabled()) {
+    exporters.push(new TourbillonPostgresExporter());
+  }
+
+  if (isPhoenixCollectorEnabled()) {
+    exporters.push(
+      new ArizeExporter({
+        endpoint: phoenixCollectorEndpoint(),
+        apiKey: process.env.PHOENIX_API_KEY || undefined,
+        projectName: phoenixProjectName(),
+      }),
+    );
+  }
+
+  return exporters;
+}
+
 function buildObservability(): Observability | undefined {
-  if (!isObservabilityEnabled()) return undefined;
+  if (!isMastraTracingEnabled()) return undefined;
+
+  const exporters = buildExporters();
+  if (exporters.length === 0) return undefined;
 
   const excludeSpanTypes = shouldStoreModelChunks()
     ? undefined
@@ -39,7 +67,7 @@ function buildObservability(): Observability | undefined {
         ],
         excludeSpanTypes,
         spanOutputProcessors: [new SensitiveDataFilter()],
-        exporters: [new TourbillonPostgresExporter()],
+        exporters,
       },
     },
   });
@@ -162,11 +190,9 @@ export function ensureMastraAgentRegistered(agentId: string, name?: string): voi
 }
 
 export async function flushObservability(): Promise<void> {
-  if (!isObservabilityEnabled()) return;
+  if (!isMastraTracingEnabled()) return;
   const instance = getMastraInstance().observability.getDefaultInstance();
   await instance?.flush();
-  const exporter = instance
-    ?.getExporters()
-    .find((e) => e.name === 'tourbillon-postgres-exporter');
-  await exporter?.flush();
+  const exporters = instance?.getExporters() ?? [];
+  await Promise.all(exporters.map((exporter) => exporter.flush()));
 }

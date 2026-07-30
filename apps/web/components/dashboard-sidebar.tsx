@@ -6,6 +6,7 @@ import { useEffect } from 'react';
 import {
   Activity,
   Bot,
+  Brain,
   CheckCircle2,
   FolderKanban,
   FolderOpen,
@@ -44,6 +45,7 @@ const navItems: { href: string; label: string; icon: LucideIcon }[] = [
   { href: '/project', label: 'Projects', icon: FolderKanban },
   { href: '/goal', label: 'Goals', icon: Target },
   { href: '/workspace', label: 'Workspace', icon: FolderOpen },
+  { href: '/memory', label: 'Memory', icon: Brain },
   { href: '/activity', label: 'Activity', icon: Activity },
   { href: '/observability', label: 'Observability', icon: ScanSearch },
   { href: '/agent', label: 'Agents', icon: Bot },

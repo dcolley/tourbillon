@@ -13,6 +13,8 @@ Shared files for all agents in this company. Use control-plane workspace tools.
 - \`archives/\` — completed material
 - \`skills/\` — company-wide skills (discovered at hire → \`assignedSkills\`; workspace content overrides bundled skills at wake)
 - \`agents/{urlKey}/skills/\` — per-agent skills (dynamic at wake; toolset templates seeded at hire)
+- \`agents/{urlKey}/memory.jsonl\` — private agent knowledge-graph memory (MCP JSONL; knowledge-graph toolset)
+- \`memory.jsonl\` — company-shared knowledge-graph memory (agents mount via config)
 
 Task thread of record: issue comments. Task plans: \`putPlanDocument\`.
 `;
@@ -41,7 +43,15 @@ export class WorkspaceSizeError extends Error {
   }
 }
 
-const TEXT_EDITABLE_EXTENSIONS = new Set(['.md', '.txt', '.json', '.yaml', '.yml', '.csv']);
+const TEXT_EDITABLE_EXTENSIONS = new Set([
+  '.md',
+  '.txt',
+  '.json',
+  '.jsonl',
+  '.yaml',
+  '.yml',
+  '.csv',
+]);
 
 const CODE_VIEWABLE_EXTENSIONS = new Set([
   '.js',

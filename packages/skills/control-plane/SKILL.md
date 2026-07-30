@@ -9,7 +9,13 @@ This skill governs how you interact with the Tourbillon control plane. Follow ev
 You wake, you work, you exit. Every heartbeat follows these 9 steps exactly:
 
 1. **Orient** — Call `getIdentity` (skip if identity is already in your system prompt context)
-2. **Check budget** — If `spentMonthlyTokens >= budgetMonthlyTokens`, call `updateIssue` with status `blocked`, comment `Pausing: monthly token budget exhausted`, then EXIT
+2. **Check budget** — Use the identity fields from step 1:
+   - If `budgetEnforced` is `false`, **skip budget pausing** — token counts are informational only; continue to step 3
+   - If `budgetEnforced` is `true` **and** `budgetExhausted` is `true` (equivalently: enforced and `spentMonthlyTokens >= budgetMonthlyTokens`):
+     - Call `getInbox`. If you have any `in_progress` or `in_review` item, `checkoutIssue` it, then `updateIssue` with status `blocked` and comment `Pausing: monthly token budget exhausted`
+     - If the inbox has no active item to block, EXIT cleanly without calling `updateIssue`
+     - Then EXIT — do not fetch more work
+   - Prefer the boolean `budgetExhausted` from `getIdentity` over recomputing from raw token fields
 3. **Fetch inbox** — Call `getInbox`. Review all `in_progress`, `in_review`, `todo`, and `blocked` items
 4. **Select task** — Priority: in_progress > in_review > critical/high todo > medium/low todo > blocked
 5. **Checkout** — Call `checkoutIssue`. If 409 → pick next task. If no tasks:
@@ -179,10 +185,15 @@ Context: [relevant background]
 
 ## §6 — Budget Discipline
 
-- **80% budget used**: Enter critical-only mode — only pick `critical` priority tasks
-- **100% budget used**: EXIT immediately, set task `blocked`, comment as above
+Budget pausing applies **only when `budgetEnforced` is `true`** on `getIdentity`. When enforcement is off, `spentMonthlyTokens` / `budgetMonthlyTokens` are soft telemetry — do not block issues or EXIT for budget.
+
+When enforcement is on:
+
+- **`budgetWarning` true (~80%+)**: Enter critical-only mode — only pick `critical` priority tasks
+- **`budgetExhausted` true (100%)**: Follow step 2 — block an active checked-out task if any, then EXIT
+- Prefer `budgetEnforced`, `budgetExhausted`, and `budgetWarning` from `getIdentity` over raw arithmetic
 - Token cost tracking is automatic — you do not need to count tokens manually
-- Local LM Studio models have zero dollar cost; token budget is soft governance only
+- Local LM Studio models have zero dollar cost; token budget without enforcement is soft governance only
 
 ---
 

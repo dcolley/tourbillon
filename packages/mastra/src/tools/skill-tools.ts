@@ -2,6 +2,7 @@ import { createTool } from '@mastra/core/tools';
 import { db, agents } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
 import { z } from 'zod';
+import { CONTROL_PLANE_SKILL_SLUG } from '@tourbillon/shared';
 import { extractToolRuntimeContext } from './api-client';
 import {
   getSkillContentForAgent,
@@ -18,7 +19,7 @@ export const listSkillsTool = createTool({
   description:
     'List methodology skills assigned to you (slug + short description). ' +
     'Use getSkill(slug) to load a full skill body when you need its procedure. ' +
-    'control-plane is already in your system prompt.',
+    'control-plane (Control Plane Operations) is baked into every agent and already in your system prompt — do not call getSkill for it.',
   inputSchema: z.object({}),
   execute: async (_inputData, { requestContext }) => {
     const { agentId } = extractToolRuntimeContext(requestContext);
@@ -33,6 +34,7 @@ export const listSkillsTool = createTool({
         description: s.description,
         approxChars: s.approxChars,
         alreadyInSystemPrompt: s.alwaysInline,
+        bakedIn: s.alwaysInline,
       })),
     };
   },
@@ -42,7 +44,8 @@ export const getSkillTool = createTool({
   id: 'getSkill',
   description:
     'Load the full markdown body of an assigned skill by slug (from listSkills). ' +
-    'Call before following methodology outside control-plane (e.g. plan-to-tasks, company playbooks).',
+    'Call before following methodology outside control-plane (e.g. plan-to-tasks, company playbooks). ' +
+    'control-plane is already in your system prompt — you do not need getSkill for it.',
   inputSchema: z.object({
     slug: z.string().describe('Skill slug, e.g. plan-to-tasks or traders-corner'),
   }),
@@ -65,6 +68,7 @@ export const getSkillTool = createTool({
       slug: skill.slug,
       content: skill.content,
       chars: skill.content.length,
+      alreadyInSystemPrompt: skill.slug === CONTROL_PLANE_SKILL_SLUG,
     };
   },
 });

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useActionState, useState } from 'react';
 import type { AgentModelSettings } from '@tourbillon/shared/model-settings';
 import {
   ModelSettingsFields,
@@ -8,13 +8,19 @@ import {
   modelSettingsToFormValues,
   type ModelSettingsFormValues,
 } from '@/components/model-settings-fields';
+import type { ActionResult } from '@/lib/action-result';
+import { useActionToast } from '@/hooks/use-action-toast';
+import { ActionSubmitButton } from '@/components/action-form';
 
 interface AgentModelSettingsFormProps {
   agentId: string;
   urlKey: string;
   initialSettings?: AgentModelSettings;
   providerDefaults?: AgentModelSettings;
-  updateModelSettings: (formData: FormData) => Promise<void>;
+  updateModelSettings: (
+    prev: ActionResult | null,
+    formData: FormData,
+  ) => Promise<ActionResult>;
 }
 
 export function AgentModelSettingsForm({
@@ -24,12 +30,14 @@ export function AgentModelSettingsForm({
   providerDefaults,
   updateModelSettings,
 }: AgentModelSettingsFormProps) {
+  const [state, formAction] = useActionState(updateModelSettings, null);
+  useActionToast(state);
   const [values, setValues] = useState<ModelSettingsFormValues>(
     modelSettingsToFormValues(initialSettings),
   );
 
   return (
-    <form action={updateModelSettings} className="space-y-4 border-t pt-4">
+    <form action={formAction} className="space-y-4 border-t pt-4">
       <input type="hidden" name="agentId" value={agentId} />
       <input type="hidden" name="urlKey" value={urlKey} />
 
@@ -55,12 +63,7 @@ export function AgentModelSettingsForm({
         />
       </div>
 
-      <button
-        type="submit"
-        className="inline-flex items-center justify-center rounded-md border px-3 py-1.5 text-sm font-medium hover:bg-muted"
-      >
-        Save generation settings
-      </button>
+      <ActionSubmitButton label="Save generation settings" />
     </form>
   );
 }

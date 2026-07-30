@@ -13,6 +13,7 @@ import {
   formatSkillsCatalogSection,
   prepareAgentSkills,
 } from './skills/on-demand-skills';
+import { agentNeedsMcpTools } from '@tourbillon/shared';
 import { buildMCPTools } from './tools/mcp-tools';
 import { SEARXNG_TOOLS } from './tools/searxng-tools';
 import { TAVILY_TOOLS } from './tools/tavily-tools';
@@ -20,7 +21,7 @@ import { getInternalApiUrl } from './tools/api-client';
 import { buildCodeExecutionWorkspace } from './execution-workspace';
 import { resolveAgentGenerationOptions, toMastraDefaultOptions } from './model-settings';
 import { getMastraInstance } from './mastra-instance';
-import { isObservabilityEnabled } from '@tourbillon/shared';
+import { isMastraTracingEnabled } from '@tourbillon/shared';
 import {
   buildHeartbeatInputProcessors,
   resolveHeartbeatContextTokenLimit,
@@ -100,11 +101,7 @@ export async function assembleAgentTools(
   });
   Object.assign(tools, assignableToolsForIds(assignedToolIds));
 
-  const needsMcp =
-    (agentRecord.assignedToolsets?.includes('buffer') ?? false) ||
-    (agentRecord.mcpServerIds?.length ?? 0) > 0;
-
-  if (needsMcp) {
+  if (agentNeedsMcpTools(agentRecord)) {
     const mcpTools = await buildMCPTools(agentRecord, {
       allowedMcpServerIds: options?.allowedMcpServerIds ?? [],
       companySettings,
@@ -227,7 +224,7 @@ export async function createDurableAgentWithSkills(
 
   // DurableAgent workflows read mastra.observability from __registerMastra on the
   // wrapper — registering only the inner Agent leaves spans with no exporter.
-  if (isObservabilityEnabled()) {
+  if (isMastraTracingEnabled()) {
     const mastra = getMastraInstance();
     mastra.removeAgent(agentRecord.id);
     mastra.addAgent(durableAgent, agentRecord.id);
@@ -250,6 +247,7 @@ function assembleSystemPrompt(
     parts.push(`## Your Identity and Role\n\n${agentRecord.instructionsBundleAgentsMd.trim()}`);
   }
 
+  // Baked-in control-plane (and any other always-inline skills) first.
   for (const skill of prepared.alwaysInline) {
     parts.push(`---\n\n${skill.content}`);
   }

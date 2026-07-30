@@ -26,7 +26,7 @@ function FileTypeIcon({ name }: { name: string }) {
   const className = 'h-4 w-4 shrink-0 text-muted-foreground';
   const lower = name.toLowerCase();
   if (lower.endsWith('.md')) return <FileText className={className} />;
-  if (lower.endsWith('.json')) return <FileJson className={className} />;
+  if (lower.endsWith('.json') || lower.endsWith('.jsonl')) return <FileJson className={className} />;
   if (
     lower.endsWith('.js') ||
     lower.endsWith('.jsx') ||

@@ -40,17 +40,31 @@ export const BOARD_DISPLAY_NAME = 'Board';
 export const BOARD_ASSIGNEE_SELECT_VALUE = '__board__';
 
 // ─── Agent roles ──────────────────────────────────────────────────────────
+
+/** Mandatory heartbeat methodology — baked into every agent (always inlined). */
+export const CONTROL_PLANE_SKILL_SLUG = 'control-plane';
+
 export const ROLE_DEFAULT_SKILLS: Record<string, string[]> = {
-  ceo:      ['control-plane', 'plan-to-tasks', 'create-agent', 'para-memory'],
-  cto:      ['control-plane', 'plan-to-tasks', 'para-memory'],
-  engineer: ['control-plane', 'para-memory'],
-  pm:       ['control-plane', 'plan-to-tasks', 'para-memory'],
-  qa:       ['control-plane', 'para-memory'],
-  designer: ['control-plane', 'para-memory'],
+  ceo:      [CONTROL_PLANE_SKILL_SLUG, 'plan-to-tasks', 'create-agent', 'para-memory'],
+  cto:      [CONTROL_PLANE_SKILL_SLUG, 'plan-to-tasks', 'para-memory'],
+  engineer: [CONTROL_PLANE_SKILL_SLUG, 'para-memory'],
+  pm:       [CONTROL_PLANE_SKILL_SLUG, 'plan-to-tasks', 'para-memory'],
+  qa:       [CONTROL_PLANE_SKILL_SLUG, 'para-memory'],
+  designer: [CONTROL_PLANE_SKILL_SLUG, 'para-memory'],
 };
 
+/** Ensure control-plane is present and first in an assignedSkills list. */
+export function ensureControlPlaneInSkills(skills: string[]): string[] {
+  const rest = skills.filter((s) => s !== CONTROL_PLANE_SKILL_SLUG);
+  return [CONTROL_PLANE_SKILL_SLUG, ...rest];
+}
+
 /** Toolset skill markdown filenames — excluded from dynamic per-agent skill scans. */
-export const TOOLSET_SKILL_FILENAMES = ['buffer-skills.md', 'code-execution-skills.md'] as const;
+export const TOOLSET_SKILL_FILENAMES = [
+  'buffer-skills.md',
+  'code-execution-skills.md',
+  'knowledge-graph-skills.md',
+] as const;
 
 export const TOOLSET_SKILL_FILENAME_SET = new Set<string>(TOOLSET_SKILL_FILENAMES);
 
@@ -96,6 +110,12 @@ export const TOOLSET_CATALOG = [
     id: 'nitter',
     label: 'Nitter / X search',
     description: 'Search tweets and users via a self-hosted Nitter instance (requires NITTER_URL).',
+  },
+  {
+    id: 'knowledge-graph',
+    label: 'Knowledge graph memory',
+    description:
+      'Persistent entity/relation knowledge graph via MCP memory (private and/or company JSONL mounts). Distinct from Mastra conversation memory and issue comments.',
   },
 ] as const;
 

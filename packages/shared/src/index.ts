@@ -19,3 +19,5 @@ export * from './tool-catalog';
 export * from './company-settings';
 export * from './mcp-registry';
 export * from './mcp-credentials';
+export * from './knowledge-graph-config';
+export * from './knowledge-graph';

@@ -1,12 +1,17 @@
 'use client';
 
-import { useMemo, useRef, useState } from 'react';
+import { useActionState, useEffect, useMemo, useRef, useState } from 'react';
 import { GRANULAR_TOOL_GROUPS, type ToolCapability } from '@tourbillon/shared/tool-catalog';
 import {
   AGENT_INTEGRATION_CREDENTIALS,
   TOOLSET_CATALOG,
   type AgentIntegrationCredentialId,
 } from '@tourbillon/shared/constants';
+import { getMcpBridgedToolsetIds } from '@tourbillon/shared/mcp-registry';
+import type { AgentRuntimeConfig } from '@tourbillon/shared/types';
+import type { ActionResult } from '@/lib/action-result';
+import { useActionToast } from '@/hooks/use-action-toast';
+import { ActionSubmitButton } from '@/components/action-form';
 
 export type AgentIntegrationOverrides = Partial<Record<AgentIntegrationCredentialId, string>>;
 
@@ -17,14 +22,35 @@ interface IntegrationRow {
   hasStoredValue: boolean;
 }
 
+interface McpToolCatalogEntry {
+  name: string;
+  description?: string;
+}
+
+interface McpServerToolCatalog {
+  serverId: string;
+  label: string;
+  tools: McpToolCatalogEntry[];
+  toolWhitelist?: string[];
+  toolBlacklist?: string[];
+  error?: string;
+}
+
 interface AgentCapabilitiesFormProps {
   agentId: string;
   urlKey: string;
   assignedToolsets: string[];
   enabledTools: string[];
+  mcpToolPolicy?: AgentRuntimeConfig['mcpToolPolicy'];
+  knowledgeGraph?: AgentRuntimeConfig['knowledgeGraph'];
   integrationOverrides?: AgentIntegrationOverrides;
-  updateCapabilities: (formData: FormData) => Promise<void>;
+  updateCapabilities: (
+    prev: ActionResult | null,
+    formData: FormData,
+  ) => Promise<ActionResult>;
 }
+
+const MCP_BRIDGED_TOOLSET_IDS = new Set(getMcpBridgedToolsetIds());
 
 function nextRowId(): string {
   return `row_${Math.random().toString(36).slice(2, 10)}`;
@@ -40,17 +66,65 @@ function initialRows(overrides: AgentIntegrationOverrides): IntegrationRow[] {
   return rows;
 }
 
+function matchesToolName(toolName: string, pattern: string): boolean {
+  return toolName === pattern || toolName.endsWith(`_${pattern}`) || toolName.includes(pattern);
+}
+
+function isToolDeniedByBlacklist(toolName: string, blacklist: string[] | undefined): boolean {
+  if (!blacklist?.length) return false;
+  return blacklist.some((pattern) => matchesToolName(toolName, pattern));
+}
+
+function defaultToolChecked(
+  toolName: string,
+  server: McpServerToolCatalog,
+  policy: AgentRuntimeConfig['mcpToolPolicy'] | undefined,
+): boolean {
+  const storedAllow =
+    policy?.[server.serverId]?.allow ??
+    (server.serverId === 'memory-mcp-private' ? policy?.['memory-mcp']?.allow : undefined);
+  if (storedAllow !== undefined) {
+    return storedAllow.some((pattern) => matchesToolName(toolName, pattern));
+  }
+  if (server.toolWhitelist?.length) {
+    return server.toolWhitelist.some((pattern) => matchesToolName(toolName, pattern));
+  }
+  return !isToolDeniedByBlacklist(toolName, server.toolBlacklist);
+}
+
+function readCheckedToolsets(form: HTMLFormElement): string[] {
+  const ids: string[] = [];
+  for (const entry of TOOLSET_CATALOG) {
+    if (entry.id === 'code-execution') continue;
+    const input = form.elements.namedItem(`toolset_${entry.id}`) as HTMLInputElement | null;
+    if (input?.checked) ids.push(entry.id);
+  }
+  return ids;
+}
+
 export function AgentCapabilitiesForm({
   agentId,
   urlKey,
   assignedToolsets,
   enabledTools,
+  mcpToolPolicy,
+  knowledgeGraph,
   integrationOverrides = {},
   updateCapabilities,
 }: AgentCapabilitiesFormProps) {
+  const [state, formAction] = useActionState(updateCapabilities, null);
+  useActionToast(state);
   const formRef = useRef<HTMLFormElement>(null);
   const [rows, setRows] = useState<IntegrationRow[]>(() => initialRows(integrationOverrides));
   const [clearedKeys, setClearedKeys] = useState<AgentIntegrationCredentialId[]>([]);
+  const [previewToolsets, setPreviewToolsets] = useState<string[]>(() =>
+    assignedToolsets.filter((id) => id !== 'code-execution'),
+  );
+  const [kgPrivate, setKgPrivate] = useState(knowledgeGraph?.private !== false);
+  const [kgCompany, setKgCompany] = useState(knowledgeGraph?.company === true);
+  const [mcpServers, setMcpServers] = useState<McpServerToolCatalog[]>([]);
+  const [mcpLoading, setMcpLoading] = useState(false);
+  const [mcpError, setMcpError] = useState<string | null>(null);
 
   const usedKeys = useMemo(
     () => new Set(rows.map((row) => row.key).filter(Boolean) as AgentIntegrationCredentialId[]),
@@ -58,6 +132,56 @@ export function AgentCapabilitiesForm({
   );
 
   const availableKeys = AGENT_INTEGRATION_CREDENTIALS.filter((entry) => !usedKeys.has(entry.id));
+
+  const showKnowledgeGraphMounts = previewToolsets.includes('knowledge-graph');
+
+  const mcpPreviewKey = useMemo(() => {
+    const bridged = previewToolsets.filter((id) => MCP_BRIDGED_TOOLSET_IDS.has(id)).sort();
+    return `${bridged.join(',')}|kg:${kgPrivate ? 'p' : ''}${kgCompany ? 'c' : ''}`;
+  }, [previewToolsets, kgPrivate, kgCompany]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
+      setMcpLoading(true);
+      setMcpError(null);
+      try {
+        const params = new URLSearchParams();
+        params.set('toolsets', previewToolsets.join(','));
+        if (previewToolsets.includes('knowledge-graph')) {
+          params.set('kgPrivate', kgPrivate ? '1' : '0');
+          params.set('kgCompany', kgCompany ? '1' : '0');
+        }
+        const res = await fetch(`/api/agents/${agentId}/mcp-tools?${params.toString()}`);
+        const data = (await res.json()) as { servers?: McpServerToolCatalog[]; error?: string };
+        if (!res.ok) {
+          throw new Error(data.error ?? `Failed to load MCP tools (${res.status})`);
+        }
+        if (!cancelled) {
+          setMcpServers(data.servers ?? []);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setMcpServers([]);
+          setMcpError(err instanceof Error ? err.message : 'Failed to load MCP tools');
+        }
+      } finally {
+        if (!cancelled) setMcpLoading(false);
+      }
+    }
+
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [agentId, mcpPreviewKey, previewToolsets, kgPrivate, kgCompany]);
+
+  function syncPreviewToolsetsFromForm() {
+    const form = formRef.current;
+    if (!form) return;
+    setPreviewToolsets(readCheckedToolsets(form));
+  }
 
   function toggleGroupCapability(groupId: string, capability: ToolCapability | 'none') {
     const form = formRef.current;
@@ -75,6 +199,17 @@ export function AgentCapabilitiesForm({
       } else {
         input.checked = tool.capability === capability;
       }
+    }
+  }
+
+  function setAllMcpTools(serverId: string, checked: boolean) {
+    const form = formRef.current;
+    if (!form) return;
+    const inputs = form.querySelectorAll<HTMLInputElement>(
+      `input[name="mcpAllow_${serverId}"]`,
+    );
+    for (const input of inputs) {
+      input.checked = checked;
     }
   }
 
@@ -107,7 +242,12 @@ export function AgentCapabilitiesForm({
   }
 
   return (
-    <form ref={formRef} action={updateCapabilities} className="space-y-6 border-t pt-4">
+    <form
+      key={JSON.stringify(mcpToolPolicy ?? null)}
+      ref={formRef}
+      action={formAction}
+      className="space-y-6 border-t pt-4"
+    >
       <input type="hidden" name="agentId" value={agentId} />
       <input type="hidden" name="urlKey" value={urlKey} />
       {clearedKeys.map((key) => (
@@ -190,6 +330,7 @@ export function AgentCapabilitiesForm({
             const checked =
               assignedToolsets.includes(entry.id) ||
               (entry.id === 'roster' && assignedToolsets.includes('agent-management'));
+            const isMcpBridged = MCP_BRIDGED_TOOLSET_IDS.has(entry.id);
             return (
               <li key={entry.id}>
                 <label className="flex items-start gap-2 cursor-pointer">
@@ -198,6 +339,7 @@ export function AgentCapabilitiesForm({
                     name={`toolset_${entry.id}`}
                     defaultChecked={checked}
                     className="mt-0.5 rounded border-input"
+                    onChange={isMcpBridged ? syncPreviewToolsetsFromForm : undefined}
                   />
                   <span>
                     <span className="font-medium">{entry.label}</span>
@@ -208,6 +350,134 @@ export function AgentCapabilitiesForm({
             );
           })}
         </ul>
+      </div>
+
+      {showKnowledgeGraphMounts && (
+        <div className="space-y-3 rounded-md border p-4">
+          <div>
+            <p className="text-sm font-medium">Knowledge graph mounts</p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Each mount is a separate MCP memory file. Writes always target one scope — not a silent union.
+              Defaults: private on, company off.
+            </p>
+          </div>
+          <ul className="space-y-3">
+            <li>
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  name="kgMountPrivate"
+                  checked={kgPrivate}
+                  onChange={(e) => setKgPrivate(e.target.checked)}
+                  className="mt-0.5 rounded border-input"
+                />
+                <span>
+                  <span className="font-medium text-sm">Private memory</span>
+                  <span className="block text-xs text-muted-foreground font-mono">
+                    agents/{urlKey}/memory.jsonl
+                  </span>
+                </span>
+              </label>
+            </li>
+            <li>
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  name="kgMountCompany"
+                  checked={kgCompany}
+                  onChange={(e) => setKgCompany(e.target.checked)}
+                  className="mt-0.5 rounded border-input"
+                />
+                <span>
+                  <span className="font-medium text-sm">Company memory</span>
+                  <span className="block text-xs text-muted-foreground font-mono">memory.jsonl</span>
+                </span>
+              </label>
+            </li>
+          </ul>
+          {!kgPrivate && !kgCompany && (
+            <p className="text-xs text-destructive">
+              Enable at least one mount or the knowledge-graph toolset will expose no memory tools.
+            </p>
+          )}
+        </div>
+      )}
+
+      <div className="space-y-3 rounded-md border p-4">
+        <div>
+          <p className="text-sm font-medium">MCP tools</p>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Live tool list from each assigned MCP server. Uncheck tools to hide them at wake. Enabling an MCP
+            toolset may take a few seconds to load (`npx` cold start).
+          </p>
+        </div>
+
+        {mcpLoading && (
+          <p className="text-xs text-muted-foreground">Loading MCP tool catalogs…</p>
+        )}
+        {mcpError && <p className="text-xs text-destructive">{mcpError}</p>}
+        {!mcpLoading && !mcpError && mcpServers.length === 0 && (
+          <p className="text-xs text-muted-foreground">
+            No MCP servers assigned. Enable Buffer, Knowledge graph memory, or set mcpServerIds.
+          </p>
+        )}
+
+        {mcpServers.map((server) => (
+          <fieldset key={server.serverId} className="space-y-3 rounded-md border p-3">
+            {!server.error ? (
+              <input type="hidden" name="mcpServerPolicy" value={server.serverId} />
+            ) : null}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <legend className="text-sm font-medium">{server.label}</legend>
+              {!server.error && server.tools.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setAllMcpTools(server.serverId, true)}
+                    className="text-xs rounded border px-2 py-0.5 hover:bg-muted"
+                  >
+                    All
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAllMcpTools(server.serverId, false)}
+                    className="text-xs rounded border px-2 py-0.5 hover:bg-muted"
+                  >
+                    None
+                  </button>
+                </div>
+              )}
+            </div>
+            <p className="text-[10px] font-mono text-muted-foreground">{server.serverId}</p>
+            {server.error ? (
+              <p className="text-xs text-destructive">{server.error}</p>
+            ) : server.tools.length === 0 ? (
+              <p className="text-xs text-muted-foreground">No tools returned.</p>
+            ) : (
+              <ul className="space-y-2">
+                {server.tools.map((tool) => (
+                  <li key={tool.name}>
+                    <label className="flex items-start gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        name={`mcpAllow_${server.serverId}`}
+                        value={tool.name}
+                        defaultChecked={defaultToolChecked(tool.name, server, mcpToolPolicy)}
+                        className="mt-0.5 rounded border-input"
+                      />
+                      <span>
+                        <span className="font-medium text-sm font-mono">{tool.name}</span>
+                        {tool.description ? (
+                          <span className="block text-xs text-muted-foreground">{tool.description}</span>
+                        ) : null}
+                      </span>
+                    </label>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </fieldset>
+        ))}
       </div>
 
       <div className="space-y-3 rounded-md border p-4">
@@ -297,12 +567,7 @@ export function AgentCapabilitiesForm({
         )}
       </div>
 
-      <button
-        type="submit"
-        className="inline-flex items-center justify-center rounded-md border px-3 py-1.5 text-sm font-medium hover:bg-muted"
-      >
-        Save capabilities
-      </button>
+      <ActionSubmitButton label="Save capabilities" />
     </form>
   );
 }

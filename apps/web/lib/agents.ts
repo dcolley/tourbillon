@@ -21,8 +21,10 @@ import {
   type AgentRuntimeConfig,
   type AgentRuntimeType,
   type SandboxIsolation,
+  resolveAgentMcpServerIds,
 } from '@tourbillon/shared';
-import { seedAgentSkillsFromTemplates, buildAssignedSkills } from '@tourbillon/shared/company-workspace';
+import { seedAgentSkillsFromTemplates, buildAssignedSkills, copyAgentWorkspaceSkills } from '@tourbillon/shared/company-workspace';
+import { ensureControlPlaneInSkills } from '@tourbillon/shared';
 import { getActiveCompany } from './company';
 import { getDefaultLlmProviderRecord } from './llm-providers';
 
@@ -211,6 +213,109 @@ export async function createAgent(input: CreateAgentInput): Promise<Agent> {
   return created;
 }
 
+export interface CloneAgentInput {
+  sourceAgentId: string;
+  name: string;
+  urlKey: string;
+  /** When false, strip agent-level integration secrets from runtimeConfig. Default true. */
+  copyCredentials?: boolean;
+}
+
+/** Suggest a free company-scoped urlKey like `cto-copy`, `cto-copy-2`, … */
+export async function suggestCloneUrlKey(companyId: string, sourceUrlKey: string): Promise<string> {
+  const base = `${sourceUrlKey}-copy`;
+  for (let i = 0; i < 50; i++) {
+    const candidate = i === 0 ? base : `${base}-${i + 1}`;
+    const existing = await db.query.agents.findFirst({
+      where: and(eq(agents.companyId, companyId), eq(agents.urlKey, candidate)),
+    });
+    if (!existing) return candidate;
+  }
+  return `${base}-${Date.now().toString(36)}`;
+}
+
+/**
+ * Clone an agent as a new row with full config (skills, toolsets, model, instructions, MCP).
+ * Regenerates id; resets spent tokens; disables automatic heartbeat; copies workspace skills.
+ */
+export async function cloneAgent(input: CloneAgentInput): Promise<Agent> {
+  const source = await db.query.agents.findFirst({ where: eq(agents.id, input.sourceAgentId) });
+  if (!source) throw new AgentValidationError('Source agent not found.');
+
+  const name = input.name?.trim();
+  if (!name) throw new AgentValidationError('Name is required.');
+
+  const urlKey = slugifyUrlKey(input.urlKey?.trim() || name);
+  if (!urlKey) throw new AgentValidationError('Agent ID is required.');
+  if (RESERVED_AGENT_IDS.has(urlKey)) {
+    throw new AgentValidationError(`Agent ID "${urlKey}" is reserved.`);
+  }
+  if (!isValidUrlKey(urlKey)) {
+    throw new AgentValidationError('Agent ID must use lowercase letters, numbers, and hyphens only.');
+  }
+  if (urlKey === source.urlKey) {
+    throw new AgentValidationError('Clone Agent ID must differ from the source agent.');
+  }
+
+  const duplicate = await db.query.agents.findFirst({
+    where: and(eq(agents.companyId, source.companyId), eq(agents.urlKey, urlKey)),
+  });
+  if (duplicate) {
+    throw new AgentValidationError(`Agent ID "${urlKey}" is already in use.`);
+  }
+
+  const sourceRuntime = source.runtimeConfig as AgentRuntimeConfig;
+  const copyCredentials = input.copyCredentials !== false;
+
+  const runtimeConfig: AgentRuntimeConfig = {
+    ...structuredClone(sourceRuntime),
+    heartbeat: {
+      ...sourceRuntime.heartbeat,
+      enabled: false,
+    },
+  };
+
+  if (!copyCredentials) {
+    delete runtimeConfig.mcpCredentials;
+    delete runtimeConfig.tavilyApiKey;
+    delete runtimeConfig.searxngUrl;
+    delete runtimeConfig.searxngApiKey;
+  }
+
+  const [created] = await db
+    .insert(agents)
+    .values({
+      companyId: source.companyId,
+      name,
+      title: source.title,
+      role: source.role,
+      icon: source.icon,
+      urlKey,
+      reportsToId: source.reportsToId,
+      adapterType: source.adapterType,
+      adapterConfig: structuredClone(source.adapterConfig ?? {}),
+      providerId: source.providerId,
+      modelId: source.modelId,
+      instructionsBundleSoulMd: source.instructionsBundleSoulMd,
+      instructionsBundleAgentsMd: source.instructionsBundleAgentsMd,
+      instructionsPath: source.instructionsPath,
+      assignedSkills: ensureControlPlaneInSkills([...(source.assignedSkills ?? [])]),
+      assignedToolsets: [...(source.assignedToolsets ?? [])],
+      mcpServerIds: [...(source.mcpServerIds ?? [])],
+      budgetMonthlyTokens: source.budgetMonthlyTokens,
+      spentMonthlyTokens: 0,
+      status: 'active',
+      runtimeConfig,
+      defaultBillingCode: source.defaultBillingCode,
+    })
+    .returning();
+
+  await copyAgentWorkspaceSkills(source.companyId, source.urlKey, urlKey);
+  await seedAgentSkillsFromTemplates(source.companyId, urlKey);
+
+  return created;
+}
+
 export async function updateAgentRuntimeConfig(
   agentId: string,
   patch: {
@@ -318,6 +423,10 @@ export async function updateAgentCapabilities(
     assignedTools: string[];
     integrations?: Partial<Record<string, string>>;
     clearIntegrations?: string[];
+    /** Per-server allow lists from capabilities UI. Only keys for currently assigned MCP servers are kept. */
+    mcpToolPolicy?: Record<string, { allow: string[] }>;
+    /** Knowledge-graph mounts when toolset is enabled. */
+    knowledgeGraph?: { private: boolean; company: boolean };
   },
 ): Promise<Agent> {
   const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
@@ -374,6 +483,45 @@ export async function updateAgentCapabilities(
   }
 
   runtimeConfig.mcpCredentials = Object.keys(mcpCredentials).length > 0 ? mcpCredentials : undefined;
+
+  if (input.knowledgeGraph !== undefined) {
+    if (toolsets.includes('knowledge-graph')) {
+      runtimeConfig.knowledgeGraph = {
+        private: input.knowledgeGraph.private,
+        company: input.knowledgeGraph.company,
+      };
+    } else {
+      runtimeConfig.knowledgeGraph = undefined;
+    }
+  } else if (!toolsets.includes('knowledge-graph')) {
+    runtimeConfig.knowledgeGraph = undefined;
+  }
+
+  if (input.mcpToolPolicy !== undefined) {
+    const assignedServerIds = new Set(
+      resolveAgentMcpServerIds({
+        assignedToolsets: toolsets,
+        mcpServerIds: agent.mcpServerIds,
+        runtimeConfig,
+      }),
+    );
+
+    const nextPolicy: NonNullable<AgentRuntimeConfig['mcpToolPolicy']> = {};
+    for (const serverId of assignedServerIds) {
+      const submitted = input.mcpToolPolicy[serverId];
+      if (submitted !== undefined) {
+        nextPolicy[serverId] = {
+          allow: [...new Set(submitted.allow.map((t) => t.trim()).filter(Boolean))],
+          ...(current.mcpToolPolicy?.[serverId]?.deny?.length
+            ? { deny: current.mcpToolPolicy[serverId]!.deny }
+            : {}),
+        };
+      } else if (current.mcpToolPolicy?.[serverId]) {
+        nextPolicy[serverId] = current.mcpToolPolicy[serverId]!;
+      }
+    }
+    runtimeConfig.mcpToolPolicy = Object.keys(nextPolicy).length > 0 ? nextPolicy : undefined;
+  }
 
   const [updated] = await db
     .update(agents)
