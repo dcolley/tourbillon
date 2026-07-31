@@ -14,11 +14,11 @@
     "@tourbillon/mastra": "workspace:*",
     "@tourbillon/shared": "workspace:*",
     "drizzle-orm": "catalog:",
-    "ioredis": "^5.11.1"
+    "ioredis": "catalog:"
   },
   "devDependencies": {
     "@types/node": "catalog:",
-    "tsx": "^4.22.4",
+    "tsx": "^4.23.1",
     "typescript": "catalog:"
   }
 }

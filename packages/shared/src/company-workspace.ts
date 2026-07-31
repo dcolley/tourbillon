@@ -1,3 +1,4 @@
+import type { Stats } from 'node:fs';
 import { mkdir, readFile, writeFile, readdir, stat, unlink, rmdir } from 'fs/promises';
 import path from 'path';
 import { ROLE_DEFAULT_SKILLS, TOOLSET_SKILL_FILENAME_SET, ensureControlPlaneInSkills, CONTROL_PLANE_SKILL_SLUG } from './constants';
@@ -100,7 +101,7 @@ export async function ensureCompanyWorkspace(companyId: string): Promise<string>
 async function entryFromStat(
   relativePath: string,
   name: string,
-  entryStat: Awaited<ReturnType<typeof stat>>
+  entryStat: Stats,
 ): Promise<WorkspaceEntry> {
   return {
     name,

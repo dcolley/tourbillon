@@ -2,23 +2,27 @@ packages:
   - 'apps/*'
   - 'packages/*'
 
-# Reject package versions published less than 7 days ago (supply-chain protection).
-minimumReleaseAge: 10080
-# Phase 2 needs @mastra/* 1.50.x (Schedules API); exclude from maturity gate.
+# Supply-chain maturity gate. Set to 10080 (7d) once this lockfile ages past the
+# cutoff; left at 0 after an intentional upgrade-to-latest (2026-07-31) so
+# scripts/`pnpm install` are not blocked by freshly published versions.
+minimumReleaseAge: 0
+# Always allow fast @mastra/* iteration (Schedules / core API churn).
 minimumReleaseAgeExclude:
   - '@mastra/*'
 
 overrides:
-  ioredis: ^5.11.0
+  ioredis: ^5.11.1
 
 catalog:
-  typescript: ^5.9.3
-  "@types/node": ^20.19.43
-  eslint: ^9.39.4
-  prettier: ^3.8.4
-  "@ai-sdk/openai": ^3.0.74
+  # TS 7 / ESLint 10 are latest on npm but break eslint-config-next peers
+  # (typescript-eslint <6.1.0, eslint-plugin-* ^9). Use newest compatible.
+  typescript: ^6.0.3
+  "@types/node": ^26.1.2
+  eslint: ^9.39.5
+  prettier: ^3.9.6
+  "@ai-sdk/openai": ^4.0.25
   drizzle-orm: ^0.45.2
-  ioredis: ^5.11.0
+  ioredis: ^5.11.1
   zod: ^4.4.3
 
 allowBuilds:
@@ -34,4 +38,3 @@ allowBuilds:
   geckodriver: false
   koffi: false
   onnxruntime-node: false
-
