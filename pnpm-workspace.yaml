@@ -12,6 +12,9 @@ minimumReleaseAgeExclude:
 
 overrides:
   ioredis: ^5.11.1
+  # Mastra CJS uses __toESM(require(slugify), 1); pure-ESM namespace breaks .default.
+  # Force our CJS-callable workspace shim (packages/slugify-cjs).
+  '@sindresorhus/slugify': workspace:*
 
 catalog:
   # TS 7 / ESLint 10 are latest on npm but break eslint-config-next peers
