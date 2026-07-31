@@ -1,0 +1,16 @@
+[Unit]
+Description=Tourbillon scheduler (WakeRunner + Mastra schedules)
+After=network-online.target tourbillon-web.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/tourbillon
+ExecStart=/bin/bash -lc 'source "$HOME/.nvm/nvm.sh" && exec pnpm workers:dev'
+Restart=always
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

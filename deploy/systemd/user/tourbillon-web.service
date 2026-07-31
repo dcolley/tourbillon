@@ -1,0 +1,17 @@
+[Unit]
+Description=Tourbillon web (Next.js)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/tourbillon
+Environment=NODE_ENV=development
+ExecStart=/bin/bash -lc 'source "$HOME/.nvm/nvm.sh" && exec pnpm dev'
+Restart=always
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target
