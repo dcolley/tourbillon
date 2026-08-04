@@ -321,13 +321,18 @@ export const createSubtaskTool = createTool({
   description:
     'Create a child issue to delegate work to another agent or the Board. ' +
     'Always set parentId and goalId — no orphan tasks allowed. ' +
+    'goalId must come from getHeartbeatContext.goal.id or listGoals; never the issue id. ' +
     'Assign with assigneeAgentId (listAgents) or assigneeUserId (getIdentity.board.assigneeUserId); ' +
     'omit both only to defer assignment to CEO (creates backlog).',
   inputSchema: z.object({
     title: z.string(),
     description: z.string().optional(),
     parentId: z.string().describe('Parent issue ID — required'),
-    goalId: z.string().describe('Goal/initiative ID — required for traceability'),
+    goalId: z
+      .string()
+      .describe(
+        'Goal UUID from getHeartbeatContext.goal.id or listGoals — must exist in goals; never invent or reuse issue/agent ids',
+      ),
     assigneeAgentId: z
       .string()
       .optional()

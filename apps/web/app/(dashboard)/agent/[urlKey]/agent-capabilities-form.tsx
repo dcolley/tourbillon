@@ -4,6 +4,8 @@ import { useActionState, useEffect, useMemo, useRef, useState } from 'react';
 import { GRANULAR_TOOL_GROUPS, type ToolCapability } from '@tourbillon/shared/tool-catalog';
 import {
   AGENT_INTEGRATION_CREDENTIALS,
+  CONTROL_PLANE_SKILL_SLUG,
+  SKILL_CATALOG,
   TOOLSET_CATALOG,
   type AgentIntegrationCredentialId,
 } from '@tourbillon/shared/constants';
@@ -39,6 +41,8 @@ interface McpServerToolCatalog {
 interface AgentCapabilitiesFormProps {
   agentId: string;
   urlKey: string;
+  assignedSkills: string[];
+  companySkillSlugs: string[];
   assignedToolsets: string[];
   enabledTools: string[];
   mcpToolPolicy?: AgentRuntimeConfig['mcpToolPolicy'];
@@ -105,6 +109,8 @@ function readCheckedToolsets(form: HTMLFormElement): string[] {
 export function AgentCapabilitiesForm({
   agentId,
   urlKey,
+  assignedSkills,
+  companySkillSlugs,
   assignedToolsets,
   enabledTools,
   mcpToolPolicy,
@@ -134,6 +140,9 @@ export function AgentCapabilitiesForm({
   const availableKeys = AGENT_INTEGRATION_CREDENTIALS.filter((entry) => !usedKeys.has(entry.id));
 
   const showKnowledgeGraphMounts = previewToolsets.includes('knowledge-graph');
+
+  const bundledSkillIds = new Set<string>(SKILL_CATALOG.map((entry) => entry.id));
+  const extraCompanySkills = companySkillSlugs.filter((slug) => !bundledSkillIds.has(slug));
 
   const mcpPreviewKey = useMemo(() => {
     const bridged = previewToolsets.filter((id) => MCP_BRIDGED_TOOLSET_IDS.has(id)).sort();
@@ -259,6 +268,66 @@ export function AgentCapabilitiesForm({
         <p className="text-xs text-muted-foreground mt-0.5">
           Tier 1 control-plane tools (inbox, checkout, update issue, subtasks) are always included.
         </p>
+      </div>
+
+      <div className="space-y-3">
+        <div>
+          <p className="text-sm font-medium">Skills</p>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Methodology playbooks. Control plane is always on and inlined; other skills appear in the
+            catalog and load via getSkill when needed.
+          </p>
+        </div>
+        <ul className="space-y-3">
+          {SKILL_CATALOG.map((entry) => {
+            const isControlPlane = entry.id === CONTROL_PLANE_SKILL_SLUG;
+            const checked = isControlPlane || assignedSkills.includes(entry.id);
+            return (
+              <li key={entry.id}>
+                <label
+                  className={`flex items-start gap-2 ${isControlPlane ? 'cursor-default' : 'cursor-pointer'}`}
+                >
+                  {isControlPlane ? (
+                    <input type="hidden" name={`skill_${entry.id}`} value="on" />
+                  ) : null}
+                  <input
+                    type="checkbox"
+                    name={isControlPlane ? undefined : `skill_${entry.id}`}
+                    defaultChecked={checked}
+                    disabled={isControlPlane}
+                    className="mt-0.5 rounded border-input"
+                  />
+                  <span>
+                    <span className="font-medium">{entry.label}</span>
+                    <span className="ml-2 text-[10px] font-mono text-muted-foreground">{entry.id}</span>
+                    <span className="block text-xs text-muted-foreground">{entry.description}</span>
+                  </span>
+                </label>
+              </li>
+            );
+          })}
+          {extraCompanySkills.map((slug) => (
+            <li key={slug}>
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  name={`skill_${slug}`}
+                  defaultChecked={assignedSkills.includes(slug)}
+                  className="mt-0.5 rounded border-input"
+                />
+                <span>
+                  <span className="font-medium">{slug}</span>
+                  <span className="ml-2 text-[10px] uppercase tracking-wide text-muted-foreground">
+                    company
+                  </span>
+                  <span className="block text-xs text-muted-foreground">
+                    Company workspace skill from skills/{slug}.md
+                  </span>
+                </span>
+              </label>
+            </li>
+          ))}
+        </ul>
       </div>
 
       {GRANULAR_TOOL_GROUPS.map((group) => {

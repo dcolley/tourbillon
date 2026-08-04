@@ -4,6 +4,8 @@ import {
   readWorkspaceText,
   writeWorkspaceText,
   saveWorkspaceUpload,
+  renameWorkspaceEntry,
+  deleteWorkspaceEntry,
   resolveSafePath,
   WorkspacePathError,
   WorkspaceSizeError,
@@ -101,6 +103,58 @@ export async function PUT(req: NextRequest) {
     }
     if (err instanceof WorkspaceSizeError) {
       return NextResponse.json({ error: err.message }, { status: 413 });
+    }
+    throw err;
+  }
+}
+
+export async function PATCH(req: NextRequest) {
+  const company = await getActiveCompany();
+  const body = (await req.json()) as {
+    from?: string;
+    to?: string;
+    /** When true, destination must remain a text-editable file path. */
+    requireEditable?: boolean;
+  };
+
+  if (!body.from?.trim() || !body.to?.trim()) {
+    return NextResponse.json({ error: 'from and to are required.' }, { status: 400 });
+  }
+
+  if (body.requireEditable && !isTextEditablePath(body.to)) {
+    return NextResponse.json(
+      { error: 'New path must use an editable extension (.md, .txt, .json, .jsonl, .yaml, .yml, .csv).' },
+      { status: 400 }
+    );
+  }
+
+  try {
+    const result = await renameWorkspaceEntry(company.id, body.from, body.to);
+    return NextResponse.json(result);
+  } catch (err) {
+    if (err instanceof WorkspacePathError) {
+      return NextResponse.json({ error: err.message }, { status: 400 });
+    }
+    throw err;
+  }
+}
+
+export async function DELETE(req: NextRequest) {
+  const company = await getActiveCompany();
+  const filePath = req.nextUrl.searchParams.get('path') ?? '';
+  if (!filePath) {
+    return NextResponse.json({ error: 'path is required.' }, { status: 400 });
+  }
+
+  try {
+    const result = await deleteWorkspaceEntry(company.id, filePath);
+    return NextResponse.json(result);
+  } catch (err) {
+    if (err instanceof WorkspacePathError) {
+      return NextResponse.json({ error: err.message }, { status: 400 });
+    }
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return NextResponse.json({ error: 'Not found.' }, { status: 404 });
     }
     throw err;
   }

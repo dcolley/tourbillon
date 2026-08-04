@@ -7,6 +7,8 @@ import {
   VALID_TOOLSET_IDS,
   VALID_ASSIGNABLE_TOOL_IDS,
   VALID_AGENT_INTEGRATION_CREDENTIAL_IDS,
+  VALID_BUNDLED_SKILL_IDS,
+  ensureControlPlaneInSkills,
   resolveModelProviderConfig,
   resolveAdapterFieldsForRuntime,
   parseAgentRuntimeType,
@@ -23,8 +25,12 @@ import {
   type SandboxIsolation,
   resolveAgentMcpServerIds,
 } from '@tourbillon/shared';
-import { seedAgentSkillsFromTemplates, buildAssignedSkills, copyAgentWorkspaceSkills } from '@tourbillon/shared/company-workspace';
-import { ensureControlPlaneInSkills } from '@tourbillon/shared';
+import {
+  seedAgentSkillsFromTemplates,
+  buildAssignedSkills,
+  copyAgentWorkspaceSkills,
+  discoverCompanySkillSlugs,
+} from '@tourbillon/shared/company-workspace';
 import { getActiveCompany } from './company';
 import { getDefaultLlmProviderRecord } from './llm-providers';
 
@@ -421,6 +427,7 @@ export async function updateAgentCapabilities(
   input: {
     toolsets: string[];
     assignedTools: string[];
+    assignedSkills: string[];
     integrations?: Partial<Record<string, string>>;
     clearIntegrations?: string[];
     /** Per-server allow lists from capabilities UI. Only keys for currently assigned MCP servers are kept. */
@@ -444,6 +451,17 @@ export async function updateAgentCapabilities(
   const invalidTools = assignedTools.filter((id) => !VALID_ASSIGNABLE_TOOL_IDS.has(id));
   if (invalidTools.length > 0) {
     throw new AgentValidationError(`Unknown tools: ${invalidTools.join(', ')}`);
+  }
+
+  const companySkillSlugs = new Set(await discoverCompanySkillSlugs(agent.companyId));
+  const assignedSkills = ensureControlPlaneInSkills([
+    ...new Set(input.assignedSkills.map((s) => s.trim()).filter(Boolean)),
+  ]);
+  const invalidSkills = assignedSkills.filter(
+    (slug) => !VALID_BUNDLED_SKILL_IDS.has(slug) && !companySkillSlugs.has(slug),
+  );
+  if (invalidSkills.length > 0) {
+    throw new AgentValidationError(`Unknown skills: ${invalidSkills.join(', ')}`);
   }
 
   const clearIntegrations = [...new Set((input.clearIntegrations ?? []).map((k) => k.trim()).filter(Boolean))];
@@ -526,6 +544,7 @@ export async function updateAgentCapabilities(
   const [updated] = await db
     .update(agents)
     .set({
+      assignedSkills,
       assignedToolsets: toolsets,
       runtimeConfig,
       updatedAt: new Date(),

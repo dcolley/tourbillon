@@ -15,6 +15,11 @@ overrides:
   # Mastra CJS uses __toESM(require(slugify), 1); pure-ESM namespace breaks .default.
   # Force our CJS-callable workspace shim (packages/slugify-cjs).
   '@sindresorhus/slugify': workspace:*
+  # Single Codemirror runtime — duplicate @codemirror/state breaks Extension instanceof checks
+  # when @mdxeditor/editor and @uiw/react-codemirror resolve different copies.
+  '@codemirror/state': ^6.7.1
+  '@codemirror/view': ^6.43.7
+  '@codemirror/language': ^6.12.3
 
 catalog:
   # TS 7 / ESLint 10 are latest on npm but break eslint-config-next peers

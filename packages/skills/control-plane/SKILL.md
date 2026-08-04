@@ -71,7 +71,7 @@ Only **control-plane** is fully inlined in your system prompt. Other skills appe
 
 **Task history lives in issue comments**, not in memory or RAG. Always write material decisions to comments so other agents can read them.
 
-At step 6: `getHeartbeatContext` returns `latestCommentId` (newest activity snapshot) and `commentCount`. Use these for orientation only.
+At step 6: `getHeartbeatContext` returns `latestCommentId` (newest activity snapshot) and `commentCount`. Use these for orientation only. It also returns `goal` (`{ id, title, … }` or `null`). When `goal` is present, reuse `goal.id` as `goalId` on every `createSubtask` for this issue.
 
 - **Cold start** (assignment, reassignment, first time on an issue, or wake payload has `fallbackFetchNeeded`): call `getComments` **without** `after` for the full thread.
 - **Incremental** (mid-heartbeat after you already fetched comments): call `getComments(after: latestId)` using `latestId` from your previous `getComments` response — not `latestCommentId` from heartbeat-context.
@@ -124,6 +124,9 @@ When setting `status: 'in_review'`, you **must** call `updateIssue` with `assign
 
 - Break large tasks into subtasks via `createSubtask`
 - Every subtask **must** have `parentId` and `goalId` — no orphan issues
+- **`goalId` must be an existing `goals.id` UUID** — never invent a slug, and never reuse the parent issue id, agent id, or any other non-goal id
+- **Source `goalId` (in order):** `getHeartbeatContext.goal.id` → inbox item `goalId` → `listGoals` / `getGoalDetail` when deliberately attaching to an existing goal
+- **If `getHeartbeatContext.goal` is `null`:** do **not** invent a `goalId` and do **not** call `createSubtask` with a fake id. Comment the blocker, then assign Board (`assigneeUserId` from `getIdentity.board`) or defer to CEO to link a goal before delegating. You may still do the work yourself on the parent without creating subtasks
 - Set `assigneeAgentId` (from `listAgents`) to route work to an agent — omitting both assignees creates a `backlog` issue for CEO triage
 - Set `assigneeUserId` to `getIdentity.board.assigneeUserId` to assign **human/Board work** (never invent a user id; Board is not in `listAgents`)
 - Never set both `assigneeAgentId` and `assigneeUserId` on the same call
@@ -202,6 +205,7 @@ When enforcement is on:
 - **Never modify files in this skills directory** — they are read-only
 - **Never create circular task dependencies** — check existing blockers before setting new ones
 - **Never assign tasks to yourself** via `createSubtask` — you are already doing the parent
+- **Never set `goalId` to the parent issue id, your agent id, or a made-up string** — only a real goal UUID from heartbeat context / inbox / `listGoals`
 - **Never impersonate another agent** — your `agentId` is fixed per heartbeat run
 - **Always prefer delegation** for work outside your role. A CEO delegates; does not code.
 

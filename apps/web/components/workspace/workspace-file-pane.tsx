@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { isMarkdownPath, isTextEditablePath, isTextViewablePath } from '@tourbillon/shared/company-workspace-types';
 import { MarkdownContent } from '@/components/markdown-content';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -17,6 +18,17 @@ import type { MDXEditorMethods } from '@mdxeditor/editor';
 
 type MarkdownMode = 'preview' | 'visual' | 'source';
 type TextMode = 'view' | 'edit';
+
+function splitWorkspacePath(filePath: string): { dir: string; name: string } {
+  const slash = filePath.lastIndexOf('/');
+  if (slash === -1) return { dir: '', name: filePath };
+  return { dir: filePath.slice(0, slash), name: filePath.slice(slash + 1) };
+}
+
+function joinWorkspacePath(dir: string, name: string): string {
+  const base = name.trim().replace(/^\/+/, '');
+  return dir ? `${dir}/${base}` : base;
+}
 
 async function fetchFileContent(path: string): Promise<string> {
   const res = await fetch(`/api/workspace/file?path=${encodeURIComponent(path)}`);
@@ -39,19 +51,36 @@ async function saveFileContent(path: string, content: string): Promise<void> {
   }
 }
 
+async function renameFile(from: string, to: string): Promise<string> {
+  const res = await fetch('/api/workspace/file', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from, to, requireEditable: true }),
+  });
+  const body = (await res.json().catch(() => ({}))) as { error?: string; path?: string };
+  if (!res.ok) {
+    throw new Error(body.error ?? `Failed to rename file (${res.status})`);
+  }
+  return body.path ?? to;
+}
+
 export function WorkspaceFilePane({
   path,
   hydratedPath,
   hydratedContent,
+  startInEdit = false,
   onSaved,
   onNavigate,
+  onStartInEditConsumed,
   deleteForm,
 }: {
   path: string | null;
   hydratedPath: string | null;
   hydratedContent: string | null;
+  startInEdit?: boolean;
   onSaved?: () => void;
   onNavigate?: (path: string) => void;
+  onStartInEditConsumed?: () => void;
   deleteForm: React.ReactNode;
 }) {
   const editable = path ? isTextEditablePath(path) : false;
@@ -61,6 +90,7 @@ export function WorkspaceFilePane({
 
   const [content, setContent] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
+  const [draftName, setDraftName] = useState(() => (path ? splitWorkspacePath(path).name : ''));
   const [loading, setLoading] = useState(Boolean(path && viewable));
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -69,13 +99,19 @@ export function WorkspaceFilePane({
   const [textMode, setTextMode] = useState<TextMode>('view');
   const mdxRef = useRef<MDXEditorMethods>(null);
   const usedHydrationRef = useRef(false);
+  const usedStartInEditRef = useRef(false);
   const visualSeedRef = useRef('');
   const [visualSeed, setVisualSeed] = useState('');
 
-  const isDirty =
-    markdownMode !== 'preview' || textMode === 'edit'
-      ? draft !== (content ?? '')
-      : false;
+  const pathParts = path ? splitWorkspacePath(path) : { dir: '', name: '' };
+  const editing = markdown ? markdownMode !== 'preview' : textMode === 'edit';
+  const nameDirty = editing && draftName.trim() !== pathParts.name;
+  const contentDirty = editing && draft !== (content ?? '');
+  const isDirty = nameDirty || contentDirty;
+
+  useEffect(() => {
+    usedStartInEditRef.current = false;
+  }, [path, startInEdit]);
 
   useEffect(() => {
     if (!path || !viewable) return;
@@ -88,6 +124,7 @@ export function WorkspaceFilePane({
       setMarkdownMode('preview');
       setTextMode('view');
       setSaveError(null);
+      setDraftName(splitWorkspacePath(path).name);
 
       try {
         let text: string;
@@ -104,6 +141,22 @@ export function WorkspaceFilePane({
         if (cancelled) return;
         setContent(text);
         setDraft(text);
+
+        const shouldStartEdit =
+          startInEdit &&
+          isTextEditablePath(path) &&
+          !usedStartInEditRef.current;
+        if (shouldStartEdit) {
+          usedStartInEditRef.current = true;
+          onStartInEditConsumed?.();
+          if (isMarkdownPath(path)) {
+            visualSeedRef.current = text;
+            setVisualSeed(text);
+            setMarkdownMode('visual');
+          } else {
+            setTextMode('edit');
+          }
+        }
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : 'Failed to load file.');
@@ -119,35 +172,49 @@ export function WorkspaceFilePane({
     return () => {
       cancelled = true;
     };
-  }, [path, viewable, hydratedPath, hydratedContent]);
+  }, [path, viewable, hydratedPath, hydratedContent, startInEdit, onStartInEditConsumed]);
 
   const enterMarkdownEdit = useCallback(
     (mode: 'visual' | 'source') => {
       const seed = content ?? '';
       setDraft(seed);
+      setDraftName(pathParts.name);
       if (mode === 'visual') {
         visualSeedRef.current = seed;
         setVisualSeed(seed);
       }
       setMarkdownMode(mode);
     },
-    [content]
+    [content, pathParts.name]
   );
 
   const enterTextEdit = useCallback(() => {
     setDraft(content ?? '');
+    setDraftName(pathParts.name);
     setTextMode('edit');
-  }, [content]);
+  }, [content, pathParts.name]);
 
   const cancelEdit = useCallback(() => {
     setDraft(content ?? '');
+    setDraftName(pathParts.name);
     setMarkdownMode('preview');
     setTextMode('view');
     setSaveError(null);
-  }, [content]);
+  }, [content, pathParts.name]);
 
   const handleSave = useCallback(async () => {
     if (!path) return;
+    const nextName = draftName.trim();
+    if (!nextName) {
+      setSaveError('Filename is required.');
+      return;
+    }
+    const nextPath = joinWorkspacePath(pathParts.dir, nextName);
+    if (!isTextEditablePath(nextPath)) {
+      setSaveError('Use an editable extension: .md, .txt, .json, .jsonl, .yaml, .yml, or .csv.');
+      return;
+    }
+
     const toSave =
       markdown && markdownMode === 'visual'
         ? (mdxRef.current?.getMarkdown() ?? draft)
@@ -155,19 +222,32 @@ export function WorkspaceFilePane({
 
     setSaving(true);
     setSaveError(null);
+    let savePath = path;
     try {
-      await saveFileContent(path, toSave);
+      if (nextPath !== path) {
+        savePath = await renameFile(path, nextPath);
+      }
+      await saveFileContent(savePath, toSave);
       setContent(toSave);
       setDraft(toSave);
+      setDraftName(splitWorkspacePath(savePath).name);
       setMarkdownMode('preview');
       setTextMode('view');
+      if (savePath !== path) {
+        onNavigate?.(savePath);
+      }
       onSaved?.();
     } catch (err) {
+      // If rename succeeded but content save failed, keep the UI on the new path.
+      if (savePath !== path) {
+        onNavigate?.(savePath);
+        onSaved?.();
+      }
       setSaveError(err instanceof Error ? err.message : 'Failed to save file.');
     } finally {
       setSaving(false);
     }
-  }, [path, draft, markdown, markdownMode, onSaved]);
+  }, [path, pathParts.dir, draftName, draft, markdown, markdownMode, onNavigate, onSaved]);
 
   useEffect(() => {
     if (markdownMode !== 'visual' || !visualSeed) return;
@@ -219,7 +299,21 @@ export function WorkspaceFilePane({
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="font-mono text-sm">{path}</p>
+        {editing ? (
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1 font-mono text-sm">
+            {pathParts.dir ? (
+              <span className="shrink-0 text-muted-foreground">{pathParts.dir}/</span>
+            ) : null}
+            <Input
+              value={draftName}
+              onChange={(e) => setDraftName(e.target.value)}
+              aria-label="Filename"
+              className="h-8 max-w-xs font-mono text-sm"
+            />
+          </div>
+        ) : (
+          <p className="font-mono text-sm">{path}</p>
+        )}
         <div className="flex flex-wrap items-center gap-2">
           {markdown && markdownMode === 'preview' && (
             <DropdownMenu>

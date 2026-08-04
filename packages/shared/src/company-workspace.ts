@@ -1,5 +1,5 @@
 import type { Stats } from 'node:fs';
-import { mkdir, readFile, writeFile, readdir, stat, unlink, rmdir } from 'fs/promises';
+import { mkdir, readFile, writeFile, readdir, rename, stat, unlink, rmdir } from 'fs/promises';
 import path from 'path';
 import { ROLE_DEFAULT_SKILLS, TOOLSET_SKILL_FILENAME_SET, ensureControlPlaneInSkills, CONTROL_PLANE_SKILL_SLUG } from './constants';
 import { getMonorepoRoot, resolveDataPath } from './monorepo-root';
@@ -193,6 +193,28 @@ export async function saveWorkspaceUpload(
   await mkdir(path.dirname(filePath), { recursive: true });
   await writeFile(filePath, data);
   return { path: normalized, size: data.length };
+}
+
+export async function createWorkspaceDirectory(
+  companyId: string,
+  relativePath: string
+): Promise<{ path: string }> {
+  await ensureCompanyWorkspace(companyId);
+  const normalized = normalizeRelativePath(relativePath);
+  if (!normalized) throw new WorkspacePathError('Directory path is required.');
+  const dirPath = await resolveSafePath(companyId, normalized);
+  try {
+    const existing = await stat(dirPath);
+    if (existing.isDirectory()) {
+      throw new WorkspacePathError('Directory already exists.');
+    }
+    throw new WorkspacePathError('A file already exists at that path.');
+  } catch (err) {
+    if (err instanceof WorkspacePathError) throw err;
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  await mkdir(dirPath, { recursive: true });
+  return { path: normalized };
 }
 
 function getToolsetSkillsTemplateDir(): string {
@@ -494,4 +516,48 @@ export async function deleteWorkspaceEntry(
     await unlink(entryPath);
   }
   return { path: normalized };
+}
+
+export async function renameWorkspaceEntry(
+  companyId: string,
+  fromPath: string,
+  toPath: string
+): Promise<{ path: string }> {
+  await ensureCompanyWorkspace(companyId);
+  const from = normalizeRelativePath(fromPath);
+  const to = normalizeRelativePath(toPath);
+  if (!from || !to) throw new WorkspacePathError('Source and destination paths are required.');
+  if (from === to) return { path: to };
+
+  const fromAbsolute = await resolveSafePath(companyId, from);
+  const toAbsolute = await resolveSafePath(companyId, to);
+
+  let fromStat: Stats;
+  try {
+    fromStat = await stat(fromAbsolute);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new WorkspacePathError('Source path does not exist.');
+    }
+    throw err;
+  }
+  try {
+    await stat(toAbsolute);
+    throw new WorkspacePathError('A file or folder already exists at the new path.');
+  } catch (err) {
+    if (err instanceof WorkspacePathError) throw err;
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+
+  // Prevent moving a directory into itself or a descendant.
+  if (fromStat.isDirectory()) {
+    const fromPrefix = from + '/';
+    if (to === from || to.startsWith(fromPrefix)) {
+      throw new WorkspacePathError('Cannot move a folder into itself.');
+    }
+  }
+
+  await mkdir(path.dirname(toAbsolute), { recursive: true });
+  await rename(fromAbsolute, toAbsolute);
+  return { path: to };
 }

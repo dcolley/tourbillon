@@ -8,6 +8,13 @@ import { entriesToNodes } from '@/lib/workspace-tree';
 import type { WorkspaceEntry } from '@tourbillon/shared/company-workspace-types';
 import { WorkspaceTree } from '@/components/workspace/workspace-tree';
 import { WorkspaceFilePane } from '@/components/workspace/workspace-file-pane';
+import { NewWorkspaceFileDialog } from '@/components/workspace/new-workspace-file-dialog';
+import { NewWorkspaceFolderDialog } from '@/components/workspace/new-workspace-folder-dialog';
+import {
+  RenameWorkspaceEntryDialog,
+  type WorkspaceEntryTarget,
+} from '@/components/workspace/rename-workspace-entry-dialog';
+import { DeleteWorkspaceEntryDialog } from '@/components/workspace/delete-workspace-entry-dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -41,6 +48,11 @@ export function WorkspaceClient({
   const [selectedPath, setSelectedPath] = useState<string | null>(initialSelectedPath);
   const [targetDir, setTargetDir] = useState('');
   const [showPaths, setShowPaths] = useState(false);
+  const [newFileOpen, setNewFileOpen] = useState(false);
+  const [newFolderOpen, setNewFolderOpen] = useState(false);
+  const [startInEdit, setStartInEdit] = useState(false);
+  const [renameEntry, setRenameEntry] = useState<WorkspaceEntryTarget | null>(null);
+  const [deleteEntry, setDeleteEntry] = useState<WorkspaceEntryTarget | null>(null);
   const [hydratedPath] = useState(initialSelectedPath);
   const [hydratedContent] = useState(initialContent);
 
@@ -63,6 +75,16 @@ export function WorkspaceClient({
 
   const handleSelectFile = useCallback(
     (path: string) => {
+      setStartInEdit(false);
+      setSelectedPath(path);
+      updateUrl(path);
+    },
+    [updateUrl]
+  );
+
+  const handleEditFile = useCallback(
+    (path: string) => {
+      setStartInEdit(true);
       setSelectedPath(path);
       updateUrl(path);
     },
@@ -76,6 +98,53 @@ export function WorkspaceClient({
   const handleSaved = useCallback(() => {
     router.refresh();
   }, [router]);
+
+  const handleFileCreated = useCallback(
+    (path: string) => {
+      router.refresh();
+      handleSelectFile(path);
+    },
+    [router, handleSelectFile]
+  );
+
+  const handleFolderCreated = useCallback(
+    (path: string) => {
+      setTargetDir(path);
+      router.refresh();
+    },
+    [router]
+  );
+
+  const handleRenamed = useCallback(
+    (from: string, to: string) => {
+      if (selectedPath === from || selectedPath?.startsWith(`${from}/`)) {
+        const next =
+          selectedPath === from ? to : `${to}${selectedPath.slice(from.length)}`;
+        setSelectedPath(next);
+        updateUrl(next);
+      }
+      if (targetDir === from || targetDir.startsWith(`${from}/`)) {
+        const next = targetDir === from ? to : `${to}${targetDir.slice(from.length)}`;
+        setTargetDir(next);
+      }
+      router.refresh();
+    },
+    [selectedPath, targetDir, updateUrl, router]
+  );
+
+  const handleDeleted = useCallback(
+    (path: string) => {
+      if (selectedPath === path || selectedPath?.startsWith(`${path}/`)) {
+        setSelectedPath(null);
+        updateUrl(null);
+      }
+      if (targetDir === path || targetDir.startsWith(`${path}/`)) {
+        setTargetDir('');
+      }
+      router.refresh();
+    },
+    [selectedPath, targetDir, updateUrl, router]
+  );
 
   const deleteForm = selectedPath ? (
     <form action={deleteAction}>
@@ -107,32 +176,69 @@ export function WorkspaceClient({
         )}
       </div>
 
-      <form
-        action={uploadAction}
-        className="flex flex-wrap items-end gap-3 rounded-lg border p-4"
-        onSubmit={() => {
-          queueMicrotask(() => router.refresh());
-        }}
-      >
-        <div className="space-y-1">
-          <Label htmlFor="targetDir">Target folder (optional)</Label>
-          <Input
-            id="targetDir"
-            name="targetDir"
-            placeholder="resources"
-            value={targetDir}
-            onChange={(e) => setTargetDir(e.target.value)}
-            className="w-48"
-          />
-        </div>
-        <div className="space-y-1">
-          <Label htmlFor="file">Upload file</Label>
-          <Input id="file" name="file" type="file" required />
-        </div>
-        <SubmitButton label="Upload" />
+      <div className="flex flex-wrap items-end gap-3 rounded-lg border p-4">
+        <form
+          action={uploadAction}
+          className="flex flex-wrap items-end gap-3"
+          onSubmit={() => {
+            queueMicrotask(() => router.refresh());
+          }}
+        >
+          <div className="space-y-1">
+            <Label htmlFor="targetDir">Target folder (optional)</Label>
+            <Input
+              id="targetDir"
+              name="targetDir"
+              placeholder="resources"
+              value={targetDir}
+              onChange={(e) => setTargetDir(e.target.value)}
+              className="w-48"
+            />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="file">Upload file</Label>
+            <Input id="file" name="file" type="file" required />
+          </div>
+          <SubmitButton label="Upload" />
+        </form>
+        <Button type="button" size="sm" variant="outline" onClick={() => setNewFileOpen(true)}>
+          New file
+        </Button>
+        <Button type="button" size="sm" variant="outline" onClick={() => setNewFolderOpen(true)}>
+          New folder
+        </Button>
         {uploadState.error && <p className="w-full text-sm text-destructive">{uploadState.error}</p>}
         {uploadState.success && <p className="w-full text-sm text-green-700">Uploaded.</p>}
-      </form>
+      </div>
+
+      <NewWorkspaceFileDialog
+        open={newFileOpen}
+        onOpenChange={setNewFileOpen}
+        defaultFolder={targetDir}
+        onCreated={handleFileCreated}
+      />
+      <NewWorkspaceFolderDialog
+        open={newFolderOpen}
+        onOpenChange={setNewFolderOpen}
+        defaultFolder={targetDir}
+        onCreated={handleFolderCreated}
+      />
+      <RenameWorkspaceEntryDialog
+        open={renameEntry !== null}
+        onOpenChange={(open) => {
+          if (!open) setRenameEntry(null);
+        }}
+        entry={renameEntry}
+        onRenamed={handleRenamed}
+      />
+      <DeleteWorkspaceEntryDialog
+        open={deleteEntry !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteEntry(null);
+        }}
+        entry={deleteEntry}
+        onDeleted={handleDeleted}
+      />
 
       <div className="grid gap-6 lg:grid-cols-[minmax(280px,320px)_1fr]">
         <div className="flex min-h-[560px] flex-col rounded-lg border p-2">
@@ -145,6 +251,9 @@ export function WorkspaceClient({
             selectedPath={selectedPath}
             onSelectFile={handleSelectFile}
             onSelectFolder={handleSelectFolder}
+            onEditFile={handleEditFile}
+            onRenameEntry={setRenameEntry}
+            onDeleteEntry={setDeleteEntry}
           />
         </div>
 
@@ -154,6 +263,8 @@ export function WorkspaceClient({
             path={selectedPath}
             hydratedPath={hydratedPath}
             hydratedContent={hydratedContent}
+            startInEdit={startInEdit}
+            onStartInEditConsumed={() => setStartInEdit(false)}
             onSaved={handleSaved}
             onNavigate={handleSelectFile}
             deleteForm={deleteForm}

@@ -59,6 +59,41 @@ export function ensureControlPlaneInSkills(skills: string[]): string[] {
   return [CONTROL_PLANE_SKILL_SLUG, ...rest];
 }
 
+/** Bundled methodology skills — toggled on the agent Capabilities form. */
+export const SKILL_CATALOG = [
+  {
+    id: CONTROL_PLANE_SKILL_SLUG,
+    label: 'Control plane',
+    description:
+      'Heartbeat procedure — always assigned and inlined in the system prompt. Cannot be disabled.',
+  },
+  {
+    id: 'plan-to-tasks',
+    label: 'Plan to tasks',
+    description: 'Goal decomposition into issues — typically CEO and PM agents.',
+  },
+  {
+    id: 'create-agent',
+    label: 'Create agent',
+    description: 'Hiring procedure for new agents — typically CEO.',
+  },
+  {
+    id: 'para-memory',
+    label: 'PARA memory',
+    description: 'Memory discipline: comments vs Mastra memory vs company workspace.',
+  },
+  {
+    id: 'humanizer',
+    label: 'Humanizer',
+    description:
+      'Rewrite prose to remove AI writing patterns (papers, dossiers, tweets, docs). Load via getSkill when needed.',
+  },
+] as const;
+
+export type SkillId = (typeof SKILL_CATALOG)[number]['id'];
+
+export const VALID_BUNDLED_SKILL_IDS = new Set<string>(SKILL_CATALOG.map((s) => s.id));
+
 /** Toolset skill markdown filenames — excluded from dynamic per-agent skill scans. */
 export const TOOLSET_SKILL_FILENAMES = [
   'buffer-skills.md',

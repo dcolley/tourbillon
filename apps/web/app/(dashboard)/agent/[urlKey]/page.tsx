@@ -78,7 +78,10 @@ async function updateCapabilities(
   const urlKey = formData.get('urlKey') as string;
 
   const { GRANULAR_TOOL_GROUPS } = await import('@tourbillon/shared/tool-catalog');
-  const { TOOLSET_CATALOG } = await import('@tourbillon/shared/constants');
+  const { TOOLSET_CATALOG, SKILL_CATALOG, CONTROL_PLANE_SKILL_SLUG } = await import(
+    '@tourbillon/shared/constants'
+  );
+  const { discoverCompanySkillSlugs } = await import('@tourbillon/shared/company-workspace');
 
   const allToolIds = GRANULAR_TOOL_GROUPS.flatMap((g) => g.tools.map((t) => t.id));
   const assignedTools = allToolIds.filter((id) => formData.get(`tool_${id}`) === 'on');
@@ -91,6 +94,21 @@ async function updateCapabilities(
   if (existingAgent?.assignedToolsets.includes('code-execution')) {
     toolsets.push('code-execution');
   }
+
+  const companySkillSlugs = existingAgent
+    ? await discoverCompanySkillSlugs(existingAgent.companyId)
+    : [];
+  const skillChoices = [
+    ...SKILL_CATALOG.map((entry) => entry.id),
+    ...companySkillSlugs.filter((slug) => !SKILL_CATALOG.some((entry) => entry.id === slug)),
+  ];
+  const assignedSkills = [
+    CONTROL_PLANE_SKILL_SLUG,
+    ...skillChoices.filter(
+      (slug) =>
+        slug !== CONTROL_PLANE_SKILL_SLUG && formData.get(`skill_${slug}`) === 'on',
+    ),
+  ];
 
   const integrationKeys = formData.getAll('integrationKey').map(String);
   const integrationValues = formData.getAll('integrationValue').map(String);
@@ -120,6 +138,7 @@ async function updateCapabilities(
     await updateAgentCapabilities(agentId, {
       toolsets,
       assignedTools,
+      assignedSkills,
       integrations,
       clearIntegrations,
       mcpToolPolicy,
@@ -426,6 +445,8 @@ export default async function AgentDetailPage({
   const sandboxPathPreview = formatExecutionWorkspacePathPreview(agent.companyId);
   const codeExecutionEnabled = agent.assignedToolsets.includes('code-execution');
   const agentRuntimeType = agentRuntimeFromAdapter(agent.adapterType);
+  const { discoverCompanySkillSlugs } = await import('@tourbillon/shared/company-workspace');
+  const companySkillSlugs = await discoverCompanySkillSlugs(agent.companyId);
 
   return (
     <div className="p-6 space-y-6 max-w-5xl">
@@ -646,22 +667,20 @@ export default async function AgentDetailPage({
 
       <section className="border rounded-lg p-4 space-y-4">
         <h2 className="text-sm font-semibold">Capabilities</h2>
-        <div className="space-y-2 text-sm">
-          <div>
-            <p className="text-muted-foreground mb-1">Skills</p>
-            <TagList items={agent.assignedSkills} />
-          </div>
-          {agent.mcpServerIds.length > 0 && (
+        {agent.mcpServerIds.length > 0 && (
+          <div className="space-y-2 text-sm">
             <div>
               <p className="text-muted-foreground mb-1">MCP servers</p>
               <TagList items={agent.mcpServerIds} />
             </div>
-          )}
-        </div>
+          </div>
+        )}
 
         <AgentCapabilitiesForm
           agentId={agent.id}
           urlKey={agent.urlKey}
+          assignedSkills={agent.assignedSkills}
+          companySkillSlugs={companySkillSlugs}
           assignedToolsets={agent.assignedToolsets}
           enabledTools={enabledTools}
           mcpToolPolicy={runtime.mcpToolPolicy}

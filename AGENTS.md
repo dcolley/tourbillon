@@ -33,6 +33,7 @@ tourbillon/
 │   └── skills/                # SKILL.md files injected into agent prompts at wake time
 │       ├── control-plane/     # Core heartbeat procedure (every agent gets this)
 │       ├── create-agent/      # CEO skill: how to hire a new agent
+│       ├── humanizer/         # Optional: remove AI writing patterns from prose
 │       ├── para-memory/       # Memory discipline (what to remember vs comment)
 │       └── plan-to-tasks/     # CEO/PM skill: decomposing goals into issues
 ├── .env.example               # All environment variables with defaults
@@ -163,21 +164,22 @@ Skills teach methodology. At wake time:
 
 | Layer | Location | Assignment | When loaded |
 |---|---|---|---|
-| **Bundled methodology** | `packages/skills/{slug}/SKILL.md` | Role defaults → `assignedSkills` | Catalog at wake; full body via `getSkill` (`control-plane` always inline) |
-| **Company workspace** | `{companyWorkspace}/skills/{slug}.md` or `skills/{slug}/SKILL.md` | Discovered at hire → merged into `assignedSkills` | Same — workspace file wins over bundled for same slug |
+| **Bundled methodology** | `packages/skills/{slug}/SKILL.md` | Role defaults → `assignedSkills`; editable via Capabilities checkboxes (`control-plane` always on) | Catalog at wake; full body via `getSkill` (`control-plane` always inline) |
+| **Company workspace** | `{companyWorkspace}/skills/{slug}.md` or `skills/{slug}/SKILL.md` | Discovered at hire → merged into `assignedSkills`; also toggleable on Capabilities | Same — workspace file wins over bundled for same slug |
 | **Per-agent workspace** | `{companyWorkspace}/agents/{urlKey}/skills/*.md` | Not stored in DB — scanned each wake | Catalog / `getSkill` each wake (overrides assigned skills for same slug) |
 | **Toolset skills** | `agents/{urlKey}/skills/buffer-skills.md`, `code-execution-skills.md` | Auto from `assignedToolsets` | Catalog / `getSkill` (excluded from per-agent dynamic scan duplication) |
 
 Per-step `TokenLimiterProcessor` (`HEARTBEAT_CONTEXT_TOKEN_LIMIT`, default `120000`) prunes older tool/assistant messages when a multi-step heartbeat approaches the context ceiling.
 
-At hire time, `createAgent()` calls `buildAssignedSkills()` — union of `ROLE_DEFAULT_SKILLS[role]` and slugs discovered in `skills/`. Role changes re-merge company skills via `updateAgentRole()`.
+At hire time, `createAgent()` calls `buildAssignedSkills()` — union of `ROLE_DEFAULT_SKILLS[role]` and slugs discovered in `skills/`. Role changes re-merge company skills via `updateAgentRole()`. After hire, optional skills are toggled on the agent **Capabilities** form (`control-plane` cannot be disabled).
 
 | Skill slug | File | Purpose |
 |---|---|---|
-| `control-plane` | `packages/skills/control-plane/SKILL.md` | The 9-step heartbeat procedure — **every agent** |
+| `control-plane` | `packages/skills/control-plane/SKILL.md` | The 9-step heartbeat procedure — **every agent** (always on) |
 | `plan-to-tasks` | `packages/skills/plan-to-tasks/SKILL.md` | Goal decomposition — CEO and PM agents |
 | `create-agent` | `packages/skills/create-agent/SKILL.md` | Hiring procedure — CEO agent |
 | `para-memory` | `packages/skills/para-memory/SKILL.md` | Memory discipline — all agents |
+| `humanizer` | `packages/skills/humanizer/SKILL.md` | Remove AI writing patterns — opt-in for writing agents |
 
 **Never modify skill files as part of feature work.** Skills are agent-facing protocol documents. Changes need deliberate review.
 
@@ -196,7 +198,7 @@ Memory persists across heartbeats only for assignment wakes with `taskId` (up to
 
 When `OBSERVABILITY_ENABLED=true`, Mastra tracing exports completed spans to the `agent_observability_events` table via a custom PostgreSQL exporter (`packages/mastra/src/observability/`). Spans are denormalized with `issue_id`, `goal_id`, `project_id`, and `agent_id` for fast filtering.
 
-When `PHOENIX_COLLECTOR_ENABLED=true`, the same spans are also exported to Arize Phoenix via `@mastra/arize` (`PHOENIX_COLLECTOR_ENDPOINT`, default `http://localhost:6006/v1/traces`). Postgres and Phoenix exporters are independent — either or both may be enabled.
+When `PHOENIX_COLLECTOR_ENABLED=true`, the same spans are also exported to Arize Phoenix via `@mastra/arize` (`PHOENIX_COLLECTOR_ENDPOINT`, default `http://localhost:6006/v1/traces`). Postgres and Phoenix exporters are independent — either or both may be enabled. Both **durable Agent** and **harness (`harness_local`)** wakes emit Mastra spans into this shared exporter stack when tracing is enabled; harness also writes fine-grained controller events to Postgres for the UI when `OBSERVABILITY_ENABLED=true`.
 
 - **Human/debug only** — issue comments remain the agent thread of record; observability is not written to comments or BullMQ logs as primary storage.
 - **UI** — `/observability` (global timeline) and the **Observability** tab on issue detail pages. **Model step** events contain final `output.text` and `toolCalls`; **Provider call** (`model_inference`) spans are latency-only.

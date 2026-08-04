@@ -9,7 +9,7 @@ import type {
 import { AgentController as AgentControllerClass } from '@mastra/core/agent-controller';
 import { PostgresStore } from '@mastra/pg';
 import { Agent } from '@mastra/core/agent';
-import { ensureExecutionWorkspace } from '@tourbillon/shared';
+import { ensureExecutionWorkspace, isMastraTracingEnabled } from '@tourbillon/shared';
 import {
   assembleAgentSystemPrompt,
   assembleAgentTools,
@@ -22,6 +22,7 @@ import { resolveAgentGenerationOptions, toMastraDefaultOptions } from './model-s
 import { buildCodeExecutionWorkspace } from './execution-workspace';
 import { agentNeedsMcpTools } from '@tourbillon/shared';
 import { buildHeartbeatInputProcessors } from './heartbeat-processors';
+import { getMastraInstance } from './mastra-instance';
 
 export type { AgentController, AgentControllerEvent, AgentControllerMode, Session };
 
@@ -172,6 +173,11 @@ export async function createTourbillonController(
     },
     ...(codeExecutionEnabled && options?.cwd
       ? { workspace: buildCodeExecutionWorkspace() }
+      : {}),
+    // Share Tourbillon exporters (Postgres UI + Phoenix) without __registerMastra,
+    // which would also bind controller storage to the scheduler Mastra instance.
+    ...(isMastraTracingEnabled()
+      ? { observability: getMastraInstance().observability }
       : {}),
     disableBuiltinTools: ['ask_user', 'submit_plan', 'subagent'],
   });

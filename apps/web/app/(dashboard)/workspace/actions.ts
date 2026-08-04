@@ -5,6 +5,7 @@ import { redirect } from 'next/navigation';
 import { getActiveCompany } from '@/lib/company';
 import {
   writeWorkspaceText,
+  createWorkspaceDirectory,
   deleteWorkspaceEntry,
   saveWorkspaceUpload,
   WorkspacePathError,
@@ -78,6 +79,26 @@ export async function uploadWorkspaceFileAction(
     return { error: null, success: true };
   } catch (err) {
     if (err instanceof WorkspacePathError || err instanceof WorkspaceSizeError) {
+      return { error: err.message };
+    }
+    throw err;
+  }
+}
+
+export async function createWorkspaceDirectoryAction(
+  _prev: WorkspaceActionState,
+  formData: FormData
+): Promise<WorkspaceActionState & { path?: string }> {
+  const company = await getActiveCompany();
+  const path = (formData.get('path') as string)?.trim();
+  if (!path) return { error: 'Directory path is required.' };
+
+  try {
+    const result = await createWorkspaceDirectory(company.id, path);
+    revalidatePath('/workspace');
+    return { error: null, success: true, path: result.path };
+  } catch (err) {
+    if (err instanceof WorkspacePathError) {
       return { error: err.message };
     }
     throw err;

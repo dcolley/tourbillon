@@ -13,6 +13,7 @@ import {
   type AgentGenerationOptions,
   shouldUseHeartbeatMemory,
   clearInboxThread,
+  buildHeartbeatTracingOptions,
 } from '@tourbillon/mastra';
 import type { HeartbeatJobData, AgentRuntimeConfig } from '@tourbillon/shared';
 import {
@@ -580,37 +581,16 @@ async function runDurableAgentWake(params: {
     thread: useMemory ? memoryKeys.thread : undefined,
   });
 
-  const tracingOptions = isMastraTracingEnabled()
-    ? {
-        metadata: {
-          issueId: taskId,
-          goalId: issueForTask?.goalId ?? undefined,
-          projectId: issueForTask?.projectId ?? undefined,
-          heartbeatRunId: runId,
-          companyId,
-          agentId: agentRecord.id,
-          agentUrlKey: agentRecord.urlKey,
-          wakeReason: wake.wakeReason,
-        },
-        // Phoenix/Arize: tags land on root span as OpenInference tag.tags (filterable).
-        // metadata is also exported into the OpenInference metadata JSON blob.
-        tags: [
-          `company:${companyId}`,
-          `agent:${agentRecord.urlKey}`,
-          `wake:${wake.wakeReason}`,
-          ...(taskId ? [`issue:${taskId}`] : []),
-        ],
-        requestContextKeys: [
-          'runId',
-          'agentId',
-          'companyId',
-          'taskId',
-          'goalId',
-          'projectId',
-          'jobId',
-        ],
-      }
-    : undefined;
+  const tracingOptions = buildHeartbeatTracingOptions({
+    companyId,
+    agentId: agentRecord.id,
+    agentUrlKey: agentRecord.urlKey,
+    wakeReason: wake.wakeReason,
+    heartbeatRunId: runId,
+    issueId: taskId,
+    goalId: issueForTask?.goalId ?? undefined,
+    projectId: issueForTask?.projectId ?? undefined,
+  });
 
   let inputTokens = 0;
   let outputTokens = 0;

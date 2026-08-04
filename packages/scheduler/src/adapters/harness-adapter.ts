@@ -14,10 +14,17 @@ import {
   persistHarnessRunId,
   writeHarnessObservabilityEvent,
   type HarnessObservabilityContext,
+  buildHeartbeatTracingOptions,
+  createHeartbeatTraceId,
 } from '@tourbillon/mastra';
 import type { HeartbeatJobData, AgentRuntimeConfig } from '@tourbillon/shared';
-import { buildWakeMessage, isHarnessAdapter, isObservabilityEnabled, type CompanySettings } from '@tourbillon/shared';
-import { randomUUID } from 'crypto';
+import {
+  buildWakeMessage,
+  isHarnessAdapter,
+  isMastraTracingEnabled,
+  isObservabilityEnabled,
+  type CompanySettings,
+} from '@tourbillon/shared';
 import { heartbeatAbortedError } from '../heartbeat-abort';
 
 export interface HarnessRunContext {
@@ -92,7 +99,20 @@ export async function runWithHarness(
     agentRuntimeConfig: agentRecord.runtimeConfig as AgentRuntimeConfig,
   });
 
-  const traceId = randomUUID();
+  // Hex-only id so harness UI events and Mastra/Phoenix spans share one trace.
+  const traceId = createHeartbeatTraceId();
+  const tracingOptions = buildHeartbeatTracingOptions({
+    companyId: agentRecord.companyId,
+    agentId: agentRecord.id,
+    agentUrlKey: agentRecord.urlKey,
+    wakeReason: wake.wakeReason,
+    heartbeatRunId: runId,
+    issueId: taskId,
+    goalId,
+    projectId,
+    traceId,
+  });
+
   const toolCallNames = new Map<string, string>();
   const observabilityCtx: HarnessObservabilityContext | null = isObservabilityEnabled()
     ? {
@@ -127,6 +147,7 @@ export async function runWithHarness(
       runtimeContext,
       onEvent,
       options.abortSignal,
+      tracingOptions,
     );
 
     const harnessRunId = session.getCurrentRunId() ?? undefined;
@@ -134,7 +155,10 @@ export async function runWithHarness(
       await persistHarnessRunId(runId, harnessRunId, threadId);
     }
 
-    return { ...result, threadId, harnessRunId, traceId };
+    const resolvedTraceId =
+      (isMastraTracingEnabled() ? session.run.getTraceId() : null) ?? traceId;
+
+    return { ...result, threadId, harnessRunId, traceId: resolvedTraceId };
   } finally {
     await controller.destroy().catch(() => undefined);
   }
@@ -146,6 +170,7 @@ async function driveSessionHeadless(
   requestContext: ReturnType<typeof createHeartbeatRuntimeContext>,
   onEvent: (event: AgentControllerEvent) => void,
   abortSignal?: AbortSignal,
+  tracingOptions?: ReturnType<typeof buildHeartbeatTracingOptions>,
 ): Promise<Omit<HarnessRunResult, 'threadId' | 'harnessRunId' | 'traceId'>> {
   let inputTokens = 0;
   let outputTokens = 0;
@@ -211,7 +236,11 @@ async function driveSessionHeadless(
     });
 
     void session
-      .sendMessage({ content: wakeMessage, requestContext })
+      .sendMessage({
+        content: wakeMessage,
+        requestContext,
+        tracingOptions: tracingOptions ?? undefined,
+      })
       .then(() => {
         if (!session.run.isRunning()) {
           finish({ inputTokens, outputTokens, finishReason: 'complete', suspendedToolCallId });
