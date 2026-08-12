@@ -208,6 +208,42 @@ export async function updateCompanyIntegrations(
   return updated;
 }
 
+export async function updateCompanyObservationalMemory(
+  companyId: string,
+  input: {
+    enabled: boolean;
+    providerId?: string;
+    modelId?: string;
+  },
+): Promise<Company> {
+  const company = await db.query.companies.findFirst({ where: eq(companies.id, companyId) });
+  if (!company) throw new Error('Company not found.');
+
+  if (input.enabled) {
+    const providerId = input.providerId?.trim();
+    const modelId = input.modelId?.trim();
+    if (!providerId) throw new Error('Provider is required when Observational Memory is enabled.');
+    if (!modelId) throw new Error('Model ID is required when Observational Memory is enabled.');
+  }
+
+  const settings = mergeCompanySettings(company.settings, {
+    observationalMemory: {
+      enabled: input.enabled,
+      providerId: input.providerId?.trim() || undefined,
+      modelId: input.modelId?.trim() || undefined,
+    },
+  });
+
+  const [updated] = await db
+    .update(companies)
+    .set({ settings, updatedAt: new Date() })
+    .where(eq(companies.id, companyId))
+    .returning();
+
+  if (!updated) throw new Error('Company not found.');
+  return updated;
+}
+
 export function assertCompanyAccess(entityCompanyId: string, activeCompanyId: string): void {
   if (entityCompanyId !== activeCompanyId) {
     throw new ActiveCompanyError('This resource belongs to a different company.');

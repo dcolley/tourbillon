@@ -2,10 +2,14 @@ import { createTraceLogger } from './trace';
 
 export const DEFAULT_HEARTBEAT_PING_INTERVAL_SEC = 20;
 export const DEFAULT_HEARTBEAT_STALE_SEC = 90;
+/** No harness controller progress (tool/model/OM events) within this window → abort wake. */
+export const DEFAULT_HEARTBEAT_PROGRESS_STALE_SEC = 600;
 
 export interface HeartbeatLivenessConfig {
   pingIntervalMs: number;
   staleSec: number;
+  /** Sliding progress timeout for harness Session (separate from event-loop ping stale). */
+  progressStaleSec: number;
 }
 
 const livenessTracer = createTraceLogger('heartbeat-liveness', {});
@@ -39,12 +43,33 @@ export function resolveHeartbeatLivenessConfig(): HeartbeatLivenessConfig {
     });
   }
 
+  const progressStaleSec = parsePositiveIntEnv(
+    'HEARTBEAT_PROGRESS_STALE_SEC',
+    DEFAULT_HEARTBEAT_PROGRESS_STALE_SEC,
+  );
+
   return {
     pingIntervalMs: pingSec * 1000,
     staleSec,
+    progressStaleSec,
   };
 }
 
 export function heartbeatStaleErrorText(staleSec: number): string {
   return `Heartbeat worker stopped responding (no ping within ${staleSec}s)`;
+}
+
+export function heartbeatProgressStaleErrorText(progressStaleSec: number): string {
+  return `Heartbeat made no progress (no controller events within ${progressStaleSec}s)`;
+}
+
+/** True when an error looks like Mastra TokenLimiter / TripWire context failure. */
+export function isTokenLimiterTripwireError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err ?? '');
+  return (
+    /TokenLimiterProcessor/i.test(message) ||
+    /No messages fit within the remaining token budget/i.test(message) ||
+    /No messages to process/i.test(message) ||
+    /TripWire/i.test(message)
+  );
 }

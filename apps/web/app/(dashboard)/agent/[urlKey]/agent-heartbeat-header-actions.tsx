@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { triggerAgentHeartbeatAction } from '../actions';
+import { useChatUiOptional } from '@/components/chat/chat-context';
 
 export type InFlightHeartbeat = {
   id: string;
@@ -14,16 +15,19 @@ export function AgentHeartbeatHeaderActions({
   agentId,
   companyId,
   urlKey,
+  agentName,
   canRunHeartbeat,
   initialInFlight,
 }: {
   agentId: string;
   companyId: string;
   urlKey: string;
+  agentName: string;
   canRunHeartbeat: boolean;
   initialInFlight: InFlightHeartbeat | null;
 }) {
   const [inFlight, setInFlight] = useState<InFlightHeartbeat | null>(initialInFlight);
+  const chat = useChatUiOptional();
 
   useEffect(() => {
     setInFlight(initialInFlight);
@@ -67,6 +71,24 @@ export function AgentHeartbeatHeaderActions({
       {inFlight && (
         <Button variant="outline" size="sm" render={<Link href={`/heartbeat/${inFlight.id}`} />}>
           {inFlight.status === 'queued' ? 'View queued heartbeat' : 'View running heartbeat'}
+        </Button>
+      )}
+      {chat && (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() =>
+            chat.openChat({
+              agentId,
+              agentName,
+              contextType: 'agent',
+              contextId: agentId,
+              contextTitle: agentName,
+            })
+          }
+        >
+          Chat
         </Button>
       )}
       <form action={triggerAgentHeartbeatAction}>

@@ -1,5 +1,12 @@
-import { db, agentObservabilityEvents, heartbeatRuns } from '@tourbillon/db';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import {
+  db,
+  agentObservabilityEvents,
+  heartbeatRuns,
+  and,
+  desc,
+  eq,
+  inArray,
+} from '@tourbillon/db';
 import { randomUUID } from 'crypto';
 import {
   observabilityMaxPayloadBytes,
@@ -28,8 +35,20 @@ export const HARNESS_OBSERVABLE_EVENT_TYPES = new Set<string>([
   'mode_changed',
   'subagent_start',
   'subagent_end',
+  // Legacy aliases (unused by Mastra 1.55 — kept for filters)
   'om_observation',
   'om_reflection',
+  // Mastra AgentController Observational Memory events
+  'om_observation_start',
+  'om_observation_end',
+  'om_observation_failed',
+  'om_reflection_start',
+  'om_reflection_end',
+  'om_reflection_failed',
+  'om_buffering_start',
+  'om_buffering_end',
+  'om_buffering_failed',
+  'om_model_changed',
 ]);
 
 export interface HarnessObservabilityContext {
@@ -142,6 +161,10 @@ function eventDisplayName(ctx: HarnessObservabilityContext, event: HarnessEvent)
     return `agent_end:${event.reason ?? 'complete'}`;
   }
 
+  if (event.type.startsWith('om_')) {
+    return event.type;
+  }
+
   return event.type;
 }
 
@@ -164,6 +187,20 @@ function mapHarnessEventType(event: HarnessEvent): string {
       return 'error';
     case 'mode_changed':
       return 'mode_switch';
+    case 'om_observation_start':
+    case 'om_observation_end':
+    case 'om_observation_failed':
+    case 'om_buffering_start':
+    case 'om_buffering_end':
+    case 'om_buffering_failed':
+    case 'om_model_changed':
+    case 'om_observation':
+      return 'om_observation';
+    case 'om_reflection_start':
+    case 'om_reflection_end':
+    case 'om_reflection_failed':
+    case 'om_reflection':
+      return 'om_reflection';
     default:
       return event.type;
   }
@@ -224,6 +261,36 @@ export function writeHarnessObservabilityEvent(
     status = 'error';
     errorText = event.error.message;
   }
+  if (
+    event.type === 'om_observation_failed' ||
+    event.type === 'om_reflection_failed' ||
+    event.type === 'om_buffering_failed'
+  ) {
+    status = 'error';
+    errorText = 'error' in event && typeof event.error === 'string' ? event.error : event.type;
+  }
+  if (event.type === 'om_observation_end' || event.type === 'om_reflection_end') {
+    if ('tokensObserved' in event && typeof event.tokensObserved === 'number') {
+      inputTokens = event.tokensObserved;
+    }
+    if ('observationTokens' in event && typeof event.observationTokens === 'number') {
+      outputTokens = event.observationTokens;
+    }
+    if ('compressedTokens' in event && typeof event.compressedTokens === 'number') {
+      outputTokens = event.compressedTokens;
+    }
+    if ('observations' in event && typeof event.observations === 'string') {
+      outputPreview = serializePreview(event.observations);
+    }
+  }
+  if (event.type === 'om_observation_start' || event.type === 'om_reflection_start') {
+    if ('tokensToObserve' in event && typeof event.tokensToObserve === 'number') {
+      inputTokens = event.tokensToObserve;
+    }
+    if ('tokensToReflect' in event && typeof event.tokensToReflect === 'number') {
+      inputTokens = event.tokensToReflect;
+    }
+  }
 
   void db
     .insert(agentObservabilityEvents)
@@ -245,6 +312,8 @@ export function writeHarnessObservabilityEvent(
       outputPreview,
       payload: capPayload(event),
       errorText,
+      durationMs:
+        'durationMs' in event && typeof event.durationMs === 'number' ? event.durationMs : null,
       inputTokens,
       outputTokens,
       occurredAt: new Date(),

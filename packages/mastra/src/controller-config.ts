@@ -9,7 +9,11 @@ import type {
 import { AgentController as AgentControllerClass } from '@mastra/core/agent-controller';
 import { PostgresStore } from '@mastra/pg';
 import { Agent } from '@mastra/core/agent';
-import { ensureExecutionWorkspace, isMastraTracingEnabled } from '@tourbillon/shared';
+import {
+  ensureExecutionWorkspace,
+  isMastraTracingEnabled,
+  resolveObservationalMemoryModel,
+} from '@tourbillon/shared';
 import {
   assembleAgentSystemPrompt,
   assembleAgentTools,
@@ -20,7 +24,7 @@ import {
 import { getLanguageModelForAgent, llmProviderRowToRecord } from './provider';
 import { resolveAgentGenerationOptions, toMastraDefaultOptions } from './model-settings';
 import { buildCodeExecutionWorkspace } from './execution-workspace';
-import { agentNeedsMcpTools } from '@tourbillon/shared';
+import { agentNeedsMcpTools } from '@tourbillon/shared/mcp-registry';
 import { buildHeartbeatInputProcessors } from './heartbeat-processors';
 import { getMastraInstance } from './mastra-instance';
 
@@ -100,7 +104,7 @@ async function buildBackingAgent(
     instructions: systemPrompt,
     model: getLanguageModelForAgent(agentRecord, providerRecord),
     tools: tools as Agent['tools'] & Record<string, unknown>,
-    memory: getAgentMemory(),
+    memory: await getAgentMemory(options?.companySettings ?? null),
     inputProcessors: buildHeartbeatInputProcessors(),
     ...(codeExecutionEnabled ? { workspace: buildCodeExecutionWorkspace() } : {}),
     ...toMastraDefaultOptions(generationOptions),
@@ -160,24 +164,36 @@ export async function createTourbillonController(
   const { agent, modes } = await buildControllerModes(agentRecord, options);
   const codeExecutionEnabled = await shouldAttachCodeExecutionWorkspace(agentRecord);
 
+  const om = resolveObservationalMemoryModel(options?.companySettings ?? null);
+  const memory = await getAgentMemory(options?.companySettings ?? null);
+
+  // Session always requires a Workspace instance (Mastra AgentController contract).
   return new AgentControllerClass<TourbillonControllerState>({
     id: `tourbillon-${agentRecord.id}`,
     resourceId: `company-${agentRecord.companyId}`,
     storage: getControllerThreadStorage(),
-    memory: getAgentMemory(),
+    memory,
     agent,
     modes,
+    workspace: buildCodeExecutionWorkspace(),
     initialState: {
       yolo: true,
       permissionRules: buildControllerPermissionRules(agentRecord, codeExecutionEnabled),
     },
-    ...(codeExecutionEnabled && options?.cwd
-      ? { workspace: buildCodeExecutionWorkspace() }
-      : {}),
     // Share Tourbillon exporters (Postgres UI + Phoenix) without __registerMastra,
     // which would also bind controller storage to the scheduler Mastra instance.
     ...(isMastraTracingEnabled()
       ? { observability: getMastraInstance().observability }
+      : {}),
+    ...(om
+      ? {
+          omConfig: {
+            defaultObserverModelId: om.modelId,
+            defaultReflectorModelId: om.modelId,
+            defaultObservationThreshold: 30_000,
+            defaultReflectionThreshold: 40_000,
+          },
+        }
       : {}),
     disableBuiltinTools: ['ask_user', 'submit_plan', 'subagent'],
   });

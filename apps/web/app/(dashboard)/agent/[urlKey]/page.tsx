@@ -30,6 +30,7 @@ import { AgentHeartbeatHeaderActions } from './agent-heartbeat-header-actions';
 import { AgentQueryToast } from './agent-query-toast';
 import { AgentRoutineToggle } from './agent-routine-toggle';
 import { AgentCloneForm } from './agent-clone-form';
+import { ChatPageContext } from '@/components/chat/chat-page-context';
 
 async function updateHeartbeatConfig(
   _prev: ActionResult | null,
@@ -129,6 +130,12 @@ async function updateCapabilities(
     };
   }
 
+  const mcpServerIds = formData
+    .getAll('mcpServerId')
+    .map(String)
+    .map((id) => id.trim())
+    .filter(Boolean);
+
   const knowledgeGraph = {
     private: formData.get('kgMountPrivate') === 'on',
     company: formData.get('kgMountCompany') === 'on',
@@ -141,6 +148,7 @@ async function updateCapabilities(
       assignedSkills,
       integrations,
       clearIntegrations,
+      mcpServerIds,
       mcpToolPolicy,
       knowledgeGraph,
     });
@@ -446,7 +454,15 @@ export default async function AgentDetailPage({
   const codeExecutionEnabled = agent.assignedToolsets.includes('code-execution');
   const agentRuntimeType = agentRuntimeFromAdapter(agent.adapterType);
   const { discoverCompanySkillSlugs } = await import('@tourbillon/shared/company-workspace');
+  const { listToggleableMcpServerDefinitions } = await import('@tourbillon/shared/mcp-registry');
   const companySkillSlugs = await discoverCompanySkillSlugs(agent.companyId);
+  const toggleableMcpServers = listToggleableMcpServerDefinitions(
+    company?.allowedMcpServerIds ?? [],
+  ).map((server) => ({
+    id: server.id,
+    label: server.label,
+    source: server.source ?? 'builtin',
+  }));
 
   return (
     <div className="p-6 space-y-6 max-w-5xl">
@@ -474,12 +490,21 @@ export default async function AgentDetailPage({
               agentId={agent.id}
               companyId={agent.companyId}
               urlKey={agent.urlKey}
+              agentName={agent.name}
               canRunHeartbeat={canRunHeartbeat}
               initialInFlight={inFlightHeartbeat}
             />
           </div>
         </div>
       </div>
+
+      <ChatPageContext
+        contextType="agent"
+        contextId={agent.id}
+        contextTitle={agent.name}
+        defaultAgentId={agent.id}
+        defaultAgentName={agent.name}
+      />
 
       <AgentQueryToast saved={saved} error={error} urlKey={agent.urlKey} />
 
@@ -667,14 +692,6 @@ export default async function AgentDetailPage({
 
       <section className="border rounded-lg p-4 space-y-4">
         <h2 className="text-sm font-semibold">Capabilities</h2>
-        {agent.mcpServerIds.length > 0 && (
-          <div className="space-y-2 text-sm">
-            <div>
-              <p className="text-muted-foreground mb-1">MCP servers</p>
-              <TagList items={agent.mcpServerIds} />
-            </div>
-          </div>
-        )}
 
         <AgentCapabilitiesForm
           agentId={agent.id}
@@ -682,6 +699,8 @@ export default async function AgentDetailPage({
           assignedSkills={agent.assignedSkills}
           companySkillSlugs={companySkillSlugs}
           assignedToolsets={agent.assignedToolsets}
+          assignedMcpServerIds={agent.mcpServerIds}
+          toggleableMcpServers={toggleableMcpServers}
           enabledTools={enabledTools}
           mcpToolPolicy={runtime.mcpToolPolicy}
           knowledgeGraph={runtime.knowledgeGraph}
@@ -972,24 +991,6 @@ function DetailCard({
       <p className={`font-medium mt-1 capitalize ${mono ? 'font-mono text-sm normal-case' : ''}`}>
         {value}
       </p>
-    </div>
-  );
-}
-
-function TagList({ items, emptyLabel = 'None' }: { items: string[]; emptyLabel?: string }) {
-  if (items.length === 0) {
-    return <span className="text-sm text-muted-foreground">{emptyLabel}</span>;
-  }
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {items.map((item) => (
-        <span
-          key={item}
-          className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs font-medium"
-        >
-          {item}
-        </span>
-      ))}
     </div>
   );
 }

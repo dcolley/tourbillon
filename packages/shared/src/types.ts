@@ -106,12 +106,23 @@ export interface AgentRuntimeConfig {
   };
 }
 
+/** Company Observational Memory compaction model (Observer + Reflector). */
+export interface ObservationalMemorySettings {
+  /** When true and providerId+modelId are set, OM compaction is active. */
+  enabled?: boolean;
+  /** FK to llm_providers.id (system-wide registry). */
+  providerId?: string;
+  /** Model id on that provider (same as agents.modelId). */
+  modelId?: string;
+}
+
 /** Company-level integration settings stored in companies.settings jsonb. */
 export interface CompanySettings {
   mcpCredentials?: Record<string, string>;
   searxngUrl?: string;
   searxngApiKey?: string;
   tavilyApiKey?: string;
+  observationalMemory?: ObservationalMemorySettings;
 }
 
 export const DEFAULT_RUNTIME_CONFIG: AgentRuntimeConfig = {

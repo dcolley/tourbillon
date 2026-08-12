@@ -23,8 +23,12 @@ import {
   type AgentRuntimeConfig,
   type AgentRuntimeType,
   type SandboxIsolation,
-  resolveAgentMcpServerIds,
 } from '@tourbillon/shared';
+import {
+  resolveAgentMcpServerIds,
+  listToggleableMcpServerDefinitions,
+  getMcpServerDefinition,
+} from '@tourbillon/shared/mcp-registry';
 import {
   seedAgentSkillsFromTemplates,
   buildAssignedSkills,
@@ -430,6 +434,8 @@ export async function updateAgentCapabilities(
     assignedSkills: string[];
     integrations?: Partial<Record<string, string>>;
     clearIntegrations?: string[];
+    /** Explicit MCP server ids enabled for this agent (from mcp.json + builtins). */
+    mcpServerIds?: string[];
     /** Per-server allow lists from capabilities UI. Only keys for currently assigned MCP servers are kept. */
     mcpToolPolicy?: Record<string, { allow: string[] }>;
     /** Knowledge-graph mounts when toolset is enabled. */
@@ -439,12 +445,35 @@ export async function updateAgentCapabilities(
   const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
   if (!agent) throw new AgentValidationError('Agent not found.');
 
+  const company = await db.query.companies.findFirst({
+    where: eq(companies.id, agent.companyId),
+  });
+  if (!company) throw new AgentValidationError('Company not found.');
+
   const toolsets = [...new Set(input.toolsets.map((t) => t.trim()).filter(Boolean))].filter(
     (id) => id !== 'planning',
   );
   const invalidToolsets = toolsets.filter((id) => !VALID_TOOLSET_IDS.has(id));
   if (invalidToolsets.length > 0) {
     throw new AgentValidationError(`Unknown toolsets: ${invalidToolsets.join(', ')}`);
+  }
+
+  const toggleableIds = new Set(
+    listToggleableMcpServerDefinitions(company.allowedMcpServerIds ?? []).map((s) => s.id),
+  );
+  const mcpServerIds = [
+    ...new Set((input.mcpServerIds ?? []).map((id) => id.trim()).filter(Boolean)),
+  ];
+  const invalidMcpServers = mcpServerIds.filter((id) => !toggleableIds.has(id));
+  if (invalidMcpServers.length > 0) {
+    throw new AgentValidationError(
+      `Unknown or disallowed MCP servers: ${invalidMcpServers.join(', ')}`,
+    );
+  }
+  for (const id of mcpServerIds) {
+    if (!getMcpServerDefinition(id)) {
+      throw new AgentValidationError(`Unknown MCP server: ${id}`);
+    }
   }
 
   const assignedTools = [...new Set(input.assignedTools.map((t) => t.trim()).filter(Boolean))];
@@ -519,7 +548,7 @@ export async function updateAgentCapabilities(
     const assignedServerIds = new Set(
       resolveAgentMcpServerIds({
         assignedToolsets: toolsets,
-        mcpServerIds: agent.mcpServerIds,
+        mcpServerIds,
         runtimeConfig,
       }),
     );
@@ -546,6 +575,7 @@ export async function updateAgentCapabilities(
     .set({
       assignedSkills,
       assignedToolsets: toolsets,
+      mcpServerIds,
       runtimeConfig,
       updatedAt: new Date(),
     })

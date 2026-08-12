@@ -101,16 +101,42 @@ export function llmProviderRowToRecord(row: LlmProvider): LlmProviderRecord {
 export function getLanguageModelForAgent(
   agent: Pick<AgentRecord, 'adapterType' | 'adapterConfig' | 'modelId'>,
   providerRecord?: LlmProviderRecord | null,
+  opts?: { apiModeOverride?: ModelProviderConfig['apiMode'] },
 ): LanguageModelV3 {
   const overrides = modelProviderOverridesFromAgent(agent.adapterType, agent.adapterConfig);
   const config = resolveModelProviderConfig(overrides, agent.modelId, providerRecord);
-  return languageModelFromConfig(config, agent.modelId);
+  const effective =
+    opts?.apiModeOverride && opts.apiModeOverride !== config.apiMode
+      ? { ...config, apiMode: opts.apiModeOverride }
+      : config;
+  return languageModelFromConfig(effective, agent.modelId);
 }
 
 /** Embedding model using env provider settings. */
 export function getEmbeddingModel(modelId: string): EmbeddingModelV3 {
   const config = resolveModelProviderConfig();
   return embeddingModelFromConfig(config, modelId);
+}
+
+/** Language model for a registry provider record + model id (e.g. Observational Memory). */
+export function getLanguageModelForProviderRecordSync(
+  providerRecord: LlmProviderRecord,
+  modelId: string,
+): LanguageModelV3 {
+  const config = resolveModelProviderConfig(null, modelId, providerRecord);
+  return languageModelFromConfig(config, modelId);
+}
+
+export async function getLanguageModelForProviderRecord(
+  providerId: string,
+  modelId: string,
+): Promise<LanguageModelV3> {
+  const { getLlmProviderRowById } = await import('@tourbillon/db');
+  const row = await getLlmProviderRowById(providerId);
+  if (!row) {
+    throw new Error(`LLM provider not found: ${providerId}`);
+  }
+  return getLanguageModelForProviderRecordSync(llmProviderRowToRecord(row), modelId);
 }
 
 /** @deprecated Use getLanguageModelFromEnv or getLanguageModelForAgent */

@@ -22,6 +22,9 @@
     "./tool-catalog": "./src/tool-catalog.ts",
     "./company-settings": "./src/company-settings.ts",
     "./mcp-registry": "./src/mcp-registry.ts",
+    "./mcp-builtin-catalog": "./src/mcp-builtin-catalog.ts",
+    "./mcp-types": "./src/mcp-types.ts",
+    "./mcp-config": "./src/mcp-config.ts",
     "./mcp-credentials": "./src/mcp-credentials.ts",
     "./knowledge-graph": "./src/knowledge-graph.ts",
     "./knowledge-graph-config": "./src/knowledge-graph-config.ts"

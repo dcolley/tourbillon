@@ -1,4 +1,8 @@
-import type { AgentRuntimeConfig, CompanySettings } from './types';
+import type {
+  AgentRuntimeConfig,
+  CompanySettings,
+  ObservationalMemorySettings,
+} from './types';
 
 function trimRecord(values: unknown): Record<string, string> | undefined {
   if (!values || typeof values !== 'object') return undefined;
@@ -11,6 +15,22 @@ function trimRecord(values: unknown): Record<string, string> | undefined {
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+function parseObservationalMemorySettings(raw: unknown): ObservationalMemorySettings | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const record = raw as Record<string, unknown>;
+  const providerId =
+    typeof record.providerId === 'string' ? record.providerId.trim() || undefined : undefined;
+  const modelId =
+    typeof record.modelId === 'string' ? record.modelId.trim() || undefined : undefined;
+  const enabled = record.enabled === true;
+  if (!enabled && !providerId && !modelId) return undefined;
+  return {
+    enabled,
+    ...(providerId ? { providerId } : {}),
+    ...(modelId ? { modelId } : {}),
+  };
+}
+
 export function parseCompanySettings(raw: unknown): CompanySettings {
   if (!raw || typeof raw !== 'object') return {};
   const record = raw as Record<string, unknown>;
@@ -21,6 +41,7 @@ export function parseCompanySettings(raw: unknown): CompanySettings {
       typeof record.searxngApiKey === 'string' ? record.searxngApiKey.trim() || undefined : undefined,
     tavilyApiKey:
       typeof record.tavilyApiKey === 'string' ? record.tavilyApiKey.trim() || undefined : undefined,
+    observationalMemory: parseObservationalMemorySettings(record.observationalMemory),
   };
 }
 
@@ -51,8 +72,34 @@ export function mergeCompanySettings(
       delete next.mcpCredentials;
     }
   }
+  if (patch.observationalMemory !== undefined) {
+    const om = patch.observationalMemory;
+    next.observationalMemory = {
+      enabled: om.enabled === true,
+      ...(om.providerId?.trim() ? { providerId: om.providerId.trim() } : {}),
+      ...(om.modelId?.trim() ? { modelId: om.modelId.trim() } : {}),
+    };
+  }
 
   return next;
+}
+
+/** Resolved OM compaction model when enabled with both provider and model set. */
+export function resolveObservationalMemoryModel(
+  companySettings?: CompanySettings | null,
+): { providerId: string; modelId: string } | null {
+  const om = companySettings?.observationalMemory;
+  if (!om?.enabled) return null;
+  const providerId = om.providerId?.trim();
+  const modelId = om.modelId?.trim();
+  if (!providerId || !modelId) return null;
+  return { providerId, modelId };
+}
+
+export function isObservationalMemoryConfigured(
+  companySettings?: CompanySettings | null,
+): boolean {
+  return resolveObservationalMemoryModel(companySettings) !== null;
 }
 
 export function resolveSearxngBaseUrl(

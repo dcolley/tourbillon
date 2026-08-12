@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "openbb-mcp": {
+      "url": "http://192.168.10.173:8001/mcp"
+    },
+    "lean-mcp": {
+      "url": "http://192.168.10.175:8765/mcp"
+    }
+  }
+}

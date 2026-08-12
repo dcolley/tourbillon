@@ -1,5 +1,5 @@
 import type { AgentRuntimeConfig } from '@tourbillon/shared/types';
-import type { McpServerDefinition } from '@tourbillon/shared/mcp-registry';
+import type { McpServerDefinition } from '@tourbillon/shared/mcp-types';
 
 function matchesToolName(toolName: string, pattern: string): boolean {
   return toolName === pattern || toolName.endsWith(`_${pattern}`) || toolName.includes(pattern);

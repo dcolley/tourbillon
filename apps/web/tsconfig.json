@@ -26,8 +26,8 @@
       "@tourbillon/shared/*": [
         "../../packages/shared/src/*"
       ],
-      "@tourbillon/mastra": [
-        "../../packages/mastra/src/index.ts"
+      "@tourbillon/mastra/chat": [
+        "../../packages/mastra/src/chat.ts"
       ],
       "@tourbillon/mastra/mcp-tools": [
         "../../packages/mastra/src/tools/mcp-tools.ts"

@@ -1,6 +1,5 @@
 import { createTool } from '@mastra/core/tools';
-import { db, agents } from '@tourbillon/db';
-import { eq } from 'drizzle-orm';
+import { db, agents, eq } from '@tourbillon/db';
 import { z } from 'zod';
 import { CONTROL_PLANE_SKILL_SLUG } from '@tourbillon/shared';
 import { extractToolRuntimeContext } from './api-client';

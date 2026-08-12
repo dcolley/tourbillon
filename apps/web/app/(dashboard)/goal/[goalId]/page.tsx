@@ -11,6 +11,7 @@ import { updateGoalAction } from '../actions';
 import { GoalEditForm } from './goal-edit-form';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { StatusBadge } from '@/lib/status-badges';
+import { ChatPageContext } from '@/components/chat/chat-page-context';
 
 export default async function GoalDetailPage({
   params,
@@ -45,6 +46,15 @@ export default async function GoalDetailPage({
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
+      {owner?.id && owner?.name ? (
+        <ChatPageContext
+          contextType="goal"
+          contextId={goal.id}
+          contextTitle={goal.title}
+          defaultAgentId={owner.id}
+          defaultAgentName={owner.name}
+        />
+      ) : null}
       {company ? (
         <DeepLinkCompanySync requiredCompanyId={company.id} requiredCompanyName={company.name} />
       ) : null}

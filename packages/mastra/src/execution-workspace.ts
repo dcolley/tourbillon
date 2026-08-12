@@ -1,6 +1,7 @@
 import {
   Workspace,
   LocalSandbox,
+  LocalFilesystem,
   type IsolationBackend,
 } from '@mastra/core/workspace';
 import {
@@ -9,6 +10,9 @@ import {
   resolveSandboxTimeoutMs,
   type AgentRuntimeConfig,
 } from '@tourbillon/shared';
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 function readCodeExecutionConfig(requestContext: {
   get: (key: string) => unknown;
@@ -46,5 +50,21 @@ export function buildCodeExecutionWorkspace(): Workspace {
         ? `${companyId}:${taskId ?? 'idle'}:${isolation}:${timeoutMs}`
         : undefined;
     },
+  });
+}
+
+/**
+ * Minimal workspace so AgentController Session can construct (Mastra requires
+ * `workspace instanceof Workspace`) without injecting sandbox tool schemas into
+ * the chat context window.
+ */
+export function buildChatWorkspace(): Workspace {
+  const basePath = join(tmpdir(), 'tourbillon-chat-workspace');
+  mkdirSync(basePath, { recursive: true });
+  return new Workspace({
+    id: 'tourbillon-chat',
+    name: 'Chat',
+    filesystem: new LocalFilesystem({ basePath }),
+    tools: { enabled: false },
   });
 }

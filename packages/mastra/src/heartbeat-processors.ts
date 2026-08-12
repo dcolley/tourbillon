@@ -3,7 +3,11 @@ import {
   TokenLimiterProcessor,
   type InputProcessorOrWorkflow,
 } from '@mastra/core/processors';
-import { stripToolLoopAssistantMonologue } from './responses-tool-loop-compat';
+import {
+  coalesceConsecutiveUserMessagesRule,
+  stripAssistantReasoning,
+  stripToolLoopAssistantMonologue,
+} from './responses-tool-loop-compat';
 
 /**
  * Cap model input tokens per agentic step so mid-heartbeat tool loops cannot
@@ -29,7 +33,11 @@ export function buildHeartbeatInputProcessors(): InputProcessorOrWorkflow[] {
       trimMode: 'contiguous',
     }),
     new ProviderHistoryCompat({
-      additionalRules: [stripToolLoopAssistantMonologue],
+      additionalRules: [
+        stripAssistantReasoning,
+        stripToolLoopAssistantMonologue,
+        coalesceConsecutiveUserMessagesRule,
+      ],
     }),
   ];
 }

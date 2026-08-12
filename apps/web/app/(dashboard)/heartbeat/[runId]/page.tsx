@@ -10,6 +10,7 @@ import {
   type JobState,
 } from '@/lib/jobs';
 import { JobDetailLive } from '../../jobs/[queue]/[jobId]/job-detail-live';
+import { ChatPageContext } from '@/components/chat/chat-page-context';
 
 async function dismissHeartbeatAction(_formData: FormData) {
   'use server';
@@ -34,6 +35,15 @@ export default async function HeartbeatRunPage({
 
   return (
     <div className="p-6 space-y-6 max-w-6xl">
+      {agent ? (
+        <ChatPageContext
+          contextType="heartbeat"
+          contextId={run.id}
+          contextTitle={`Heartbeat ${run.id.slice(0, 8)}`}
+          defaultAgentId={agent.id}
+          defaultAgentName={agent.name}
+        />
+      ) : null}
       <div>
         <Link
           href="/jobs/heartbeat"

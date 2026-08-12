@@ -9,7 +9,7 @@ import {
   TOOLSET_CATALOG,
   type AgentIntegrationCredentialId,
 } from '@tourbillon/shared/constants';
-import { getMcpBridgedToolsetIds } from '@tourbillon/shared/mcp-registry';
+import { getMcpBridgedToolsetIds } from '@tourbillon/shared/mcp-builtin-catalog';
 import type { AgentRuntimeConfig } from '@tourbillon/shared/types';
 import type { ActionResult } from '@/lib/action-result';
 import { useActionToast } from '@/hooks/use-action-toast';
@@ -38,12 +38,20 @@ interface McpServerToolCatalog {
   error?: string;
 }
 
+interface ToggleableMcpServer {
+  id: string;
+  label: string;
+  source: string;
+}
+
 interface AgentCapabilitiesFormProps {
   agentId: string;
   urlKey: string;
   assignedSkills: string[];
   companySkillSlugs: string[];
   assignedToolsets: string[];
+  assignedMcpServerIds: string[];
+  toggleableMcpServers: ToggleableMcpServer[];
   enabledTools: string[];
   mcpToolPolicy?: AgentRuntimeConfig['mcpToolPolicy'];
   knowledgeGraph?: AgentRuntimeConfig['knowledgeGraph'];
@@ -106,12 +114,23 @@ function readCheckedToolsets(form: HTMLFormElement): string[] {
   return ids;
 }
 
+function readCheckedMcpServerIds(form: HTMLFormElement): string[] {
+  const inputs = form.querySelectorAll<HTMLInputElement>('input[name="mcpServerId"]');
+  const ids: string[] = [];
+  for (const input of inputs) {
+    if (input.checked && input.value) ids.push(input.value);
+  }
+  return ids;
+}
+
 export function AgentCapabilitiesForm({
   agentId,
   urlKey,
   assignedSkills,
   companySkillSlugs,
   assignedToolsets,
+  assignedMcpServerIds,
+  toggleableMcpServers,
   enabledTools,
   mcpToolPolicy,
   knowledgeGraph,
@@ -126,6 +145,9 @@ export function AgentCapabilitiesForm({
   const [previewToolsets, setPreviewToolsets] = useState<string[]>(() =>
     assignedToolsets.filter((id) => id !== 'code-execution'),
   );
+  const [previewMcpServerIds, setPreviewMcpServerIds] = useState<string[]>(() => [
+    ...assignedMcpServerIds,
+  ]);
   const [kgPrivate, setKgPrivate] = useState(knowledgeGraph?.private !== false);
   const [kgCompany, setKgCompany] = useState(knowledgeGraph?.company === true);
   const [mcpServers, setMcpServers] = useState<McpServerToolCatalog[]>([]);
@@ -146,8 +168,9 @@ export function AgentCapabilitiesForm({
 
   const mcpPreviewKey = useMemo(() => {
     const bridged = previewToolsets.filter((id) => MCP_BRIDGED_TOOLSET_IDS.has(id)).sort();
-    return `${bridged.join(',')}|kg:${kgPrivate ? 'p' : ''}${kgCompany ? 'c' : ''}`;
-  }, [previewToolsets, kgPrivate, kgCompany]);
+    const servers = [...previewMcpServerIds].sort();
+    return `${bridged.join(',')}|mcp:${servers.join(',')}|kg:${kgPrivate ? 'p' : ''}${kgCompany ? 'c' : ''}`;
+  }, [previewToolsets, previewMcpServerIds, kgPrivate, kgCompany]);
 
   useEffect(() => {
     let cancelled = false;
@@ -158,6 +181,7 @@ export function AgentCapabilitiesForm({
       try {
         const params = new URLSearchParams();
         params.set('toolsets', previewToolsets.join(','));
+        params.set('mcpServers', previewMcpServerIds.join(','));
         if (previewToolsets.includes('knowledge-graph')) {
           params.set('kgPrivate', kgPrivate ? '1' : '0');
           params.set('kgCompany', kgCompany ? '1' : '0');
@@ -184,12 +208,18 @@ export function AgentCapabilitiesForm({
     return () => {
       cancelled = true;
     };
-  }, [agentId, mcpPreviewKey, previewToolsets, kgPrivate, kgCompany]);
+  }, [agentId, mcpPreviewKey, previewToolsets, previewMcpServerIds, kgPrivate, kgCompany]);
 
   function syncPreviewToolsetsFromForm() {
     const form = formRef.current;
     if (!form) return;
     setPreviewToolsets(readCheckedToolsets(form));
+  }
+
+  function syncPreviewMcpServersFromForm() {
+    const form = formRef.current;
+    if (!form) return;
+    setPreviewMcpServerIds(readCheckedMcpServerIds(form));
   }
 
   function toggleGroupCapability(groupId: string, capability: ToolCapability | 'none') {
@@ -474,10 +504,51 @@ export function AgentCapabilitiesForm({
 
       <div className="space-y-3 rounded-md border p-4">
         <div>
+          <p className="text-sm font-medium">MCP servers</p>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Enable servers declared in <span className="font-mono">mcp.json</span> (and builtins such as
+            Buffer/GitHub). Buffer and knowledge-graph toolsets above still attach their servers
+            automatically.
+          </p>
+        </div>
+        {toggleableMcpServers.length === 0 ? (
+          <p className="text-xs text-muted-foreground">
+            No toggleable MCP servers. Add entries to <span className="font-mono">mcp.json</span> (see{' '}
+            <span className="font-mono">mcp.json.example</span>) and restart web/workers.
+          </p>
+        ) : (
+          <ul className="space-y-3">
+            {toggleableMcpServers.map((server) => (
+              <li key={server.id}>
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    name="mcpServerId"
+                    value={server.id}
+                    defaultChecked={assignedMcpServerIds.includes(server.id)}
+                    className="mt-0.5 rounded border-input"
+                    onChange={syncPreviewMcpServersFromForm}
+                  />
+                  <span>
+                    <span className="font-medium text-sm">{server.label}</span>
+                    <span className="ml-2 text-[10px] font-mono text-muted-foreground">{server.id}</span>
+                    <span className="ml-2 text-[10px] uppercase tracking-wide text-muted-foreground">
+                      {server.source}
+                    </span>
+                  </span>
+                </label>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <div className="space-y-3 rounded-md border p-4">
+        <div>
           <p className="text-sm font-medium">MCP tools</p>
           <p className="text-xs text-muted-foreground mt-0.5">
             Live tool list from each assigned MCP server. Uncheck tools to hide them at wake. Enabling an MCP
-            toolset may take a few seconds to load (`npx` cold start).
+            server or toolset may take a few seconds to load.
           </p>
         </div>
 
@@ -487,7 +558,7 @@ export function AgentCapabilitiesForm({
         {mcpError && <p className="text-xs text-destructive">{mcpError}</p>}
         {!mcpLoading && !mcpError && mcpServers.length === 0 && (
           <p className="text-xs text-muted-foreground">
-            No MCP servers assigned. Enable Buffer, Knowledge graph memory, or set mcpServerIds.
+            No MCP servers assigned. Enable a server above, or Buffer / Knowledge graph memory toolsets.
           </p>
         )}
 

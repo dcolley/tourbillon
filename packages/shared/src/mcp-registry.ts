@@ -1,106 +1,115 @@
 import { resolveKnowledgeGraphMounts } from './knowledge-graph-config';
+import { loadMcpJsonConfig } from './mcp-config';
+import {
+  MCP_BUILTIN_CATALOG,
+  MCP_SERVER_CATALOG,
+  getBuiltinMcpServerForToolset,
+  getMcpBridgedToolsetIds,
+  isSpecialMcpServerId,
+} from './mcp-builtin-catalog';
+import type { McpServerDefinition } from './mcp-types';
 
-export type McpTransport = 'http' | 'stdio';
+export type {
+  McpTransport,
+  McpServerAuthDefinition,
+  McpServerDefinition,
+} from './mcp-types';
+export {
+  MCP_BUILTIN_CATALOG,
+  MCP_SERVER_CATALOG,
+  getMcpBridgedToolsetIds,
+  isSpecialMcpServerId,
+} from './mcp-builtin-catalog';
 
-export interface McpServerAuthDefinition {
-  envVar: string;
-  optional?: boolean;
-  header?: string;
-  prefix?: string;
+let mergedCache: McpServerDefinition[] | null = null;
+let mergedById: Map<string, McpServerDefinition> | null = null;
+
+function mergeBuiltinAndFileCatalogs(): McpServerDefinition[] {
+  const byId = new Map<string, McpServerDefinition>();
+
+  for (const server of MCP_BUILTIN_CATALOG) {
+    byId.set(server.id, { ...server, source: server.source ?? 'builtin' });
+  }
+
+  for (const fileServer of loadMcpJsonConfig()) {
+    const existing = byId.get(fileServer.id);
+    if (existing) {
+      // File wins for connection fields; keep builtin toolset/auth/filters when present.
+      byId.set(fileServer.id, {
+        ...existing,
+        ...fileServer,
+        toolsetId: existing.toolsetId ?? fileServer.toolsetId,
+        auth: fileServer.auth ?? existing.auth,
+        toolWhitelist: fileServer.toolWhitelist ?? existing.toolWhitelist,
+        toolBlacklist: fileServer.toolBlacklist ?? existing.toolBlacklist,
+        source: 'file',
+      });
+    } else {
+      byId.set(fileServer.id, fileServer);
+    }
+  }
+
+  return [...byId.values()];
 }
 
-export interface McpServerDefinition {
-  id: string;
-  label: string;
-  toolsetId?: string;
-  transport: McpTransport;
-  url?: string;
-  urlEnvVar?: string;
-  auth?: McpServerAuthDefinition;
-  command?: string;
-  args?: (ctx: { companyId: string }) => string[];
-  env?: Record<string, string>;
-  toolWhitelist?: string[];
-  toolBlacklist?: string[];
+function ensureRegistry(): Map<string, McpServerDefinition> {
+  if (!mergedById) {
+    mergedCache = mergeBuiltinAndFileCatalogs();
+    mergedById = new Map(mergedCache.map((server) => [server.id, server]));
+  }
+  return mergedById;
 }
 
-export const MCP_SERVER_CATALOG: McpServerDefinition[] = [
-  {
-    id: 'buffer-mcp',
-    label: 'Buffer',
-    toolsetId: 'buffer',
-    transport: 'http',
-    url: 'https://mcp.buffer.com/mcp',
-    urlEnvVar: 'BUFFER_MCP_URL',
-    auth: { envVar: 'BUFFER_API_KEY' },
-    toolWhitelist: [
-      'get_account',
-      'list_channels',
-      'get_channel',
-      'list_posts',
-      'get_post',
-      'list_ideas',
-      'list_idea_groups',
-      'create_idea',
-      'create_post',
-      'edit_post',
-    ],
-    toolBlacklist: [
-      'delete_post',
-      'get_aggregated_post_metrics',
-      'introspect_schema',
-      'execute_query',
-      'execute_mutation',
-    ],
-  },
-  {
-    id: 'github-mcp',
-    label: 'GitHub',
-    transport: 'stdio',
-    command: 'npx',
-    args: () => ['-y', '@modelcontextprotocol/server-github'],
-    env: { GITHUB_PERSONAL_ACCESS_TOKEN: process.env.GITHUB_TOKEN ?? '' },
-  },
-  {
-    id: 'filesystem-local',
-    label: 'Filesystem',
-    transport: 'stdio',
-    command: 'npx',
-  },
-  {
-    id: 'memory-mcp-private',
-    label: 'Private knowledge graph',
-    transport: 'stdio',
-    command: 'npx',
-  },
-  {
-    id: 'memory-mcp-company',
-    label: 'Company knowledge graph',
-    transport: 'stdio',
-    command: 'npx',
-  },
-];
+/** Reset merged catalog (tests / after config change in-process). */
+export function resetMcpRegistryCache(): void {
+  mergedCache = null;
+  mergedById = null;
+}
 
-const MCP_SERVER_BY_ID = new Map(MCP_SERVER_CATALOG.map((server) => [server.id, server]));
+export function listMcpServerDefinitions(): McpServerDefinition[] {
+  ensureRegistry();
+  return mergedCache ?? [];
+}
+
+/**
+ * Servers an agent may toggle via mcpServerIds (excludes toolset-only specials that
+ * are always bridged: memory mounts stay toolset-driven; filesystem is not agent-toggleable here).
+ */
+export function listToggleableMcpServerDefinitions(
+  allowedMcpServerIds: string[] = [],
+): McpServerDefinition[] {
+  const all = listMcpServerDefinitions().filter((server) => {
+    if (server.id === 'memory-mcp-private' || server.id === 'memory-mcp-company') return false;
+    if (server.id === 'filesystem-local') return false;
+    return true;
+  });
+
+  if (allowedMcpServerIds.length === 0) return all;
+
+  return all.filter((server) => {
+    if (allowedMcpServerIds.includes(server.id)) return true;
+    if (
+      (server.id === 'memory-mcp-private' || server.id === 'memory-mcp-company') &&
+      allowedMcpServerIds.includes('memory-mcp')
+    ) {
+      return true;
+    }
+    return false;
+  });
+}
 
 export function getMcpServerDefinition(serverId: string): McpServerDefinition | undefined {
+  const byId = ensureRegistry();
   // Back-compat: legacy single memory-mcp id maps to private
-  if (serverId === 'memory-mcp') return MCP_SERVER_BY_ID.get('memory-mcp-private');
-  return MCP_SERVER_BY_ID.get(serverId);
+  if (serverId === 'memory-mcp') return byId.get('memory-mcp-private');
+  return byId.get(serverId);
 }
 
 export function getMcpServerForToolset(toolsetId: string): McpServerDefinition | undefined {
-  return MCP_SERVER_CATALOG.find((server) => server.toolsetId === toolsetId);
-}
-
-/** Toolset ids that bridge to an MCP server (e.g. buffer, knowledge-graph). */
-export function getMcpBridgedToolsetIds(): string[] {
-  const ids = MCP_SERVER_CATALOG.map((server) => server.toolsetId).filter(
-    (id): id is string => Boolean(id),
+  return (
+    listMcpServerDefinitions().find((server) => server.toolsetId === toolsetId) ??
+    getBuiltinMcpServerForToolset(toolsetId)
   );
-  // knowledge-graph is bridged specially (private + company mounts)
-  if (!ids.includes('knowledge-graph')) ids.push('knowledge-graph');
-  return ids;
 }
 
 export interface ResolveAgentMcpServerIdsInput {

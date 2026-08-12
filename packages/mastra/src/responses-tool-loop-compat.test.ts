@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+  coalesceConsecutiveUserMessages,
+  stripAssistantReasoning,
+  stripAssistantReasoningFromPrompt,
   stripToolLoopAssistantMonologue,
   stripToolLoopMonologueFromPrompt,
   type ToolLoopCompatPrompt,
@@ -12,6 +15,67 @@ const toolCall = {
   toolName: 'mastra_workspace_execute_command',
   input: { command: 'echo hi' },
 };
+
+describe('coalesceConsecutiveUserMessages', () => {
+  it('merges adjacent user messages', () => {
+    const prompt: ToolLoopCompatPrompt = [
+      { role: 'user', content: [{ type: 'text', text: 'a' }] },
+      { role: 'user', content: [{ type: 'text', text: 'b' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'c' }] },
+    ];
+    const next = coalesceConsecutiveUserMessages(prompt);
+    assert.ok(next);
+    assert.equal(next.length, 2);
+    assert.deepEqual(next[0]?.content, [
+      { type: 'text', text: 'a' },
+      { type: 'text', text: 'b' },
+    ]);
+  });
+});
+
+describe('stripAssistantReasoningFromPrompt', () => {
+  it('strips reasoning and keeps text on assistant messages', () => {
+    const prompt: ToolLoopCompatPrompt = [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'reasoning', text: 'Think.' },
+          { type: 'text', text: 'Hello!' },
+        ],
+      },
+    ];
+    const next = stripAssistantReasoningFromPrompt(prompt);
+    assert.ok(next);
+    assert.deepEqual(next[0]?.content, [{ type: 'text', text: 'Hello!' }]);
+  });
+
+  it('drops reasoning-only assistant messages', () => {
+    const prompt: ToolLoopCompatPrompt = [
+      { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+      { role: 'assistant', content: [{ type: 'reasoning', text: '…' }] },
+      { role: 'user', content: [{ type: 'text', text: 'Again' }] },
+    ];
+    const next = stripAssistantReasoningFromPrompt(prompt);
+    assert.ok(next);
+    assert.equal(next.length, 2);
+    assert.equal(next[0]?.role, 'user');
+    assert.equal(next[1]?.role, 'user');
+  });
+
+  it('leaves prompts without reasoning unchanged', () => {
+    const prompt: ToolLoopCompatPrompt = [
+      { role: 'assistant', content: [{ type: 'text', text: 'Done.' }] },
+    ];
+    assert.equal(stripAssistantReasoningFromPrompt(prompt), undefined);
+  });
+});
+
+describe('stripAssistantReasoning', () => {
+  it('exposes the expected CompatRule name', () => {
+    assert.equal(stripAssistantReasoning.name, 'strip-assistant-reasoning');
+    assert.ok(stripAssistantReasoning.applyToPrompt);
+  });
+});
 
 describe('stripToolLoopMonologueFromPrompt', () => {
   it('leaves assistant text-only messages unchanged', () => {

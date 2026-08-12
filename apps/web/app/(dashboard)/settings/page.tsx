@@ -1,5 +1,11 @@
 import { redirect } from 'next/navigation';
-import { getActiveCompany, getActiveCompanyOrNull, updateCompanySettings, updateCompanyIntegrations } from '@/lib/company';
+import {
+  getActiveCompany,
+  getActiveCompanyOrNull,
+  updateCompanySettings,
+  updateCompanyIntegrations,
+  updateCompanyObservationalMemory,
+} from '@/lib/company';
 import {
   getExecutionWorkspaceRoot,
   getWorkspaceRoot,
@@ -7,8 +13,12 @@ import {
   parseCompanySettings,
   isSearxngConfigured,
   isTavilyConfigured,
+  resolveObservationalMemoryModel,
 } from '@tourbillon/shared';
 import { LlmProvidersSettings } from '@/components/llm-providers-settings';
+import { ObservationalMemorySettingsForm } from '@/components/observational-memory-settings-form';
+import { listLlmProvidersPublic } from '@/lib/llm-providers';
+import { actionError, actionSuccess, type ActionResult } from '@/lib/action-result';
 
 async function saveSettings(formData: FormData) {
   'use server';
@@ -53,6 +63,25 @@ async function saveIntegrations(formData: FormData) {
   redirect('/settings?saved=integrations');
 }
 
+async function saveObservationalMemory(
+  _prev: ActionResult | null,
+  formData: FormData,
+): Promise<ActionResult> {
+  'use server';
+
+  try {
+    const company = await getActiveCompany();
+    await updateCompanyObservationalMemory(company.id, {
+      enabled: formData.get('enabled') === 'on',
+      providerId: (formData.get('providerId') as string) || undefined,
+      modelId: (formData.get('modelId') as string) || undefined,
+    });
+    return actionSuccess('Observational Memory settings saved.');
+  } catch (err) {
+    return actionError(err instanceof Error ? err.message : 'Failed to save Observational Memory.');
+  }
+}
+
 function isConfigured(value: string | undefined, envFallback?: string): boolean {
   return Boolean(value?.trim() || envFallback?.trim());
 }
@@ -68,6 +97,8 @@ export default async function SettingsPage({
   const saved = resolvedSearchParams.saved;
   const error = resolvedSearchParams.error ? decodeURIComponent(resolvedSearchParams.error) : null;
   const integrationSettings = parseCompanySettings(company.settings);
+  const omResolved = resolveObservationalMemoryModel(integrationSettings);
+  const providers = await listLlmProvidersPublic();
 
   const llm = resolveModelProviderConfig();
 
@@ -318,6 +349,30 @@ export default async function SettingsPage({
       </section>
 
       <LlmProvidersSettings />
+
+      <section className="space-y-4">
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="text-lg font-semibold">Observational Memory</h2>
+          <span
+            className={`text-xs rounded px-2 py-0.5 ${omResolved ? 'bg-green-100 text-green-800' : 'bg-muted text-muted-foreground'}`}
+          >
+            {omResolved ? 'Enabled' : 'Off'}
+          </span>
+        </div>
+        <p className="text-sm text-muted-foreground">
+          Compacts long agent/harness conversation history before it hits the TokenLimiter ceiling.
+          Uses the selected provider/model for Observer and Reflector (not the agent&apos;s chat model).
+        </p>
+        <div className="border rounded-lg p-4">
+          <ObservationalMemorySettingsForm
+            initialEnabled={integrationSettings.observationalMemory?.enabled === true}
+            initialProviderId={integrationSettings.observationalMemory?.providerId ?? null}
+            initialModelId={integrationSettings.observationalMemory?.modelId ?? ''}
+            providers={providers}
+            saveAction={saveObservationalMemory}
+          />
+        </div>
+      </section>
 
       <section className="space-y-4">
         <h2 className="text-lg font-semibold">Runtime (env fallback)</h2>

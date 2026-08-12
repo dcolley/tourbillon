@@ -4,6 +4,7 @@ export * from './provider';
 export * from './model-settings';
 export * from './agent-factory';
 export * from './controller-config';
+export * from './chat-controller';
 // harness-config.ts re-exports controller-config for deprecated import paths only;
 // do not also `export * from './harness-config'` here (duplicate bindings).
 export * from './mastra-instance';

@@ -4,8 +4,24 @@ import { Memory } from '@mastra/memory';
 import { PostgresStore, PgVector } from '@mastra/pg';
 import type { Agent as AgentRecord } from '@tourbillon/db';
 import { getLlmProviderRowById } from '@tourbillon/db';
-import { formatTrace, modelProviderOverridesFromAgent, resolveModelProviderConfig, resolveAssignedTools, type AgentRuntimeConfig, type CompanySettings, isSearxngConfigured, isTavilyConfigured, isCodeExecutionAvailable } from '@tourbillon/shared';
-import { getEmbeddingModel, getLanguageModelForAgent, llmProviderRowToRecord } from './provider';
+import {
+  formatTrace,
+  modelProviderOverridesFromAgent,
+  resolveModelProviderConfig,
+  resolveAssignedTools,
+  resolveObservationalMemoryModel,
+  type AgentRuntimeConfig,
+  type CompanySettings,
+  isSearxngConfigured,
+  isTavilyConfigured,
+  isCodeExecutionAvailable,
+} from '@tourbillon/shared';
+import {
+  getEmbeddingModel,
+  getLanguageModelForAgent,
+  getLanguageModelForProviderRecord,
+  llmProviderRowToRecord,
+} from './provider';
 import { CONTROL_PLANE_TOOLS } from './tools/control-plane-tools';
 import { ROLE_TOOLS } from './tools/role-tools';
 import { assignableToolsForIds } from './tools/assignable-tools';
@@ -13,7 +29,7 @@ import {
   formatSkillsCatalogSection,
   prepareAgentSkills,
 } from './skills/on-demand-skills';
-import { agentNeedsMcpTools } from '@tourbillon/shared';
+import { agentNeedsMcpTools } from '@tourbillon/shared/mcp-registry';
 import { buildMCPTools } from './tools/mcp-tools';
 import { SEARXNG_TOOLS } from './tools/searxng-tools';
 import { TAVILY_TOOLS } from './tools/tavily-tools';
@@ -28,39 +44,78 @@ import {
 } from './heartbeat-processors';
 
 const globalForMastra = globalThis as unknown as {
-  mastraMemory?: Memory;
+  /** Memory instances keyed by OM config (or `base` when OM is off). */
+  mastraMemoryByKey?: Map<string, Memory>;
 };
 
-export function getAgentMemory(): Memory {
-  if (!globalForMastra.mastraMemory) {
-    const connectionString = process.env.DATABASE_URL!;
-    const semanticRecallEnabled = process.env.MEMORY_SEMANTIC_RECALL === 'true';
-    const embeddingModel = process.env.MEMORY_EMBEDDING_MODEL;
+function memoryCacheKey(companySettings?: CompanySettings | null): string {
+  const om = resolveObservationalMemoryModel(companySettings);
+  return om ? `om:${om.providerId}:${om.modelId}` : 'base';
+}
 
-    const config: ConstructorParameters<typeof Memory>[0] = {
-      storage: new PostgresStore({ id: 'tourbillon-memory', connectionString }),
-      options: {
-        lastMessages: 20,
-        ...(semanticRecallEnabled && embeddingModel
-          ? {
-              semanticRecall: {
-                topK: 5,
-                messageRange: 2,
-                scope: 'resource' as const,
-              },
-            }
-          : {}),
+/**
+ * Shared Mastra Memory for durable Agent and harness AgentController.
+ * When company Observational Memory is configured, returns a Memory with OM
+ * enabled using that provider/model (never the Gemini default).
+ */
+export async function getAgentMemory(
+  companySettings?: CompanySettings | null,
+): Promise<Memory> {
+  if (!globalForMastra.mastraMemoryByKey) {
+    globalForMastra.mastraMemoryByKey = new Map();
+  }
+  const key = memoryCacheKey(companySettings);
+  const cached = globalForMastra.mastraMemoryByKey.get(key);
+  if (cached) return cached;
+
+  const connectionString = process.env.DATABASE_URL!;
+  const semanticRecallEnabled = process.env.MEMORY_SEMANTIC_RECALL === 'true';
+  const embeddingModel = process.env.MEMORY_EMBEDDING_MODEL;
+  const om = resolveObservationalMemoryModel(companySettings);
+
+  const config: ConstructorParameters<typeof Memory>[0] = {
+    storage: new PostgresStore({ id: 'tourbillon-memory', connectionString }),
+    options: {
+      lastMessages: 20,
+      ...(semanticRecallEnabled && embeddingModel
+        ? {
+            semanticRecall: {
+              topK: 5,
+              messageRange: 2,
+              scope: 'resource' as const,
+            },
+          }
+        : {}),
+    },
+  };
+
+  if (om) {
+    const omModel = await getLanguageModelForProviderRecord(om.providerId, om.modelId);
+    config.options = {
+      ...config.options,
+      observationalMemory: {
+        // Explicit LanguageModel — never observationalMemory: true (Gemini default).
+        model: omModel,
+        scope: 'thread',
+        observation: {
+          messageTokens: 30_000,
+          bufferOnIdle: true,
+        },
+        reflection: {
+          observationTokens: 40_000,
+        },
       },
     };
-
-    if (semanticRecallEnabled && embeddingModel) {
-      config.vector = new PgVector({ id: 'tourbillon-vector', connectionString });
-      config.embedder = getEmbeddingModel(embeddingModel);
-    }
-
-    globalForMastra.mastraMemory = new Memory(config);
   }
-  return globalForMastra.mastraMemory;
+
+  if (semanticRecallEnabled && embeddingModel) {
+    config.vector = new PgVector({ id: 'tourbillon-vector', connectionString });
+    config.embedder = getEmbeddingModel(embeddingModel);
+  }
+
+  const memory = new Memory(config);
+  globalForMastra.mastraMemoryByKey.set(key, memory);
+  return memory;
 }
 
 export interface AssembleAgentToolsOptions {
@@ -203,7 +258,7 @@ export async function createAgentWithSkills(
     instructions: systemPrompt,
     model: getLanguageModelForAgent(agentRecord, providerRecord),
     tools: tools as Parameters<typeof Agent>[0]['tools'],
-    memory: getAgentMemory(),
+    memory: await getAgentMemory(options?.companySettings ?? null),
     inputProcessors,
     ...(codeExecutionEnabled ? { workspace: buildCodeExecutionWorkspace() } : {}),
     ...toMastraDefaultOptions(generationOptions),

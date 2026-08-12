@@ -31,6 +31,15 @@ export async function GET(
           .filter(Boolean)
       : undefined;
 
+  const mcpServersParam = req.nextUrl.searchParams.get('mcpServers');
+  const mcpServerIds =
+    mcpServersParam !== null
+      ? mcpServersParam
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : undefined;
+
   const kgPrivateParam = req.nextUrl.searchParams.get('kgPrivate');
   const kgCompanyParam = req.nextUrl.searchParams.get('kgCompany');
   const knowledgeGraph =
@@ -46,6 +55,7 @@ export async function GET(
       allowedMcpServerIds: company.allowedMcpServerIds ?? [],
       companySettings: parseCompanySettings(company.settings),
       assignedToolsets,
+      mcpServerIds,
       knowledgeGraph,
     });
     return NextResponse.json({ servers });

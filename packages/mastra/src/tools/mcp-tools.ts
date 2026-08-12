@@ -1,14 +1,17 @@
+/**
+ * MCP tool loading for agent wakes / capabilities preview.
+ * Server-only: imports Node-backed @tourbillon/shared/mcp-registry (mcp.json).
+ */
 import { MCPClient } from '@mastra/mcp';
 import type { Agent as AgentRecord } from '@tourbillon/db';
+import type { AgentRuntimeConfig, CompanySettings, McpServerDefinition } from '@tourbillon/shared';
 import {
-  getMcpServerDefinition,
-  resolveMcpCredential,
-  resolveMcpServerUrl,
-  resolveAgentMcpServerIds,
   agentNeedsMcpTools,
-  type AgentRuntimeConfig,
-  type CompanySettings,
-} from '@tourbillon/shared';
+  getMcpServerDefinition,
+  isSpecialMcpServerId,
+  resolveAgentMcpServerIds,
+} from '@tourbillon/shared/mcp-registry';
+import { resolveMcpCredential, resolveMcpServerUrl } from '@tourbillon/shared/mcp-credentials';
 import {
   ensureAgentMemoryDir,
   ensureCompanyMemoryDir,
@@ -21,9 +24,17 @@ import { filterMcpTools } from './mcp-tool-filter';
 
 const mcpClientCache = new Map<string, MCPClient>();
 
-function buildHttpFetch(apiKey: string | undefined) {
+function buildHttpFetch(
+  apiKey: string | undefined,
+  extraHeaders?: Record<string, string>,
+) {
   return async (url: string | URL, init?: RequestInit) => {
     const headers = new Headers(init?.headers);
+    if (extraHeaders) {
+      for (const [key, value] of Object.entries(extraHeaders)) {
+        if (value) headers.set(key, value);
+      }
+    }
     if (apiKey) {
       headers.set('Authorization', `Bearer ${apiKey}`);
     }
@@ -31,10 +42,111 @@ function buildHttpFetch(apiKey: string | undefined) {
   };
 }
 
+function serverKeyForClient(serverId: string): string {
+  return serverId.replace(/-mcp$/, '').replace(/-/g, '_') || serverId;
+}
+
 export interface GetMcpClientOptions {
   companyId: string;
   urlKey?: string;
   apiKey?: string;
+}
+
+async function getSpecialStdioClient(
+  serverId: string,
+  options: GetMcpClientOptions,
+): Promise<MCPClient | null> {
+  const { companyId, urlKey } = options;
+
+  if (serverId === 'filesystem-local') {
+    await ensureCompanyWorkspace(companyId);
+    const workspacePath = getCompanyWorkspaceDir(companyId);
+    return new MCPClient({
+      id: `filesystem-local-${companyId}`,
+      servers: {
+        filesystem: {
+          command: 'npx',
+          args: ['-y', '@modelcontextprotocol/server-filesystem', workspacePath],
+        },
+      },
+    });
+  }
+
+  if (serverId === 'memory-mcp-private') {
+    if (!urlKey) return null;
+    await ensureAgentMemoryDir(companyId, urlKey);
+    const memoryFilePath = getAgentMemoryFilePath(companyId, urlKey);
+    return new MCPClient({
+      id: `memory-mcp-private-${companyId}-${urlKey}`,
+      servers: {
+        memory_private: {
+          command: 'npx',
+          args: ['-y', '@modelcontextprotocol/server-memory'],
+          env: { MEMORY_FILE_PATH: memoryFilePath },
+        },
+      },
+    });
+  }
+
+  if (serverId === 'memory-mcp-company') {
+    await ensureCompanyMemoryDir(companyId);
+    const memoryFilePath = getCompanyMemoryFilePath(companyId);
+    return new MCPClient({
+      id: `memory-mcp-company-${companyId}`,
+      servers: {
+        memory_company: {
+          command: 'npx',
+          args: ['-y', '@modelcontextprotocol/server-memory'],
+          env: { MEMORY_FILE_PATH: memoryFilePath },
+        },
+      },
+    });
+  }
+
+  return null;
+}
+
+function getGenericHttpClient(
+  serverId: string,
+  def: McpServerDefinition,
+  apiKey: string | undefined,
+): MCPClient | null {
+  const url = resolveMcpServerUrl(serverId);
+  if (!url) return null;
+
+  return new MCPClient({
+    id: serverId,
+    servers: {
+      [serverKeyForClient(serverId)]: {
+        url,
+        fetch: buildHttpFetch(apiKey, def.headers),
+      },
+    },
+  });
+}
+
+function getGenericStdioClient(serverId: string, def: McpServerDefinition): MCPClient | null {
+  if (!def.command) return null;
+
+  const env =
+    serverId === 'github-mcp'
+      ? {
+          ...def.env,
+          GITHUB_PERSONAL_ACCESS_TOKEN:
+            def.env?.GITHUB_PERSONAL_ACCESS_TOKEN || process.env.GITHUB_TOKEN || '',
+        }
+      : def.env;
+
+  return new MCPClient({
+    id: serverId,
+    servers: {
+      [serverKeyForClient(serverId)]: {
+        command: def.command,
+        args: def.args ?? [],
+        env,
+      },
+    },
+  });
 }
 
 async function getMCPClient(
@@ -52,7 +164,9 @@ async function getMCPClient(
           ? `${serverId}:${companyId}`
           : serverId === 'buffer-mcp' && apiKey
             ? `${serverId}:${apiKey.slice(0, 8)}`
-            : serverId;
+            : apiKey
+              ? `${serverId}:${apiKey.slice(0, 8)}`
+              : serverId;
 
   if (mcpClientCache.has(cacheKey)) return mcpClientCache.get(cacheKey)!;
 
@@ -61,69 +175,12 @@ async function getMCPClient(
 
   let client: MCPClient | null = null;
 
-  if (def.transport === 'http') {
-    const url = resolveMcpServerUrl(serverId);
-    if (!url) return null;
-
-    client = new MCPClient({
-      id: serverId,
-      servers: {
-        [serverId.replace(/-mcp$/, '')]: {
-          url,
-          fetch: buildHttpFetch(apiKey || undefined),
-        },
-      },
-    });
-  } else if (serverId === 'filesystem-local') {
-    await ensureCompanyWorkspace(companyId);
-    const workspacePath = getCompanyWorkspaceDir(companyId);
-    client = new MCPClient({
-      id: `filesystem-local-${companyId}`,
-      servers: {
-        filesystem: {
-          command: 'npx',
-          args: ['-y', '@modelcontextprotocol/server-filesystem', workspacePath],
-        },
-      },
-    });
-  } else if (serverId === 'github-mcp') {
-    client = new MCPClient({
-      id: 'github-mcp',
-      servers: {
-        github: {
-          command: 'npx',
-          args: ['-y', '@modelcontextprotocol/server-github'],
-          env: { GITHUB_PERSONAL_ACCESS_TOKEN: process.env.GITHUB_TOKEN ?? '' },
-        },
-      },
-    });
-  } else if (serverId === 'memory-mcp-private') {
-    if (!urlKey) return null;
-    await ensureAgentMemoryDir(companyId, urlKey);
-    const memoryFilePath = getAgentMemoryFilePath(companyId, urlKey);
-    client = new MCPClient({
-      id: `memory-mcp-private-${companyId}-${urlKey}`,
-      servers: {
-        memory_private: {
-          command: 'npx',
-          args: ['-y', '@modelcontextprotocol/server-memory'],
-          env: { MEMORY_FILE_PATH: memoryFilePath },
-        },
-      },
-    });
-  } else if (serverId === 'memory-mcp-company') {
-    await ensureCompanyMemoryDir(companyId);
-    const memoryFilePath = getCompanyMemoryFilePath(companyId);
-    client = new MCPClient({
-      id: `memory-mcp-company-${companyId}`,
-      servers: {
-        memory_company: {
-          command: 'npx',
-          args: ['-y', '@modelcontextprotocol/server-memory'],
-          env: { MEMORY_FILE_PATH: memoryFilePath },
-        },
-      },
-    });
+  if (isSpecialMcpServerId(serverId)) {
+    client = await getSpecialStdioClient(serverId, options);
+  } else if (def.transport === 'http') {
+    client = getGenericHttpClient(serverId, def, apiKey);
+  } else if (def.transport === 'stdio') {
+    client = getGenericStdioClient(serverId, def);
   }
 
   if (!client) return null;

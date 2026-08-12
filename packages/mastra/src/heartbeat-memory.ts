@@ -14,7 +14,8 @@ export function buildHarnessIdleThreadId(agentId: string): string {
 
 async function deleteThreadIfExists(threadId: string): Promise<void> {
   try {
-    await getAgentMemory().deleteThread(threadId);
+    const memory = await getAgentMemory();
+    await memory.deleteThread(threadId);
   } catch {
     // Thread may not exist — safe to ignore.
   }

@@ -6,8 +6,6 @@ import {
   createTourbillonController,
   ensureControllerThread,
   clearHarnessIdleThread,
-  type TourbillonControllerState,
-  type Session,
   type AgentControllerEvent,
   CONTROLLER_THREAD_MESSAGE_CAP,
   getResumableHarnessRun,
@@ -25,7 +23,7 @@ import {
   isObservabilityEnabled,
   type CompanySettings,
 } from '@tourbillon/shared';
-import { heartbeatAbortedError } from '../heartbeat-abort';
+import { driveSessionHeadless } from '../harness-session-drive';
 
 export interface HarnessRunContext {
   wake: HeartbeatJobData;
@@ -164,95 +162,9 @@ export async function runWithHarness(
   }
 }
 
-async function driveSessionHeadless(
-  session: Session<TourbillonControllerState>,
-  wakeMessage: string,
-  requestContext: ReturnType<typeof createHeartbeatRuntimeContext>,
-  onEvent: (event: AgentControllerEvent) => void,
-  abortSignal?: AbortSignal,
-  tracingOptions?: ReturnType<typeof buildHeartbeatTracingOptions>,
-): Promise<Omit<HarnessRunResult, 'threadId' | 'harnessRunId' | 'traceId'>> {
-  let inputTokens = 0;
-  let outputTokens = 0;
-  let finishReason: HarnessRunResult['finishReason'] = 'complete';
-  let suspendedToolCallId: string | undefined;
-
-  return new Promise((resolve, reject) => {
-    let unsub: (() => void) | undefined;
-
-    const finish = (result: Omit<HarnessRunResult, 'threadId' | 'harnessRunId' | 'traceId'>) => {
-      abortSignal?.removeEventListener('abort', onAbort);
-      unsub?.();
-      resolve(result);
-    };
-
-    const fail = (err: Error) => {
-      abortSignal?.removeEventListener('abort', onAbort);
-      unsub?.();
-      reject(err);
-    };
-
-    const onAbort = () => {
-      session.abort();
-      fail(heartbeatAbortedError());
-    };
-
-    abortSignal?.addEventListener('abort', onAbort, { once: true });
-
-    unsub = session.subscribe((event) => {
-      onEvent(event);
-
-      switch (event.type) {
-        case 'usage_update':
-          inputTokens += event.usage.promptTokens ?? 0;
-          outputTokens += event.usage.completionTokens ?? 0;
-          break;
-
-        case 'agent_end':
-          if (event.reason === 'suspended') {
-            suspendedToolCallId = session.getCurrentRunId() ?? undefined;
-            finishReason = 'suspended';
-          } else if (event.reason === 'error') {
-            finishReason = 'error';
-          } else {
-            finishReason = 'complete';
-          }
-          finish({ inputTokens, outputTokens, finishReason, suspendedToolCallId });
-          break;
-
-        case 'tool_suspended':
-          suspendedToolCallId = event.toolCallId;
-          finishReason = 'suspended';
-          finish({ inputTokens, outputTokens, finishReason, suspendedToolCallId });
-          break;
-
-        case 'error':
-          fail(event.error);
-          break;
-
-        default:
-          break;
-      }
-    });
-
-    void session
-      .sendMessage({
-        content: wakeMessage,
-        requestContext,
-        tracingOptions: tracingOptions ?? undefined,
-      })
-      .then(() => {
-        if (!session.run.isRunning()) {
-          finish({ inputTokens, outputTokens, finishReason: 'complete', suspendedToolCallId });
-        }
-      })
-      .catch((err) => {
-        fail(err instanceof Error ? err : new Error(String(err)));
-      });
-  });
-}
-
 /** Limit message history when listing threads (controller storage cap). */
 export function harnessMessageLimit(): number {
   return CONTROLLER_THREAD_MESSAGE_CAP;
 }
+
+export { driveSessionHeadless, isHarnessProgressEvent, tripwireErrorFromUnknown } from '../harness-session-drive';
