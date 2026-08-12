@@ -9,7 +9,6 @@ import { getCompanyById } from '@/lib/company';
 import { NewProjectIssueDialog } from '../new-project-issue-dialog';
 import { updateProjectAction } from '../actions';
 import { ProjectEditForm } from './project-edit-form';
-import { ChatPageContext } from '@/components/chat/chat-page-context';
 
 export default async function ProjectDetailPage({
   params,
@@ -52,15 +51,6 @@ export default async function ProjectDetailPage({
 
   return (
     <div className="p-6 space-y-6 max-w-3xl">
-      {owner?.id && owner?.name ? (
-        <ChatPageContext
-          contextType="project"
-          contextId={project.id}
-          contextTitle={project.title}
-          defaultAgentId={owner.id}
-          defaultAgentName={owner.name}
-        />
-      ) : null}
       {company ? (
         <DeepLinkCompanySync requiredCompanyId={company.id} requiredCompanyName={company.name} />
       ) : null}

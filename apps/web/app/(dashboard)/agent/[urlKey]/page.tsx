@@ -30,7 +30,6 @@ import { AgentHeartbeatHeaderActions } from './agent-heartbeat-header-actions';
 import { AgentQueryToast } from './agent-query-toast';
 import { AgentRoutineToggle } from './agent-routine-toggle';
 import { AgentCloneForm } from './agent-clone-form';
-import { ChatPageContext } from '@/components/chat/chat-page-context';
 
 async function updateHeartbeatConfig(
   _prev: ActionResult | null,
@@ -497,14 +496,6 @@ export default async function AgentDetailPage({
           </div>
         </div>
       </div>
-
-      <ChatPageContext
-        contextType="agent"
-        contextId={agent.id}
-        contextTitle={agent.name}
-        defaultAgentId={agent.id}
-        defaultAgentName={agent.name}
-      />
 
       <AgentQueryToast saved={saved} error={error} urlKey={agent.urlKey} />
 
