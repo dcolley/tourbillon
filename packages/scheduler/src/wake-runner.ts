@@ -299,6 +299,16 @@ async function runWake(
   const runTracer = agentTracer.child({ runId, taskId });
   const runStartedAt = new Date();
 
+  const providerRow = agentRecord.providerId
+    ? await getLlmProviderRowById(agentRecord.providerId)
+    : null;
+  const providerRecord = providerRow ? toLlmProviderRecord(providerRow) : null;
+  const providerConfig = resolveModelProviderConfig(
+    modelProviderOverridesFromAgent(agentRecord.adapterType, agentRecord.adapterConfig),
+    agentRecord.modelId,
+    providerRecord,
+  );
+
   await db.insert(heartbeatRuns).values({
     id: runId,
     agentId,
@@ -315,6 +325,9 @@ async function runWake(
       approvalStatus: wake.approvalStatus,
       approvalNote: wake.approvalNote,
       linkedIssueIds: wake.linkedIssueIds,
+      providerId: agentRecord.providerId ?? null,
+      providerName: providerRow?.name ?? providerConfig.providerName ?? providerConfig.provider,
+      modelId: agentRecord.modelId ?? null,
     },
     startedAt: runStartedAt,
     lastSeenAt: runStartedAt,
@@ -366,16 +379,6 @@ async function runWake(
 
   pingHeartbeat();
   const pingInterval = setInterval(pingHeartbeat, liveness.pingIntervalMs);
-
-  const providerRow = agentRecord.providerId
-    ? await getLlmProviderRowById(agentRecord.providerId)
-    : null;
-  const providerRecord = providerRow ? toLlmProviderRecord(providerRow) : null;
-  const providerConfig = resolveModelProviderConfig(
-    modelProviderOverridesFromAgent(agentRecord.adapterType, agentRecord.adapterConfig),
-    agentRecord.modelId,
-    providerRecord,
-  );
 
   const issueForTask = taskId
     ? await db.query.issues.findFirst({ where: eq(issues.id, taskId) })

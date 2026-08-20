@@ -77,6 +77,7 @@ export async function driveSessionHeadless(
     let unsub: (() => void) | undefined;
     let progressTimer: ReturnType<typeof setTimeout> | undefined;
     let settled = false;
+    let lastEvent: { type: string; at: Date } | null = null;
 
     const cleanup = () => {
       if (progressTimer) clearTimeout(progressTimer);
@@ -106,7 +107,7 @@ export async function driveSessionHeadless(
         } catch {
           // ignore
         }
-        fail(new Error(heartbeatProgressStaleErrorText(staleSec)));
+        fail(new Error(heartbeatProgressStaleErrorText(staleSec, lastEvent)));
       }, staleSec * 1000);
     };
 
@@ -119,6 +120,7 @@ export async function driveSessionHeadless(
     resetProgressWatchdog();
 
     unsub = session.subscribe((event) => {
+      lastEvent = { type: event.type, at: new Date() };
       onEvent(event);
 
       if (isHarnessProgressEvent(event)) {

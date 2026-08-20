@@ -59,8 +59,20 @@ export function heartbeatStaleErrorText(staleSec: number): string {
   return `Heartbeat worker stopped responding (no ping within ${staleSec}s)`;
 }
 
-export function heartbeatProgressStaleErrorText(progressStaleSec: number): string {
-  return `Heartbeat made no progress (no controller events within ${progressStaleSec}s)`;
+export interface HeartbeatProgressLastEvent {
+  type: string;
+  at: Date;
+}
+
+export function heartbeatProgressStaleErrorText(
+  progressStaleSec: number,
+  lastEvent?: HeartbeatProgressLastEvent | null,
+): string {
+  const base = `Heartbeat made no progress (no controller events within ${progressStaleSec}s)`;
+  if (!lastEvent?.type) {
+    return `${base}; last event: none`;
+  }
+  return `${base}; last event: ${lastEvent.type} at ${lastEvent.at.toISOString()}`;
 }
 
 /** True when an error looks like Mastra TokenLimiter / TripWire context failure. */

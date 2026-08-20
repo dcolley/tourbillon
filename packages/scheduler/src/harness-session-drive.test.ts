@@ -171,6 +171,41 @@ describe('driveSessionHeadless', () => {
     );
   });
 
+  it('includes last event type and time when progress watchdog fires', async () => {
+    const listeners = new Set<(event: AgentControllerEvent) => void>();
+    const session = {
+      subscribe(listener: (event: AgentControllerEvent) => void) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      abort() {},
+      getCurrentRunId() {
+        return null;
+      },
+      run: { isRunning: () => true },
+      sendMessage: () => new Promise(() => undefined),
+    };
+
+    const drive = driveSessionHeadless(
+      session as never,
+      'wake',
+      {},
+      () => undefined,
+      undefined,
+      undefined,
+      1,
+    );
+    for (const listener of listeners) {
+      listener({ type: 'tool_end' } as AgentControllerEvent);
+    }
+
+    await assert.rejects(drive, (err: Error) => {
+      assert.match(err.message, /no controller events within 1s/i);
+      assert.match(err.message, /last event: tool_end at \d{4}-\d{2}-\d{2}T/);
+      return true;
+    });
+  });
+
   it('tripwireErrorFromUnknown wraps limiter errors', () => {
     const err = tripwireErrorFromUnknown(
       new Error('TokenLimiterProcessor: No messages to process.'),

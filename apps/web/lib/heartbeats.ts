@@ -1,10 +1,19 @@
-import { db, agents, heartbeatRuns, type Agent, type HeartbeatRun } from '@tourbillon/db';
+import { db, agents, heartbeatRuns, llmProviders, type Agent, type HeartbeatRun } from '@tourbillon/db';
 import { desc, eq, and, inArray, count } from 'drizzle-orm';
 import { getActiveCompany } from './company';
 
+export interface HeartbeatAgentSummary {
+  id: string;
+  name: string;
+  urlKey: string;
+  title: string;
+  modelId: string | null;
+  providerName: string | null;
+}
+
 export interface HeartbeatRunWithAgent {
   run: HeartbeatRun;
-  agent: Pick<Agent, 'id' | 'name' | 'urlKey' | 'title'> | null;
+  agent: HeartbeatAgentSummary | null;
 }
 
 export type { HeartbeatListFilter } from './heartbeat-list-storage';
@@ -17,6 +26,8 @@ export interface HeartbeatListEntry {
   runId: string | null;
   jobId: string | null;
   agent: Pick<Agent, 'id' | 'name' | 'urlKey' | 'title'> | null;
+  providerName: string | null;
+  modelId: string | null;
   invocationSource: string | null;
   runStatus: string | null;
   jobState: string | null;
@@ -58,11 +69,31 @@ async function attachAgents(runs: HeartbeatRun[]): Promise<HeartbeatRunWithAgent
   const company = await getActiveCompany();
   const agentIds = [...new Set(runs.map((r) => r.agentId))];
   const agentRows = await db
-    .select({ id: agents.id, name: agents.name, urlKey: agents.urlKey, title: agents.title })
+    .select({
+      id: agents.id,
+      name: agents.name,
+      urlKey: agents.urlKey,
+      title: agents.title,
+      modelId: agents.modelId,
+      providerName: llmProviders.name,
+    })
     .from(agents)
+    .leftJoin(llmProviders, eq(agents.providerId, llmProviders.id))
     .where(and(eq(agents.companyId, company.id), inArray(agents.id, agentIds)));
 
-  const agentById = new Map(agentRows.map((a) => [a.id, a]));
+  const agentById = new Map(
+    agentRows.map((a) => [
+      a.id,
+      {
+        id: a.id,
+        name: a.name,
+        urlKey: a.urlKey,
+        title: a.title,
+        modelId: a.modelId ?? null,
+        providerName: a.providerName ?? null,
+      },
+    ]),
+  );
 
   return runs.map((run) => ({
     run,
@@ -107,12 +138,30 @@ async function countHeartbeatRuns(
   return row?.total ?? 0;
 }
 
+function snapshotString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function inferenceFromRun(
+  run: HeartbeatRun,
+  agent: HeartbeatAgentSummary | null,
+): { providerName: string | null; modelId: string | null } {
+  const snapshot = run.contextSnapshot as { providerName?: unknown; modelId?: unknown } | null;
+  return {
+    providerName: snapshotString(snapshot?.providerName) ?? agent?.providerName ?? null,
+    modelId: snapshotString(snapshot?.modelId) ?? agent?.modelId ?? null,
+  };
+}
+
 function entryFromRun({ run, agent }: HeartbeatRunWithAgent): HeartbeatListEntry {
+  const inference = inferenceFromRun(run, agent);
   return {
     key: run.id,
     runId: run.id,
     jobId: null,
     agent,
+    providerName: inference.providerName,
+    modelId: inference.modelId,
     invocationSource: run.invocationSource,
     runStatus: run.status,
     jobState: null,
@@ -165,12 +214,30 @@ export async function getHeartbeatRun(runId: string): Promise<HeartbeatRunWithAg
   });
   if (!run) return null;
 
-  const agent = await db.query.agents.findFirst({
-    where: eq(agents.id, run.agentId),
-    columns: { id: true, name: true, urlKey: true, title: true },
-  });
+  const [agent] = await db
+    .select({
+      id: agents.id,
+      name: agents.name,
+      urlKey: agents.urlKey,
+      title: agents.title,
+      modelId: agents.modelId,
+      providerName: llmProviders.name,
+    })
+    .from(agents)
+    .leftJoin(llmProviders, eq(agents.providerId, llmProviders.id))
+    .where(eq(agents.id, run.agentId))
+    .limit(1);
 
-  return { run, agent: agent ?? null };
+  return {
+    run,
+    agent: agent
+      ? {
+          ...agent,
+          modelId: agent.modelId ?? null,
+          providerName: agent.providerName ?? null,
+        }
+      : null,
+  };
 }
 
 export function getHeartbeatJobId(_run: HeartbeatRun): string | undefined {

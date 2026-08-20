@@ -33,6 +33,8 @@ interface HeartbeatListEntryJson {
   runId: string | null;
   jobId: string | null;
   agent: AgentOption | null;
+  providerName: string | null;
+  modelId: string | null;
   invocationSource: string | null;
   runStatus: string | null;
   jobState: string | null;
@@ -279,6 +281,8 @@ export function HeartbeatListClient({ agents }: { agents: AgentOption[] }) {
               <tr className="border-b bg-muted/40 text-left">
                 <th className="px-4 py-3 font-medium">Job ID</th>
                 <th className="px-4 py-3 font-medium">Agent</th>
+                <th className="px-4 py-3 font-medium">Provider</th>
+                <th className="px-4 py-3 font-medium">Model</th>
                 <th className="px-4 py-3 font-medium">Source</th>
                 <th className="px-4 py-3 font-medium">Run</th>
                 <th className="px-4 py-3 font-medium">Job</th>
@@ -288,13 +292,13 @@ export function HeartbeatListClient({ agents }: { agents: AgentOption[] }) {
             <tbody className="divide-y">
               {loading && !data ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-8 text-center text-muted-foreground">
+                  <td colSpan={8} className="px-4 py-8 text-center text-muted-foreground">
                     Loading heartbeats…
                   </td>
                 </tr>
               ) : !data || data.entries.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-8 text-center text-muted-foreground">
+                  <td colSpan={8} className="px-4 py-8 text-center text-muted-foreground">
                     No heartbeats in this view.
                   </td>
                 </tr>
@@ -324,6 +328,18 @@ export function HeartbeatListClient({ agents }: { agents: AgentOption[] }) {
                         </Link>
                       ) : (
                         <span className="text-muted-foreground">—</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">
+                      {entry.providerName ?? '—'}
+                    </td>
+                    <td className="px-4 py-3 text-muted-foreground">
+                      {entry.modelId ? (
+                        <span className="font-mono text-xs break-all" title={entry.modelId}>
+                          {entry.modelId}
+                        </span>
+                      ) : (
+                        '—'
                       )}
                     </td>
                     <td className="px-4 py-3 capitalize text-muted-foreground">
