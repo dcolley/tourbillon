@@ -360,8 +360,10 @@ export default async function SettingsPage({
           </span>
         </div>
         <p className="text-sm text-muted-foreground">
-          Compacts long agent/harness conversation history before it hits the TokenLimiter ceiling.
-          Uses the selected provider/model for Observer and Reflector (not the agent&apos;s chat model).
+          Compacts long assignment and harness Session history before it hits the TokenLimiter
+          ceiling. Applies to harness on-demand idle threads as well as issue threads. Uses the
+          selected provider/model for Observer and Reflector (not the agent&apos;s chat model).
+          Does not shrink system prompt or tool schemas.
         </p>
         <div className="border rounded-lg p-4">
           <ObservationalMemorySettingsForm

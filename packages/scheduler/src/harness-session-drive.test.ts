@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   heartbeatProgressStaleErrorText,
+  isResumableWakeMatch,
   isTokenLimiterTripwireError,
   parseCompanySettings,
+  resolveContextBudget,
   resolveObservationalMemoryModel,
 } from '@tourbillon/shared';
 import {
@@ -35,6 +37,43 @@ describe('resolveObservationalMemoryModel', () => {
       }),
       null,
     );
+  });
+});
+
+describe('isResumableWakeMatch', () => {
+  it('rejects on-demand and timer wakes with no taskId', () => {
+    assert.equal(isResumableWakeMatch(undefined, 'issue-1'), false);
+    assert.equal(isResumableWakeMatch(undefined, undefined), false);
+  });
+
+  it('requires the snapshot taskId to match the wake taskId', () => {
+    assert.equal(isResumableWakeMatch('issue-1', 'issue-1'), true);
+    assert.equal(isResumableWakeMatch('issue-1', 'issue-2'), false);
+    assert.equal(isResumableWakeMatch('issue-1', undefined), false);
+  });
+});
+
+describe('resolveContextBudget', () => {
+  it('falls back to the env limiter when no context window is set', () => {
+    const budget = resolveContextBudget({
+      kind: 'durable',
+      envLimit: 120_000,
+    });
+    assert.equal(budget.contextTokens, null);
+    assert.equal(budget.limiterLimit, 120_000);
+    assert.equal(budget.observationThreshold, 30_000);
+    assert.equal(budget.reflectionThreshold, 40_000);
+  });
+
+  it('reserves output and harness tool schemas under the model window', () => {
+    const budget = resolveContextBudget({
+      kind: 'harness',
+      maxContextTokens: 131_072,
+      maxOutputTokens: 4_096,
+    });
+    assert.equal(budget.limiterLimit, 131_072 - 4_096 - 16_000);
+    assert.ok(budget.observationThreshold < budget.limiterLimit);
+    assert.ok(budget.reflectionThreshold > budget.observationThreshold);
   });
 });
 

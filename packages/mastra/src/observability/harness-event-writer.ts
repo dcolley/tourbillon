@@ -9,6 +9,7 @@ import {
 } from '@tourbillon/db';
 import { randomUUID } from 'crypto';
 import {
+  isResumableWakeMatch,
   observabilityMaxPayloadBytes,
   observabilityPreviewChars,
 } from '@tourbillon/shared';
@@ -351,7 +352,7 @@ export async function getResumableHarnessRun(
     const snapshot = row.contextSnapshot as Record<string, unknown> | null;
     const snapshotTaskId =
       typeof snapshot?.taskId === 'string' ? snapshot.taskId : undefined;
-    if (taskId && snapshotTaskId !== taskId) continue;
+    if (!isResumableWakeMatch(taskId, snapshotTaskId)) continue;
 
     const threadId =
       typeof snapshot?.harnessThreadId === 'string'
@@ -421,7 +422,7 @@ export async function getResumableDurableRun(
     const snapshot = row.contextSnapshot as Record<string, unknown> | null;
     const snapshotTaskId =
       typeof snapshot?.taskId === 'string' ? snapshot.taskId : undefined;
-    if (taskId && snapshotTaskId !== taskId) continue;
+    if (!isResumableWakeMatch(taskId, snapshotTaskId)) continue;
     return { heartbeatRunId: row.id, durableRunId: row.durableRunId };
   }
 

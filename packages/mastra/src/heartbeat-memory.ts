@@ -1,4 +1,5 @@
 import { getAgentMemory } from './agent-factory';
+import { deleteControllerThreadIfExists } from './controller-config';
 
 export function shouldUseHeartbeatMemory(taskId?: string): boolean {
   return Boolean(taskId);
@@ -26,7 +27,9 @@ export async function clearInboxThread(companyId: string, agentId: string): Prom
   await deleteThreadIfExists(buildInboxThreadId(companyId, agentId));
 }
 
-/** Delete harness idle thread before a stateless wake. */
+/** Delete harness idle thread before a stateless wake (controller storage + Memory). */
 export async function clearHarnessIdleThread(agentId: string): Promise<void> {
-  await deleteThreadIfExists(buildHarnessIdleThreadId(agentId));
+  const threadId = buildHarnessIdleThreadId(agentId);
+  await deleteControllerThreadIfExists(threadId);
+  await deleteThreadIfExists(threadId);
 }

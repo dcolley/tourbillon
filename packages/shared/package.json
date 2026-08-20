@@ -13,6 +13,7 @@
     "./issue-assignee": "./src/issue-assignee.ts",
     "./model-provider": "./src/model-provider.ts",
     "./model-settings": "./src/model-settings.ts",
+    "./context-budget": "./src/context-budget.ts",
     "./reasoning-capabilities": "./src/reasoning-capabilities.ts",
     "./company-workspace": "./src/company-workspace.ts",
     "./company-workspace-types": "./src/company-workspace-types.ts",

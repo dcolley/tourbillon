@@ -169,7 +169,7 @@ Skills teach methodology. At wake time:
 | **Per-agent workspace** | `{companyWorkspace}/agents/{urlKey}/skills/*.md` | Not stored in DB — scanned each wake | Catalog / `getSkill` each wake (overrides assigned skills for same slug) |
 | **Toolset skills** | `agents/{urlKey}/skills/buffer-skills.md`, `code-execution-skills.md` | Auto from `assignedToolsets` | Catalog / `getSkill` (excluded from per-agent dynamic scan duplication) |
 
-Per-step `TokenLimiterProcessor` (`HEARTBEAT_CONTEXT_TOKEN_LIMIT`, default `120000`) prunes older tool/assistant messages when a multi-step heartbeat approaches the context ceiling.
+Per-step `TokenLimiterProcessor` prunes older tool/assistant messages when a multi-step heartbeat approaches the context ceiling. The limit is `runtimeConfig.model.maxContextTokens` (or the provider default) minus output-token and tool-schema reserves. `HEARTBEAT_CONTEXT_TOKEN_LIMIT` (default `120000`) is the fallback when neither is set.
 
 At hire time, `createAgent()` calls `buildAssignedSkills()` — union of `ROLE_DEFAULT_SKILLS[role]` and slugs discovered in `skills/`. Role changes re-merge company skills via `updateAgentRole()`. After hire, optional skills are toggled on the agent **Capabilities** form (`control-plane` cannot be disabled).
 
@@ -190,9 +190,13 @@ Mastra memory is keyed per agent × issue (thread). Memory keys are built in `pa
 - `resource` = `{companyId}:{agentId}` (widened to project/goal when semantic recall is enabled)
 - `thread` = `{issueId}:{agentId}` when the heartbeat job includes `taskId` (assignment, approval with linked issue, etc.)
 
-**Stateless inbox wakes** — timer, on-demand, and any heartbeat without `taskId` do **not** use Mastra memory. The legacy inbox thread (`{companyId}:{agentId}:inbox`) is deleted before each stateless wake so prior heartbeat transcripts are not replayed into the LLM context. Agents rely on control-plane tools (`getInbox`, `getHeartbeatContext`, `getComments`) for task state.
+**Stateless inbox wakes (durable Agent)** — timer, on-demand, and any heartbeat without `taskId` do **not** use Mastra memory. The legacy inbox thread (`{companyId}:{agentId}:inbox`) is deleted before each stateless wake so prior heartbeat transcripts are not replayed into the LLM context. Agents rely on control-plane tools (`getInbox`, `getHeartbeatContext`, `getComments`) for task state.
 
-Memory persists across heartbeats only for assignment wakes with `taskId` (up to `lastMessages: 20`). **Task history is written to issue comments**, not memory — comments are the shared record of record that all agents can read.
+**Harness (`harness_local`) always has a Session thread.** On-demand / timer wakes use `agent-{agentId}` (cleared from controller storage before each stateless wake). Assignment wakes use `issue-{companyId}-{taskId}` and persist across heartbeats. Failed assignment runs are **not** resumed on on-demand/timer wakes.
+
+**Observational Memory** (company Settings, Observer + Reflector) compactes harness and assignment thread history. It does not shrink system prompt or tool schemas. Enable it when long tool loops should compress before TokenLimiter trims blindly.
+
+Memory persists across heartbeats only for assignment wakes with `taskId` (durable: `lastMessages: 20`; harness: last `40` controller messages). **Task history is written to issue comments**, not memory — comments are the shared record of record that all agents can read.
 
 ### Observability
 

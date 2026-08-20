@@ -22,8 +22,12 @@ import {
   type AssembleAgentToolsOptions,
 } from './agent-factory';
 import { getLanguageModelForAgent, llmProviderRowToRecord } from './provider';
-import { resolveAgentGenerationOptions, toMastraDefaultOptions } from './model-settings';
-import { buildCodeExecutionWorkspace } from './execution-workspace';
+import {
+  resolveAgentContextBudget,
+  resolveAgentGenerationOptions,
+  toMastraDefaultOptions,
+} from './model-settings';
+import { buildChatWorkspace, buildCodeExecutionWorkspace } from './execution-workspace';
 import { agentNeedsMcpTools } from '@tourbillon/shared/mcp-registry';
 import { buildHeartbeatInputProcessors } from './heartbeat-processors';
 import { getMastraInstance } from './mastra-instance';
@@ -97,6 +101,7 @@ async function buildBackingAgent(
     : null;
   const providerRecord = providerRow ? llmProviderRowToRecord(providerRow) : null;
   const generationOptions = resolveAgentGenerationOptions(agentRecord, providerRecord);
+  const contextBudget = resolveAgentContextBudget(agentRecord, providerRecord, 'harness');
 
   return new Agent({
     id: agentRecord.id,
@@ -105,7 +110,7 @@ async function buildBackingAgent(
     model: getLanguageModelForAgent(agentRecord, providerRecord),
     tools: tools as Agent['tools'] & Record<string, unknown>,
     memory: await getAgentMemory(options?.companySettings ?? null),
-    inputProcessors: buildHeartbeatInputProcessors(),
+    inputProcessors: buildHeartbeatInputProcessors({ limit: contextBudget.limiterLimit }),
     ...(codeExecutionEnabled ? { workspace: buildCodeExecutionWorkspace() } : {}),
     ...toMastraDefaultOptions(generationOptions),
   });
@@ -166,8 +171,14 @@ export async function createTourbillonController(
 
   const om = resolveObservationalMemoryModel(options?.companySettings ?? null);
   const memory = await getAgentMemory(options?.companySettings ?? null);
+  const providerRow = agentRecord.providerId
+    ? await getLlmProviderRowById(agentRecord.providerId)
+    : null;
+  const providerRecord = providerRow ? llmProviderRowToRecord(providerRow) : null;
+  const contextBudget = resolveAgentContextBudget(agentRecord, providerRecord, 'harness');
 
-  // Session always requires a Workspace instance (Mastra AgentController contract).
+  // Session always requires a Workspace instance. Skip sandbox tool schemas
+  // unless code-execution is enabled (same pattern as dashboard chat).
   return new AgentControllerClass<TourbillonControllerState>({
     id: `tourbillon-${agentRecord.id}`,
     resourceId: `company-${agentRecord.companyId}`,
@@ -175,7 +186,7 @@ export async function createTourbillonController(
     memory,
     agent,
     modes,
-    workspace: buildCodeExecutionWorkspace(),
+    workspace: codeExecutionEnabled ? buildCodeExecutionWorkspace() : buildChatWorkspace(),
     initialState: {
       yolo: true,
       permissionRules: buildControllerPermissionRules(agentRecord, codeExecutionEnabled),
@@ -190,8 +201,8 @@ export async function createTourbillonController(
           omConfig: {
             defaultObserverModelId: om.modelId,
             defaultReflectorModelId: om.modelId,
-            defaultObservationThreshold: 30_000,
-            defaultReflectionThreshold: 40_000,
+            defaultObservationThreshold: contextBudget.observationThreshold,
+            defaultReflectionThreshold: contextBudget.reflectionThreshold,
           },
         }
       : {}),
@@ -253,6 +264,39 @@ export async function ensureControllerThread(
   }
 
   await session.thread.switch({ threadId });
+  await trimControllerThreadHistory(session, threadId);
+}
+
+export async function deleteControllerThreadIfExists(threadId: string): Promise<void> {
+  try {
+    const memory = await getControllerThreadStorage().getStore('memory');
+    if (!memory) return;
+    await memory.deleteThread({ threadId });
+  } catch {
+    // Thread may not exist.
+  }
+}
+
+/** Keep the newest `cap` messages so the Session cap is more than a list limit. */
+export async function trimControllerThreadHistory(
+  session: Session<TourbillonControllerState>,
+  threadId: string,
+  cap = CONTROLLER_THREAD_MESSAGE_CAP,
+): Promise<void> {
+  try {
+    const messages = await session.thread.listMessages({ threadId });
+    if (messages.length <= cap) return;
+    const excessIds = messages
+      .slice(0, messages.length - cap)
+      .map((message) => message.id)
+      .filter((id): id is string => Boolean(id));
+    if (excessIds.length === 0) return;
+    const memory = await getControllerThreadStorage().getStore('memory');
+    if (!memory) return;
+    await memory.deleteMessages(excessIds);
+  } catch {
+    // Trimming is best-effort — TokenLimiter still caps the model request.
+  }
 }
 
 /** @deprecated Prefer {@link ensureControllerThread}. */

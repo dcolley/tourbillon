@@ -4,31 +4,43 @@ import {
   type InputProcessorOrWorkflow,
 } from '@mastra/core/processors';
 import {
+  resolveContextBudget,
+  resolveEnvContextTokenLimit,
+  type AgentModelSettings,
+  type ContextBudget,
+  type ContextBudgetKind,
+} from '@tourbillon/shared';
+import {
   coalesceConsecutiveUserMessagesRule,
   stripAssistantReasoning,
   stripToolLoopAssistantMonologue,
 } from './responses-tool-loop-compat';
 
 /**
- * Cap model input tokens per agentic step so mid-heartbeat tool loops cannot
- * grow past the provider context window. Default leaves headroom under common
- * 128k–242k windows for system + next tool results.
- *
+ * Env fallback when neither provider nor agent sets maxContextTokens.
  * Env: HEARTBEAT_CONTEXT_TOKEN_LIMIT (default 120000)
  */
 export function resolveHeartbeatContextTokenLimit(): number {
-  const raw = process.env.HEARTBEAT_CONTEXT_TOKEN_LIMIT;
-  if (raw) {
-    const n = parseInt(raw, 10);
-    if (Number.isFinite(n) && n >= 8_000) return n;
-  }
-  return 120_000;
+  return resolveEnvContextTokenLimit();
 }
 
-export function buildHeartbeatInputProcessors(): InputProcessorOrWorkflow[] {
+export function resolveHeartbeatContextBudget(
+  settings: AgentModelSettings | null | undefined,
+  kind: ContextBudgetKind,
+): ContextBudget {
+  return resolveContextBudget({
+    maxContextTokens: settings?.maxContextTokens,
+    maxOutputTokens: settings?.maxOutputTokens,
+    kind,
+  });
+}
+
+export function buildHeartbeatInputProcessors(
+  options?: { limit?: number },
+): InputProcessorOrWorkflow[] {
   return [
     new TokenLimiterProcessor({
-      limit: resolveHeartbeatContextTokenLimit(),
+      limit: options?.limit ?? resolveHeartbeatContextTokenLimit(),
       // Prefer contiguous recent history so the current tool loop stays coherent.
       trimMode: 'contiguous',
     }),

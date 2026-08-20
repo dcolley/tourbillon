@@ -35,13 +35,14 @@ import { SEARXNG_TOOLS } from './tools/searxng-tools';
 import { TAVILY_TOOLS } from './tools/tavily-tools';
 import { getInternalApiUrl } from './tools/api-client';
 import { buildCodeExecutionWorkspace } from './execution-workspace';
-import { resolveAgentGenerationOptions, toMastraDefaultOptions } from './model-settings';
+import {
+  resolveAgentContextBudget,
+  resolveAgentGenerationOptions,
+  toMastraDefaultOptions,
+} from './model-settings';
 import { getMastraInstance } from './mastra-instance';
 import { isMastraTracingEnabled } from '@tourbillon/shared';
-import {
-  buildHeartbeatInputProcessors,
-  resolveHeartbeatContextTokenLimit,
-} from './heartbeat-processors';
+import { buildHeartbeatInputProcessors } from './heartbeat-processors';
 
 const globalForMastra = globalThis as unknown as {
   /** Memory instances keyed by OM config (or `base` when OM is off). */
@@ -228,7 +229,8 @@ export async function createAgentWithSkills(
 
   const codeExecutionEnabled = await shouldAttachCodeExecutionWorkspace(agentRecord);
   const generationOptions = resolveAgentGenerationOptions(agentRecord, providerRecord);
-  const inputProcessors = buildHeartbeatInputProcessors();
+  const contextBudget = resolveAgentContextBudget(agentRecord, providerRecord, 'durable');
+  const inputProcessors = buildHeartbeatInputProcessors({ limit: contextBudget.limiterLimit });
 
   console.log(
     formatTrace('agent-factory', { agentId: agentRecord.id, agentName: agentRecord.name }, 'agent ready', {
@@ -245,7 +247,9 @@ export async function createAgentWithSkills(
       skillCount: prepared.catalog.length,
       alwaysInlineSkills: prepared.alwaysInline.map((s) => s.slug),
       onDemandSkills: prepared.catalog.filter((s) => !s.alwaysInline).map((s) => s.slug),
-      contextTokenLimit: resolveHeartbeatContextTokenLimit(),
+      contextTokenLimit: contextBudget.limiterLimit,
+      maxContextTokens: contextBudget.contextTokens,
+      outputReserve: contextBudget.outputReserve,
       codeExecutionEnabled,
       modelSettings: generationOptions.modelSettings,
       reasoning: generationOptions.reasoning,

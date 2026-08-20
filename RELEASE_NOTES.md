@@ -26,7 +26,7 @@ set -a && source .env && set +a && pnpm db:migrate
 |---|---|---|---|
 | `SCHEDULER_WAKE_PORT` | Yes | `3003` | WakeRunner HTTP port |
 | `SCHEDULER_WAKE_URL` | No | `http://127.0.0.1:3003` | Set if web and scheduler are on different hosts |
-| `HEARTBEAT_CONTEXT_TOKEN_LIMIT` | No | `120000` | Per-step token cap (TokenLimiterProcessor) |
+| `HEARTBEAT_CONTEXT_TOKEN_LIMIT` | No | `120000` | Fallback TokenLimiter cap when provider/agent `maxContextTokens` is unset |
 
 On Linux, set `SANDBOX_ISOLATION=bwrap` or `none` (not `seatbelt`, which is macOS-only).
 

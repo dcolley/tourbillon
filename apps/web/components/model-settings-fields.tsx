@@ -42,6 +42,14 @@ export const MODEL_SETTING_FIELDS = [
     hint: 'Cap response length per generation step.',
   },
   {
+    key: 'maxContextTokens' as const,
+    label: 'Max context tokens',
+    min: 8_000,
+    max: 2_000_000,
+    step: 1,
+    hint: 'Model context window. Used to trim heartbeat/harness input so system + tools + output fit.',
+  },
+  {
     key: 'frequencyPenalty' as const,
     label: 'Frequency penalty',
     min: -2,
@@ -94,6 +102,7 @@ export function emptyModelSettingsFormValues(): ModelSettingsFormValues {
     temperature: '',
     topP: '',
     maxOutputTokens: '',
+    maxContextTokens: '',
     frequencyPenalty: '',
     presencePenalty: '',
     topK: '',

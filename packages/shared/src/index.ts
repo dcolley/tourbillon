@@ -7,6 +7,7 @@ export * from './heartbeat-schedule';
 export * from './trace';
 export * from './model-provider';
 export * from './model-settings';
+export * from './context-budget';
 export * from './reasoning-capabilities';
 export * from './agent-runtime';
 export * from './wake-message';

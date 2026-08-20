@@ -16,6 +16,11 @@ export interface AgentModelSettings {
   temperature?: number;
   topP?: number;
   maxOutputTokens?: number;
+  /**
+   * Model context window. Used to size TokenLimiter / OM budgets so system +
+   * tools + output fit. Not sent to the provider as a generation parameter.
+   */
+  maxContextTokens?: number;
   frequencyPenalty?: number;
   presencePenalty?: number;
   topK?: number;
@@ -28,6 +33,7 @@ export const AgentModelSettingsSchema = z.object({
   temperature: z.number().min(0).max(2).optional(),
   topP: z.number().min(0).max(1).optional(),
   maxOutputTokens: z.number().int().positive().optional(),
+  maxContextTokens: z.number().int().min(8_000).optional(),
   frequencyPenalty: z.number().min(-2).max(2).optional(),
   presencePenalty: z.number().min(-2).max(2).optional(),
   topK: z.number().int().positive().optional(),
@@ -36,6 +42,18 @@ export const AgentModelSettingsSchema = z.object({
 });
 
 const NUMERIC_MODEL_SETTING_KEYS = [
+  'temperature',
+  'topP',
+  'maxOutputTokens',
+  'maxContextTokens',
+  'frequencyPenalty',
+  'presencePenalty',
+  'topK',
+  'seed',
+] as const satisfies ReadonlyArray<keyof AgentModelSettings>;
+
+/** Keys Mastra `modelSettings` understands — excludes Tourbillon-only fields. */
+const MASTRA_MODEL_SETTING_KEYS = [
   'temperature',
   'topP',
   'maxOutputTokens',
@@ -108,9 +126,16 @@ export function resolveModelSettings(
 /** Return Mastra-compatible numeric modelSettings, or undefined when none are configured. */
 export function toMastraModelSettings(
   settings: AgentModelSettings | null | undefined,
-): Omit<AgentModelSettings, 'reasoningLevel'> | undefined {
-  const stripped = stripNumericModelSettings(settings);
-  return Object.keys(stripped).length > 0 ? stripped : undefined;
+): Omit<AgentModelSettings, 'reasoningLevel' | 'maxContextTokens'> | undefined {
+  const result: Omit<AgentModelSettings, 'reasoningLevel' | 'maxContextTokens'> = {};
+  if (!settings) return undefined;
+  for (const key of MASTRA_MODEL_SETTING_KEYS) {
+    const value = settings[key];
+    if (value !== undefined) {
+      result[key] = value;
+    }
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
 }
 
 /** Parse a single numeric form field — empty string clears the field. */
