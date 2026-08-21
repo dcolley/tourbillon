@@ -169,7 +169,7 @@ Heartbeats and tool calls will fail without a reachable LLM when workers process
 
 **`/dashboard` errors after fresh clone** — Run `docker compose up -d postgres redis` then `pnpm db:migrate`.
 
-**`Module not found: @paperclip-mastra/...`** — Stale import scope; packages should use `@tourbillon/*`.
+**Stale scoped package import** — All workspace packages use the `@tourbillon/*` scope.
 
 **Port already in use** — Change the web port in `apps/web/package.json` (`next dev -p <port>`) and update `BETTER_AUTH_URL` / `INTERNAL_API_URL` in `.env` to match.
 
