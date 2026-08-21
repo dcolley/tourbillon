@@ -55,6 +55,12 @@ async function updateHeartbeatConfig(
     heartbeat.intervalSec = 0;
   }
 
+  const maxStepsRaw = formData.get('maxSteps') as string;
+  const maxSteps = maxStepsRaw ? parseInt(maxStepsRaw, 10) : 30;
+  if (Number.isFinite(maxSteps) && maxSteps >= 1) {
+    heartbeat.maxSteps = maxSteps;
+  }
+
   try {
     await updateAgentRuntimeConfig(agentId, { heartbeat });
   } catch (err) {
@@ -766,6 +772,10 @@ export default async function AgentDetailPage({
           <div>
             <dt className="text-muted-foreground">Timeout</dt>
             <dd className="font-medium mt-0.5">{runtime.timeout?.heartbeatSec ?? 300}s</dd>
+          </div>
+          <div>
+            <dt className="text-muted-foreground">Max steps</dt>
+            <dd className="font-medium mt-0.5">{runtime.heartbeat?.maxSteps ?? 30}</dd>
           </div>
         </dl>
       </section>

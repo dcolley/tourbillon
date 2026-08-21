@@ -52,6 +52,9 @@ export function AgentHeartbeatForm({
   const [intervalSec, setIntervalSec] = useState(
     heartbeat.intervalSec > 0 ? String(heartbeat.intervalSec) : '300',
   );
+  const [maxSteps, setMaxSteps] = useState(
+    heartbeat.maxSteps !== undefined ? String(heartbeat.maxSteps) : '30',
+  );
 
   const cronExpression = useMemo(() => {
     if (scheduleMode !== 'cron') return '';
@@ -190,6 +193,25 @@ export function AgentHeartbeatForm({
           ) : null}
         </div>
       )}
+
+      <div>
+        <label htmlFor="maxSteps" className="text-muted-foreground block mb-1">
+          Max steps per heartbeat
+        </label>
+        <input
+          id="maxSteps"
+          name="maxSteps"
+          type="number"
+          min={1}
+          step={1}
+          value={maxSteps}
+          onChange={(event) => setMaxSteps(event.target.value)}
+          className="w-32 rounded-md border border-input bg-background px-3 py-1.5 text-sm"
+        />
+        <p className="text-xs text-muted-foreground mt-1">
+          Maximum model steps per heartbeat. Default 30. Aborts when exceeded.
+        </p>
+      </div>
 
       <ActionSubmitButton label="Save heartbeat settings" />
     </form>

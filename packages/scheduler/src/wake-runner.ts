@@ -571,10 +571,12 @@ async function runDurableAgentWake(params: {
   } = params;
 
   const company = await db.query.companies.findFirst({ where: eq(companies.id, companyId) });
+  const runtimeConfig = agentRecord.runtimeConfig as AgentRuntimeConfig;
+  const maxSteps = runtimeConfig.heartbeat?.maxSteps ?? 30;
   const durableAgent = await createDurableAgentWithSkills(agentRecord, {
     allowedMcpServerIds: company?.allowedMcpServerIds ?? [],
     companySettings: parseCompanySettings(company?.settings),
-    maxSteps: 30,
+    maxSteps,
   });
 
   const runtimeContext = createHeartbeatRuntimeContext({
@@ -658,7 +660,7 @@ async function runDurableAgentWake(params: {
     } else {
       const streamed = await durableAgent.stream(wakeMessage, {
         requestContext: runtimeContext,
-        maxSteps: 30,
+        maxSteps,
         ...(useMemory
           ? {
               memory: {
