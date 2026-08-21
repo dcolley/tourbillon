@@ -38,7 +38,7 @@ export interface HarnessRunResult {
   harnessRunId?: string;
   inputTokens: number;
   outputTokens: number;
-  finishReason: 'complete' | 'suspended' | 'error' | 'timeout';
+  finishReason: 'complete' | 'suspended' | 'error' | 'timeout' | 'max_steps' | 'repeated_tool_loop';
   suspendedToolCallId?: string;
   traceId?: string;
 }
