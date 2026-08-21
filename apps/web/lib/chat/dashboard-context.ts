@@ -3,7 +3,7 @@ import { z } from 'zod';
 /** Optional page context sent with chat messages so the model knows "this issue". */
 export const chatDashboardContextSchema = z
   .object({
-    contextType: z.enum(['free', 'issue', 'project', 'goal', 'heartbeat', 'agent']),
+    contextType: z.enum(['free', 'issue', 'project', 'goal', 'heartbeat', 'agent', 'board']),
     contextId: z.string().min(1).optional(),
     contextTitle: z.string().optional(),
   })

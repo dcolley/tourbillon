@@ -45,6 +45,7 @@ export default async function IssuesPage({
     <Suspense fallback={<p className="text-sm text-muted-foreground">Loading issues…</p>}>
       <ChatPageContext
         contextType="board"
+        contextId="board"
         contextTitle="Issue Board"
         defaultAgentId={defaultAgent?.id}
         defaultAgentName={defaultAgent?.name}
