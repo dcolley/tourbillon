@@ -422,12 +422,28 @@ async function runWake(
         harnessResult,
       );
 
-      if (harnessResult.finishReason === 'timeout' || harnessResult.finishReason === 'error') {
+      if (
+        harnessResult.finishReason === 'timeout' ||
+        harnessResult.finishReason === 'error' ||
+        harnessResult.finishReason === 'max_steps' ||
+        harnessResult.finishReason === 'repeated_tool_loop'
+      ) {
         const { staleSec } = resolveHeartbeatLivenessConfig();
-        const errorText =
-          harnessResult.finishReason === 'timeout'
-            ? heartbeatStaleErrorText(staleSec)
-            : 'Harness run failed';
+        let errorText: string;
+        switch (harnessResult.finishReason) {
+          case 'timeout':
+            errorText = heartbeatStaleErrorText(staleSec);
+            break;
+          case 'max_steps':
+            errorText = 'Heartbeat exceeded maxSteps limit';
+            break;
+          case 'repeated_tool_loop':
+            errorText = 'Repeated tool loop detected';
+            break;
+          default:
+            errorText = 'Harness run failed';
+            break;
+        }
         return { runId, status: 'failed', errorText };
       }
 
@@ -505,6 +521,16 @@ async function recordHarnessResult(
 
   if (result.finishReason === 'error') {
     await recordHeartbeatFailure(runId, 'Harness run failed', companyId, agentRecord.id);
+    return;
+  }
+
+  if (result.finishReason === 'max_steps') {
+    await recordHeartbeatFailure(runId, 'Heartbeat exceeded maxSteps limit', companyId, agentRecord.id);
+    return;
+  }
+
+  if (result.finishReason === 'repeated_tool_loop') {
+    await recordHeartbeatFailure(runId, 'Repeated tool loop detected', companyId, agentRecord.id);
     return;
   }
 
