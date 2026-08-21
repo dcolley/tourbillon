@@ -249,11 +249,9 @@ describe('driveSessionHeadless', () => {
       listener({ type: 'message_start' } as AgentControllerEvent);
     }
 
-    await assert.rejects(drive, (err: Error) => {
-      assert.match(err.message, /exceeded maxSteps limit of 3/i);
-      assert.equal(abortCalled, true);
-      return true;
-    });
+    const result = await drive;
+    assert.equal(result.finishReason, 'max_steps');
+    assert.equal(abortCalled, true);
   });
 
   it('aborts when the same tool is called 5 times in a row', async () => {
@@ -292,12 +290,9 @@ describe('driveSessionHeadless', () => {
       listener({ type: 'tool_start', toolName: 'searxngSearch' } as AgentControllerEvent);
     }
 
-    await assert.rejects(drive, (err: Error) => {
-      assert.match(err.message, /repeated tool loop detected/i);
-      assert.match(err.message, /searxngSearch/i);
-      assert.equal(abortCalled, true);
-      return true;
-    });
+    const result = await drive;
+    assert.equal(result.finishReason, 'repeated_tool_loop');
+    assert.equal(abortCalled, true);
   });
 
   it('does not abort when different tools are called', async () => {

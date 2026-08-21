@@ -151,7 +151,11 @@ export async function driveSessionHeadless(
           if (maxSteps && modelStepCount > maxSteps) {
             session.abort();
             finishReason = 'max_steps';
-            fail(new Error(`Heartbeat exceeded maxSteps limit of ${maxSteps}`));
+            onEvent({
+              type: 'error',
+              error: new Error(`Heartbeat exceeded maxSteps limit of ${maxSteps}`),
+            } as AgentControllerEvent);
+            finish({ inputTokens, outputTokens, finishReason, suspendedToolCallId });
             return;
           }
           break;
@@ -169,11 +173,13 @@ export async function driveSessionHeadless(
               if (allSame) {
                 session.abort();
                 finishReason = 'repeated_tool_loop';
-                fail(
-                  new Error(
+                onEvent({
+                  type: 'error',
+                  error: new Error(
                     `Repeated tool loop detected: ${toolName} called ${REPEATED_TOOL_BREAKER_THRESHOLD} times in a row`,
                   ),
-                );
+                } as AgentControllerEvent);
+                finish({ inputTokens, outputTokens, finishReason, suspendedToolCallId });
                 return;
               }
             }
