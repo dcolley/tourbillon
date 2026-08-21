@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Examples - Tourbillon</title>
+    <base href="./">
+    <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+    <nav>
+        <div class="container">
+            <h1 class="nav-title">Tourbillon</h1>
+            <ul class="nav-links">
+                <li><a href="./">Home</a></li>
+                <li><a href="./examples.html">Examples</a></li>
+                <li><a href="./docs.html">Docs</a></li>
+                <li><a href="./architecture.html">Architecture</a></li>
+                <li><a href="https://github.com/dcolley/tourbillon" target="_blank">GitHub</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <main class="container">
+        <h1>Examples</h1>
+        <p>Real-world patterns for running agent teams with Tourbillon.</p>
+
+        <div class="example-card">
+            <h3>1. Heartbeat Team</h3>
+            <p><strong>Pattern:</strong> Multiple agents wake on schedule to check their inbox and execute assigned work.</p>
+            
+            <h4>How it works:</h4>
+            <ul>
+                <li>Each agent has a heartbeat timer enabled in <code>runtimeConfig.heartbeat</code></li>
+                <li>WakeRunner receives timer events from Mastra Schedules</li>
+                <li>Agent calls <code>getInbox</code> to retrieve assigned issues</li>
+                <li>Agent calls <code>checkoutIssue</code> to acquire atomic lock</li>
+                <li>Agent executes work using assigned tools and skills</li>
+                <li>Agent calls <code>updateIssue</code> to report status and add comments</li>
+            </ul>
+
+            <h4>Use case:</h4>
+            <p>CEO agent runs every 15 minutes, reviews goals, decomposes them into issues using the <code>plan-to-tasks</code> skill, and assigns work to engineers.</p>
+        </div>
+
+        <div class="example-card">
+            <h3>2. Assignment Wake and Handoff</h3>
+            <p><strong>Pattern:</strong> One agent completes work, assigns the next step to a different agent, triggering an immediate wake.</p>
+            
+            <h4>How it works:</h4>
+            <ul>
+                <li>Agent A completes an issue and sets <code>status: in_review</code></li>
+                <li>Agent A calls <code>updateIssue</code> with <code>assigneeAgentId</code> set to Agent B</li>
+                <li>The system triggers an assignment wake for Agent B via WakeRunner</li>
+                <li>Agent B wakes immediately (no waiting for timer), calls <code>checkoutIssue</code></li>
+                <li>Agent B reviews the work and either approves (<code>status: done</code>) or requests changes (<code>status: in_progress</code>, reassign back)</li>
+            </ul>
+
+            <h4>Use case:</h4>
+            <p>Engineer completes a feature implementation, assigns to QA agent for testing. QA wakes immediately, runs tests, and reports results in a comment.</p>
+        </div>
+
+        <div class="example-card">
+            <h3>3. Hire an Agent with Board Approval</h3>
+            <p><strong>Pattern:</strong> CEO agent decides to hire a new agent but requires human approval before executing.</p>
+            
+            <h4>How it works:</h4>
+            <ul>
+                <li>CEO agent has the <code>create-agent</code> skill assigned</li>
+                <li>When CEO determines a new role is needed, it calls <code>createApproval</code> with <code>type: hire_agent</code></li>
+                <li>Linked issues are automatically set to <code>blocked</code> status with <code>boardApprovalId</code></li>
+                <li>Human reviews the request at <code>/approval</code> UI and decides (approve/reject)</li>
+                <li>On approval, WakeRunner triggers an <code>approval_resolved</code> wake for the CEO agent</li>
+                <li>CEO resumes execution, creates the agent, and updates linked issues</li>
+            </ul>
+
+            <h4>Use case:</h4>
+            <p>CEO identifies need for a designer role based on backlog analysis. Creates approval request explaining why. Human approves. CEO proceeds to hire the designer agent with appropriate skills and toolsets.</p>
+        </div>
+
+        <div class="example-card">
+            <h3>4. Human Approval Gate for High-Cost Actions</h3>
+            <p><strong>Pattern:</strong> Agent needs to perform an irreversible or expensive action and must wait for human confirmation.</p>
+            
+            <h4>How it works:</h4>
+            <ul>
+                <li>Agent identifies a high-risk action (large spend, external API call, production change)</li>
+                <li>Agent calls <code>createApproval</code> with <code>type: request_board_approval</code> and links relevant issue IDs</li>
+                <li>All linked issues are halted (<code>blocked</code> + <code>boardApprovalId</code>)</li>
+                <li>Agent cannot checkout or update these issues to non-blocked status until approval is decided</li>
+                <li>Human reviews context in comments and approves or rejects</li>
+                <li>On approval, prior status is restored; on reject, issues remain <code>blocked</code> but halt ID is cleared</li>
+            </ul>
+
+            <h4>Use case:</h4>
+            <p>Integration agent is about to call a production API that will charge $500. Agent creates approval with explanation of why the call is necessary. Human reviews logs, confirms budget, and approves. Agent resumes and makes the call.</p>
+        </div>
+
+        <section>
+            <h2>Next Steps</h2>
+            <p>These patterns are built into the control plane. To implement them:</p>
+            <ol>
+                <li>Create agents with appropriate <code>role</code> and <code>assignedSkills</code></li>
+                <li>Enable <code>runtimeConfig.heartbeat</code> for timer wakes</li>
+                <li>Grant tool access via <code>assignedToolsets</code> and <code>runtimeConfig.assignedTools</code></li>
+                <li>Create goals and issues to seed the work queue</li>
+                <li>Watch the heartbeat runs in the <code>/jobs</code> UI</li>
+            </ol>
+            <p><a href="./docs.html" class="button">Read the Docs</a></p>
+        </section>
+    </main>
+
+    <footer>
+        <div class="container">
+            <p>&copy; 2025 Tourbillon Contributors | <a href="https://github.com/dcolley/tourbillon">GitHub</a></p>
+        </div>
+    </footer>
+</body>
+</html>

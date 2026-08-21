@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Architecture - Tourbillon</title>
+    <base href="./">
+    <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+    <nav>
+        <div class="container">
+            <h1 class="nav-title">Tourbillon</h1>
+            <ul class="nav-links">
+                <li><a href="./">Home</a></li>
+                <li><a href="./examples.html">Examples</a></li>
+                <li><a href="./docs.html">Docs</a></li>
+                <li><a href="./architecture.html">Architecture</a></li>
+                <li><a href="https://github.com/dcolley/tourbillon" target="_blank">GitHub</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <main class="container">
+        <h1>Tourbillon Architecture</h1>
+        <p>System design and architecture of the Tourbillon agent orchestration platform.</p>
+
+        <section>
+            <h2>Overview</h2>
+            <p>Tourbillon is a TypeScript monorepo that orchestrates teams of AI agents through a continuous heartbeat loop. The system is designed to be fully local-first with no mandatory cloud services.</p>
+        </section>
+
+        <section>
+            <h2>System Components</h2>
+            
+            <h3>1. Web Application (<code>apps/web</code>)</h3>
+            <p>A Next.js 14 application serving both the UI and REST API:</p>
+            <ul>
+                <li><strong>UI:</strong> React + shadcn/ui + Tailwind CSS</li>
+                <li><strong>API Routes:</strong> <code>/api/*</code> endpoints that agents call as tools</li>
+                <li><strong>Authentication:</strong> Better Auth (API key + session)</li>
+                <li><strong>Real-time:</strong> Server-Sent Events (SSE) via Redis pub/sub</li>
+            </ul>
+
+            <h3>2. Database Layer (<code>packages/db</code>)</h3>
+            <ul>
+                <li><strong>ORM:</strong> Drizzle ORM</li>
+                <li><strong>Database:</strong> PostgreSQL with pgvector extension</li>
+                <li><strong>Schema:</strong> Tenant-isolated (company → agents → goals → projects → issues)</li>
+                <li><strong>Migrations:</strong> Versioned SQL migrations in <code>packages/db/src/migrations/</code></li>
+            </ul>
+            <p><strong>Key tables:</strong> companies, llm_providers, agents, goals, projects, issues, routines, approvals, heartbeat_runs, agent_observability_events, cost_events, activity_log</p>
+
+            <h3>3. Agent Runtime (<code>packages/mastra</code>)</h3>
+            <p>Built on Mastra.ai framework:</p>
+            <ul>
+                <li><strong>Agent Factory:</strong> Creates Mastra Agent or AgentController instances</li>
+                <li><strong>LLM Providers:</strong> LM Studio (default), Ollama, vLLM (OpenAI-compatible)</li>
+                <li><strong>Tools:</strong> Three-tier tool system (Control Plane, Boolean Toolsets, Granular, MCP)</li>
+                <li><strong>Memory:</strong> Per-agent × issue thread memory (optional pgvector semantic recall)</li>
+                <li><strong>Observability:</strong> Mastra tracing → PostgreSQL + optional Arize Phoenix</li>
+            </ul>
+
+            <h3>4. Scheduler (<code>packages/scheduler</code>)</h3>
+            <p>Heartbeat orchestration via WakeRunner + Mastra Schedules:</p>
+            <ul>
+                <li><strong>WakeRunner:</strong> HTTP server (default :3003) that receives wake requests</li>
+                <li><strong>Mastra Schedules:</strong> Timer-based and cron-based schedule triggers</li>
+                <li><strong>No BullMQ:</strong> Heartbeats run through WakeRunner, not job queues</li>
+            </ul>
+
+            <h3>5. Shared Packages</h3>
+            <ul>
+                <li><code>packages/shared</code> — Types, constants, logger</li>
+                <li><code>packages/skills</code> — SKILL.md files (agent methodology)</li>
+            </ul>
+        </section>
+
+        <section>
+            <h2>The Wake Loop</h2>
+            <p>Every agent runs via a heartbeat driven by WakeRunner:</p>
+            <pre><code>Wake request received (HTTP or Mastra Schedule)
+ → Load agent record from DB
+ → Check status (active?), company status, budget
+ → Create heartbeat_runs row
+ → Build wake message (reason + task context + recent comments)
+ → Call agent.generate() via Mastra
+ → Record token usage
+ → Mark run succeeded/failed</code></pre>
+
+            <h3>Wake Triggers</h3>
+            <ol>
+                <li><strong>Assignment wake</strong> — New issue assigned; web calls <code>enqueueHeartbeat</code> → scheduler WakeRunner</li>
+                <li><strong>Timer wake</strong> — <code>agent.runtimeConfig.heartbeat.enabled = true</code>; Mastra schedule fires → WakeRunner</li>
+                <li><strong>Routine wake</strong> — A <code>routines</code> row's Mastra schedule fires → creates issue via internal API</li>
+                <li><strong>Approval wake</strong> — Human decides approval → <code>enqueueApprovalWake</code> → WakeRunner</li>
+                <li><strong>On-demand</strong> — Wake Now UI → same WakeRunner path</li>
+            </ol>
+        </section>
+
+        <section>
+            <h2>Object Hierarchy</h2>
+            <pre><code>Goal (outcome — CEO-owned, weeks/months)
+ └─ Project (optional grouping — PM-owned, days/weeks)
+     └─ Issue (executable task — worker agent, hours/days)
+         └─ Issue (subtask — same or delegated agent)</code></pre>
+            <ul>
+                <li><strong>Goals:</strong> Desired outcomes with acceptance criteria. Agents never execute a goal directly.</li>
+                <li><strong>Projects:</strong> Optional grouping containers. Not every goal needs a project.</li>
+                <li><strong>Issues:</strong> Atomic unit of work. Checkout lock, status machine, and heartbeat assignment operate on issues.</li>
+            </ul>
+            <p><strong>Issue status machine:</strong> <code>backlog → todo → in_progress → in_review → done | blocked | cancelled</code></p>
+        </section>
+
+        <section>
+            <h2>Tool Tiers</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Tier</th>
+                        <th>Source</th>
+                        <th>Gating</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Tier 1 — Control Plane</strong></td>
+                        <td><code>control-plane-tools.ts</code></td>
+                        <td>Every agent always gets these</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Tier 2 — Boolean toolsets</strong></td>
+                        <td><code>role-tools.ts</code></td>
+                        <td>Gated by <code>assignedToolsets</code></td>
+                    </tr>
+                    <tr>
+                        <td><strong>Tier 2 — Granular tools</strong></td>
+                        <td><code>assignable-tools.ts</code></td>
+                        <td>Gated by <code>runtimeConfig.assignedTools</code></td>
+                    </tr>
+                    <tr>
+                        <td><strong>Tier 3 — MCP Tools</strong></td>
+                        <td><code>mcp-tools.ts</code></td>
+                        <td>Gated by <code>mcpServerIds</code></td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>Tier 1 Tools (All Agents)</h3>
+            <p><code>getIdentity</code>, <code>getInbox</code>, <code>checkoutIssue</code>, <code>getHeartbeatContext</code>, <code>getComments</code>, <code>updateIssue</code>, <code>createSubtask</code>, <code>listSkills</code>, <code>getSkill</code></p>
+
+            <h3>Tier 2 Boolean Toolsets</h3>
+            <p><code>comments</code>, <code>approvals</code>, <code>roster</code>, <code>code-execution</code>, <code>web-search</code>, <code>web-search-tavily</code>, <code>nitter</code>, <code>buffer</code></p>
+
+            <h3>Tier 2 Granular Tools</h3>
+            <p>Three groups (each tool toggled individually):</p>
+            <ul>
+                <li><strong>Goal management:</strong> <code>listGoals</code>, <code>getGoalDetail</code>, <code>createGoal</code>, <code>updateGoal</code></li>
+                <li><strong>Project management:</strong> <code>listProjects</code>, <code>getProjectDetail</code>, <code>createProject</code>, <code>updateProject</code></li>
+                <li><strong>Issue management:</strong> <code>createIssue</code>, <code>putPlanDocument</code>, <code>requestConfirmation</code></li>
+            </ul>
+        </section>
+
+        <section>
+            <h2>Skills System</h2>
+            <p>Skills teach methodology. At wake time:</p>
+            <ol>
+                <li><code>control-plane</code> is always inlined in the system prompt (9-step heartbeat procedure)</li>
+                <li>All other assigned skills listed as compact catalog (slug + short description)</li>
+                <li>Agent calls <code>getSkill(slug)</code> to load full body when needed</li>
+            </ol>
+
+            <h3>Built-in Skills</h3>
+            <ul>
+                <li><code>control-plane</code> — Core heartbeat procedure (every agent, always on)</li>
+                <li><code>plan-to-tasks</code> — Goal decomposition (CEO and PM agents)</li>
+                <li><code>create-agent</code> — Hiring procedure (CEO agent)</li>
+                <li><code>para-memory</code> — Memory discipline (all agents)</li>
+                <li><code>humanizer</code> — Remove AI writing patterns (opt-in)</li>
+            </ul>
+        </section>
+
+        <section>
+            <h2>Data Flow</h2>
+            
+            <h3>Assignment Wake Flow</h3>
+            <ol>
+                <li>Human assigns issue to agent in UI</li>
+                <li>Web API: POST /api/issues/:id (assigneeAgentId)</li>
+                <li>Web calls enqueueHeartbeat(agentId, taskId, reason: assignment)</li>
+                <li>HTTP POST to SCHEDULER_WAKE_URL/internal/wake</li>
+                <li>Scheduler WakeRunner receives request</li>
+                <li>Load agent + company + issue from DB</li>
+                <li>Build wake message with task context</li>
+                <li>Call agent.generate() via Mastra</li>
+                <li>Agent calls control-plane tools (checkoutIssue, updateIssue, etc.)</li>
+                <li>Tools hit web API routes with run-scoped Bearer token</li>
+                <li>Record token usage, mark run complete</li>
+                <li>Agent comment written to issue via updateIssue</li>
+            </ol>
+
+            <h3>Timer Wake Flow</h3>
+            <ol>
+                <li>Agent has runtimeConfig.heartbeat.enabled = true</li>
+                <li>Mastra schedule agent-timer-{agentId} fires (cron interval)</li>
+                <li>Schedule prepare() function calls WakeRunner</li>
+                <li>Load agent from DB (no taskId, stateless)</li>
+                <li>Build wake message (reason: timer)</li>
+                <li>Call agent.generate() via Mastra</li>
+                <li>Agent calls getInbox, iterates assigned issues</li>
+                <li>Agent picks one, calls checkoutIssue (atomic lock)</li>
+                <li>Agent executes work, calls updateIssue</li>
+                <li>Record token usage, mark run complete</li>
+            </ol>
+        </section>
+
+        <section>
+            <h2>Security</h2>
+            <ul>
+                <li><strong>Tenant isolation:</strong> All queries filter by <code>companyId</code></li>
+                <li><strong>Run-scoped API keys:</strong> Bearer tokens encode <code>{ runId, agentId, companyId }</code></li>
+                <li><strong>Atomic locks:</strong> <code>checkoutIssue</code> uses DB-level locking to prevent concurrent work</li>
+                <li><strong>Approval gates:</strong> High-risk actions blocked until human approval</li>
+                <li><strong>Budget ceilings:</strong> Per-agent token budgets enforced before wake</li>
+            </ul>
+        </section>
+
+        <section>
+            <h2>Deployment</h2>
+            <p>Tourbillon is designed for self-hosting:</p>
+            <ol>
+                <li><strong>Infrastructure:</strong> Docker Compose (Postgres + Redis)</li>
+                <li><strong>Web app:</strong> Next.js on port 3000 (<code>pnpm dev</code> or <code>pnpm build</code> + <code>pnpm start</code>)</li>
+                <li><strong>Workers:</strong> Scheduler process (<code>pnpm workers:dev</code> or production equivalent)</li>
+                <li><strong>LLM:</strong> LM Studio, Ollama, or vLLM running locally (OpenAI-compatible API)</li>
+            </ol>
+            <p><strong>No cloud services required.</strong> All data stays local.</p>
+        </section>
+
+        <section>
+            <h2>Extending the System</h2>
+            
+            <h3>Adding a New Tool</h3>
+            <ol>
+                <li>Create <code>packages/mastra/src/tools/my-tools.ts</code></li>
+                <li>Add to toolset in <code>role-tools.ts</code> or <code>control-plane-tools.ts</code></li>
+                <li>Add API route in <code>apps/web/app/api/</code></li>
+                <li>Update relevant SKILL.md if needed</li>
+            </ol>
+
+            <h3>Adding a New Skill</h3>
+            <ul>
+                <li><strong>Bundled:</strong> Create <code>packages/skills/my-skill/SKILL.md</code></li>
+                <li><strong>Company-wide:</strong> Add <code>skills/my-skill.md</code> under company workspace</li>
+                <li><strong>Per-agent:</strong> Add <code>agents/{urlKey}/skills/my-skill.md</code></li>
+            </ul>
+
+            <h3>Adding a Database Table</h3>
+            <ol>
+                <li>Edit <code>packages/db/src/schema/</code></li>
+                <li>Run <code>pnpm db:generate</code> to create migration</li>
+                <li>Run <code>pnpm db:migrate</code> to apply</li>
+                <li>Commit both schema and migration files</li>
+            </ol>
+        </section>
+
+        <section>
+            <h2>Further Reading</h2>
+            <ul>
+                <li><a href="https://github.com/dcolley/tourbillon/blob/main/AGENTS.md" target="_blank">AGENTS.md</a> — Detailed developer documentation</li>
+                <li><a href="./docs.html">Documentation</a> — Quick start and setup guide</li>
+                <li><a href="./examples.html">Examples</a> — Common agent patterns</li>
+                <li><a href="https://github.com/dcolley/tourbillon" target="_blank">GitHub Repository</a></li>
+            </ul>
+        </section>
+
+        <section class="license">
+            <p><strong>License:</strong> MIT</p>
+        </section>
+    </main>
+
+    <footer>
+        <div class="container">
+            <p>&copy; 2025 Tourbillon Contributors | <a href="https://github.com/dcolley/tourbillon">GitHub</a></p>
+        </div>
+    </footer>
+</body>
+</html>

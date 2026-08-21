@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tourbillon - Open-Source AI Agent Orchestration</title>
+    <base href="./">
+    <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+    <nav>
+        <div class="container">
+            <h1 class="nav-title">Tourbillon</h1>
+            <ul class="nav-links">
+                <li><a href="./">Home</a></li>
+                <li><a href="./examples.html">Examples</a></li>
+                <li><a href="./docs.html">Docs</a></li>
+                <li><a href="./architecture.html">Architecture</a></li>
+                <li><a href="https://github.com/dcolley/tourbillon" target="_blank">GitHub</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <main class="container">
+        <section class="hero">
+            <h1>Tourbillon</h1>
+            <p class="tagline">Open-source AI agent orchestration, local-first</p>
+            <p class="subtitle">Mastra + LM Studio + Next.js</p>
+        </section>
+
+        <section class="intro">
+            <blockquote>
+                <p><em>Tourbillon</em> (French, /tuʁ.bi.jɔ̃/ ['toor-bee-yon']) — literally <em>whirlwind</em> or <em>vortex</em>; from the Old French <em>torb(i)illon</em>, rooted in Latin <em>turbo</em> (a spinning top, a whirlwind).</p>
+                <p>In horology, the tourbillon is the most complex escapement ever invented: a self-correcting rotating cage that counteracts the pull of gravity on the movement's gears, keeping time with relentless precision.</p>
+                <p>The name fits here — a team of agents spinning continuously through work, self-correcting as they go, driven by an inner heartbeat that never stops ticking.</p>
+            </blockquote>
+        </section>
+
+        <section class="what-it-does">
+            <h2>What It Does</h2>
+            <p>A control plane for running teams of AI agents as a company:</p>
+            <ul>
+                <li><strong>Org chart</strong> — agents with roles, reporting lines, and hierarchies</li>
+                <li><strong>Work system</strong> — goals → projects → issues, with atomic checkout and state machine</li>
+                <li><strong>Heartbeat loop</strong> — agents wake on schedule or events, check their inbox, do work, exit</li>
+                <li><strong>Skills</strong> — SKILL.md files injected into agent system prompts at wake time</li>
+                <li><strong>Budget tracking</strong> — per-agent token budgets with hard ceilings</li>
+                <li><strong>Governance</strong> — approval queues with human-in-the-loop gates</li>
+                <li><strong>MCP tools</strong> — agents call the control plane API as tools</li>
+            </ul>
+        </section>
+
+        <section class="tech-stack">
+            <h2>Built With</h2>
+            <ul>
+                <li><a href="https://mastra.ai" target="_blank">Mastra.ai</a> — TypeScript agent orchestration (agents, workflows, memory, MCP, Schedules)</li>
+                <li><a href="https://lmstudio.ai" target="_blank">LM Studio</a> — local OpenAI-compatible API running open-source HuggingFace models</li>
+                <li><a href="https://nextjs.org" target="_blank">Next.js 14</a> App Router + <a href="https://ui.shadcn.com" target="_blank">shadcn/ui</a> + Tailwind CSS</li>
+                <li><a href="https://orm.drizzle.team" target="_blank">Drizzle ORM</a> + PostgreSQL + pgvector</li>
+                <li>WakeRunner + Mastra Schedules — timer/assignment/approval wakes</li>
+                <li><a href="https://better-auth.com" target="_blank">Better Auth</a> — API key + session auth</li>
+            </ul>
+        </section>
+
+        <section class="cta">
+            <h2>Get Started</h2>
+            <p>Clone the repository and run locally with LM Studio:</p>
+            <pre><code>git clone https://github.com/dcolley/tourbillon
+cd tourbillon
+pnpm install
+cp .env.example .env
+docker compose up -d postgres redis
+pnpm db:migrate
+pnpm dev</code></pre>
+            <p>Open <a href="http://localhost:3000">http://localhost:3000</a></p>
+            <p><a href="./docs.html" class="button">Read the Docs</a> <a href="https://github.com/dcolley/tourbillon" class="button button-secondary" target="_blank">View on GitHub</a></p>
+        </section>
+
+        <section class="license">
+            <p><strong>License:</strong> MIT</p>
+        </section>
+    </main>
+
+    <footer>
+        <div class="container">
+            <p>&copy; 2025 Tourbillon Contributors | <a href="https://github.com/dcolley/tourbillon">GitHub</a></p>
+        </div>
+    </footer>
+</body>
+</html>
