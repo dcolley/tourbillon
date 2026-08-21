@@ -212,4 +212,126 @@ describe('driveSessionHeadless', () => {
     );
     assert.match(err.message, /TokenLimiter tripwire/);
   });
+
+  it('aborts when maxSteps is exceeded', async () => {
+    const listeners = new Set<(event: AgentControllerEvent) => void>();
+    let abortCalled = false;
+    const session = {
+      subscribe(listener: (event: AgentControllerEvent) => void) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      abort() {
+        abortCalled = true;
+      },
+      getCurrentRunId() {
+        return null;
+      },
+      run: { isRunning: () => true },
+      sendMessage: () => new Promise(() => undefined),
+    };
+
+    const drive = driveSessionHeadless(
+      session as never,
+      'wake',
+      {},
+      () => undefined,
+      undefined,
+      undefined,
+      60,
+      3,
+    );
+
+    for (const listener of listeners) {
+      listener({ type: 'message_start' } as AgentControllerEvent);
+      listener({ type: 'message_start' } as AgentControllerEvent);
+      listener({ type: 'message_start' } as AgentControllerEvent);
+      listener({ type: 'message_start' } as AgentControllerEvent);
+    }
+
+    const result = await drive;
+    assert.equal(result.finishReason, 'max_steps');
+    assert.equal(abortCalled, true);
+  });
+
+  it('aborts when the same tool is called 5 times in a row', async () => {
+    const listeners = new Set<(event: AgentControllerEvent) => void>();
+    let abortCalled = false;
+    const session = {
+      subscribe(listener: (event: AgentControllerEvent) => void) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      abort() {
+        abortCalled = true;
+      },
+      getCurrentRunId() {
+        return null;
+      },
+      run: { isRunning: () => true },
+      sendMessage: () => new Promise(() => undefined),
+    };
+
+    const drive = driveSessionHeadless(
+      session as never,
+      'wake',
+      {},
+      () => undefined,
+      undefined,
+      undefined,
+      60,
+    );
+
+    for (const listener of listeners) {
+      listener({ type: 'tool_start', toolName: 'searxngSearch' } as AgentControllerEvent);
+      listener({ type: 'tool_start', toolName: 'searxngSearch' } as AgentControllerEvent);
+      listener({ type: 'tool_start', toolName: 'searxngSearch' } as AgentControllerEvent);
+      listener({ type: 'tool_start', toolName: 'searxngSearch' } as AgentControllerEvent);
+      listener({ type: 'tool_start', toolName: 'searxngSearch' } as AgentControllerEvent);
+    }
+
+    const result = await drive;
+    assert.equal(result.finishReason, 'repeated_tool_loop');
+    assert.equal(abortCalled, true);
+  });
+
+  it('does not abort when different tools are called', async () => {
+    const listeners = new Set<(event: AgentControllerEvent) => void>();
+    let abortCalled = false;
+    const session = {
+      subscribe(listener: (event: AgentControllerEvent) => void) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      abort() {
+        abortCalled = true;
+      },
+      getCurrentRunId() {
+        return null;
+      },
+      run: { isRunning: () => false },
+      sendMessage: async () => {
+        for (const listener of listeners) {
+          listener({ type: 'tool_start', toolName: 'searxngSearch' } as AgentControllerEvent);
+          listener({ type: 'tool_start', toolName: 'getInbox' } as AgentControllerEvent);
+          listener({ type: 'tool_start', toolName: 'searxngSearch' } as AgentControllerEvent);
+          listener({ type: 'tool_start', toolName: 'updateIssue' } as AgentControllerEvent);
+          listener({ type: 'agent_end', reason: 'complete' } as AgentControllerEvent);
+        }
+      },
+    };
+
+    const result = await driveSessionHeadless(
+      session as never,
+      'wake',
+      {},
+      () => undefined,
+      undefined,
+      undefined,
+      60,
+    );
+
+    assert.equal(abortCalled, false);
+    assert.equal(result.finishReason, 'complete');
+  });
 });

@@ -11,7 +11,7 @@ import { heartbeatAbortedError } from './heartbeat-abort';
 export interface HarnessDriveResult {
   inputTokens: number;
   outputTokens: number;
-  finishReason: 'complete' | 'suspended' | 'error' | 'timeout';
+  finishReason: 'complete' | 'suspended' | 'error' | 'timeout' | 'max_steps' | 'repeated_tool_loop';
   suspendedToolCallId?: string;
 }
 
@@ -54,7 +54,7 @@ export function tripwireErrorFromUnknown(err: unknown): Error {
 }
 
 /**
- * Drive a headless Session until agent_end / suspend / error / abort / progress stale.
+ * Drive a headless Session until agent_end / suspend / error / abort / progress stale / max steps / repeated tool loop.
  */
 export async function driveSessionHeadless(
   session: Session<TourbillonControllerState>,
@@ -64,6 +64,8 @@ export async function driveSessionHeadless(
   abortSignal?: AbortSignal,
   tracingOptions?: ReturnType<typeof buildHeartbeatTracingOptions>,
   progressStaleSec?: number,
+  maxSteps?: number,
+  timeoutSec?: number,
 ): Promise<HarnessDriveResult> {
   let inputTokens = 0;
   let outputTokens = 0;
@@ -76,11 +78,16 @@ export async function driveSessionHeadless(
   return new Promise((resolve, reject) => {
     let unsub: (() => void) | undefined;
     let progressTimer: ReturnType<typeof setTimeout> | undefined;
+    let wallClockTimer: ReturnType<typeof setTimeout> | undefined;
     let settled = false;
     let lastEvent: { type: string; at: Date } | null = null;
+    let modelStepCount = 0;
+    const recentToolNames: string[] = [];
+    const REPEATED_TOOL_BREAKER_THRESHOLD = 5;
 
     const cleanup = () => {
       if (progressTimer) clearTimeout(progressTimer);
+      if (wallClockTimer) clearTimeout(wallClockTimer);
       abortSignal?.removeEventListener('abort', onAbort);
       unsub?.();
     };
@@ -119,6 +126,17 @@ export async function driveSessionHeadless(
     abortSignal?.addEventListener('abort', onAbort, { once: true });
     resetProgressWatchdog();
 
+    if (timeoutSec && timeoutSec > 0) {
+      wallClockTimer = setTimeout(() => {
+        try {
+          session.abort();
+        } catch {
+          // ignore
+        }
+        fail(new Error(`Heartbeat exceeded wall-clock timeout of ${timeoutSec}s`));
+      }, timeoutSec * 1000);
+    }
+
     unsub = session.subscribe((event) => {
       lastEvent = { type: event.type, at: new Date() };
       onEvent(event);
@@ -128,6 +146,47 @@ export async function driveSessionHeadless(
       }
 
       switch (event.type) {
+        case 'message_start':
+          modelStepCount += 1;
+          if (maxSteps && modelStepCount > maxSteps) {
+            session.abort();
+            finishReason = 'max_steps';
+            onEvent({
+              type: 'error',
+              error: new Error(`Heartbeat exceeded maxSteps limit of ${maxSteps}`),
+            } as AgentControllerEvent);
+            finish({ inputTokens, outputTokens, finishReason, suspendedToolCallId });
+            return;
+          }
+          break;
+
+        case 'tool_start': {
+          const toolName = (event as { toolName?: string }).toolName;
+          if (toolName) {
+            recentToolNames.push(toolName);
+            if (recentToolNames.length > REPEATED_TOOL_BREAKER_THRESHOLD) {
+              recentToolNames.shift();
+            }
+
+            if (recentToolNames.length >= REPEATED_TOOL_BREAKER_THRESHOLD) {
+              const allSame = recentToolNames.every((name) => name === recentToolNames[0]);
+              if (allSame) {
+                session.abort();
+                finishReason = 'repeated_tool_loop';
+                onEvent({
+                  type: 'error',
+                  error: new Error(
+                    `Repeated tool loop detected: ${toolName} called ${REPEATED_TOOL_BREAKER_THRESHOLD} times in a row`,
+                  ),
+                } as AgentControllerEvent);
+                finish({ inputTokens, outputTokens, finishReason, suspendedToolCallId });
+                return;
+              }
+            }
+          }
+          break;
+        }
+
         case 'usage_update':
           inputTokens += event.usage.promptTokens ?? 0;
           outputTokens += event.usage.completionTokens ?? 0;

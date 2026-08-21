@@ -38,7 +38,7 @@ export interface HarnessRunResult {
   harnessRunId?: string;
   inputTokens: number;
   outputTokens: number;
-  finishReason: 'complete' | 'suspended' | 'error' | 'timeout';
+  finishReason: 'complete' | 'suspended' | 'error' | 'timeout' | 'max_steps' | 'repeated_tool_loop';
   suspendedToolCallId?: string;
   traceId?: string;
 }
@@ -138,6 +138,10 @@ export async function runWithHarness(
     }
   };
 
+  const runtimeConfig = agentRecord.runtimeConfig as AgentRuntimeConfig;
+  const maxSteps = runtimeConfig.heartbeat?.maxSteps ?? 30;
+  const timeoutSec = runtimeConfig.timeout?.heartbeatSec ?? 300;
+
   try {
     const result = await driveSessionHeadless(
       session,
@@ -146,6 +150,9 @@ export async function runWithHarness(
       onEvent,
       options.abortSignal,
       tracingOptions,
+      undefined,
+      maxSteps,
+      timeoutSec,
     );
 
     const harnessRunId = session.getCurrentRunId() ?? undefined;

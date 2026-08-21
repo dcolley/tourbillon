@@ -68,6 +68,8 @@ export interface AgentRuntimeConfig {
     wakeOnAssignment: boolean;
     wakeOnDemand: boolean;
     wakeOnAutomation: boolean;
+    /** Maximum model steps per heartbeat (default 30). Aborts when exceeded. */
+    maxSteps?: number;
   };
   timeout: {
     heartbeatSec: number;
@@ -133,6 +135,7 @@ export const DEFAULT_RUNTIME_CONFIG: AgentRuntimeConfig = {
     wakeOnAssignment: true,
     wakeOnDemand: true,
     wakeOnAutomation: false,
+    maxSteps: 30,
   },
   timeout: {
     heartbeatSec: 300,
