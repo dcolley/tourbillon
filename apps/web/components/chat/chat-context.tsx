@@ -83,7 +83,7 @@ export function ChatContextProvider({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(false);
   const [target, setTarget] = useState<ChatOpenTarget | null>(null);
   const [pageContext, setPageContextState] = useState<ChatUiContextValue['pageContext']>(null);
-  const [layoutMode, setLayoutModeState] = useState<ChatLayoutMode>('popover');
+  const [layoutMode, setLayoutModeState] = useState<ChatLayoutMode>('sidebar');
 
   useEffect(() => {
     setLayoutModeState(readChatLayoutMode());

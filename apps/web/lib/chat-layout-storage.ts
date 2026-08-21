@@ -29,14 +29,14 @@ export function clampChatSidebarWidth(width: number, max = CHAT_SIDEBAR_WIDTH_MA
 }
 
 export function readChatLayoutMode(): ChatLayoutMode {
-  if (typeof window === 'undefined') return 'popover';
+  if (typeof window === 'undefined') return 'sidebar';
   try {
     const raw = localStorage.getItem(CHAT_LAYOUT_STORAGE_KEY);
     if (isChatLayoutMode(raw)) return raw;
   } catch {
     // ignore
   }
-  return 'popover';
+  return 'sidebar';
 }
 
 export function writeChatLayoutMode(mode: ChatLayoutMode): void {

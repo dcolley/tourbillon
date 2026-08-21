@@ -16,6 +16,7 @@ import { DeepLinkCompanySync } from '@/components/deep-link-company-sync';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { getCompanyById } from '@/lib/company';
 import { STICKY_TOOLBAR_ROOT_ATTR } from '@/lib/sticky-toolbar';
+import { ChatPageContext } from '@/components/chat/chat-page-context';
 
 export default async function IssueDetailPage({
   params,
@@ -55,6 +56,13 @@ export default async function IssueDetailPage({
 
   return (
     <div {...{ [STICKY_TOOLBAR_ROOT_ATTR]: '' }}>
+      <ChatPageContext
+        contextType="issue"
+        contextId={issue.id}
+        contextTitle={issue.title}
+        defaultAgentId={assignee?.id}
+        defaultAgentName={assignee?.name}
+      />
       <IssueDetailTabs
         identifier={issue.identifier}
         title={issue.title}
