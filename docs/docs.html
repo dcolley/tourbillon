@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Documentation - Tourbillon</title>
+    <base href="./">
+    <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+    <nav>
+        <div class="container">
+            <h1 class="nav-title">Tourbillon</h1>
+            <ul class="nav-links">
+                <li><a href="./">Home</a></li>
+                <li><a href="./examples.html">Examples</a></li>
+                <li><a href="./docs.html">Docs</a></li>
+                <li><a href="./architecture.html">Architecture</a></li>
+                <li><a href="https://github.com/dcolley/tourbillon" target="_blank">GitHub</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <main class="container">
+        <h1>Documentation</h1>
+        <p>Get started with Tourbillon, the open-source AI agent orchestration platform.</p>
+
+        <section>
+            <h2>Quick Start</h2>
+            
+            <h3>Prerequisites</h3>
+            <ul>
+                <li>Node.js 20+</li>
+                <li>pnpm 9+</li>
+                <li>Docker (for Postgres and Redis)</li>
+                <li><a href="https://lmstudio.ai" target="_blank">LM Studio</a> with a model loaded and local server running on port 1234</li>
+            </ul>
+
+            <h3>Setup</h3>
+            <pre><code># Clone the repository
+git clone https://github.com/dcolley/tourbillon
+cd tourbillon
+
+# Install dependencies
+pnpm install
+
+# Copy environment template
+cp .env.example .env
+# Edit .env — set LM_STUDIO_DEFAULT_MODEL to match your loaded model
+
+# Start infrastructure (Postgres + Redis)
+docker compose up -d postgres redis
+
+# Run database migrations
+pnpm db:migrate
+
+# Start the web app
+pnpm dev
+
+# In a second terminal, start the heartbeat workers
+pnpm workers:dev</code></pre>
+
+            <p>Open <a href="http://localhost:3000">http://localhost:3000</a> in your browser.</p>
+        </section>
+
+        <section>
+            <h2>Project Structure</h2>
+            <pre><code>tourbillon/
+├── apps/
+│   └── web/              Next.js 14 App Router + shadcn/ui
+├── packages/
+│   ├── db/               Drizzle ORM schema + migrations
+│   ├── mastra/           Mastra agents, workflows, tools
+│   ├── scheduler/        WakeRunner + Mastra schedule boot
+│   ├── shared/           Shared types and utilities
+│   └── skills/           SKILL.md files (agent methodology)
+│       ├── control-plane/
+│       ├── plan-to-tasks/
+│       ├── create-agent/
+│       └── para-memory/
+├── .env.example          Environment variables
+└── docker-compose.yml    Postgres + Redis services</code></pre>
+        </section>
+
+        <section>
+            <h2>Schedulers: WakeRunner + Mastra Schedules</h2>
+            <p>Tourbillon uses a custom heartbeat system built on WakeRunner and Mastra Schedules:</p>
+            
+            <h3>Wake Types</h3>
+            <ul>
+                <li><strong>Assignment wake</strong> — New issue assigned to an agent; web calls <code>enqueueHeartbeat</code> → scheduler WakeRunner</li>
+                <li><strong>Timer wake</strong> — <code>agent.runtimeConfig.heartbeat.enabled = true</code>; Mastra schedule <code>agent-timer-{agentId}</code> fires → WakeRunner</li>
+                <li><strong>Routine wake</strong> — A <code>routines</code> row's Mastra schedule fires → creates an issue via internal API</li>
+                <li><strong>Approval wake</strong> — Human decides an approval → <code>enqueueApprovalWake</code> → WakeRunner (<code>approval_resolved</code>)</li>
+                <li><strong>On-demand</strong> — Wake Now button in UI → same WakeRunner path</li>
+            </ul>
+
+            <h3>How it works</h3>
+            <ol>
+                <li>Wake request received (HTTP or Mastra Schedule)</li>
+                <li>Load agent record from database</li>
+                <li>Check status (active?), company status, budget</li>
+                <li>Create <code>heartbeat_runs</code> row</li>
+                <li>Build wake message (reason + task context + recent comments)</li>
+                <li>Call <code>agent.generate()</code> via Mastra (or AgentController Session for harness_local)</li>
+                <li>Record token usage</li>
+                <li>Mark run succeeded/failed</li>
+            </ol>
+
+            <div class="info">
+                <p><strong>Note:</strong> Tourbillon does not use BullMQ for heartbeats. The scheduler process runs WakeRunner + Mastra Schedules only.</p>
+            </div>
+        </section>
+
+        <section>
+            <h2>Core Concepts</h2>
+            
+            <h3>Org</h3>
+            <p>A company has agents with roles and reporting lines. Each agent belongs to a company (tenant isolation) and has a role (ceo, cto, engineer, pm, qa, designer, custom). Agents can be organized with reporting hierarchies, forming the org chart.</p>
+            <ul>
+                <li><strong>Company</strong> — Tenant boundary; all data is company-scoped</li>
+                <li><strong>Agents</strong> — Individual AI workers with assigned roles and skills</li>
+                <li><strong>Roles</strong> — Define agent responsibilities and default tool access</li>
+                <li><strong>Reporting lines</strong> — Hierarchical relationships between agents</li>
+            </ul>
+            
+            <h3>The Object Hierarchy</h3>
+            <pre><code>Goal (outcome — CEO-owned, weeks/months)
+ └─ Project (optional grouping — PM-owned, days/weeks)
+     └─ Issue (executable task — worker agent, hours/days)
+         └─ Issue (subtask — same or delegated agent)</code></pre>
+            
+            <ul>
+                <li><strong>Goals</strong> are desired outcomes with acceptance criteria. Agents never execute a goal directly. The CEO agent reads goals and creates issues to achieve them.</li>
+                <li><strong>Projects</strong> are optional grouping containers. Not every goal needs a project.</li>
+                <li><strong>Issues</strong> are the atomic unit of work. The checkout lock, status machine, and heartbeat assignment all operate on issues.</li>
+            </ul>
+
+            <p><strong>Issue status machine:</strong> <code>backlog → todo → in_progress → in_review → done | blocked | cancelled</code></p>
+
+            <h3>Inbox</h3>
+            <p>The inbox is the assigned-work view for each agent. Agents call <code>getInbox</code> to retrieve issues currently assigned to them (statuses: <code>todo</code>, <code>in_progress</code>, <code>in_review</code>, <code>blocked</code>). The inbox is the starting point for every heartbeat—agents check what work is waiting, pick a task, and call <code>checkoutIssue</code> to acquire the lock.</p>
+
+            <h3>Agent Identity</h3>
+            <p>Each agent has:</p>
+            <ul>
+                <li><code>role</code> — ceo | cto | engineer | pm | qa | designer | custom</li>
+                <li><code>urlKey</code> — short slug used in URLs and wake routing (e.g. <code>cto</code>)</li>
+                <li><code>assignedSkills</code> — array of skill slugs available to the agent (always includes <code>control-plane</code>)</li>
+                <li><code>assignedToolsets</code> — Tier 2 boolean toolsets (e.g. <code>comments</code>, <code>approvals</code>, <code>roster</code>)</li>
+                <li><code>runtimeConfig.assignedTools</code> — Tier 2 granular tools (goal/project/issue management)</li>
+                <li><code>mcpServerIds</code> — Tier 3 MCP capability tools</li>
+                <li><code>adapterType</code> — runtime adapter (<code>lmstudio</code> | <code>ollama</code> | <code>harness_local</code> | <code>process</code> | <code>http</code>)</li>
+                <li><code>providerId</code> — FK to system-wide <code>llm_providers</code> registry</li>
+                <li><code>modelId</code> — model identifier from the selected provider endpoint</li>
+            </ul>
+
+            <h3>Skills (Prompt Injections)</h3>
+            <p>Skills teach methodology. At wake time:</p>
+            <ol>
+                <li><code>control-plane</code> is always inlined in the system prompt</li>
+                <li>All other assigned skills are listed as a compact catalog</li>
+                <li>Agent calls <code>getSkill(slug)</code> to load the full body when needed</li>
+            </ol>
+
+            <h3>Governance and Approvals</h3>
+            <p>Tourbillon has three distinct approval paths:</p>
+            <ul>
+                <li><strong>Issue review</strong> — Comment + reassign (<code>status: in_review</code>, <code>assigneeAgentId</code> = reviewer). Agent-to-agent or agent-to-human review handoff.</li>
+                <li><strong>Board approval</strong> — <code>createApproval</code> → <code>/approval</code> UI → decide. Linked issues are halted (<code>blocked</code> + <code>boardApprovalId</code>). Checkout and non-blocked status updates return 409 until decided.</li>
+                <li><strong>Tool access</strong> — Agent config (<code>assignedToolsets</code>, <code>assignedTools</code>, MCP). Tools are granted at hire/settings time.</li>
+            </ul>
+        </section>
+
+        <section>
+            <h2>Key Scripts</h2>
+            <ul>
+                <li><code>pnpm dev</code> — Start Next.js app on :3000</li>
+                <li><code>pnpm workers:dev</code> — Start WakeRunner + Mastra schedules (timers, routines)</li>
+                <li><code>pnpm db:migrate</code> — Apply pending Drizzle migrations</li>
+                <li><code>pnpm db:generate</code> — Generate new migration SQL from schema changes</li>
+                <li><code>pnpm db:studio</code> — Open Drizzle Studio DB browser</li>
+                <li><code>pnpm build</code> — Production build</li>
+                <li><code>pnpm type-check</code> — TypeScript check across all packages</li>
+                <li><code>pnpm lint</code> — ESLint across all packages</li>
+            </ul>
+        </section>
+
+        <section>
+            <h2>Next Steps</h2>
+            <ol>
+                <li>Read the <a href="./architecture.html">Architecture</a> guide to understand the system design</li>
+                <li>Explore <a href="./examples.html">Examples</a> for common agent patterns</li>
+                <li>Check the <a href="https://github.com/dcolley/tourbillon/blob/main/AGENTS.md" target="_blank">AGENTS.md</a> file for detailed developer documentation</li>
+                <li>Join the <a href="https://github.com/dcolley/tourbillon/discussions" target="_blank">GitHub Discussions</a> to ask questions</li>
+            </ol>
+        </section>
+    </main>
+
+    <footer>
+        <div class="container">
+            <p>&copy; 2026 Tourbillon Contributors | <a href="https://github.com/dcolley/tourbillon">GitHub</a></p>
+        </div>
+    </footer>
+</body>
+</html>
