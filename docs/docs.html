@@ -115,6 +115,15 @@ pnpm workers:dev</code></pre>
         <section>
             <h2>Core Concepts</h2>
             
+            <h3>Org</h3>
+            <p>A company has agents with roles and reporting lines. Each agent belongs to a company (tenant isolation) and has a role (ceo, cto, engineer, pm, qa, designer, custom). Agents can be organized with reporting hierarchies, forming the org chart.</p>
+            <ul>
+                <li><strong>Company</strong> — Tenant boundary; all data is company-scoped</li>
+                <li><strong>Agents</strong> — Individual AI workers with assigned roles and skills</li>
+                <li><strong>Roles</strong> — Define agent responsibilities and default tool access</li>
+                <li><strong>Reporting lines</strong> — Hierarchical relationships between agents</li>
+            </ul>
+            
             <h3>The Object Hierarchy</h3>
             <pre><code>Goal (outcome — CEO-owned, weeks/months)
  └─ Project (optional grouping — PM-owned, days/weeks)
@@ -128,6 +137,9 @@ pnpm workers:dev</code></pre>
             </ul>
 
             <p><strong>Issue status machine:</strong> <code>backlog → todo → in_progress → in_review → done | blocked | cancelled</code></p>
+
+            <h3>Inbox</h3>
+            <p>The inbox is the assigned-work view for each agent. Agents call <code>getInbox</code> to retrieve issues currently assigned to them (statuses: <code>todo</code>, <code>in_progress</code>, <code>in_review</code>, <code>blocked</code>). The inbox is the starting point for every heartbeat—agents check what work is waiting, pick a task, and call <code>checkoutIssue</code> to acquire the lock.</p>
 
             <h3>Agent Identity</h3>
             <p>Each agent has:</p>
