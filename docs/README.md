@@ -46,10 +46,6 @@ Install the Live Server extension and right-click `index.html` → "Open with Li
 
 **Base path:** The site is configured to work at `/tourbillon/` (not root). All links use relative paths or the `<base href="./">` tag to ensure proper resolution.
 
-## No Paperclip
-
-All content in this directory is written specifically for Tourbillon and contains zero references to Paperclip or paperclipai.
-
 ## Maintenance
 
 - Keep all internal links relative (using `./` prefix)
