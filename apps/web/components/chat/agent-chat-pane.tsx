@@ -91,6 +91,7 @@ export function AgentChatPane({
   presentation = 'popover',
   layoutMode,
   onLayoutModeChange,
+  onAgentSwitch,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -102,6 +103,7 @@ export function AgentChatPane({
   presentation?: ChatPanePresentation;
   layoutMode: ChatLayoutMode;
   onLayoutModeChange: (mode: ChatLayoutMode) => void;
+  onAgentSwitch?: (agentId: string, agentName: string) => void;
 }) {
   const session = useAgentChatSession({
     agentId,
@@ -110,6 +112,7 @@ export function AgentChatPane({
     contextType,
     contextId,
     contextTitle,
+    onAgentSwitch,
   });
 
   const bottomRef = useRef<HTMLDivElement>(null);

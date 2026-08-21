@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { stripDashboardContext } from '@/lib/chat/dashboard-context';
 
-export type ChatContextType = 'free' | 'issue' | 'project' | 'goal' | 'heartbeat' | 'agent';
+export type ChatContextType = 'free' | 'issue' | 'project' | 'goal' | 'heartbeat' | 'agent' | 'board';
 
 export interface ChatThreadInfo {
   id: string;
@@ -124,6 +124,7 @@ export function useAgentChatSession(options: {
   contextType?: ChatContextType;
   contextId?: string;
   contextTitle?: string;
+  onAgentSwitch?: (agentId: string, agentName: string) => void;
 }) {
   const {
     agentId: initialAgentId,
@@ -132,11 +133,13 @@ export function useAgentChatSession(options: {
     contextType = 'free',
     contextId,
     contextTitle,
+    onAgentSwitch,
   } = options;
 
   const [activeAgentId, setActiveAgentId] = useState(initialAgentId);
   const [activeAgentName, setActiveAgentName] = useState(initialAgentName ?? '');
   const [agentOptions, setAgentOptions] = useState<ChatAgentOption[]>([]);
+  const [userPinnedAgent, setUserPinnedAgent] = useState(false);
 
   const [resourceId, setResourceId] = useState<string | null>(null);
   const [threadId, setThreadId] = useState<string | null>(null);
@@ -162,10 +165,14 @@ export function useAgentChatSession(options: {
   useEffect(() => {
     agentIdRef.current = activeAgentId;
   }, [activeAgentId]);
+
+  // Only rebind to page default agent when nothing is pinned by the user.
   useEffect(() => {
-    setActiveAgentId(initialAgentId);
-    setActiveAgentName(initialAgentName ?? '');
-  }, [initialAgentId, initialAgentName]);
+    if (!userPinnedAgent) {
+      setActiveAgentId(initialAgentId);
+      setActiveAgentName(initialAgentName ?? '');
+    }
+  }, [initialAgentId, initialAgentName, userPinnedAgent]);
 
   // Changing dashboard context must not reuse another page's resource/thread.
   useEffect(() => {
@@ -572,9 +579,11 @@ export function useAgentChatSession(options: {
       if (nextAgentId === activeAgentId) return;
       setActiveAgentId(nextAgentId);
       setActiveAgentName(nextAgentName);
+      setUserPinnedAgent(true);
+      onAgentSwitch?.(nextAgentId, nextAgentName);
         // bootstrap effect re-runs with same resource/thread refs when possible
     },
-    [activeAgentId],
+    [activeAgentId, onAgentSwitch],
   );
 
 

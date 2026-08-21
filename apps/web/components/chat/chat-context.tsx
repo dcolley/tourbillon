@@ -49,6 +49,7 @@ interface ChatUiContextValue {
   /** Current chat target when a session is active (open or sidebar-docked). */
   target: ChatOpenTarget | null;
   open: boolean;
+  handleAgentSwitch: (agentId: string, agentName: string) => void;
 }
 
 const ChatUiContext = createContext<ChatUiContextValue | null>(null);
@@ -84,6 +85,7 @@ export function ChatContextProvider({ children }: { children: ReactNode }) {
   const [target, setTarget] = useState<ChatOpenTarget | null>(null);
   const [pageContext, setPageContextState] = useState<ChatUiContextValue['pageContext']>(null);
   const [layoutMode, setLayoutModeState] = useState<ChatLayoutMode>('sidebar');
+  const [pinnedAgentId, setPinnedAgentId] = useState<string | null>(null);
 
   useEffect(() => {
     setLayoutModeState(readChatLayoutMode());
@@ -91,6 +93,7 @@ export function ChatContextProvider({ children }: { children: ReactNode }) {
 
   const openChat = useCallback((next: ChatOpenTarget) => {
     setTarget(next);
+    setPinnedAgentId(next.agentId);
     setOpen(true);
   }, []);
 
@@ -133,12 +136,13 @@ export function ChatContextProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  // Sidebar mode: keep a target bound to the current page agent when available.
+  // Sidebar mode: bind target to page context, but respect pinned agent.
   useEffect(() => {
     if (layoutMode !== 'sidebar') return;
     const fromPage = targetFromPageContext(pageContext);
     if (!fromPage) return;
     setTarget((prev) => {
+      // Already showing this exact room + agent → no change.
       if (
         prev &&
         prev.agentId === fromPage.agentId &&
@@ -147,14 +151,33 @@ export function ChatContextProvider({ children }: { children: ReactNode }) {
       ) {
         return prev;
       }
+      // User pinned an agent → keep that agent, update room context only.
+      if (pinnedAgentId && prev) {
+        return {
+          ...prev,
+          contextType: fromPage.contextType,
+          contextId: fromPage.contextId,
+          contextTitle: fromPage.contextTitle,
+        };
+      }
+      // No pin → use page default agent + context.
       return fromPage;
     });
     setOpen(true);
-  }, [layoutMode, pageContext]);
+  }, [layoutMode, pageContext, pinnedAgentId]);
+
+  const handleAgentSwitch = useCallback((agentId: string, agentName: string) => {
+    setPinnedAgentId(agentId);
+    setTarget((prev) =>
+      prev
+        ? { ...prev, agentId, agentName }
+        : { agentId, agentName, contextType: 'free' },
+    );
+  }, []);
 
   const actions = useMemo(
-    () => ({ openChat, closeChat, setPageContext, setLayoutMode }),
-    [openChat, closeChat, setPageContext, setLayoutMode],
+    () => ({ openChat, closeChat, setPageContext, setLayoutMode, handleAgentSwitch }),
+    [openChat, closeChat, setPageContext, setLayoutMode, handleAgentSwitch],
   );
 
   const value = useMemo(
@@ -194,6 +217,7 @@ export function ChatContextProvider({ children }: { children: ReactNode }) {
         presentation="popover"
         layoutMode={layoutMode}
         onLayoutModeChange={setLayoutMode}
+        onAgentSwitch={handleAgentSwitch}
       />
     ) : null);
 
@@ -210,7 +234,7 @@ export function ChatContextProvider({ children }: { children: ReactNode }) {
 export function ChatSidebarSlot() {
   const chat = useChatUiOptional();
   if (!chat) return null;
-  const { layoutMode, open, target, setLayoutMode } = chat;
+  const { layoutMode, open, target, setLayoutMode, handleAgentSwitch } = chat;
   if (layoutMode !== 'sidebar' || !target || !open) return null;
 
   return (
@@ -230,6 +254,7 @@ export function ChatSidebarSlot() {
       presentation="sidebar"
       layoutMode={layoutMode}
       onLayoutModeChange={setLayoutMode}
+      onAgentSwitch={handleAgentSwitch}
     />
   );
 }

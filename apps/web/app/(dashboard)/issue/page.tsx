@@ -13,6 +13,7 @@ import {
   statusesForFilter,
   type IssueFilter,
 } from './issue-filter';
+import { ChatPageContext } from '@/components/chat/chat-page-context';
 
 export default async function IssuesPage({
   searchParams,
@@ -37,8 +38,17 @@ export default async function IssuesPage({
 
   const emptyMsg = emptyMessage(filter);
 
+  // Board room: use first available agent as default, or leave unpinned
+  const defaultAgent = agentList.length > 0 ? agentList[0] : null;
+
   return (
     <Suspense fallback={<p className="text-sm text-muted-foreground">Loading issues…</p>}>
+      <ChatPageContext
+        contextType="board"
+        contextTitle="Issue Board"
+        defaultAgentId={defaultAgent?.id}
+        defaultAgentName={defaultAgent?.name}
+      />
       <IssueListShell
         filter={filter}
         visibleStatuses={visibleStatuses}
