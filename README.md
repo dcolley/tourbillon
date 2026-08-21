@@ -6,7 +6,7 @@
 > The name fits here — a team of agents spinning continuously through work, self-correcting as they go,  
 > driven by an inner heartbeat that never stops ticking.
 
-An open-source clone of [Paperclip AI](https://github.com/paperclipai/paperclip) built with:
+Open-source AI agent orchestration built with:
 
 - **[Mastra.ai](https://mastra.ai)** — TypeScript agent orchestration (agents, workflows, memory, MCP, Schedules)
 - **[LM Studio](https://lmstudio.ai)** — local OpenAI-compatible API running open-source HuggingFace models

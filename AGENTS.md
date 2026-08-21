@@ -455,7 +455,7 @@ These are discussed in the project's design documents and are next on the roadma
 
 ## Common Pitfalls
 
-**`Module not found: @paperclip-mastra/...`** — Stale import. All packages use `@tourbillon/*` scope.
+**Stale scoped package import** — All workspace packages use the `@tourbillon/*` scope.
 
 **`password authentication failed for user "<os-username>"`** — `DATABASE_URL` not in environment. Run `set -a && source .env && set +a` first.
 
