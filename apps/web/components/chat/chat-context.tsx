@@ -137,6 +137,7 @@ export function ChatContextProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // Sidebar mode: bind target to page context, but respect pinned agent.
+  // Exception: agent pages always select that agent (product requirement).
   useEffect(() => {
     if (layoutMode !== 'sidebar') return;
     const fromPage = targetFromPageContext(pageContext);
@@ -150,6 +151,11 @@ export function ChatContextProvider({ children }: { children: ReactNode }) {
         prev.contextId === fromPage.contextId
       ) {
         return prev;
+      }
+      // Agent page: arriving IS picking the agent. Override any pin.
+      if (pageContext?.contextType === 'agent') {
+        setPinnedAgentId(fromPage.agentId);
+        return fromPage;
       }
       // User pinned an agent → keep that agent, update room context only.
       if (pinnedAgentId && prev) {
