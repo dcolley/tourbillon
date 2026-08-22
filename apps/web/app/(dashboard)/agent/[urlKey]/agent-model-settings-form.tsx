@@ -1,6 +1,6 @@
 'use client';
 
-import { useActionState, useState } from 'react';
+import { useActionState, useEffect, useRef, useState } from 'react';
 import type { AgentModelSettings } from '@tourbillon/shared/model-settings';
 import {
   ModelSettingsFields,
@@ -35,6 +35,15 @@ export function AgentModelSettingsForm({
   const [values, setValues] = useState<ModelSettingsFormValues>(
     modelSettingsToFormValues(initialSettings),
   );
+
+  // Notify open chat panes to refresh agent list after settings save.
+  const prevStateRef = useRef<ActionResult | null>(null);
+  useEffect(() => {
+    if (state && state !== prevStateRef.current && state.ok) {
+      prevStateRef.current = state;
+      window.dispatchEvent(new CustomEvent('tourbillon:agent-settings-saved'));
+    }
+  }, [state]);
 
   return (
     <form action={formAction} className="space-y-4 border-t pt-4">
