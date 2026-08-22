@@ -392,7 +392,7 @@ function ChatPaneBody({
                       )}
                       onClick={() => void selectThread(t.id)}
                     >
-                      <span className="line-clamp-2">{t.title || t.id.slice(0, 8)}</span>
+                      <span className="line-clamp-2">{t.title || 'New chat'}</span>
                     </button>
                     <DropdownMenu>
                       <DropdownMenuTrigger
@@ -705,7 +705,7 @@ function DeleteChatThreadDialog({
     }
   }
 
-  const label = thread?.title?.trim() || thread?.id.slice(0, 8) || 'this chat';
+  const label = thread?.title?.trim() || 'New chat';
 
   return (
     <Dialog
