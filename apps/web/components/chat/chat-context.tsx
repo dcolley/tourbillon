@@ -50,6 +50,8 @@ interface ChatUiContextValue {
   target: ChatOpenTarget | null;
   open: boolean;
   handleAgentSwitch: (agentId: string, agentName: string) => void;
+  /** Server-side active company ID (from cookie); used to detect company changes. */
+  activeCompanyId: string | null;
 }
 
 const ChatUiContext = createContext<ChatUiContextValue | null>(null);
@@ -80,16 +82,32 @@ function targetFromPageContext(
   };
 }
 
-export function ChatContextProvider({ children }: { children: ReactNode }) {
+export function ChatContextProvider({
+  children,
+  activeCompanyId: serverActiveCompanyId,
+}: {
+  children: ReactNode;
+  activeCompanyId: string | null;
+}) {
   const [open, setOpen] = useState(false);
   const [target, setTarget] = useState<ChatOpenTarget | null>(null);
   const [pageContext, setPageContextState] = useState<ChatUiContextValue['pageContext']>(null);
   const [layoutMode, setLayoutModeState] = useState<ChatLayoutMode>('sidebar');
   const [pinnedAgentId, setPinnedAgentId] = useState<string | null>(null);
+  const [trackedCompanyId, setTrackedCompanyId] = useState<string | null>(serverActiveCompanyId);
 
   useEffect(() => {
     setLayoutModeState(readChatLayoutMode());
   }, []);
+
+  // Reset chat state when server-side active company changes
+  useEffect(() => {
+    if (trackedCompanyId !== null && serverActiveCompanyId !== trackedCompanyId) {
+      setPinnedAgentId(null);
+      setTarget(null);
+    }
+    setTrackedCompanyId(serverActiveCompanyId);
+  }, [serverActiveCompanyId, trackedCompanyId]);
 
   const openChat = useCallback((next: ChatOpenTarget) => {
     setTarget(next);
@@ -195,8 +213,8 @@ export function ChatContextProvider({ children }: { children: ReactNode }) {
   );
 
   const value = useMemo(
-    () => ({ ...actions, pageContext, layoutMode, target, open }),
-    [actions, pageContext, layoutMode, target, open],
+    () => ({ ...actions, pageContext, layoutMode, target, open, activeCompanyId: serverActiveCompanyId }),
+    [actions, pageContext, layoutMode, target, open, serverActiveCompanyId],
   );
 
   const handleOpenChange = useCallback(
@@ -232,6 +250,7 @@ export function ChatContextProvider({ children }: { children: ReactNode }) {
         layoutMode={layoutMode}
         onLayoutModeChange={setLayoutMode}
         onAgentSwitch={handleAgentSwitch}
+        activeCompanyId={serverActiveCompanyId}
       />
     ) : null);
 
@@ -248,7 +267,7 @@ export function ChatContextProvider({ children }: { children: ReactNode }) {
 export function ChatSidebarSlot() {
   const chat = useChatUiOptional();
   if (!chat) return null;
-  const { layoutMode, open, target, setLayoutMode, handleAgentSwitch } = chat;
+  const { layoutMode, open, target, setLayoutMode, handleAgentSwitch, activeCompanyId } = chat;
   if (layoutMode !== 'sidebar' || !target || !open) return null;
 
   return (
@@ -269,6 +288,7 @@ export function ChatSidebarSlot() {
       layoutMode={layoutMode}
       onLayoutModeChange={setLayoutMode}
       onAgentSwitch={handleAgentSwitch}
+      activeCompanyId={activeCompanyId}
     />
   );
 }

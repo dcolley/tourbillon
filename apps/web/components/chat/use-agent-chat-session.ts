@@ -125,6 +125,7 @@ export function useAgentChatSession(options: {
   contextId?: string;
   contextTitle?: string;
   onAgentSwitch?: (agentId: string, agentName: string) => void;
+  activeCompanyId: string | null;
 }) {
   const {
     agentId: initialAgentId,
@@ -134,6 +135,7 @@ export function useAgentChatSession(options: {
     contextId,
     contextTitle,
     onAgentSwitch,
+    activeCompanyId: serverActiveCompanyId,
   } = options;
 
   const [activeAgentId, setActiveAgentId] = useState(initialAgentId);
@@ -150,6 +152,7 @@ export function useAgentChatSession(options: {
   const [error, setError] = useState<string | null>(null);
   const [pendingApproval, setPendingApproval] = useState<ChatPendingApproval | null>(null);
   const [input, setInput] = useState('');
+  const [trackedCompanyId, setTrackedCompanyId] = useState<string | null>(serverActiveCompanyId);
 
   const abortRef = useRef<AbortController | null>(null);
   const resourceIdRef = useRef<string | null>(null);
@@ -183,6 +186,29 @@ export function useAgentChatSession(options: {
     setMessages([]);
     setThreads([]);
   }, [contextType, contextId]);
+
+  // Reset all session state when server-side active company changes
+  useEffect(() => {
+    if (trackedCompanyId !== null && serverActiveCompanyId !== trackedCompanyId) {
+      abortRef.current?.abort();
+      setActiveAgentId(initialAgentId);
+      setActiveAgentName(initialAgentName ?? '');
+      setResourceId(null);
+      setThreadId(null);
+      resourceIdRef.current = null;
+      threadIdRef.current = null;
+      setMessages([]);
+      setThreads([]);
+      setAgentOptions([]);
+      setUserPinnedAgent(false);
+      setRunning(false);
+      setConnecting(false);
+      setError(null);
+      setPendingApproval(null);
+      setInput('');
+    }
+    setTrackedCompanyId(serverActiveCompanyId);
+  }, [serverActiveCompanyId, trackedCompanyId, initialAgentId, initialAgentName]);
 
   const contextTags = useCallback((): Record<string, string> => {
     const tags: Record<string, string> = { kind: 'chat', contextType };
@@ -475,7 +501,7 @@ export function useAgentChatSession(options: {
         setAgentOptions(data.agents ?? []);
       })
       .catch(() => undefined);
-  }, [open]);
+  }, [open, serverActiveCompanyId]);
 
 
   const selectThread = useCallback(

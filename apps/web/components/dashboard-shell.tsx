@@ -22,7 +22,7 @@ export function DashboardShell({
   buildInfo: BuildInfo;
 }) {
   return (
-    <ChatContextProvider>
+    <ChatContextProvider activeCompanyId={activeCompanyId}>
       <SidebarProvider
         className="h-svh overflow-hidden"
         style={
