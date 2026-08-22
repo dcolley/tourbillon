@@ -236,6 +236,30 @@ async function updateBudgetConfig(
   return actionSuccess('Budget settings saved.');
 }
 
+async function updateMailConfig(
+  _prev: ActionResult | null,
+  formData: FormData,
+): Promise<ActionResult> {
+  'use server';
+
+  const agentId = formData.get('agentId') as string;
+  const mailEnabled = formData.get('mailEnabled') === 'on';
+
+  try {
+    await updateAgentRuntimeConfig(agentId, {
+      mail: { enabled: mailEnabled },
+    });
+  } catch (err) {
+    return actionError(
+      err instanceof AgentValidationError ? err.message : 'Failed to update DM settings.',
+    );
+  }
+
+  return actionSuccess(
+    "DM settings saved. Changes apply on the agent's next heartbeat or chat session.",
+  );
+}
+
 async function updateProfile(
   _prev: ActionResult | null,
   formData: FormData,
@@ -788,6 +812,35 @@ export default async function AgentDetailPage({
             <dd className="font-medium mt-0.5">{runtime.heartbeat?.maxSteps ?? 30}</dd>
           </div>
         </dl>
+      </section>
+
+      <section className="border rounded-lg p-4 space-y-4">
+        <div>
+          <h2 className="text-sm font-semibold">Direct messages to other agents</h2>
+          <p className="text-xs text-muted-foreground mt-1">
+            When enabled, this agent can send and receive DMs via <code className="text-xs">sendToAgent</code>.
+            The agent-dm skill is auto-loaded when DMs are enabled.
+          </p>
+        </div>
+        <ActionForm action={updateMailConfig} className="space-y-4 text-sm">
+          <input type="hidden" name="agentId" value={agent.id} />
+          <input type="hidden" name="urlKey" value={agent.urlKey} />
+
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              name="mailEnabled"
+              defaultChecked={runtime.mail?.enabled ?? true}
+              className="rounded border-input"
+            />
+            <span>Allow DMs</span>
+          </label>
+          <p className="text-xs text-muted-foreground -mt-2 pl-6">
+            When disabled, <code className="text-xs">sendToAgent</code> is removed from this agent&apos;s toolset.
+          </p>
+
+          <ActionSubmitButton label="Save DM settings" />
+        </ActionForm>
       </section>
 
       {agentRoutines.length > 0 && (
