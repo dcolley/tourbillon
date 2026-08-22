@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { stripDashboardContext } from '@/lib/chat/dashboard-context';
+import { getStoredCompanyId } from '@/lib/company-storage';
 
 export type ChatContextType = 'free' | 'issue' | 'project' | 'goal' | 'heartbeat' | 'agent' | 'board';
 
@@ -150,6 +151,7 @@ export function useAgentChatSession(options: {
   const [error, setError] = useState<string | null>(null);
   const [pendingApproval, setPendingApproval] = useState<ChatPendingApproval | null>(null);
   const [input, setInput] = useState('');
+  const [activeCompanyId, setActiveCompanyId] = useState<string | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const resourceIdRef = useRef<string | null>(null);
@@ -183,6 +185,43 @@ export function useAgentChatSession(options: {
     setMessages([]);
     setThreads([]);
   }, [contextType, contextId]);
+
+  // Initialize and track company changes
+  useEffect(() => {
+    setActiveCompanyId(getStoredCompanyId());
+
+    // Poll for company changes every 500ms
+    const pollInterval = setInterval(() => {
+      const currentCompanyId = getStoredCompanyId();
+      setActiveCompanyId((prev) => {
+        if (prev && currentCompanyId !== prev) {
+          // Company changed: reset all session state
+          abortRef.current?.abort();
+          setResourceId(null);
+          setThreadId(null);
+          resourceIdRef.current = null;
+          threadIdRef.current = null;
+          setMessages([]);
+          setThreads([]);
+          setAgentOptions([]);
+          setUserPinnedAgent(false);
+          setRunning(false);
+          setConnecting(false);
+          setError(null);
+          setPendingApproval(null);
+          setInput('');
+          return currentCompanyId;
+        }
+        if (prev === null && currentCompanyId) {
+          // Initial load
+          return currentCompanyId;
+        }
+        return prev;
+      });
+    }, 500);
+
+    return () => clearInterval(pollInterval);
+  }, []);
 
   const contextTags = useCallback((): Record<string, string> => {
     const tags: Record<string, string> = { kind: 'chat', contextType };
@@ -475,7 +514,7 @@ export function useAgentChatSession(options: {
         setAgentOptions(data.agents ?? []);
       })
       .catch(() => undefined);
-  }, [open]);
+  }, [open, activeCompanyId]);
 
 
   const selectThread = useCallback(

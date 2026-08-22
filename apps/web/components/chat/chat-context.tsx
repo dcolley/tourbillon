@@ -18,6 +18,7 @@ import {
   writeChatLayoutMode,
   type ChatLayoutMode,
 } from '@/lib/chat-layout-storage';
+import { getStoredCompanyId } from '@/lib/company-storage';
 
 export interface ChatOpenTarget {
   agentId: string;
@@ -86,9 +87,31 @@ export function ChatContextProvider({ children }: { children: ReactNode }) {
   const [pageContext, setPageContextState] = useState<ChatUiContextValue['pageContext']>(null);
   const [layoutMode, setLayoutModeState] = useState<ChatLayoutMode>('sidebar');
   const [pinnedAgentId, setPinnedAgentId] = useState<string | null>(null);
+  const [activeCompanyId, setActiveCompanyId] = useState<string | null>(null);
 
   useEffect(() => {
     setLayoutModeState(readChatLayoutMode());
+    setActiveCompanyId(getStoredCompanyId());
+
+    // Poll for company changes every 500ms
+    const pollInterval = setInterval(() => {
+      const currentCompanyId = getStoredCompanyId();
+      setActiveCompanyId((prev) => {
+        if (prev && currentCompanyId !== prev) {
+          // Company changed: reset chat state
+          setPinnedAgentId(null);
+          setTarget(null);
+          return currentCompanyId;
+        }
+        if (prev === null && currentCompanyId) {
+          // Initial load
+          return currentCompanyId;
+        }
+        return prev;
+      });
+    }, 500);
+
+    return () => clearInterval(pollInterval);
   }, []);
 
   const openChat = useCallback((next: ChatOpenTarget) => {
