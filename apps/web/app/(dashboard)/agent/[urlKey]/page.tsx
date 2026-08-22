@@ -23,6 +23,7 @@ import { listProjectOptions } from '@/lib/projects';
 import { AgentDetailTabs } from './agent-detail-tabs';
 import { AgentObservabilityTab } from './agent-observability-tab';
 import { AgentMemoryTab } from './agent-memory-tab';
+import { AgentMailTab } from './agent-mail-tab';
 import { AgentCapabilitiesForm } from './agent-capabilities-form';
 import { AgentCodeExecutionForm } from './agent-code-execution-form';
 import { AgentHeartbeatForm } from './agent-heartbeat-form';
@@ -980,6 +981,9 @@ export default async function AgentDetailPage({
             goals={goals}
             projects={projects}
           />
+        }
+        mail={
+          <AgentMailTab agentId={agent.id} />
         }
       />
       </div>

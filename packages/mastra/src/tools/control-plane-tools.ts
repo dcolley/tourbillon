@@ -360,6 +360,37 @@ export const createSubtaskTool = createTool({
   },
 });
 
+export const sendToAgentTool = createTool({
+  id: 'sendToAgent',
+  description:
+    'Send a short message to another agent in your company. ' +
+    'The recipient will be woken with your message. This is NOT operator chat, NOT a council, NOT an issue comment. ' +
+    'Use for quick agent-to-agent coordination that does not require an issue. ' +
+    'In chat mode, do not use this unless the human clearly asks. ' +
+    'Cannot send to yourself.',
+  inputSchema: z.object({
+    toAgentId: z.string().optional().describe('Agent UUID — use this OR toAgentUrlKey, not both'),
+    toAgentUrlKey: z.string().optional().describe('Agent urlKey (e.g. "cto") — use this OR toAgentId, not both'),
+    body: z.string().describe('Message body — keep it short and actionable'),
+    inReplyTo: z.string().optional().describe('Mail ID if replying to a received message'),
+  }),
+  execute: async (inputData, { requestContext }) => {
+    const { companyId, agentId } = extractToolRuntimeContext(requestContext);
+    if (!companyId) {
+      return { error: 'missing_company', message: 'companyId not present in tool runtime context' };
+    }
+    if (!agentId) {
+      return { error: 'missing_agent', message: 'agentId not present in tool runtime context' };
+    }
+    const res = await tracedAgentFetch('sendToAgent', requestContext, `/api/companies/${companyId}/agent-mail`, {
+      method: 'POST',
+      body: JSON.stringify(inputData),
+    });
+    if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
+    return res.json();
+  },
+});
+
 export const CONTROL_PLANE_TOOLS = {
   getDateTimeTool,
   getIdentityTool,
@@ -373,5 +404,6 @@ export const CONTROL_PLANE_TOOLS = {
   writeWorkspaceFileTool,
   deleteWorkspaceFileTool,
   createSubtaskTool,
+  sendToAgentTool,
   ...SKILL_TOOLS,
 };
