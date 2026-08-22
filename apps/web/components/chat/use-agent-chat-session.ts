@@ -413,7 +413,7 @@ export function useAgentChatSession(options: {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              title: contextTitle ?? 'New chat',
+              title: 'New chat',
               tags,
             }),
           },
@@ -501,7 +501,7 @@ export function useAgentChatSession(options: {
     const res = await fetch(`${sessionBase(activeAgentId, rid)}/threads?sessionScope=${encodeURIComponent(scope)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: contextTitle ?? 'New chat', tags }),
+        body: JSON.stringify({ title: 'New chat', tags }),
       },
     );
     if (!res.ok) {
@@ -590,10 +590,15 @@ export function useAgentChatSession(options: {
   const sendMessage = useCallback(
     async (text: string) => {
       const rid = resourceIdRef.current;
+      const tid = threadIdRef.current;
       if (!rid || !text.trim()) return;
       setError(null);
       const trimmed = text.trim();
       setInput('');
+
+      // Check if this is the first user message in the thread.
+      const hasUserMessages = messages.some((m) => isChatUserMessage(m));
+      const shouldUpdateTitle = !hasUserMessages && tid;
 
       // Optimistic bubble so the turn shows before SSE / hydrate.
       // randomUUID needs a secure context; fall back on LAN/http.
@@ -628,9 +633,20 @@ export function useAgentChatSession(options: {
         setMessages((prev) => prev.filter((m) => m.id !== optimisticId));
         setError((await res.json().catch(() => ({}))).error ?? 'Failed to send');
         setInput(trimmed);
+        return;
+      }
+
+      // Auto-update thread title to first user message (truncated to ~40 chars).
+      if (shouldUpdateTitle) {
+        const titleText = trimmed.length > 40 ? `${trimmed.slice(0, 40)}…` : trimmed;
+        try {
+          await renameThread(tid, titleText);
+        } catch {
+          // Non-blocking: if rename fails, the thread keeps its default title.
+        }
       }
     },
-    [activeAgentId, contextId, contextTitle, contextType, mergeMessage, running],
+    [activeAgentId, contextId, contextTitle, contextType, mergeMessage, messages, renameThread, running],
   );
 
   const abort = useCallback(async () => {
