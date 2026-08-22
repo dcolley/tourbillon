@@ -4,12 +4,14 @@ import { useEffect, useRef, useState, type FormEvent, type RefObject } from 'rea
 import {
   Clock,
   PanelRight,
+  PanelLeftClose,
   AppWindow,
   CircleDot,
   MoreHorizontal,
   Pencil,
   Trash2,
   XIcon,
+  ChevronDown,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -31,12 +33,6 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-} from '@/components/ui/select';
 import {
   Sheet,
   SheetContent,
@@ -76,6 +72,27 @@ function agentInferenceLabel(agent: Pick<ChatAgentOption, 'providerName' | 'mode
   if (provider) return provider;
   if (model) return model;
   return null;
+}
+
+const SESSIONS_STORAGE_KEY = 'tourbillon.chat.sessionsOpen';
+
+function readSessionsOpen(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    const stored = window.localStorage.getItem(SESSIONS_STORAGE_KEY);
+    return stored === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function writeSessionsOpen(open: boolean): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(SESSIONS_STORAGE_KEY, String(open));
+  } catch {
+    // ignore
+  }
 }
 
 export type ChatPanePresentation = 'popover' | 'sidebar';
@@ -227,6 +244,17 @@ function ChatPaneBody({
 
   const [renameTarget, setRenameTarget] = useState<ChatThreadInfo | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ChatThreadInfo | null>(null);
+  const [sessionsOpen, setSessionsOpen] = useState(false);
+
+  useEffect(() => {
+    setSessionsOpen(readSessionsOpen());
+  }, []);
+
+  const toggleSessions = () => {
+    const next = !sessionsOpen;
+    setSessionsOpen(next);
+    writeSessionsOpen(next);
+  };
 
   const contextLabel =
     contextType === 'free'
@@ -235,24 +263,79 @@ function ChatPaneBody({
         ? `${contextType}: ${contextTitle}`
         : contextType;
 
-  const title = `Chat with ${activeAgentName || agentName}`;
   const description = `${contextLabel}${running ? ' · generating…' : connecting ? ' · connecting…' : ''}`;
+
+  const active =
+    agentOptions.find((a) => a.id === activeAgentId) ??
+    ({
+      id: activeAgentId,
+      name: activeAgentName || agentName,
+      urlKey: '',
+    } satisfies ChatAgentOption);
+  const inference = agentInferenceLabel(active);
 
   const headerInner = (
     <>
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0 flex-1">
-          {sheetHeader ? (
-            <>
-              <SheetTitle>{title}</SheetTitle>
-              <SheetDescription>{description}</SheetDescription>
-            </>
-          ) : (
-            <>
-              <h2 className="text-base font-semibold leading-none">{title}</h2>
-              <p className="mt-1 text-sm text-muted-foreground">{description}</p>
-            </>
-          )}
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            onClick={toggleSessions}
+            title={sessionsOpen ? 'Hide sessions' : 'Show sessions'}
+            aria-label={sessionsOpen ? 'Hide sessions' : 'Show sessions'}
+          >
+            <PanelLeftClose className={cn('size-4 transition-transform', sessionsOpen && 'rotate-180')} />
+          </Button>
+
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <Button
+                  type="button"
+                  variant="ghost"
+                  className="h-auto min-h-8 flex-1 justify-start gap-1.5 px-2 py-1 text-left font-normal"
+                  disabled={connecting || running}
+                />
+              }
+            >
+              <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                <span className="truncate font-medium text-foreground">{active.name}</span>
+                {inference && (
+                  <span className="truncate text-xs text-muted-foreground">{inference}</span>
+                )}
+              </span>
+              <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="min-w-60">
+              {(agentOptions.length === 0
+                ? [active]
+                : agentOptions
+              ).map((a) => {
+                const inf = agentInferenceLabel(a);
+                return (
+                  <DropdownMenuItem
+                    key={a.id}
+                    onClick={() => {
+                      if (a.id !== activeAgentId) void switchAgent(a.id, a.name);
+                    }}
+                    className="flex items-center justify-between gap-2"
+                  >
+                    <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                      <span className="truncate font-medium">{a.name}</span>
+                      {inf && (
+                        <span className="truncate text-xs text-muted-foreground">{inf}</span>
+                      )}
+                    </span>
+                    {a.id === activeAgentId && (
+                      <CircleDot className="size-3 shrink-0 text-primary" />
+                    )}
+                  </DropdownMenuItem>
+                );
+              })}
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
         <div className="flex shrink-0 items-center gap-0.5">
           <ChatLayoutModeMenu
@@ -273,72 +356,9 @@ function ChatPaneBody({
           )}
         </div>
       </div>
-      <div className="flex flex-wrap gap-2 px-0 pt-1">
-        <div className="flex min-w-[8rem] flex-1 flex-col gap-0.5 text-[10px] text-muted-foreground">
-          Agent
-          <Select
-            value={activeAgentId}
-            disabled={connecting || running}
-            onValueChange={(value) => {
-              if (!value) return;
-              const next = agentOptions.find((a) => a.id === value);
-              if (next) void switchAgent(next.id, next.name);
-            }}
-          >
-            <SelectTrigger className="h-auto min-h-8 w-full items-start whitespace-normal py-1.5 text-xs">
-              {(() => {
-                const active =
-                  agentOptions.find((a) => a.id === activeAgentId) ??
-                  ({
-                    id: activeAgentId,
-                    name: activeAgentName || agentName,
-                    urlKey: '',
-                  } satisfies ChatAgentOption);
-                const inference = agentInferenceLabel(active);
-                return (
-                  <span className="flex min-w-0 flex-1 flex-col items-start gap-0.5 text-left">
-                    <span className="truncate font-medium text-foreground">{active.name}</span>
-                    {inference ? (
-                      <span className="truncate text-[10px] font-normal text-muted-foreground">
-                        {inference}
-                      </span>
-                    ) : null}
-                  </span>
-                );
-              })()}
-            </SelectTrigger>
-            <SelectContent align="start" className="min-w-(--anchor-width)">
-              {(agentOptions.length === 0
-                ? [
-                    {
-                      id: activeAgentId,
-                      name: activeAgentName || agentName,
-                      urlKey: '',
-                    } satisfies ChatAgentOption,
-                  ]
-                : agentOptions
-              ).map((a) => {
-                const inference = agentInferenceLabel(a);
-                return (
-                  <SelectItem
-                    key={a.id}
-                    value={a.id}
-                    label={a.name}
-                    className="items-start py-1.5 [&>span:first-child]:min-w-0 [&>span:first-child]:flex-col [&>span:first-child]:items-start [&>span:first-child]:gap-0.5 [&>span:first-child]:whitespace-normal"
-                  >
-                    <span className="truncate font-medium">{a.name}</span>
-                    {inference ? (
-                      <span className="truncate text-[10px] text-muted-foreground">
-                        {inference}
-                      </span>
-                    ) : null}
-                  </SelectItem>
-                );
-              })}
-            </SelectContent>
-          </Select>
-        </div>
-      </div>
+      {sheetHeader && (
+        <SheetDescription className="sr-only">{description}</SheetDescription>
+      )}
     </>
   );
 
@@ -352,74 +372,76 @@ function ChatPaneBody({
       )}
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        <aside className="flex w-40 shrink-0 flex-col border-r bg-muted/20">
-          <div className="flex items-center justify-between gap-1 border-b p-2">
-            <span className="text-xs font-medium text-muted-foreground">Chats</span>
-            <Button type="button" variant="ghost" size="xs" onClick={() => void newThread()}>
-              New
-            </Button>
-          </div>
-          <div className="flex-1 overflow-y-auto">
-            <ul className="space-y-0.5 p-1">
-              {threads.map((t) => (
-                <li key={t.id} className="group relative">
-                  <button
-                    type="button"
-                    className={cn(
-                      'w-full rounded-md py-1.5 pr-7 pl-2 text-left text-xs hover:bg-muted',
-                      t.id === threadId && 'bg-muted font-medium',
-                    )}
-                    onClick={() => void selectThread(t.id)}
-                  >
-                    <span className="line-clamp-2">{t.title || t.id.slice(0, 8)}</span>
-                  </button>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger
-                      render={
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon-xs"
-                          className={cn(
-                            'absolute top-0.5 right-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-popup-open:opacity-100',
-                            t.id === threadId && 'opacity-70',
-                          )}
-                          aria-label="Chat options"
-                          title="Chat options"
-                        />
-                      }
+        {sessionsOpen && (
+          <aside className="flex w-[220px] shrink-0 flex-col border-r bg-muted/20">
+            <div className="flex items-center justify-between gap-1 border-b p-2">
+              <span className="text-xs font-medium text-muted-foreground">Sessions</span>
+              <Button type="button" variant="ghost" size="xs" onClick={() => void newThread()}>
+                New
+              </Button>
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              <ul className="space-y-0.5 p-1">
+                {threads.map((t) => (
+                  <li key={t.id} className="group relative">
+                    <button
+                      type="button"
+                      className={cn(
+                        'w-full rounded-md py-1.5 pr-7 pl-2 text-left text-xs hover:bg-muted',
+                        t.id === threadId && 'bg-muted font-medium',
+                      )}
+                      onClick={() => void selectThread(t.id)}
                     >
-                      <MoreHorizontal className="size-3.5" />
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" side="bottom" className="min-w-36">
-                      <DropdownMenuItem
-                        onClick={() => {
-                          setRenameTarget(t);
-                        }}
+                      <span className="line-clamp-2">{t.title || t.id.slice(0, 8)}</span>
+                    </button>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger
+                        render={
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon-xs"
+                            className={cn(
+                              'absolute top-0.5 right-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-popup-open:opacity-100',
+                              t.id === threadId && 'opacity-70',
+                            )}
+                            aria-label="Session options"
+                            title="Session options"
+                          />
+                        }
                       >
-                        <Pencil />
-                        Rename
-                      </DropdownMenuItem>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem
-                        variant="destructive"
-                        onClick={() => {
-                          setDeleteTarget(t);
-                        }}
-                      >
-                        <Trash2 />
-                        Delete
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </li>
-              ))}
-              {threads.length === 0 && (
-                <li className="px-2 py-3 text-xs text-muted-foreground">No chats yet</li>
-              )}
-            </ul>
-          </div>
-        </aside>
+                        <MoreHorizontal className="size-3.5" />
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" side="bottom" className="min-w-36">
+                        <DropdownMenuItem
+                          onClick={() => {
+                            setRenameTarget(t);
+                          }}
+                        >
+                          <Pencil />
+                          Rename
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          variant="destructive"
+                          onClick={() => {
+                            setDeleteTarget(t);
+                          }}
+                        >
+                          <Trash2 />
+                          Delete
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </li>
+                ))}
+                {threads.length === 0 && (
+                  <li className="px-2 py-3 text-xs text-muted-foreground">No sessions yet</li>
+                )}
+              </ul>
+            </div>
+          </aside>
+        )}
 
         <div className="flex min-w-0 flex-1 flex-col">
           <div className="flex-1 overflow-y-auto px-3 py-3">
@@ -497,49 +519,51 @@ function ChatPaneBody({
           )}
 
           <form
-            className="flex flex-col gap-2 border-t p-3"
+            className="border-t p-3"
             onSubmit={(e) => {
               e.preventDefault();
               void sendMessage(input);
             }}
           >
-            <textarea
-              className="min-h-[72px] w-full resize-none rounded-md border bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              placeholder={
-                running
-                  ? 'Queue a follow-up while the agent is working…'
-                  : 'Message the agent…'
-              }
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  void sendMessage(input);
+            <div className="flex items-end gap-2">
+              <textarea
+                className="min-h-[72px] w-full resize-none rounded-md border bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                placeholder={
+                  running
+                    ? 'Queue a follow-up while the agent is working…'
+                    : 'Message the agent…'
                 }
-              }}
-              disabled={connecting}
-            />
-            <div className="flex flex-wrap items-center gap-2">
-              <Button type="submit" size="sm" disabled={connecting || !input.trim()}>
-                {running ? 'Queue' : 'Send'}
-              </Button>
-              {running && (
-                <>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    disabled={!input.trim()}
-                    onClick={() => void steer(input)}
-                  >
-                    Steer
-                  </Button>
-                  <Button type="button" size="sm" variant="ghost" onClick={() => void abort()}>
-                    Stop
-                  </Button>
-                </>
-              )}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    void sendMessage(input);
+                  }
+                }}
+                disabled={connecting}
+              />
+              <div className="flex shrink-0 flex-col gap-2">
+                <Button type="submit" size="sm" disabled={connecting || !input.trim()}>
+                  {running ? 'Queue' : 'Send'}
+                </Button>
+                {running && (
+                  <>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={!input.trim()}
+                      onClick={() => void steer(input)}
+                    >
+                      Steer
+                    </Button>
+                    <Button type="button" size="sm" variant="ghost" onClick={() => void abort()}>
+                      Stop
+                    </Button>
+                  </>
+                )}
+              </div>
             </div>
           </form>
         </div>
