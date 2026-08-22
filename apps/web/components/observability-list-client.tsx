@@ -32,7 +32,7 @@ import { PageHeader } from '@/components/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { StatusBadge } from '@/lib/status-badges';
-import { RefreshCw } from 'lucide-react';
+import { RefreshCw, ChevronDown, ChevronRight } from 'lucide-react';
 import {
   OBSERVABILITY_LIST_REFRESH_INTERVALS,
   isObservabilityListRefreshInterval,
@@ -126,6 +126,49 @@ function defaultFilters(overrides?: Partial<ObservabilityFilters>): Observabilit
   };
 }
 
+const FILTERS_OPEN_KEY = 'tourbillon.heartbeat.observability.filtersOpen';
+
+function readFiltersOpen(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    const raw = localStorage.getItem(FILTERS_OPEN_KEY);
+    return raw === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function writeFiltersOpen(open: boolean): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(FILTERS_OPEN_KEY, String(open));
+  } catch {
+    // ignore
+  }
+}
+
+function countActiveFilters(filters: ObservabilityFilters, fixed: {
+  issueId?: string;
+  agentId?: string;
+  heartbeatRunId?: string;
+  jobId?: string;
+}): number {
+  let count = 0;
+  if (filters.issueId && !fixed.issueId) count++;
+  if (filters.projectId) count++;
+  if (filters.goalId) count++;
+  if (filters.agentId && !fixed.agentId) count++;
+  if (filters.eventType) count++;
+  if (filters.status) count++;
+  if (filters.traceId) count++;
+  if (filters.heartbeatRunId && !fixed.heartbeatRunId) count++;
+  if (filters.jobId && !fixed.jobId) count++;
+  if (filters.search.trim()) count++;
+  if (filters.from.trim()) count++;
+  if (filters.to.trim()) count++;
+  return count;
+}
+
 function buildQueryParams(filters: ObservabilityFilters): URLSearchParams {
   const params = new URLSearchParams();
   params.set('page', String(filters.page));
@@ -182,6 +225,7 @@ export function ObservabilityListClient({
 }: ObservabilityListClientProps) {
   const [refreshIntervalSec, setRefreshIntervalSec] =
     useState<ObservabilityListRefreshIntervalSec | null>(null);
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [filters, setFilters] = useState<ObservabilityFilters>(() =>
     defaultFilters({
       ...(fixedIssueId ? { issueId: fixedIssueId } : {}),
@@ -198,6 +242,7 @@ export function ObservabilityListClient({
 
   useEffect(() => {
     setRefreshIntervalSec(readObservabilityListRefreshPrefs().refreshIntervalSec);
+    setFiltersOpen(readFiltersOpen());
   }, []);
 
   const fetchList = useCallback(
@@ -256,6 +301,12 @@ export function ObservabilityListClient({
     writeObservabilityListRefreshPrefs({ refreshIntervalSec: next });
   }
 
+  function toggleFiltersOpen() {
+    const next = !filtersOpen;
+    setFiltersOpen(next);
+    writeFiltersOpen(next);
+  }
+
   function updateFilters(patch: Partial<ObservabilityFilters>) {
     const resetPage =
       patch.issueId !== undefined ||
@@ -301,6 +352,13 @@ export function ObservabilityListClient({
     { input: 0, output: 0 },
   );
 
+  const activeFilterCount = countActiveFilters(filters, {
+    issueId: fixedIssueId,
+    agentId: fixedAgentId,
+    heartbeatRunId: fixedHeartbeatRunId,
+    jobId: fixedJobId,
+  });
+
   const selectClass =
     'w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm';
   const labelClass = 'text-xs font-medium text-muted-foreground';
@@ -325,206 +383,224 @@ export function ObservabilityListClient({
         </p>
       )}
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-        {!fixedIssueId && (
-          <div className="space-y-1.5">
-            <label htmlFor="obs-issue" className={labelClass}>
-              Issue ID
-            </label>
-            <input
-              id="obs-issue"
-              type="text"
-              className={selectClass}
-              placeholder="Filter by issue"
-              disabled={loading}
-              value={filters.issueId}
-              onChange={(e) => updateFilters({ issueId: e.target.value })}
-            />
-          </div>
-        )}
+      <div className="space-y-3">
+        <button
+          type="button"
+          onClick={toggleFiltersOpen}
+          className="flex items-center gap-2 text-sm font-medium hover:text-foreground text-muted-foreground"
+        >
+          {filtersOpen ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
+          Filters
+          {activeFilterCount > 0 && !filtersOpen && (
+            <span className="rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
+              {activeFilterCount} active
+            </span>
+          )}
+        </button>
 
-        {goals.length > 0 && (
-          <div className="space-y-1.5">
-            <label htmlFor="obs-goal" className={labelClass}>
-              Goal
-            </label>
-            <select
-              id="obs-goal"
-              className={selectClass}
-              disabled={loading}
-              value={filters.goalId}
-              onChange={(e) => updateFilters({ goalId: e.target.value })}
-            >
-              <option value="">All goals</option>
-              {goals.map((g) => (
-                <option key={g.id} value={g.id}>
-                  {g.title}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
+        {filtersOpen && (
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            {!fixedIssueId && (
+              <div className="space-y-1.5">
+                <label htmlFor="obs-issue" className={labelClass}>
+                  Issue ID
+                </label>
+                <input
+                  id="obs-issue"
+                  type="text"
+                  className={selectClass}
+                  placeholder="Filter by issue"
+                  disabled={loading}
+                  value={filters.issueId}
+                  onChange={(e) => updateFilters({ issueId: e.target.value })}
+                />
+              </div>
+            )}
 
-        {projects.length > 0 && (
-          <div className="space-y-1.5">
-            <label htmlFor="obs-project" className={labelClass}>
-              Project
-            </label>
-            <select
-              id="obs-project"
-              className={selectClass}
-              disabled={loading}
-              value={filters.projectId}
-              onChange={(e) => updateFilters({ projectId: e.target.value })}
-            >
-              <option value="">All projects</option>
-              {projects.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.title}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
+            {goals.length > 0 && (
+              <div className="space-y-1.5">
+                <label htmlFor="obs-goal" className={labelClass}>
+                  Goal
+                </label>
+                <select
+                  id="obs-goal"
+                  className={selectClass}
+                  disabled={loading}
+                  value={filters.goalId}
+                  onChange={(e) => updateFilters({ goalId: e.target.value })}
+                >
+                  <option value="">All goals</option>
+                  {goals.map((g) => (
+                    <option key={g.id} value={g.id}>
+                      {g.title}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
 
-        {!fixedAgentId && (
-          <div className="space-y-1.5">
-            <label htmlFor="obs-agent" className={labelClass}>
-              Agent
-            </label>
-            <select
-              id="obs-agent"
-              className={selectClass}
-              disabled={loading}
-              value={filters.agentId}
-              onChange={(e) => updateFilters({ agentId: e.target.value })}
-            >
-              <option value="">All agents</option>
-              {agents.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.name}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
+            {projects.length > 0 && (
+              <div className="space-y-1.5">
+                <label htmlFor="obs-project" className={labelClass}>
+                  Project
+                </label>
+                <select
+                  id="obs-project"
+                  className={selectClass}
+                  disabled={loading}
+                  value={filters.projectId}
+                  onChange={(e) => updateFilters({ projectId: e.target.value })}
+                >
+                  <option value="">All projects</option>
+                  {projects.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.title}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
 
-        <div className="space-y-1.5">
-          <label htmlFor="obs-type" className={labelClass}>
-            Event type
-          </label>
-          <select
-            id="obs-type"
-            className={selectClass}
-            disabled={loading}
-            value={filters.eventType}
-            onChange={(e) =>
-              updateFilters({ eventType: e.target.value as ObservabilityEventType | '' })
-            }
-          >
-            <option value="">All types</option>
-            {OBSERVABILITY_EVENT_TYPES.map((t) => (
-              <option key={t} value={t}>
-                {EVENT_TYPE_LABELS[t]}
-              </option>
-            ))}
-          </select>
-        </div>
+            {!fixedAgentId && (
+              <div className="space-y-1.5">
+                <label htmlFor="obs-agent" className={labelClass}>
+                  Agent
+                </label>
+                <select
+                  id="obs-agent"
+                  className={selectClass}
+                  disabled={loading}
+                  value={filters.agentId}
+                  onChange={(e) => updateFilters({ agentId: e.target.value })}
+                >
+                  <option value="">All agents</option>
+                  {agents.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
 
-        <div className="space-y-1.5">
-          <label htmlFor="obs-status" className={labelClass}>
-            Status
-          </label>
-          <select
-            id="obs-status"
-            className={selectClass}
-            disabled={loading}
-            value={filters.status}
-            onChange={(e) =>
-              updateFilters({ status: e.target.value as ObservabilityEventStatus | '' })
-            }
-          >
-            <option value="">All statuses</option>
-            {OBSERVABILITY_EVENT_STATUSES.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
-        </div>
+            <div className="space-y-1.5">
+              <label htmlFor="obs-type" className={labelClass}>
+                Event type
+              </label>
+              <select
+                id="obs-type"
+                className={selectClass}
+                disabled={loading}
+                value={filters.eventType}
+                onChange={(e) =>
+                  updateFilters({ eventType: e.target.value as ObservabilityEventType | '' })
+                }
+              >
+                <option value="">All types</option>
+                {OBSERVABILITY_EVENT_TYPES.map((t) => (
+                  <option key={t} value={t}>
+                    {EVENT_TYPE_LABELS[t]}
+                  </option>
+                ))}
+              </select>
+            </div>
 
-        <div className="space-y-1.5">
-          <label htmlFor="obs-from" className={labelClass}>
-            From
-          </label>
-          <input
-            id="obs-from"
-            type="datetime-local"
-            className={selectClass}
-            disabled={loading}
-            value={filters.from}
-            onChange={(e) => updateFilters({ from: e.target.value })}
-          />
-        </div>
+            <div className="space-y-1.5">
+              <label htmlFor="obs-status" className={labelClass}>
+                Status
+              </label>
+              <select
+                id="obs-status"
+                className={selectClass}
+                disabled={loading}
+                value={filters.status}
+                onChange={(e) =>
+                  updateFilters({ status: e.target.value as ObservabilityEventStatus | '' })
+                }
+              >
+                <option value="">All statuses</option>
+                {OBSERVABILITY_EVENT_STATUSES.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </select>
+            </div>
 
-        <div className="space-y-1.5">
-          <label htmlFor="obs-to" className={labelClass}>
-            To
-          </label>
-          <input
-            id="obs-to"
-            type="datetime-local"
-            className={selectClass}
-            disabled={loading}
-            value={filters.to}
-            onChange={(e) => updateFilters({ to: e.target.value })}
-          />
-        </div>
+            <div className="space-y-1.5">
+              <label htmlFor="obs-from" className={labelClass}>
+                From
+              </label>
+              <input
+                id="obs-from"
+                type="datetime-local"
+                className={selectClass}
+                disabled={loading}
+                value={filters.from}
+                onChange={(e) => updateFilters({ from: e.target.value })}
+              />
+            </div>
 
-        <div className="space-y-1.5 sm:col-span-2">
-          <label htmlFor="obs-search" className={labelClass}>
-            Search
-          </label>
-          <input
-            id="obs-search"
-            type="text"
-            className={selectClass}
-            placeholder="Name, tool, preview, trace…"
-            disabled={loading}
-            value={filters.search}
-            onChange={(e) => updateFilters({ search: e.target.value })}
-          />
-        </div>
+            <div className="space-y-1.5">
+              <label htmlFor="obs-to" className={labelClass}>
+                To
+              </label>
+              <input
+                id="obs-to"
+                type="datetime-local"
+                className={selectClass}
+                disabled={loading}
+                value={filters.to}
+                onChange={(e) => updateFilters({ to: e.target.value })}
+              />
+            </div>
 
-        <div className="space-y-1.5">
-          <label htmlFor="obs-trace" className={labelClass}>
-            Trace ID
-          </label>
-          <input
-            id="obs-trace"
-            type="text"
-            className={selectClass}
-            placeholder="Full trace id"
-            disabled={loading}
-            value={filters.traceId}
-            onChange={(e) => updateFilters({ traceId: e.target.value })}
-          />
-        </div>
+            <div className="space-y-1.5 sm:col-span-2">
+              <label htmlFor="obs-search" className={labelClass}>
+                Search
+              </label>
+              <input
+                id="obs-search"
+                type="text"
+                className={selectClass}
+                placeholder="Name, tool, preview, trace…"
+                disabled={loading}
+                value={filters.search}
+                onChange={(e) => updateFilters({ search: e.target.value })}
+              />
+            </div>
 
-        {!fixedHeartbeatRunId && (
-          <div className="space-y-1.5">
-            <label htmlFor="obs-run" className={labelClass}>
-              Heartbeat run ID
-            </label>
-            <input
-              id="obs-run"
-              type="text"
-              className={selectClass}
-              placeholder="Run id"
-              disabled={loading}
-              value={filters.heartbeatRunId}
-              onChange={(e) => updateFilters({ heartbeatRunId: e.target.value })}
-            />
+            <div className="space-y-1.5">
+              <label htmlFor="obs-trace" className={labelClass}>
+                Trace ID
+              </label>
+              <input
+                id="obs-trace"
+                type="text"
+                className={selectClass}
+                placeholder="Full trace id"
+                disabled={loading}
+                value={filters.traceId}
+                onChange={(e) => updateFilters({ traceId: e.target.value })}
+              />
+            </div>
+
+            {!fixedHeartbeatRunId && (
+              <div className="space-y-1.5">
+                <label htmlFor="obs-run" className={labelClass}>
+                  Heartbeat run ID
+                </label>
+                <input
+                  id="obs-run"
+                  type="text"
+                  className={selectClass}
+                  placeholder="Run id"
+                  disabled={loading}
+                  value={filters.heartbeatRunId}
+                  onChange={(e) => updateFilters({ heartbeatRunId: e.target.value })}
+                />
+              </div>
+            )}
           </div>
         )}
       </div>
