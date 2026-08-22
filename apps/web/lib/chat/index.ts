@@ -1,0 +1,15 @@
+export {
+  resolveChatAgent,
+  getOrCreateChatController,
+  getChatSession,
+  createChatRequestContext,
+  getOrCreateChatApiKey,
+  chatResourceId,
+  chatControllerId,
+  chatContextFromTags,
+  extractThreadTags,
+  isReservedThreadMetadataKey,
+  ChatAgentError,
+  type TourbillonChatController,
+  type TourbillonChatSession,
+} from './registry';
