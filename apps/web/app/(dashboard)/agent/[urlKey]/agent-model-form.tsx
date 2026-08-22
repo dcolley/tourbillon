@@ -1,6 +1,6 @@
 'use client';
 
-import { useActionState, useState } from 'react';
+import { useActionState, useEffect, useRef, useState } from 'react';
 import type { ActionResult } from '@/lib/action-result';
 import { useActionToast } from '@/hooks/use-action-toast';
 import { ActionSubmitButton } from '@/components/action-form';
@@ -43,6 +43,15 @@ export function AgentModelForm({
   const [fetchError, setFetchError] = useState<string | null>(null);
 
   const selectedProvider = providers.find((p) => p.id === providerId);
+
+  // Notify open chat panes to refresh agent list after model save.
+  const prevStateRef = useRef<ActionResult | null>(null);
+  useEffect(() => {
+    if (state && state !== prevStateRef.current && state.ok) {
+      prevStateRef.current = state;
+      window.dispatchEvent(new CustomEvent('tourbillon:agent-settings-saved'));
+    }
+  }, [state]);
 
   async function loadModels() {
     if (!providerId) {

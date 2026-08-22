@@ -29,6 +29,23 @@ export function clearChatControllerCache(): void {
   globalForChat.tourbillonChatControllers?.clear();
 }
 
+/**
+ * Invalidate all cached chat controllers for a specific agent.
+ * Called after agent model/provider settings change so the next chat uses fresh config.
+ */
+export function invalidateChatControllerForAgent(agentId: string): void {
+  const cache = controllerCache();
+  const keysToDelete: string[] = [];
+  for (const key of cache.keys()) {
+    if (key.startsWith(`tourbillon-chat-${agentId}`)) {
+      keysToDelete.push(key);
+    }
+  }
+  for (const key of keysToDelete) {
+    cache.delete(key);
+  }
+}
+
 function controllerCache(): Map<string, Promise<TourbillonChatController>> {
   if (!globalForChat.tourbillonChatControllers) {
     globalForChat.tourbillonChatControllers = new Map();
