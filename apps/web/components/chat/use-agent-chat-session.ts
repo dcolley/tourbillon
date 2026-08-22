@@ -413,7 +413,7 @@ export function useAgentChatSession(options: {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              title: contextTitle ?? 'New chat',
+              title: 'New chat',
               tags,
             }),
           },
@@ -501,7 +501,7 @@ export function useAgentChatSession(options: {
     const res = await fetch(`${sessionBase(activeAgentId, rid)}/threads?sessionScope=${encodeURIComponent(scope)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: contextTitle ?? 'New chat', tags }),
+        body: JSON.stringify({ title: 'New chat', tags }),
       },
     );
     if (!res.ok) {
