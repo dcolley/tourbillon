@@ -163,9 +163,9 @@ function countActiveFilters(filters: ObservabilityFilters, fixed: {
   if (filters.traceId) count++;
   if (filters.heartbeatRunId && !fixed.heartbeatRunId) count++;
   if (filters.jobId && !fixed.jobId) count++;
-  if (filters.search) count++;
-  if (filters.from) count++;
-  if (filters.to) count++;
+  if (filters.search.trim()) count++;
+  if (filters.from.trim()) count++;
+  if (filters.to.trim()) count++;
   return count;
 }
 
