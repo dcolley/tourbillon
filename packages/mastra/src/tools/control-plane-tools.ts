@@ -366,6 +366,7 @@ export const sendToAgentTool = createTool({
     'Send a short message to another agent in your company. ' +
     'The recipient will be woken with your message. This is NOT operator chat, NOT a council, NOT an issue comment. ' +
     'Use for quick agent-to-agent coordination that does not require an issue. ' +
+    'In chat mode, do not use this unless the human clearly asks. ' +
     'Cannot send to yourself.',
   inputSchema: z.object({
     toAgentId: z.string().optional().describe('Agent UUID — use this OR toAgentUrlKey, not both'),
