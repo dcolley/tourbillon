@@ -30,6 +30,8 @@ const TOOLSET_SKILL_FILES: Record<string, string> = {
   'knowledge-graph': 'knowledge-graph-skills.md',
 };
 
+const AGENT_DM_SKILL_SLUG = 'agent-dm';
+
 // Sections only relevant to CEO/admin role — stripped for other agents
 const CEO_ONLY_SECTION_HEADERS = [
   '## Company Skills Workflow',
@@ -179,6 +181,17 @@ export async function loadSkillsForAgent(
       } else {
         merged.push(skill);
       }
+    }
+  }
+
+  // Auto-attach agent-dm skill when DMs are enabled (default: true)
+  const runtimeConfig = agentRecord.runtimeConfig as AgentRuntimeConfig;
+  const mailEnabled = runtimeConfig.mail?.enabled ?? true;
+  if (mailEnabled && !seen.has(AGENT_DM_SKILL_SLUG)) {
+    const dmSkill = await readSkillFile(AGENT_DM_SKILL_SLUG, agentRecord.role);
+    if (dmSkill) {
+      seen.add(dmSkill.slug);
+      merged.push(dmSkill);
     }
   }
 

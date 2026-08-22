@@ -112,6 +112,13 @@ export interface AgentRuntimeConfig {
     private?: boolean;
     company?: boolean;
   };
+  /**
+   * Direct messages to other agents (sendToAgent tool).
+   * When false, sendToAgent is unavailable. Default: true.
+   */
+  mail?: {
+    enabled?: boolean;
+  };
 }
 
 /** Company Observational Memory compaction model (Observer + Reflector). */
