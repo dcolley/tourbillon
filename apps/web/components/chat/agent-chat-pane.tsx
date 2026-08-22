@@ -109,6 +109,7 @@ export function AgentChatPane({
   layoutMode,
   onLayoutModeChange,
   onAgentSwitch,
+  activeCompanyId,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -121,6 +122,7 @@ export function AgentChatPane({
   layoutMode: ChatLayoutMode;
   onLayoutModeChange: (mode: ChatLayoutMode) => void;
   onAgentSwitch?: (agentId: string, agentName: string) => void;
+  activeCompanyId: string | null;
 }) {
   const session = useAgentChatSession({
     agentId,
@@ -130,6 +132,7 @@ export function AgentChatPane({
     contextId,
     contextTitle,
     onAgentSwitch,
+    activeCompanyId,
   });
 
   const bottomRef = useRef<HTMLDivElement>(null);
