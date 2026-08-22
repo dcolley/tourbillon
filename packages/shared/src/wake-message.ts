@@ -16,6 +16,15 @@ export function buildWakeMessage(data: HeartbeatJobData): string {
       parts.push(`Linked issue IDs: ${data.linkedIssueIds.join(', ')}`);
     }
   }
+  if (data.wakeReason === 'agent_mail') {
+    if (data.mailId) parts.push(`Mail ID: ${data.mailId}`);
+    if (data.mailFromAgentId) parts.push(`From agent ID: ${data.mailFromAgentId}`);
+    if (data.mailFromAgentName) parts.push(`From: ${data.mailFromAgentName}`);
+    if (data.mailBody) {
+      const body = data.mailBody.trim();
+      parts.push(`Message: ${body}`);
+    }
+  }
   if (data.wakePayloadJson) {
     try {
       const payload = JSON.parse(data.wakePayloadJson) as WakePayload;
@@ -48,6 +57,11 @@ export function buildWakeMessage(data: HeartbeatJobData): string {
       /* ignore malformed payload */
     }
   }
-  parts.push('\nBegin your heartbeat procedure. Follow SKILL: Control Plane Operations exactly.');
+  
+  // Agent mail wakes do NOT trigger the control-plane heartbeat ritual
+  if (data.wakeReason !== 'agent_mail') {
+    parts.push('\nBegin your heartbeat procedure. Follow SKILL: Control Plane Operations exactly.');
+  }
+  
   return parts.join('\n');
 }

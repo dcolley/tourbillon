@@ -11,7 +11,8 @@ export type WakeReason =
   | 'issue_blockers_resolved'
   | 'issue_children_completed'
   | 'approval_resolved'
-  | 'automation';
+  | 'automation'
+  | 'agent_mail';
 
 export interface HeartbeatJobData {
   agentId: string;
@@ -27,6 +28,11 @@ export interface HeartbeatJobData {
   approvalNote?: string;
   linkedIssueIds?: string[];
   wakePayloadJson?: string;
+  /** Agent mail data (agent_mail wakes). */
+  mailId?: string;
+  mailFromAgentId?: string;
+  mailFromAgentName?: string;
+  mailBody?: string;
 }
 
 // ─── API Types ─────────────────────────────────────────────────────────────

@@ -60,6 +60,7 @@ const CHAT_ALLOWED_TOOL_IDS = new Set([
   'getGoalDetail',
   'listProjects',
   'getProjectDetail',
+  'sendToAgent',
 ]);
 
 /** Toolsets that pull large MCP / search schemas — omit from chat assembly. */
