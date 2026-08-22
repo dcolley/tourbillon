@@ -96,7 +96,6 @@ When you wake with `wakeReason: agent_mail`:
 If your `runtimeConfig.mail.enabled` is `false`:
 - `sendToAgent` is **unavailable** (removed from your toolset) or will **hard-fail** with a clear error
 - You cannot send or reply to DMs
-- Incoming DMs are not delivered
 
 This applies in **both chat and heartbeat modes**. When DMs are off, you must use issues and comments for all coordination.
 

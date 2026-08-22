@@ -332,6 +332,7 @@ export async function updateAgentRuntimeConfig(
     heartbeat?: Partial<AgentRuntimeConfig['heartbeat']>;
     timeout?: Partial<AgentRuntimeConfig['timeout']>;
     model?: AgentRuntimeConfig['model'];
+    mail?: AgentRuntimeConfig['mail'];
   }
 ): Promise<Agent> {
   const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });

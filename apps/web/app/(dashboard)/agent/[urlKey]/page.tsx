@@ -836,7 +836,7 @@ export default async function AgentDetailPage({
             <span>Allow DMs</span>
           </label>
           <p className="text-xs text-muted-foreground -mt-2 pl-6">
-            When disabled, <code className="text-xs">sendToAgent</code> is removed from this agent&apos;s toolset and incoming DMs are not delivered.
+            When disabled, <code className="text-xs">sendToAgent</code> is removed from this agent&apos;s toolset.
           </p>
 
           <ActionSubmitButton label="Save DM settings" />
