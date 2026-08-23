@@ -9,6 +9,7 @@ export {
   chatContextFromTags,
   extractThreadTags,
   isReservedThreadMetadataKey,
+  invalidateChatControllerForAgent,
   ChatAgentError,
   type TourbillonChatController,
   type TourbillonChatSession,

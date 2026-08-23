@@ -37,6 +37,7 @@ import {
 } from '@tourbillon/shared/company-workspace';
 import { getActiveCompany } from './company';
 import { getDefaultLlmProviderRecord } from './llm-providers';
+import { invalidateChatControllerForAgent } from './chat';
 
 const AGENT_ROLES = ['ceo', 'cto', 'engineer', 'pm', 'qa', 'designer', 'custom'] as const;
 export type AgentRole = (typeof AGENT_ROLES)[number];
@@ -401,6 +402,8 @@ export async function updateAgentModelSettings(
     .set({ runtimeConfig, updatedAt: new Date() })
     .where(eq(agents.id, agentId))
     .returning();
+
+  invalidateChatControllerForAgent(agentId);
 
   return updated;
 }
@@ -867,6 +870,8 @@ export async function updateAgentModel(
     .set(patch)
     .where(eq(agents.id, agentId))
     .returning();
+
+  invalidateChatControllerForAgent(agentId);
 
   return updated;
 }

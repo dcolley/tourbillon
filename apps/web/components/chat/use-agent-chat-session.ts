@@ -503,6 +503,29 @@ export function useAgentChatSession(options: {
       .catch(() => undefined);
   }, [open, serverActiveCompanyId]);
 
+  const refetchAgents = useCallback(() => {
+    if (!open) return;
+    void fetch('/api/chat/agents')
+      .then(async (res) => {
+        if (!res.ok) return;
+        const data = (await res.json()) as { agents: ChatAgentOption[] };
+        setAgentOptions(data.agents ?? []);
+      })
+      .catch(() => undefined);
+  }, [open]);
+
+  // Refetch agent list when model settings are saved (cross-window communication).
+  useEffect(() => {
+    if (!open) return;
+    const handler = () => {
+      void refetchAgents();
+    };
+    window.addEventListener('tourbillon:agent-settings-saved', handler);
+    return () => {
+      window.removeEventListener('tourbillon:agent-settings-saved', handler);
+    };
+  }, [open, refetchAgents]);
+
 
   const selectThread = useCallback(
     async (tid: string) => {
