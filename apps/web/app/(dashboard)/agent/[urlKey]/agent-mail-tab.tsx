@@ -112,8 +112,25 @@ export function AgentMailTab({ agentId, companyId }: { agentId: string; companyI
 
   if (mails.length === 0) {
     return (
-      <div id="mail-tab-container" className="border rounded-lg p-8 text-center">
-        <p className="text-sm text-muted-foreground">No mail yet.</p>
+      <div id="mail-tab-container" className="border rounded-lg divide-y">
+        <div className="p-4 flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-semibold">Agent Mail</h3>
+            <p className="text-xs text-muted-foreground mt-1">
+              Recent sent and received messages
+            </p>
+          </div>
+          <button
+            onClick={handleRefresh}
+            disabled={loading}
+            className="rounded-md border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+          >
+            {loading ? 'Refreshing...' : 'Refresh'}
+          </button>
+        </div>
+        <div className="p-8 text-center">
+          <p className="text-sm text-muted-foreground">No mail yet.</p>
+        </div>
       </div>
     );
   }

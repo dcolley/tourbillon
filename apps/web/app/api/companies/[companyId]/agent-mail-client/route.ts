@@ -1,6 +1,8 @@
+import { cookies } from 'next/headers';
 import { NextRequest, NextResponse } from 'next/server';
 import { db, agentMail, agents } from '@tourbillon/db';
 import { eq, or, and, desc, inArray } from 'drizzle-orm';
+import { ACTIVE_COMPANY_COOKIE } from '@/lib/company';
 
 export async function GET(
   req: NextRequest,
@@ -13,6 +15,24 @@ export async function GET(
 
   if (!agentId) {
     return NextResponse.json({ error: 'agentId query parameter required' }, { status: 400 });
+  }
+
+  // Verify active company matches requested company
+  const cookieStore = await cookies();
+  const activeCompanyId = cookieStore.get(ACTIVE_COMPANY_COOKIE)?.value;
+  if (!activeCompanyId) {
+    return NextResponse.json({ error: 'No active company' }, { status: 401 });
+  }
+  if (activeCompanyId !== companyId) {
+    return NextResponse.json({ error: 'Company mismatch' }, { status: 403 });
+  }
+
+  // Verify agent belongs to this company
+  const agent = await db.query.agents.findFirst({
+    where: and(eq(agents.id, agentId), eq(agents.companyId, companyId)),
+  });
+  if (!agent) {
+    return NextResponse.json({ error: 'Agent not found or does not belong to this company' }, { status: 404 });
   }
 
   // Get sent and received mail
