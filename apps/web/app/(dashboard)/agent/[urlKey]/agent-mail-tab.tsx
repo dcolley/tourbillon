@@ -1,48 +1,161 @@
-import { db, agentMail, agents } from '@tourbillon/db';
-import { eq, or, inArray, desc } from 'drizzle-orm';
+'use client';
 
-export async function AgentMailTab({ agentId }: { agentId: string }) {
-  const mails = await db
-    .select()
-    .from(agentMail)
-    .where(or(eq(agentMail.fromAgentId, agentId), eq(agentMail.toAgentId, agentId)))
-    .orderBy(desc(agentMail.createdAt))
-    .limit(50);
+import { useEffect, useState, useRef } from 'react';
 
-  if (mails.length === 0) {
+type AgentMail = {
+  id: string;
+  companyId: string;
+  fromAgentId: string;
+  toAgentId: string;
+  body: string;
+  inReplyTo: string | null;
+  createdAt: string;
+  fromAgent?: { id: string; name: string; urlKey: string };
+  toAgent?: { id: string; name: string; urlKey: string };
+};
+
+type MailResponse = {
+  mails: AgentMail[];
+};
+
+export function AgentMailTab({ agentId, companyId }: { agentId: string; companyId: string }) {
+  const [mails, setMails] = useState<AgentMail[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [isVisible, setIsVisible] = useState(true);
+  const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  const fetchMails = async () => {
+    try {
+      const response = await fetch(`/api/companies/${companyId}/agent-mail-client?agentId=${agentId}`);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const data: MailResponse = await response.json();
+      setMails(data.mails);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load mail');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRefresh = () => {
+    setLoading(true);
+    fetchMails();
+  };
+
+  useEffect(() => {
+    fetchMails();
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        setIsVisible(entry?.isIntersecting ?? false);
+      },
+      { threshold: 0 }
+    );
+
+    const element = document.getElementById('mail-tab-container');
+    if (element) {
+      observer.observe(element);
+    }
+
+    return () => {
+      if (element) {
+        observer.disconnect();
+      }
+    };
+  }, [agentId, companyId]);
+
+  useEffect(() => {
+    if (isVisible) {
+      pollIntervalRef.current = setInterval(() => {
+        fetchMails();
+      }, 5000);
+    } else {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
+    }
+
+    return () => {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
+    };
+  }, [isVisible, agentId, companyId]);
+
+  if (loading && mails.length === 0) {
     return (
-      <div className="border rounded-lg p-8 text-center">
-        <p className="text-sm text-muted-foreground">No mail yet.</p>
+      <div id="mail-tab-container" className="border rounded-lg p-8 text-center">
+        <p className="text-sm text-muted-foreground">Loading mail...</p>
       </div>
     );
   }
 
-  // Fetch all relevant agents
-  const agentIds = new Set<string>();
-  for (const mail of mails) {
-    agentIds.add(mail.fromAgentId);
-    agentIds.add(mail.toAgentId);
+  if (error) {
+    return (
+      <div id="mail-tab-container" className="border rounded-lg p-8 text-center">
+        <p className="text-sm text-destructive">{error}</p>
+        <button
+          onClick={handleRefresh}
+          className="mt-4 rounded-md border px-3 py-1.5 text-sm hover:bg-muted"
+        >
+          Retry
+        </button>
+      </div>
+    );
   }
-  const agentList = await db
-    .select({ id: agents.id, name: agents.name, urlKey: agents.urlKey })
-    .from(agents)
-    .where(inArray(agents.id, Array.from(agentIds)));
-  
-  const agentMap = new Map(agentList.map(a => [a.id, a]));
+
+  if (mails.length === 0) {
+    return (
+      <div id="mail-tab-container" className="border rounded-lg divide-y">
+        <div className="p-4 flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-semibold">Agent Mail</h3>
+            <p className="text-xs text-muted-foreground mt-1">
+              Recent sent and received messages
+            </p>
+          </div>
+          <button
+            onClick={handleRefresh}
+            disabled={loading}
+            className="rounded-md border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+          >
+            {loading ? 'Refreshing...' : 'Refresh'}
+          </button>
+        </div>
+        <div className="p-8 text-center">
+          <p className="text-sm text-muted-foreground">No mail yet.</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="border rounded-lg divide-y">
-      <div className="p-4">
-        <h3 className="text-sm font-semibold">Agent Mail</h3>
-        <p className="text-xs text-muted-foreground mt-1">
-          Recent sent and received messages
-        </p>
+    <div id="mail-tab-container" className="border rounded-lg divide-y">
+      <div className="p-4 flex items-center justify-between">
+        <div>
+          <h3 className="text-sm font-semibold">Agent Mail</h3>
+          <p className="text-xs text-muted-foreground mt-1">
+            Recent sent and received messages
+          </p>
+        </div>
+        <button
+          onClick={handleRefresh}
+          disabled={loading}
+          className="rounded-md border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+        >
+          {loading ? 'Refreshing...' : 'Refresh'}
+        </button>
       </div>
       <div className="divide-y">
         {mails.map((mail) => {
           const isSent = mail.fromAgentId === agentId;
-          const otherAgentId = isSent ? mail.toAgentId : mail.fromAgentId;
-          const otherAgent = agentMap.get(otherAgentId);
+          const otherAgent = isSent ? mail.toAgent : mail.fromAgent;
           
           return (
             <div key={mail.id} className="p-4 space-y-2">
@@ -54,8 +167,8 @@ export async function AgentMailTab({ agentId }: { agentId: string }) {
                     </span>
                     <span>{otherAgent?.name || 'Unknown'}</span>
                     <span className="text-muted-foreground/50">•</span>
-                    <time dateTime={mail.createdAt.toISOString()}>
-                      {mail.createdAt.toLocaleString()}
+                    <time dateTime={mail.createdAt}>
+                      {new Date(mail.createdAt).toLocaleString()}
                     </time>
                   </div>
                   <p className="text-sm whitespace-pre-wrap">{mail.body}</p>

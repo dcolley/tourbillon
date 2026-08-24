@@ -61,6 +61,7 @@ const CHAT_ALLOWED_TOOL_IDS = new Set([
   'listProjects',
   'getProjectDetail',
   'sendToAgent',
+  'getMessages',
 ]);
 
 /** Toolsets that pull large MCP / search schemas — omit from chat assembly. */
@@ -85,6 +86,7 @@ Rules:
 - Do **not** run the control-plane heartbeat procedure (no inbox scan, checkout, or EXIT ritual).
 - Do **not** mutate issues, goals, or projects unless the human clearly asks — prefer explaining and drafting.
 - Do **not** sendToAgent / send mail unless the human clearly asks.
+- You **may** read mail via \`getMessages\` when the human asks about your messages, or after you send a DM you are waiting on.
 - If the human wants autonomous work done, suggest assigning an issue or using Wake / Run heartbeat.
 - When methodology is needed, call \`getSkill(slug)\` first.
 - Stay in the conversation; do not end with "EXIT".

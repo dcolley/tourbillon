@@ -391,6 +391,37 @@ export const sendToAgentTool = createTool({
   },
 });
 
+export const getMessagesTool = createTool({
+  id: 'getMessages',
+  description:
+    'Read recent direct messages (DMs) sent to and from you. ' +
+    'Returns the last 50 messages with sender/recipient info, body, time, and IDs. ' +
+    'In chat mode, you may read mail when the human asks about messages, or after you send a DM you are waiting on. ' +
+    'In heartbeat mode, use this to check for replies after sending a DM, or when woken with wakeReason: agent_mail. ' +
+    'Do not call this reflexively — only when you need to read mail.',
+  inputSchema: z.object({
+    limit: z.number().optional().describe('Max messages to return (default 50, max 100)'),
+  }),
+  execute: async (inputData, { requestContext }) => {
+    const { companyId, agentId } = extractToolRuntimeContext(requestContext);
+    if (!companyId) {
+      return { error: 'missing_company', message: 'companyId not present in tool runtime context' };
+    }
+    if (!agentId) {
+      return { error: 'missing_agent', message: 'agentId not present in tool runtime context' };
+    }
+    const limit = inputData.limit ? Math.min(inputData.limit, 100) : 50;
+    const res = await tracedAgentFetch(
+      'getMessages',
+      requestContext,
+      `/api/companies/${companyId}/agent-mail?agentId=${agentId}&limit=${limit}`,
+      { method: 'GET' }
+    );
+    if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
+    return res.json();
+  },
+});
+
 export const CONTROL_PLANE_TOOLS = {
   getDateTimeTool,
   getIdentityTool,
@@ -405,5 +436,6 @@ export const CONTROL_PLANE_TOOLS = {
   deleteWorkspaceFileTool,
   createSubtaskTool,
   sendToAgentTool,
+  getMessagesTool,
   ...SKILL_TOOLS,
 };
