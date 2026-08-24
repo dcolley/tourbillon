@@ -244,6 +244,54 @@ export async function updateCompanyObservationalMemory(
   return updated;
 }
 
+export async function updateCompanyHitlyGate(
+  companyId: string,
+  input: {
+    enabled: boolean;
+    baseUrl?: string;
+    projectId?: string;
+    apiKey?: string;
+    types?: string[];
+    clearApiKey?: boolean;
+  },
+): Promise<Company> {
+  const company = await db.query.companies.findFirst({ where: eq(companies.id, companyId) });
+  if (!company) throw new Error('Company not found.');
+
+  if (input.enabled) {
+    const baseUrl = input.baseUrl?.trim();
+    const projectId = input.projectId?.trim();
+    if (!baseUrl) throw new Error('HITLy base URL is required when the gate is enabled.');
+    if (!projectId) throw new Error('HITLy project ID is required when the gate is enabled.');
+    if (!input.clearApiKey && !input.apiKey?.trim()) {
+      const current = parseCompanySettings(company.settings);
+      if (!current.hitlyGate?.apiKey) {
+        throw new Error('HITLy API key is required when the gate is enabled.');
+      }
+    }
+  }
+
+  const current = parseCompanySettings(company.settings);
+  const settings = mergeCompanySettings(company.settings, {
+    hitlyGate: {
+      enabled: input.enabled,
+      baseUrl: input.baseUrl?.trim() || undefined,
+      projectId: input.projectId?.trim() || undefined,
+      apiKey: input.clearApiKey ? '' : (input.apiKey?.trim() || current.hitlyGate?.apiKey || ''),
+      types: input.types && input.types.length > 0 ? input.types : undefined,
+    },
+  });
+
+  const [updated] = await db
+    .update(companies)
+    .set({ settings, updatedAt: new Date() })
+    .where(eq(companies.id, companyId))
+    .returning();
+
+  if (!updated) throw new Error('Company not found.');
+  return updated;
+}
+
 export function assertCompanyAccess(entityCompanyId: string, activeCompanyId: string): void {
   if (entityCompanyId !== activeCompanyId) {
     throw new ActiveCompanyError('This resource belongs to a different company.');

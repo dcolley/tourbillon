@@ -5,6 +5,7 @@ import {
   updateCompanySettings,
   updateCompanyIntegrations,
   updateCompanyObservationalMemory,
+  updateCompanyHitlyGate,
 } from '@/lib/company';
 import {
   getExecutionWorkspaceRoot,
@@ -13,6 +14,7 @@ import {
   parseCompanySettings,
   isSearxngConfigured,
   isTavilyConfigured,
+  isHitlyGateConfigured,
   resolveObservationalMemoryModel,
 } from '@tourbillon/shared';
 import { LlmProvidersSettings } from '@/components/llm-providers-settings';
@@ -82,6 +84,27 @@ async function saveObservationalMemory(
   }
 }
 
+async function saveHitlyGate(formData: FormData) {
+  'use server';
+
+  const company = await getActiveCompany();
+
+  try {
+    await updateCompanyHitlyGate(company.id, {
+      enabled: formData.get('enabled') === 'on',
+      baseUrl: (formData.get('baseUrl') as string) || undefined,
+      projectId: (formData.get('projectId') as string) || undefined,
+      apiKey: (formData.get('apiKey') as string) || undefined,
+      clearApiKey: formData.get('clearApiKey') === 'on',
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to save HITLy gate settings.';
+    redirect(`/settings?error=${encodeURIComponent(message)}`);
+  }
+
+  redirect('/settings?saved=hitly');
+}
+
 function isConfigured(value: string | undefined, envFallback?: string): boolean {
   return Boolean(value?.trim() || envFallback?.trim());
 }
@@ -135,6 +158,7 @@ export default async function SettingsPage({
   );
   const searxngConfigured = isSearxngConfigured(integrationSettings);
   const tavilyConfigured = isTavilyConfigured(integrationSettings);
+  const hitlyGateConfigured = isHitlyGateConfigured(integrationSettings);
 
   return (
     <div className="p-6 max-w-3xl space-y-8">
@@ -152,6 +176,12 @@ export default async function SettingsPage({
       {saved === 'integrations' && (
         <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
           Integration settings saved.
+        </div>
+      )}
+
+      {saved === 'hitly' && (
+        <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
+          HITLy gate settings saved.
         </div>
       )}
 
@@ -344,6 +374,96 @@ export default async function SettingsPage({
             className="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
           >
             Save integrations
+          </button>
+        </form>
+      </section>
+
+      <section className="space-y-4">
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="text-lg font-semibold">HITLy Approval Gate</h2>
+          <span
+            className={`text-xs rounded px-2 py-0.5 ${hitlyGateConfigured ? 'bg-green-100 text-green-800' : 'bg-muted text-muted-foreground'}`}
+          >
+            {hitlyGateConfigured ? 'Enabled' : 'Off'}
+          </span>
+        </div>
+        <p className="text-sm text-muted-foreground">
+          When enabled, new approvals from <code className="text-xs">createApproval</code> also open a HITLy work item.
+          The approval stays pending until HITLy decides, then we apply the decision here.
+          If disabled, approvals use the in-app Approvals page only.
+        </p>
+        <form action={saveHitlyGate} className="space-y-4 border rounded-lg p-4">
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              name="enabled"
+              defaultChecked={integrationSettings.hitlyGate?.enabled === true}
+              className="rounded border-input"
+            />
+            <span className="font-medium">Send approvals to HITLy</span>
+          </label>
+
+          <div className="space-y-2">
+            <label htmlFor="hitlyBaseUrl" className="text-sm font-medium">
+              HITLy base URL
+            </label>
+            <input
+              id="hitlyBaseUrl"
+              name="baseUrl"
+              type="url"
+              defaultValue={integrationSettings.hitlyGate?.baseUrl ?? ''}
+              placeholder="http://localhost:3001"
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+            />
+            <p className="text-xs text-muted-foreground">
+              Base URL only (no trailing slash). Example: <code className="text-xs">http://localhost:3001</code>
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <label htmlFor="hitlyProjectId" className="text-sm font-medium">
+              HITLy project ID
+            </label>
+            <input
+              id="hitlyProjectId"
+              name="projectId"
+              type="text"
+              defaultValue={integrationSettings.hitlyGate?.projectId ?? ''}
+              placeholder="prj_..."
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+            />
+            <p className="text-xs text-muted-foreground">
+              Project ID from HITLy (e.g. <code className="text-xs">prj_abc123</code>)
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <label htmlFor="hitlyApiKey" className="text-sm font-medium">
+              HITLy API key
+            </label>
+            <input
+              id="hitlyApiKey"
+              name="apiKey"
+              type="password"
+              placeholder={integrationSettings.hitlyGate?.apiKey ? '••••••••' : 'Project API key'}
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+            />
+            {integrationSettings.hitlyGate?.apiKey && (
+              <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                <input type="checkbox" name="clearApiKey" className="rounded border-input" />
+                Clear stored key
+              </label>
+            )}
+            <p className="text-xs text-muted-foreground">
+              HITLy project API key (used for ingest authorization)
+            </p>
+          </div>
+
+          <button
+            type="submit"
+            className="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+          >
+            Save HITLy gate settings
           </button>
         </form>
       </section>

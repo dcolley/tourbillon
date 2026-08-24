@@ -131,6 +131,20 @@ export interface ObservationalMemorySettings {
   modelId?: string;
 }
 
+/** HITLy approval gate settings. */
+export interface HitlyGateSettings {
+  /** When true, new approvals POST to HITLy. */
+  enabled?: boolean;
+  /** HITLy base URL (e.g. http://localhost:3001). */
+  baseUrl?: string;
+  /** HITLy project ID (e.g. prj_...). */
+  projectId?: string;
+  /** HITLy project API key (ingest Bearer token). */
+  apiKey?: string;
+  /** Optional approval types to forward (default: all types). */
+  types?: string[];
+}
+
 /** Company-level integration settings stored in companies.settings jsonb. */
 export interface CompanySettings {
   mcpCredentials?: Record<string, string>;
@@ -138,6 +152,7 @@ export interface CompanySettings {
   searxngApiKey?: string;
   tavilyApiKey?: string;
   observationalMemory?: ObservationalMemorySettings;
+  hitlyGate?: HitlyGateSettings;
 }
 
 export const DEFAULT_RUNTIME_CONFIG: AgentRuntimeConfig = {

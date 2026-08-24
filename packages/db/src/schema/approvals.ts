@@ -14,6 +14,8 @@ export const approvals = pgTable('approvals', {
   payload: jsonb('payload').notNull().default({}),
   note: text('note'),  // board's decision note
   decidedAt: timestamp('decided_at'),
+  hitlyApprovalId: text('hitly_approval_id'),  // HITLy work item id
+  hitlyError: text('hitly_error'),  // HITLy ingest/resume error message
   createdAt: timestamp('created_at').notNull().defaultNow(),
   updatedAt: timestamp('updated_at').notNull().defaultNow(),
 });

@@ -1,6 +1,7 @@
 import type {
   AgentRuntimeConfig,
   CompanySettings,
+  HitlyGateSettings,
   ObservationalMemorySettings,
 } from './types';
 
@@ -31,6 +32,27 @@ function parseObservationalMemorySettings(raw: unknown): ObservationalMemorySett
   };
 }
 
+function parseHitlyGateSettings(raw: unknown): HitlyGateSettings | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const record = raw as Record<string, unknown>;
+  const enabled = record.enabled === true;
+  const baseUrl = typeof record.baseUrl === 'string' ? record.baseUrl.trim() || undefined : undefined;
+  const projectId = typeof record.projectId === 'string' ? record.projectId.trim() || undefined : undefined;
+  const apiKey = typeof record.apiKey === 'string' ? record.apiKey.trim() || undefined : undefined;
+  const types = Array.isArray(record.types)
+    ? record.types.filter((t): t is string => typeof t === 'string' && t.trim().length > 0)
+    : undefined;
+  
+  if (!enabled && !baseUrl && !projectId && !apiKey && !types) return undefined;
+  return {
+    enabled,
+    ...(baseUrl ? { baseUrl } : {}),
+    ...(projectId ? { projectId } : {}),
+    ...(apiKey ? { apiKey } : {}),
+    ...(types && types.length > 0 ? { types } : {}),
+  };
+}
+
 export function parseCompanySettings(raw: unknown): CompanySettings {
   if (!raw || typeof raw !== 'object') return {};
   const record = raw as Record<string, unknown>;
@@ -42,6 +64,7 @@ export function parseCompanySettings(raw: unknown): CompanySettings {
     tavilyApiKey:
       typeof record.tavilyApiKey === 'string' ? record.tavilyApiKey.trim() || undefined : undefined,
     observationalMemory: parseObservationalMemorySettings(record.observationalMemory),
+    hitlyGate: parseHitlyGateSettings(record.hitlyGate),
   };
 }
 
@@ -78,6 +101,16 @@ export function mergeCompanySettings(
       enabled: om.enabled === true,
       ...(om.providerId?.trim() ? { providerId: om.providerId.trim() } : {}),
       ...(om.modelId?.trim() ? { modelId: om.modelId.trim() } : {}),
+    };
+  }
+  if (patch.hitlyGate !== undefined) {
+    const hg = patch.hitlyGate;
+    next.hitlyGate = {
+      enabled: hg.enabled === true,
+      ...(hg.baseUrl?.trim() ? { baseUrl: hg.baseUrl.trim() } : {}),
+      ...(hg.projectId?.trim() ? { projectId: hg.projectId.trim() } : {}),
+      ...(hg.apiKey?.trim() ? { apiKey: hg.apiKey.trim() } : {}),
+      ...(hg.types && hg.types.length > 0 ? { types: hg.types } : {}),
     };
   }
 
@@ -162,4 +195,28 @@ export function isTavilyConfigured(
   agentRuntime?: AgentRuntimeConfig | null,
 ): boolean {
   return resolveTavilyApiKey(companySettings, agentRuntime) !== null;
+}
+
+export function resolveHitlyGate(
+  companySettings?: CompanySettings | null,
+): HitlyGateSettings | null {
+  const hg = companySettings?.hitlyGate;
+  if (!hg?.enabled) return null;
+  const baseUrl = hg.baseUrl?.trim();
+  const projectId = hg.projectId?.trim();
+  const apiKey = hg.apiKey?.trim();
+  if (!baseUrl || !projectId || !apiKey) return null;
+  return {
+    enabled: true,
+    baseUrl: baseUrl.replace(/\/+$/, ''),
+    projectId,
+    apiKey,
+    ...(hg.types && hg.types.length > 0 ? { types: hg.types } : {}),
+  };
+}
+
+export function isHitlyGateConfigured(
+  companySettings?: CompanySettings | null,
+): boolean {
+  return resolveHitlyGate(companySettings) !== null;
 }
