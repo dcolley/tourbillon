@@ -152,9 +152,11 @@ export async function POST(
       try {
         const resumeToken = generateResumeToken();
         const resumeUrl = new URL(
-          `/api/approvals/${approval.id}/hitly-resume/${resumeToken}`,
+          `/api/approvals/${approval.id}/hitly-resume`,
           req.url,
-        ).toString();
+        );
+        resumeUrl.searchParams.set('token', resumeToken);
+        const resumeUrlString = resumeUrl.toString();
 
         const approvalUrl = new URL(`/approval`, req.url).toString();
         
@@ -180,7 +182,7 @@ export async function POST(
             approvalId: approval.id,
             issueIds: approval.issueIds,
           },
-          resumeUrl,
+          resumeUrl: resumeUrlString,
           args: basePayload,
           externalUrls: [
             {

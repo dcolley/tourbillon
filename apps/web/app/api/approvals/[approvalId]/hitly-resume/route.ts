@@ -14,11 +14,19 @@ type ApprovalPayload = Record<string, unknown> & {
 
 export async function POST(
   req: NextRequest,
-  { params }: { params: Promise<{ approvalId: string; token: string }> }
+  { params }: { params: Promise<{ approvalId: string }> }
 ) {
-  const { approvalId, token } = await params;
+  const { approvalId } = await params;
 
-  // This route is called by HITLy via the resumeUrl callback
+  // This route is called by HITLy via the resumeUrl callback (unsigned POST)
+  // Token is in query string, not Authorization header
+  const { searchParams } = new URL(req.url);
+  const token = searchParams.get('token');
+
+  if (!token) {
+    return NextResponse.json({ error: 'Missing token' }, { status: 400 });
+  }
+
   const body = (await req.json()) as HitlyResumePayload;
   const { decision, metadata, id: hitlyId } = body;
 
