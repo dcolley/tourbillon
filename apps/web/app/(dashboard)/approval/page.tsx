@@ -86,6 +86,11 @@ export default async function ApprovalsPage() {
                           ? ` · ${approval.issueIds.length} linked issue${approval.issueIds.length === 1 ? '' : 's'}`
                           : ''}
                       </p>
+                      {approval.hitlyApprovalId && (
+                        <p className="text-xs text-muted-foreground">
+                          Sent to HITLy · <span className="font-mono">{approval.hitlyApprovalId}</span>
+                        </p>
+                      )}
                       {approval.note ? (
                         <p className="mt-1 text-sm text-muted-foreground">{approval.note}</p>
                       ) : null}
@@ -107,7 +112,15 @@ function ApprovalCard({
   agent,
   linkedIssues,
 }: {
-  approval: { id: string; type: string; payload: unknown; createdAt: Date; issueIds: string[] };
+  approval: {
+    id: string;
+    type: string;
+    payload: unknown;
+    createdAt: Date;
+    issueIds: string[];
+    hitlyApprovalId: string | null;
+    hitlyError: string | null;
+  };
   agent: { name: string } | null;
   linkedIssues: Array<{
     id: string;
@@ -127,6 +140,16 @@ function ApprovalCard({
               Requested by {agent?.name ?? 'Unknown agent'} ·{' '}
               {new Date(approval.createdAt).toLocaleDateString()}
             </p>
+            {approval.hitlyApprovalId && (
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                Sent to HITLy · <span className="font-mono">{approval.hitlyApprovalId}</span>
+              </p>
+            )}
+            {approval.hitlyError && (
+              <p className="mt-0.5 text-xs text-destructive">
+                HITLy ingest error: {approval.hitlyError}
+              </p>
+            )}
           </div>
           <StatusBadge status="pending" />
         </div>
