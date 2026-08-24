@@ -1,13 +1,20 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db, approvals, issues, activityLog, type IssueStatus } from '@tourbillon/db';
+import { db, approvals, issues, activityLog, companies, type IssueStatus } from '@tourbillon/db';
 import { and, eq, inArray } from 'drizzle-orm';
 import { validateRunToken } from '@/lib/auth/run-token';
+import { parseCompanySettings, resolveHitlyGate } from '@tourbillon/shared';
+import { ingestHitlyApproval, type HitlyIngestPayload } from '@/lib/hitly/client';
+import { randomBytes } from 'crypto';
 
 type ApprovalPayload = Record<string, unknown> & {
   title?: string;
   summary?: string;
   priorStatuses?: Record<string, IssueStatus>;
 };
+
+function generateResumeToken(): string {
+  return randomBytes(32).toString('base64url');
+}
 
 export async function POST(
   req: NextRequest,
@@ -34,6 +41,24 @@ export async function POST(
       : {};
 
   try {
+    // Load company settings to check HITLy gate
+    const company = await db.query.companies.findFirst({
+      where: eq(companies.id, companyId),
+    });
+    
+    if (!company) {
+      return NextResponse.json({ error: 'Company not found' }, { status: 404 });
+    }
+
+    const settings = parseCompanySettings(company.settings);
+    const hitlyGate = resolveHitlyGate(settings);
+    
+    // Check if this approval type should be forwarded to HITLy
+    const shouldForwardToHitly =
+      hitlyGate &&
+      hitlyGate.enabled &&
+      (!hitlyGate.types || hitlyGate.types.length === 0 || hitlyGate.types.includes(body.type));
+
     const approval = await db.transaction(async (tx) => {
       const priorStatuses: Record<string, IssueStatus> = {};
 
@@ -121,6 +146,83 @@ export async function POST(
 
       return created;
     });
+
+    // Forward to HITLy if gate is enabled
+    if (shouldForwardToHitly && hitlyGate) {
+      try {
+        const resumeToken = generateResumeToken();
+        const resumeUrl = new URL(
+          `/api/approvals/${approval.id}/hitly-resume`,
+          hitlyGate.resumeHost,
+        );
+        resumeUrl.searchParams.set('token', resumeToken);
+        const resumeUrlString = resumeUrl.toString();
+
+        const approvalUrl = new URL(`/approval`, req.url).toString();
+        
+        const title = typeof basePayload.title === 'string' ? basePayload.title : approval.type;
+        const summary = typeof basePayload.summary === 'string' ? basePayload.summary : '';
+        
+        const contextMarkdown = [
+          `# ${title}`,
+          summary,
+          issueIds.length > 0 ? `\n**Linked Issues:** ${issueIds.length}` : '',
+        ]
+          .filter(Boolean)
+          .join('\n\n');
+
+        const hitlyPayload: HitlyIngestPayload = {
+          plugin: 'http',
+          projectId: hitlyGate.projectId!,
+          runId: approval.id,
+          actionName: approval.type,
+          contextMarkdown,
+          metadata: {
+            companyId: approval.companyId,
+            approvalId: approval.id,
+            issueIds: approval.issueIds,
+          },
+          resumeUrl: resumeUrlString,
+          args: basePayload,
+          externalUrls: [
+            {
+              url: approvalUrl,
+              label: 'View in Tourbillon',
+            },
+          ],
+        };
+
+        const hitlyApprovalId = await ingestHitlyApproval(hitlyGate, hitlyPayload, approval.id);
+
+        // Store HITLy approval id and resume token
+        const currentPayload = approval.payload as Record<string, unknown>;
+        await db
+          .update(approvals)
+          .set({
+            hitlyApprovalId,
+            payload: { ...currentPayload, hitlyResumeToken: resumeToken },
+            updatedAt: new Date(),
+          })
+          .where(eq(approvals.id, approval.id));
+
+        approval.hitlyApprovalId = hitlyApprovalId;
+      } catch (hitlyErr: unknown) {
+        // Fail-closed: store error but keep approval pending
+        const errorMsg =
+          hitlyErr instanceof Error ? hitlyErr.message : 'Unknown HITLy ingest error';
+        console.error('[createApproval] HITLy ingest failed:', errorMsg);
+
+        await db
+          .update(approvals)
+          .set({
+            hitlyError: errorMsg,
+            updatedAt: new Date(),
+          })
+          .where(eq(approvals.id, approval.id));
+
+        approval.hitlyError = errorMsg;
+      }
+    }
 
     return NextResponse.json(approval, { status: 201 });
   } catch (err: unknown) {
