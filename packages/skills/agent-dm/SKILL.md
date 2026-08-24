@@ -78,10 +78,46 @@ Agent (working on issue):
 
 ---
 
-## §4 — How to Handle Incoming DMs
+## §4 — How to Read Your Mail
+
+Use `getMessages()` to read recent DMs (sent and received, up to 50 messages by default).
+
+**When to read mail:**
+- **Chat mode:** When the human asks about your messages ("what did COO say?", "do I have any DMs?"), or after you send a DM you are waiting on
+- **Heartbeat mode:** When you wake with `wakeReason: agent_mail`, or after you send a DM and need to check for a reply
+
+**What you get back:**
+- Array of mail records with `id`, `fromAgentId`, `toAgentId`, `body`, `createdAt`, `inReplyTo`, and agent details (`fromAgent`, `toAgent` with `name`, `urlKey`)
+
+### Example (chat mode)
+
+```
+Human: "What did the COO say?"
+
+Agent:
+1. Calls getMessages()
+2. Finds COO's latest message: "Budget approved for Q1 hiring"
+3. Responds to human: "The COO said: 'Budget approved for Q1 hiring' (received 2 hours ago)"
+```
+
+### Example (heartbeat mode)
+
+```
+Agent (wakes with wakeReason: agent_mail):
+1. Calls getMessages()
+2. Finds the mail from the wake: mailId matches the most recent message
+3. Reads body: "Is the API deployment complete?"
+4. Replies: sendToAgent({ toAgentId: mailFromAgentId, body: "Yes, deployed to prod at 14:30 UTC.", inReplyTo: mailId })
+5. EXIT
+```
+
+---
+
+## §5 — How to Handle Incoming DMs
 
 When you wake with `wakeReason: agent_mail`:
 - The wake payload includes `mailId`, `mailFromAgentId`, `mailFromAgentName`, and `mailBody`
+- **Always call `getMessages()` first** to see the full mail thread (the wake payload only includes the body of the triggering message)
 - Read the message, then decide:
   - **Reply** → `sendToAgent({ toAgentId: mailFromAgentId, body: "...", inReplyTo: mailId })`
   - **No reply needed** → just EXIT
@@ -91,28 +127,30 @@ When you wake with `wakeReason: agent_mail`:
 
 ---
 
-## §5 — When DMs Are Disabled
+## §6 — When DMs Are Disabled
 
 If your `runtimeConfig.mail.enabled` is `false`:
 - `sendToAgent` is **unavailable** (removed from your toolset) or will **hard-fail** with a clear error
 - You cannot send or reply to DMs
+- `getMessages` may still be available (to see mail you already have), but you cannot send new messages
 
 This applies in **both chat and heartbeat modes**. When DMs are off, you must use issues and comments for all coordination.
 
 ---
 
-## §6 — Rules
+## §7 — Rules
 
-- **Chat mode:** Only send a DM if the human clearly asks you to contact an agent
-- **Heartbeat mode:** Send DMs when work requires quick coordination (unless disabled)
+- **Chat mode:** Only send a DM if the human clearly asks you to contact an agent; you may read mail when asked or after sending a DM
+- **Heartbeat mode:** Send DMs when work requires quick coordination (unless disabled); use `getMessages` to check for replies
 - **Never** send a DM to yourself
 - **Never** treat a DM as a substitute for formal task delegation (`createSubtask`) or board approval (`createApproval`)
 - **Never** loop or poll waiting for a reply — a response (if any) arrives as a later wake
 - **Never** answer the human operator as if you are relaying a message from another agent — if they say "ask CEO", use `sendToAgent`, don't pretend to be the CEO
+- **Always** call `getMessages()` after you send a DM you are waiting on, or when you wake with `wakeReason: agent_mail`
 
 ---
 
-## §7 — The Operator Is Not Another Agent
+## §8 — The Operator Is Not Another Agent
 
 **Critical distinction:** The human in dashboard chat is **not** another agent.
 

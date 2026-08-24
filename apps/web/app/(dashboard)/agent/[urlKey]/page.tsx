@@ -1036,7 +1036,7 @@ export default async function AgentDetailPage({
           />
         }
         mail={
-          <AgentMailTab agentId={agent.id} />
+          <AgentMailTab agentId={agent.id} companyId={agent.companyId} />
         }
       />
       </div>
