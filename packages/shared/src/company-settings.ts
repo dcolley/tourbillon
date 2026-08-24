@@ -37,16 +37,18 @@ function parseHitlyGateSettings(raw: unknown): HitlyGateSettings | undefined {
   const record = raw as Record<string, unknown>;
   const enabled = record.enabled === true;
   const baseUrl = typeof record.baseUrl === 'string' ? record.baseUrl.trim() || undefined : undefined;
+  const resumeHost = typeof record.resumeHost === 'string' ? record.resumeHost.trim() || undefined : undefined;
   const projectId = typeof record.projectId === 'string' ? record.projectId.trim() || undefined : undefined;
   const apiKey = typeof record.apiKey === 'string' ? record.apiKey.trim() || undefined : undefined;
   const types = Array.isArray(record.types)
     ? record.types.filter((t): t is string => typeof t === 'string' && t.trim().length > 0)
     : undefined;
   
-  if (!enabled && !baseUrl && !projectId && !apiKey && !types) return undefined;
+  if (!enabled && !baseUrl && !resumeHost && !projectId && !apiKey && !types) return undefined;
   return {
     enabled,
     ...(baseUrl ? { baseUrl } : {}),
+    ...(resumeHost ? { resumeHost } : {}),
     ...(projectId ? { projectId } : {}),
     ...(apiKey ? { apiKey } : {}),
     ...(types && types.length > 0 ? { types } : {}),
@@ -108,6 +110,7 @@ export function mergeCompanySettings(
     next.hitlyGate = {
       enabled: hg.enabled === true,
       ...(hg.baseUrl?.trim() ? { baseUrl: hg.baseUrl.trim() } : {}),
+      ...(hg.resumeHost?.trim() ? { resumeHost: hg.resumeHost.trim() } : {}),
       ...(hg.projectId?.trim() ? { projectId: hg.projectId.trim() } : {}),
       ...(hg.apiKey?.trim() ? { apiKey: hg.apiKey.trim() } : {}),
       ...(hg.types && hg.types.length > 0 ? { types: hg.types } : {}),
@@ -203,12 +206,14 @@ export function resolveHitlyGate(
   const hg = companySettings?.hitlyGate;
   if (!hg?.enabled) return null;
   const baseUrl = hg.baseUrl?.trim();
+  const resumeHost = hg.resumeHost?.trim();
   const projectId = hg.projectId?.trim();
   const apiKey = hg.apiKey?.trim();
-  if (!baseUrl || !projectId || !apiKey) return null;
+  if (!baseUrl || !resumeHost || !projectId || !apiKey) return null;
   return {
     enabled: true,
     baseUrl: baseUrl.replace(/\/+$/, ''),
+    resumeHost: resumeHost.replace(/\/+$/, ''),
     projectId,
     apiKey,
     ...(hg.types && hg.types.length > 0 ? { types: hg.types } : {}),

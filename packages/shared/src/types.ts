@@ -137,6 +137,8 @@ export interface HitlyGateSettings {
   enabled?: boolean;
   /** HITLy base URL (e.g. http://localhost:3001). */
   baseUrl?: string;
+  /** Tourbillon resume host HITLy can reach (e.g. https://tourbillon.example.com). */
+  resumeHost?: string;
   /** HITLy project ID (e.g. prj_...). */
   projectId?: string;
   /** HITLy project API key (ingest Bearer token). */

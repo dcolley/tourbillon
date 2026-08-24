@@ -93,6 +93,7 @@ async function saveHitlyGate(formData: FormData) {
     await updateCompanyHitlyGate(company.id, {
       enabled: formData.get('enabled') === 'on',
       baseUrl: (formData.get('baseUrl') as string) || undefined,
+      resumeHost: (formData.get('resumeHost') as string) || undefined,
       projectId: (formData.get('projectId') as string) || undefined,
       apiKey: (formData.get('apiKey') as string) || undefined,
       clearApiKey: formData.get('clearApiKey') === 'on',
@@ -416,7 +417,24 @@ export default async function SettingsPage({
               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
             />
             <p className="text-xs text-muted-foreground">
-              Base URL only (no trailing slash). Example: <code className="text-xs">http://localhost:3001</code>
+              Where Tourbillon POSTs ingest requests. Example: <code className="text-xs">http://localhost:3001</code>
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <label htmlFor="hitlyResumeHost" className="text-sm font-medium">
+              Tourbillon resume host
+            </label>
+            <input
+              id="hitlyResumeHost"
+              name="resumeHost"
+              type="url"
+              defaultValue={integrationSettings.hitlyGate?.resumeHost ?? ''}
+              placeholder="https://tourbillon.example.com"
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+            />
+            <p className="text-xs text-muted-foreground">
+              Reachable host HITLy can POST resume callbacks to (no trailing slash). Must be accessible from HITLy.
             </p>
           </div>
 

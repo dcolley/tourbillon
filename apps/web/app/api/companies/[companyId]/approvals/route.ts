@@ -153,7 +153,7 @@ export async function POST(
         const resumeToken = generateResumeToken();
         const resumeUrl = new URL(
           `/api/approvals/${approval.id}/hitly-resume`,
-          req.url,
+          hitlyGate.resumeHost,
         );
         resumeUrl.searchParams.set('token', resumeToken);
         const resumeUrlString = resumeUrl.toString();

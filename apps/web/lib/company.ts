@@ -249,6 +249,7 @@ export async function updateCompanyHitlyGate(
   input: {
     enabled: boolean;
     baseUrl?: string;
+    resumeHost?: string;
     projectId?: string;
     apiKey?: string;
     types?: string[];
@@ -260,8 +261,10 @@ export async function updateCompanyHitlyGate(
 
   if (input.enabled) {
     const baseUrl = input.baseUrl?.trim();
+    const resumeHost = input.resumeHost?.trim();
     const projectId = input.projectId?.trim();
     if (!baseUrl) throw new Error('HITLy base URL is required when the gate is enabled.');
+    if (!resumeHost) throw new Error('Resume host is required when the gate is enabled.');
     if (!projectId) throw new Error('HITLy project ID is required when the gate is enabled.');
     if (!input.clearApiKey && !input.apiKey?.trim()) {
       const current = parseCompanySettings(company.settings);
@@ -276,6 +279,7 @@ export async function updateCompanyHitlyGate(
     hitlyGate: {
       enabled: input.enabled,
       baseUrl: input.baseUrl?.trim() || undefined,
+      resumeHost: input.resumeHost?.trim() || undefined,
       projectId: input.projectId?.trim() || undefined,
       apiKey: input.clearApiKey ? '' : (input.apiKey?.trim() || current.hitlyGate?.apiKey || ''),
       types: input.types && input.types.length > 0 ? input.types : undefined,
