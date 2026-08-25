@@ -5,6 +5,46 @@ export interface ActivityEntry {
   action: string;
   createdAt: Date | null;
   details: Record<string, unknown> | null;
+  entityId?: string | null;
+}
+
+export interface ChildIssue {
+  id: string;
+}
+
+/**
+ * Pure function: detect updateIssue calls on parent from activity logs.
+ */
+export function hasParentUpdate(
+  activities: ActivityEntry[],
+  checkoutTime: Date,
+  runId: string,
+): boolean {
+  return activities.some((a) => {
+    if (!a.createdAt || a.createdAt < checkoutTime) return false;
+    const details = a.details as { runId?: string } | null;
+    if (details?.runId !== runId) return false;
+    return a.action === 'issue.updated';
+  });
+}
+
+/**
+ * Pure function: detect subtask creation (issue.created on child) from activity logs.
+ */
+export function hasChildCreated(
+  childIds: string[],
+  childActivities: ActivityEntry[],
+  runId: string,
+): boolean {
+  return childActivities.some((a) => {
+    const details = a.details as { runId?: string } | null;
+    return (
+      a.action === 'issue.created' &&
+      details?.runId === runId &&
+      a.entityId &&
+      childIds.includes(a.entityId)
+    );
+  });
 }
 
 /**
@@ -63,10 +103,7 @@ export async function hasSubtaskCreated(
     columns: { entityId: true, details: true },
   });
 
-  return childActivities.some((a) => {
-    const details = a.details as { runId?: string } | null;
-    return details?.runId === runId && a.entityId && childIds.includes(a.entityId);
-  });
+  return hasChildCreated(childIds, childActivities, runId);
 }
 
 /**
@@ -74,9 +111,6 @@ export async function hasSubtaskCreated(
  * Material work includes:
  * - issue.updated (status/comment changes)
  * - Subtask creation (child issue with parentId === this issue)
- * 
- * Note: approval.created is NOT checked because createApproval immediately
- * blocks the issue and clears the lock, so parkNoProgressIssue never runs.
  */
 export async function hasMaterialWork(
   issue: Issue,
@@ -93,14 +127,9 @@ export async function hasMaterialWork(
     columns: { action: true, details: true, createdAt: true },
   });
 
-  const hasUpdate = parentActivities.some((a) => {
-    if (!a.createdAt || a.createdAt < checkoutTime) return false;
-    const details = a.details as { runId?: string } | null;
-    if (details?.runId !== runId) return false;
-    return a.action === 'issue.updated';
-  });
-
-  if (hasUpdate) return true;
+  if (hasParentUpdate(parentActivities, checkoutTime, runId)) {
+    return true;
+  }
 
   // Check for subtask creation (createSubtask writes issue.created on the child)
   return await hasSubtaskCreated(issue.id, runId);

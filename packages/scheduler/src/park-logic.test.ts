@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { shouldParkIssue } from './park-helpers';
+import {
+  shouldParkIssue,
+  hasParentUpdate,
+  hasChildCreated,
+  type ActivityEntry,
+} from './park-helpers';
 import type { Issue } from '@tourbillon/db';
 
 /**
  * Tests for park helpers that import production code.
- * Tests cover decision logic without requiring a live database.
+ * Tests call production functions directly with test data.
  */
 
 describe('shouldParkIssue', () => {
@@ -41,75 +46,171 @@ describe('shouldParkIssue', () => {
   });
 });
 
-describe('park logic integration points', () => {
-  it('findIssueToPark uses taskId when present (assignment wake)', () => {
-    // findIssueToPark(runId, agentId, companyId, taskId)
-    // When taskId is provided, it queries: db.query.issues.findFirst({ where: eq(issues.id, taskId) })
-    const taskId = 'issue-123';
-    assert.ok(taskId, 'taskId path: find issue by taskId');
-  });
+describe('hasParentUpdate', () => {
+  const checkoutTime = new Date('2026-08-25T12:00:00Z');
+  const afterCheckout = new Date('2026-08-25T12:01:00Z');
+  const beforeCheckout = new Date('2026-08-25T11:59:00Z');
 
-  it('findIssueToPark finds checked-out issue when taskId is absent (timer wake)', () => {
-    // findIssueToPark(runId, agentId, companyId, undefined)
-    // When taskId is absent, it queries:
-    // where: and(
-    //   eq(issues.companyId, companyId),
-    //   eq(issues.checkoutRunId, runId),
-    //   eq(issues.executionAgentNameKey, agentId),
-    // )
-    const runId = 'run-456';
-    const agentId = 'agent-789';
-    const companyId = 'company-abc';
-    assert.ok(runId && agentId && companyId, 'no-taskId path: find issue by checkout lock');
-  });
-
-  it('hasMaterialWork detects issue.updated activity from this run', () => {
-    // hasMaterialWork checks parent activities for issue.updated with this runId
-    const activities = [
-      { action: 'issue.checked_out', runId: 'run-456' },
-      { action: 'issue.updated', runId: 'run-456' },
+  it('detects issue.updated from this run after checkout', () => {
+    const activities: ActivityEntry[] = [
+      {
+        action: 'issue.checked_out',
+        createdAt: checkoutTime,
+        details: { runId: 'run-456' },
+      },
+      {
+        action: 'issue.updated',
+        createdAt: afterCheckout,
+        details: { runId: 'run-456' },
+      },
     ];
-    const hasUpdate = activities.some((a) => a.action === 'issue.updated' && a.runId === 'run-456');
-    assert.equal(hasUpdate, true, 'detected updateIssue');
+
+    const result = hasParentUpdate(activities, checkoutTime, 'run-456');
+    assert.equal(result, true, 'detected updateIssue after checkout');
   });
 
-  it('hasMaterialWork detects subtask creation via hasSubtaskCreated', () => {
-    // hasSubtaskCreated:
-    // 1. Finds child issues with parentId === this issue
-    // 2. Checks for issue.created activity on those children with this runId
-    // createSubtask writes issue.created on the CHILD, not the parent
-    const parentId = 'parent-123';
-    const childId = 'child-456';
-    const childActivities = [
-      { action: 'issue.created', entityId: childId, runId: 'run-789' },
+  it('does NOT detect issue.updated from different run', () => {
+    const activities: ActivityEntry[] = [
+      {
+        action: 'issue.updated',
+        createdAt: afterCheckout,
+        details: { runId: 'run-999' },
+      },
     ];
-    const hasSubtask = childActivities.some(
-      (a) => a.action === 'issue.created' && a.runId === 'run-789',
-    );
-    assert.equal(hasSubtask, true, 'detected createSubtask via child issue.created');
+
+    const result = hasParentUpdate(activities, checkoutTime, 'run-456');
+    assert.equal(result, false, 'ignored updateIssue from different run');
   });
 
-  it('hasMaterialWork does NOT check for approval.created', () => {
-    // approval.created is never written
-    // createApproval immediately blocks the issue and clears the lock
-    // parkNoProgressIssue never runs on approval-blocked issues
-    const activities = [
-      { action: 'issue.checked_out', runId: 'run-456' },
-      // No approval.created check
+  it('does NOT detect issue.updated before checkout', () => {
+    const activities: ActivityEntry[] = [
+      {
+        action: 'issue.updated',
+        createdAt: beforeCheckout,
+        details: { runId: 'run-456' },
+      },
     ];
-    const hasApproval = activities.some((a) => a.action === 'approval.created');
-    assert.equal(hasApproval, false, 'approval.created is not checked');
+
+    const result = hasParentUpdate(activities, checkoutTime, 'run-456');
+    assert.equal(result, false, 'ignored updateIssue before checkout');
   });
 
-  it('parkNoProgressIssue is called from success path (harness + durable)', () => {
-    // wake-runner.ts line ~417 (harness): await parkNoProgressIssue(...)
-    // wake-runner.ts line ~711 (durable): await parkNoProgressIssue(...)
-    assert.ok(true, 'park called after successful wake');
+  it('does NOT detect non-update actions', () => {
+    const activities: ActivityEntry[] = [
+      {
+        action: 'issue.checked_out',
+        createdAt: afterCheckout,
+        details: { runId: 'run-456' },
+      },
+    ];
+
+    const result = hasParentUpdate(activities, checkoutTime, 'run-456');
+    assert.equal(result, false, 'ignored non-update action');
+  });
+});
+
+describe('hasChildCreated', () => {
+  it('detects child issue.created from this run', () => {
+    const childIds = ['child-1', 'child-2'];
+    const childActivities: ActivityEntry[] = [
+      {
+        action: 'issue.created',
+        createdAt: new Date(),
+        details: { runId: 'run-456' },
+        entityId: 'child-1',
+      },
+    ];
+
+    const result = hasChildCreated(childIds, childActivities, 'run-456');
+    assert.equal(result, true, 'detected createSubtask via child issue.created');
   });
 
-  it('parkNoProgressIssue is called from failure path (catch block)', () => {
-    // wake-runner.ts line ~479 (catch): await parkNoProgressIssue(...)
-    // Provider 400 and other errors trigger this path
-    assert.ok(true, 'park called after failed wake to clear lock');
+  it('does NOT detect child created by different run', () => {
+    const childIds = ['child-1'];
+    const childActivities: ActivityEntry[] = [
+      {
+        action: 'issue.created',
+        createdAt: new Date(),
+        details: { runId: 'run-999' },
+        entityId: 'child-1',
+      },
+    ];
+
+    const result = hasChildCreated(childIds, childActivities, 'run-456');
+    assert.equal(result, false, 'ignored child created by different run');
+  });
+
+  it('does NOT detect child not in childIds list', () => {
+    const childIds = ['child-1'];
+    const childActivities: ActivityEntry[] = [
+      {
+        action: 'issue.created',
+        createdAt: new Date(),
+        details: { runId: 'run-456' },
+        entityId: 'child-99',
+      },
+    ];
+
+    const result = hasChildCreated(childIds, childActivities, 'run-456');
+    assert.equal(result, false, 'ignored non-child issue');
+  });
+
+  it('returns false when no children exist', () => {
+    const childIds: string[] = [];
+    const childActivities: ActivityEntry[] = [];
+
+    const result = hasChildCreated(childIds, childActivities, 'run-456');
+    assert.equal(result, false, 'no children means no subtask created');
+  });
+});
+
+describe('material work detection scenarios', () => {
+  const checkoutTime = new Date('2026-08-25T12:00:00Z');
+  const afterCheckout = new Date('2026-08-25T12:01:00Z');
+
+  it('updateIssue this run → do not park (material work)', () => {
+    const activities: ActivityEntry[] = [
+      {
+        action: 'issue.updated',
+        createdAt: afterCheckout,
+        details: { runId: 'run-456' },
+      },
+    ];
+
+    const hasMaterial = hasParentUpdate(activities, checkoutTime, 'run-456');
+    assert.equal(hasMaterial, true, 'updateIssue is material work');
+  });
+
+  it('createSubtask this run → do not park (material work)', () => {
+    const childIds = ['child-1'];
+    const childActivities: ActivityEntry[] = [
+      {
+        action: 'issue.created',
+        createdAt: afterCheckout,
+        details: { runId: 'run-456' },
+        entityId: 'child-1',
+      },
+    ];
+
+    const hasMaterial = hasChildCreated(childIds, childActivities, 'run-456');
+    assert.equal(hasMaterial, true, 'createSubtask is material work');
+  });
+
+  it('checkout only, no children → should park (no material work)', () => {
+    const parentActivities: ActivityEntry[] = [
+      {
+        action: 'issue.checked_out',
+        createdAt: afterCheckout,
+        details: { runId: 'run-456' },
+      },
+    ];
+    const childIds: string[] = [];
+    const childActivities: ActivityEntry[] = [];
+
+    const hasParent = hasParentUpdate(parentActivities, checkoutTime, 'run-456');
+    const hasChild = hasChildCreated(childIds, childActivities, 'run-456');
+
+    assert.equal(hasParent, false, 'no parent update');
+    assert.equal(hasChild, false, 'no child created');
   });
 });
