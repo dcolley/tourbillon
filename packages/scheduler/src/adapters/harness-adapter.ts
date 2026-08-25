@@ -21,6 +21,7 @@ import {
   isHarnessAdapter,
   isMastraTracingEnabled,
   isObservabilityEnabled,
+  isObservationalMemoryConfigured,
   type CompanySettings,
 } from '@tourbillon/shared';
 import { driveSessionHeadless } from '../harness-session-drive';
@@ -73,7 +74,8 @@ export async function runWithHarness(
   await controller.init();
 
   const resumable = await getResumableHarnessRun(agentRecord.id, taskId);
-  if (!resumable && !taskId) {
+  const omEnabled = isObservationalMemoryConfigured(options.companySettings);
+  if (!resumable && !taskId && !omEnabled) {
     await clearHarnessIdleThread(agentRecord.id);
   }
   const threadId = resumable?.threadId ?? buildControllerThreadId(agentRecord, taskId);
