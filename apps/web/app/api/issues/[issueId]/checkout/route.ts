@@ -78,21 +78,29 @@ export async function POST(
         .where(eq(issues.id, issueId))
         .returning();
 
-      await tx.insert(activityLog).values({
-        companyId: runCtx.companyId,
-        actorType: 'agent',
-        actorId: runCtx.agentId,
-        action: 'issue.checked_out',
-        entityType: 'issue',
-        entityId: issueId,
-        details: {
-          runId,
-          previousStatus: issue.status,
-          ...(issue.checkoutRunId && issue.checkoutRunId !== runId
-            ? { replacedStaleLockFrom: issue.checkoutRunId }
-            : {}),
-        },
-      });
+      // Only insert checkout activity if:
+      // - status was not already in_progress, OR
+      // - this is a different agent taking over
+      const shouldLogCheckout =
+        issue.status !== 'in_progress' || issue.executionAgentNameKey !== runCtx.agentId;
+
+      if (shouldLogCheckout) {
+        await tx.insert(activityLog).values({
+          companyId: runCtx.companyId,
+          actorType: 'agent',
+          actorId: runCtx.agentId,
+          action: 'issue.checked_out',
+          entityType: 'issue',
+          entityId: issueId,
+          details: {
+            runId,
+            previousStatus: issue.status,
+            ...(issue.checkoutRunId && issue.checkoutRunId !== runId
+              ? { replacedStaleLockFrom: issue.checkoutRunId }
+              : {}),
+          },
+        });
+      }
 
       return updated;
     });

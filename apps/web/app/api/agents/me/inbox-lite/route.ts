@@ -3,7 +3,7 @@ import { db, issues, agents, type IssueStatus } from '@tourbillon/db';
 import { eq, and, inArray, isNull } from 'drizzle-orm';
 import { validateRunToken } from '@/lib/auth/run-token';
 import { logAgentApiRequest, logAgentApiResponse } from '@/lib/agent-api-trace';
-import { ISSUE_STATUS_WORK_PRIORITY } from '@tourbillon/shared';
+import { sortInboxIssues } from '@tourbillon/shared/inbox-sort';
 
 export async function GET(req: NextRequest) {
   const token = req.headers.get('authorization')?.replace('Bearer ', '');
@@ -54,23 +54,16 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // Sort by status priority, then by issue priority
-  const priorityOrder: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
-  myIssues.sort((a, b) => {
-    const statusDiff =
-      (ISSUE_STATUS_WORK_PRIORITY[a.status] ?? 99) - (ISSUE_STATUS_WORK_PRIORITY[b.status] ?? 99);
-    if (statusDiff !== 0) return statusDiff;
-    return (priorityOrder[a.priority] ?? 99) - (priorityOrder[b.priority] ?? 99);
-  });
+  const sortedIssues = sortInboxIssues(myIssues);
 
   logAgentApiResponse('/api/agents/me/inbox-lite', 'GET', runCtx, 200, {
-    issueCount: myIssues.length,
-    issueIds: myIssues.map((i) => i.id),
-    identifiers: myIssues.map((i) => i.identifier),
+    issueCount: sortedIssues.length,
+    issueIds: sortedIssues.map((i) => i.id),
+    identifiers: sortedIssues.map((i) => i.identifier),
   });
 
   return NextResponse.json({
-    issues: myIssues.map((i) => ({
+    issues: sortedIssues.map((i) => ({
       id: i.id,
       identifier: i.identifier,
       title: i.title,
