@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db, approvals, issues, activityLog, companies, type IssueStatus } from '@tourbillon/db';
 import { and, eq, inArray } from 'drizzle-orm';
 import { validateRunToken } from '@/lib/auth/run-token';
-import { parseCompanySettings, resolveHitlyGate } from '@tourbillon/shared';
+import { parseCompanySettings, resolveHitlyGate, publicOriginFromRequest } from '@tourbillon/shared';
 import { ingestHitlyApproval, type HitlyIngestPayload } from '@/lib/hitly/client';
 import { randomBytes } from 'crypto';
 
@@ -158,7 +158,7 @@ export async function POST(
         resumeUrl.searchParams.set('token', resumeToken);
         const resumeUrlString = resumeUrl.toString();
 
-        const approvalUrl = new URL(`/approval`, req.url).toString();
+        const approvalUrl = new URL(`/approval`, publicOriginFromRequest(req)).toString();
         
         const title = typeof basePayload.title === 'string' ? basePayload.title : approval.type;
         const summary = typeof basePayload.summary === 'string' ? basePayload.summary : '';

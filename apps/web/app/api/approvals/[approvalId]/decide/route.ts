@@ -3,6 +3,7 @@ import { db, approvals, issues, activityLog, type IssueStatus } from '@tourbillo
 import { and, eq, inArray } from 'drizzle-orm';
 import { enqueueApprovalWake } from '@/lib/wake-client';
 import { addIssueComment } from '@/lib/issue-comments';
+import { publicOriginFromRequest } from '@tourbillon/shared';
 
 type ApprovalPayload = Record<string, unknown> & {
   title?: string;
@@ -153,7 +154,9 @@ export async function POST(
   // If dashboard form POST, redirect back
   const accept = req.headers.get('accept') ?? '';
   if (accept.includes('text/html')) {
-    return NextResponse.redirect(new URL('/approval', req.url));
+    // Use relative redirect to stay on the request host (LAN, Tailscale, or localhost)
+    // Alternative: new URL('/approval', publicOriginFromRequest(req))
+    return NextResponse.redirect('/approval', 303);
   }
 
   return NextResponse.json(updated);

@@ -4,6 +4,9 @@
   "private": true,
   "main": "./src/index.ts",
   "types": "./src/index.ts",
+  "scripts": {
+    "test": "tsx --test src/**/*.test.ts"
+  },
   "exports": {
     ".": "./src/index.ts",
     "./types": "./src/types.ts",
@@ -33,5 +36,10 @@
   "dependencies": {
     "croner": "^10.0.1",
     "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "tsx": "^4.23.1",
+    "typescript": "catalog:"
   }
 }
