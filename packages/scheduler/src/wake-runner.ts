@@ -39,6 +39,11 @@ import {
   isAbortLikeError,
   resolveHeartbeatFailureError,
 } from './heartbeat-abort';
+import {
+  findIssueToPark,
+  hasMaterialWork,
+  shouldParkIssue,
+} from './park-helpers';
 
 export type WakeRequest = HeartbeatJobData;
 
@@ -741,21 +746,7 @@ async function parkNoProgressIssue(
   companyId: string,
   taskId?: string,
 ): Promise<void> {
-  let issueToCheck: Awaited<ReturnType<typeof db.query.issues.findFirst>> | undefined;
-
-  if (taskId) {
-    // Assignment wake: check the assigned issue
-    issueToCheck = await db.query.issues.findFirst({ where: eq(issues.id, taskId) });
-  } else {
-    // Timer/on-demand wake with no taskId: find the issue this run checked out
-    issueToCheck = await db.query.issues.findFirst({
-      where: and(
-        eq(issues.companyId, companyId),
-        eq(issues.checkoutRunId, runId),
-        eq(issues.executionAgentNameKey, agentId),
-      ),
-    });
-  }
+  const issueToCheck = await findIssueToPark(runId, agentId, companyId, taskId);
 
   if (!issueToCheck) {
     runTracer.info('park check: no issue to check', { taskId, hadCheckout: !taskId });
@@ -763,7 +754,7 @@ async function parkNoProgressIssue(
   }
 
   // Only park if still in_progress and locked by this run
-  if (issueToCheck.status !== 'in_progress' || issueToCheck.checkoutRunId !== runId) {
+  if (!shouldParkIssue(issueToCheck, runId)) {
     runTracer.info('park check: skipped — status or lock changed', {
       issueId: issueToCheck.id,
       status: issueToCheck.status,
@@ -772,23 +763,8 @@ async function parkNoProgressIssue(
     return;
   }
 
-  // Check for material work: updateIssue calls (status/comment), subtasks, comments
-  const workActivities = await db.query.activityLog.findMany({
-    where: and(
-      eq(activityLog.entityId, issueToCheck.id),
-      eq(activityLog.entityType, 'issue'),
-    ),
-    columns: { action: true, details: true, createdAt: true },
-  });
-
-  const checkoutTime = issueToCheck.executionLockedAt ?? new Date(0);
-  const materialWork = workActivities.some((a) => {
-    if (!a.createdAt || a.createdAt < checkoutTime) return false;
-    const details = a.details as { runId?: string } | null;
-    if (details?.runId !== runId) return false;
-    // Material actions: updated (status/comment), created subtask, created approval
-    return ['issue.updated', 'issue.created', 'approval.created'].includes(a.action);
-  });
+  // Check for material work: updateIssue calls (status/comment), subtasks
+  const materialWork = await hasMaterialWork(issueToCheck, runId);
 
   if (materialWork) {
     runTracer.info('park check: skipped — material work detected', {
