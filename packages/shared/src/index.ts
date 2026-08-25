@@ -22,3 +22,4 @@ export * from './mcp-types';
 export * from './mcp-builtin-catalog';
 export * from './knowledge-graph-config';
 export * from './knowledge-graph';
+export * from './request-origin';
