@@ -154,9 +154,8 @@ export async function POST(
   // If dashboard form POST, redirect back
   const accept = req.headers.get('accept') ?? '';
   if (accept.includes('text/html')) {
-    // Use relative redirect to stay on the request host (LAN, Tailscale, or localhost)
-    // Alternative: new URL('/approval', publicOriginFromRequest(req))
-    return NextResponse.redirect('/approval', 303);
+    // Build absolute URL using public origin from request headers (never 0.0.0.0)
+    return NextResponse.redirect(new URL('/approval', publicOriginFromRequest(req)), 303);
   }
 
   return NextResponse.json(updated);
