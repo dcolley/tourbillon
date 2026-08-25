@@ -1,4 +1,4 @@
-import { buildInboxThreadId } from './heartbeat-memory';
+import { buildInboxThreadId, buildHarnessIdleThreadId } from './heartbeat-memory';
 
 export interface HeartbeatMemoryKeyInput {
   companyId: string;
@@ -6,6 +6,7 @@ export interface HeartbeatMemoryKeyInput {
   issueId?: string;
   goalId?: string | null;
   projectId?: string | null;
+  useIdleThread?: boolean;
 }
 
 export interface HeartbeatMemoryKeys {
@@ -17,10 +18,10 @@ export interface HeartbeatMemoryKeys {
  * Build Mastra memory resource/thread keys for a heartbeat run.
  *
  * - resource: agent namespace; widened to project or goal when semantic recall is enabled
- * - thread: per-agent per-issue conversation when taskId is set; inbox thread id when not
+ * - thread: per-agent per-issue conversation when taskId is set; idle thread when useIdleThread; inbox thread otherwise
  */
 export function buildHeartbeatMemoryKeys(input: HeartbeatMemoryKeyInput): HeartbeatMemoryKeys {
-  const { companyId, agentId, issueId, goalId, projectId } = input;
+  const { companyId, agentId, issueId, goalId, projectId, useIdleThread } = input;
 
   let resource = `${companyId}:${agentId}`;
 
@@ -32,7 +33,14 @@ export function buildHeartbeatMemoryKeys(input: HeartbeatMemoryKeyInput): Heartb
     }
   }
 
-  const thread = issueId ? `${issueId}:${agentId}` : buildInboxThreadId(companyId, agentId);
+  let thread: string;
+  if (issueId) {
+    thread = `${issueId}:${agentId}`;
+  } else if (useIdleThread) {
+    thread = buildHarnessIdleThreadId(agentId);
+  } else {
+    thread = buildInboxThreadId(companyId, agentId);
+  }
 
   return { resource, thread };
 }

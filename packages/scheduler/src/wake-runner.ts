@@ -572,10 +572,11 @@ async function runDurableAgentWake(params: {
 
   const company = await db.query.companies.findFirst({ where: eq(companies.id, companyId) });
   const runtimeConfig = agentRecord.runtimeConfig as AgentRuntimeConfig;
+  const companySettings = parseCompanySettings(company?.settings);
   const maxSteps = runtimeConfig.heartbeat?.maxSteps ?? 30;
   const durableAgent = await createDurableAgentWithSkills(agentRecord, {
     allowedMcpServerIds: company?.allowedMcpServerIds ?? [],
-    companySettings: parseCompanySettings(company?.settings),
+    companySettings,
     maxSteps,
   });
 
@@ -591,16 +592,18 @@ async function runDurableAgentWake(params: {
     agentRuntimeConfig: agentRecord.runtimeConfig as AgentRuntimeConfig,
   });
 
+  const resumable = await getResumableDurableRun(agentRecord.id, taskId);
+  const useMemory = shouldUseHeartbeatMemory(taskId, companySettings);
+  const useIdleThread = !taskId && useMemory;
+
   const memoryKeys = buildHeartbeatMemoryKeys({
     companyId,
     agentId: agentRecord.id,
     issueId: taskId,
     goalId: issueForTask?.goalId ?? undefined,
     projectId: issueForTask?.projectId ?? undefined,
+    useIdleThread,
   });
-
-  const resumable = await getResumableDurableRun(agentRecord.id, taskId);
-  const useMemory = shouldUseHeartbeatMemory(taskId);
 
   if (!resumable && !useMemory) {
     await clearInboxThread(companyId, agentRecord.id);
