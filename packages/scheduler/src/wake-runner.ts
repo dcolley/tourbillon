@@ -414,7 +414,7 @@ async function runWake(
       );
 
       await logIssueStateAfterRun(runTracer, taskId);
-      await parkNoProgressIssue(runId, runTracer, taskId);
+      await parkNoProgressIssue(runId, runTracer, agentRecord.id, companyId, taskId);
       await recordHarnessResult(
         runId,
         agentRecord,
@@ -477,6 +477,7 @@ async function runWake(
       aborted: abortController.signal.aborted,
       durationMs: Date.now() - runStartedMs,
     });
+    await parkNoProgressIssue(runId, runTracer, agentId, companyId, taskId);
     await recordHeartbeatFailure(runId, errorText, companyId, agentId);
     return { runId, status: 'failed', errorText };
   } finally {
@@ -710,7 +711,7 @@ async function runDurableAgentWake(params: {
   }
 
   await logIssueStateAfterRun(runTracer, taskId);
-  await parkNoProgressIssue(runId, runTracer, taskId);
+  await parkNoProgressIssue(runId, runTracer, agentRecord.id, companyId, taskId);
 
   await recordHeartbeatSuccess(runId, agentRecord, companyId, providerConfig.provider, {
     inputTokens,
@@ -736,21 +737,37 @@ async function logIssueStateAfterRun(runTracer: WakeTracer, taskId?: string): Pr
 async function parkNoProgressIssue(
   runId: string,
   runTracer: WakeTracer,
+  agentId: string,
+  companyId: string,
   taskId?: string,
 ): Promise<void> {
-  if (!taskId) return;
+  let issueToCheck: Awaited<ReturnType<typeof db.query.issues.findFirst>> | undefined;
 
-  const issue = await db.query.issues.findFirst({ where: eq(issues.id, taskId) });
-  if (!issue) {
-    runTracer.warn('park check: issue not found', { taskId });
+  if (taskId) {
+    // Assignment wake: check the assigned issue
+    issueToCheck = await db.query.issues.findFirst({ where: eq(issues.id, taskId) });
+  } else {
+    // Timer/on-demand wake with no taskId: find the issue this run checked out
+    issueToCheck = await db.query.issues.findFirst({
+      where: and(
+        eq(issues.companyId, companyId),
+        eq(issues.checkoutRunId, runId),
+        eq(issues.executionAgentNameKey, agentId),
+      ),
+    });
+  }
+
+  if (!issueToCheck) {
+    runTracer.info('park check: no issue to check', { taskId, hadCheckout: !taskId });
     return;
   }
 
   // Only park if still in_progress and locked by this run
-  if (issue.status !== 'in_progress' || issue.checkoutRunId !== runId) {
+  if (issueToCheck.status !== 'in_progress' || issueToCheck.checkoutRunId !== runId) {
     runTracer.info('park check: skipped — status or lock changed', {
-      status: issue.status,
-      checkoutRunId: issue.checkoutRunId,
+      issueId: issueToCheck.id,
+      status: issueToCheck.status,
+      checkoutRunId: issueToCheck.checkoutRunId,
     });
     return;
   }
@@ -758,13 +775,13 @@ async function parkNoProgressIssue(
   // Check for material work: updateIssue calls (status/comment), subtasks, comments
   const workActivities = await db.query.activityLog.findMany({
     where: and(
-      eq(activityLog.entityId, taskId),
+      eq(activityLog.entityId, issueToCheck.id),
       eq(activityLog.entityType, 'issue'),
     ),
     columns: { action: true, details: true, createdAt: true },
   });
 
-  const checkoutTime = issue.executionLockedAt ?? new Date(0);
+  const checkoutTime = issueToCheck.executionLockedAt ?? new Date(0);
   const materialWork = workActivities.some((a) => {
     if (!a.createdAt || a.createdAt < checkoutTime) return false;
     const details = a.details as { runId?: string } | null;
@@ -774,15 +791,17 @@ async function parkNoProgressIssue(
   });
 
   if (materialWork) {
-    runTracer.info('park check: skipped — material work detected');
+    runTracer.info('park check: skipped — material work detected', {
+      issueId: issueToCheck.id,
+    });
     return;
   }
 
   // No material work: park the issue
   runTracer.warn('parking no-progress issue', {
-    taskId,
-    identifier: issue.identifier,
-    title: issue.title,
+    issueId: issueToCheck.id,
+    identifier: issueToCheck.identifier,
+    title: issueToCheck.title,
   });
 
   await db.transaction(async (tx) => {
@@ -795,15 +814,15 @@ async function parkNoProgressIssue(
         executionAgentNameKey: null,
         updatedAt: new Date(),
       })
-      .where(eq(issues.id, taskId));
+      .where(eq(issues.id, issueToCheck.id));
 
     await tx.insert(activityLog).values({
-      companyId: issue.companyId,
+      companyId: issueToCheck.companyId,
       actorType: 'system',
       actorId: 'wake-runner',
       action: 'issue.updated',
       entityType: 'issue',
-      entityId: taskId,
+      entityId: issueToCheck.id,
       details: {
         runId,
         previousStatus: 'in_progress',

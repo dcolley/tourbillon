@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db, issues, activityLog } from '@tourbillon/db';
+import { db, issues, activityLog, shouldInsertCheckoutActivity } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
 import { validateRunToken } from '@/lib/auth/run-token';
 import { logAgentApiRequest, logAgentApiResponse, summarizeBody } from '@/lib/agent-api-trace';
@@ -78,13 +78,8 @@ export async function POST(
         .where(eq(issues.id, issueId))
         .returning();
 
-      // Only insert checkout activity if:
-      // - status was not already in_progress, OR
-      // - this is a different agent taking over
-      const shouldLogCheckout =
-        issue.status !== 'in_progress' || issue.executionAgentNameKey !== runCtx.agentId;
-
-      if (shouldLogCheckout) {
+      // Only insert checkout activity if needed (avoid duplicate re-checkout spam)
+      if (shouldInsertCheckoutActivity(issue, runCtx.agentId)) {
         await tx.insert(activityLog).values({
           companyId: runCtx.companyId,
           actorType: 'agent',

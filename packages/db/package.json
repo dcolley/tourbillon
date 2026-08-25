@@ -8,7 +8,8 @@
     "generate": "drizzle-kit generate",
     "migrate": "drizzle-kit migrate",
     "studio": "drizzle-kit studio",
-    "push": "drizzle-kit push"
+    "push": "drizzle-kit push",
+    "test": "tsx --test src/**/*.test.ts"
   },
   "dependencies": {
     "drizzle-orm": "catalog:",
@@ -17,6 +18,7 @@
   "devDependencies": {
     "@types/node": "catalog:",
     "drizzle-kit": "^0.31.10",
+    "tsx": "^4.23.1",
     "typescript": "catalog:"
   }
 }

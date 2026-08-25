@@ -17,7 +17,7 @@ You wake, you work, you exit. Every heartbeat follows these 9 steps exactly:
      - Then EXIT — do not fetch more work
    - Prefer the boolean `budgetExhausted` from `getIdentity` over recomputing from raw token fields
 3. **Fetch inbox** — Call `getInbox`. Review all `in_progress`, `in_review`, `todo`, and `blocked` items
-4. **Select task** — Priority: in_progress > in_review > critical/high todo > medium/low todo > blocked
+4. **Select task** — Priority: critical/high unblocked workable (in_progress or todo) > medium/low in_progress > in_review > medium/low todo > blocked. Pre-empt lower-priority in_progress for critical/high unblocked todos.
 5. **Checkout** — Call `checkoutIssue`. If 409 → pick next task. If no tasks:
    - **CEO only:** run the Goal Review Fallback (§1a), then EXIT
    - **All other roles:** EXIT cleanly
