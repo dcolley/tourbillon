@@ -6,7 +6,7 @@ import type { JobLiveSnapshot } from '@/lib/jobs';
 interface JobLogPanelProps {
   queue: string;
   jobId: string;
-  initialLogs: string[];
+  initialLogs?: string[];
   initialState: string;
 }
 
@@ -18,10 +18,41 @@ function shouldPoll(state: string): boolean {
 }
 
 export function JobLogPanel({ queue, jobId, initialLogs, initialState }: JobLogPanelProps) {
-  const [logs, setLogs] = useState(initialLogs);
+  const [logs, setLogs] = useState(initialLogs ?? []);
   const [state, setState] = useState(initialState);
   const [polling, setPolling] = useState(shouldPoll(initialState));
+  const [loaded, setLoaded] = useState(!!initialLogs);
   const preRef = useRef<HTMLPreElement>(null);
+
+  useEffect(() => {
+    if (loaded) return;
+
+    let cancelled = false;
+
+    async function loadInitial() {
+      try {
+        const res = await fetch(`/api/jobs/${queue}/${jobId}/live`);
+        if (!res.ok || cancelled) return;
+
+        const data = (await res.json()) as JobLiveSnapshot;
+        if (!cancelled) {
+          setLogs(data.logs);
+          setState(data.state);
+          setLoaded(true);
+          if (!TERMINAL_STATES.has(data.state)) {
+            setPolling(true);
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    loadInitial();
+    return () => {
+      cancelled = true;
+    };
+  }, [loaded, queue, jobId]);
 
   useEffect(() => {
     if (!polling) return;
