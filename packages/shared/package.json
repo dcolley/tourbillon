@@ -13,6 +13,7 @@
     "./heartbeat-schedule": "./src/heartbeat-schedule.ts",
     "./heartbeat-schedule-mode": "./src/heartbeat-schedule-mode.ts",
     "./constants": "./src/constants.ts",
+    "./inbox-sort": "./src/inbox-sort.ts",
     "./issue-assignee": "./src/issue-assignee.ts",
     "./model-provider": "./src/model-provider.ts",
     "./model-settings": "./src/model-settings.ts",

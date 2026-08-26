@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db, issues, activityLog } from '@tourbillon/db';
+import { db, issues, activityLog, shouldInsertCheckoutActivity } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
 import { validateRunToken } from '@/lib/auth/run-token';
 import { logAgentApiRequest, logAgentApiResponse, summarizeBody } from '@/lib/agent-api-trace';
@@ -78,21 +78,24 @@ export async function POST(
         .where(eq(issues.id, issueId))
         .returning();
 
-      await tx.insert(activityLog).values({
-        companyId: runCtx.companyId,
-        actorType: 'agent',
-        actorId: runCtx.agentId,
-        action: 'issue.checked_out',
-        entityType: 'issue',
-        entityId: issueId,
-        details: {
-          runId,
-          previousStatus: issue.status,
-          ...(issue.checkoutRunId && issue.checkoutRunId !== runId
-            ? { replacedStaleLockFrom: issue.checkoutRunId }
-            : {}),
-        },
-      });
+      // Only insert checkout activity if needed (avoid duplicate re-checkout spam)
+      if (shouldInsertCheckoutActivity(issue, runCtx.agentId)) {
+        await tx.insert(activityLog).values({
+          companyId: runCtx.companyId,
+          actorType: 'agent',
+          actorId: runCtx.agentId,
+          action: 'issue.checked_out',
+          entityType: 'issue',
+          entityId: issueId,
+          details: {
+            runId,
+            previousStatus: issue.status,
+            ...(issue.checkoutRunId && issue.checkoutRunId !== runId
+              ? { replacedStaleLockFrom: issue.checkoutRunId }
+              : {}),
+          },
+        });
+      }
 
       return updated;
     });

@@ -1,4 +1,4 @@
-import { db, agents, heartbeatRuns, companies, costEvents, issues, getLlmProviderRowById } from '@tourbillon/db';
+import { db, agents, heartbeatRuns, companies, costEvents, issues, activityLog, getLlmProviderRowById } from '@tourbillon/db';
 import { eq, and, sql, lt } from 'drizzle-orm';
 import {
   createDurableAgentWithSkills,
@@ -39,6 +39,11 @@ import {
   isAbortLikeError,
   resolveHeartbeatFailureError,
 } from './heartbeat-abort';
+import {
+  findIssueToPark,
+  hasMaterialWork,
+  shouldParkIssue,
+} from './park-helpers';
 
 export type WakeRequest = HeartbeatJobData;
 
@@ -414,6 +419,7 @@ async function runWake(
       );
 
       await logIssueStateAfterRun(runTracer, taskId);
+      await parkNoProgressIssue(runId, runTracer, agentRecord.id, companyId, taskId);
       await recordHarnessResult(
         runId,
         agentRecord,
@@ -476,6 +482,7 @@ async function runWake(
       aborted: abortController.signal.aborted,
       durationMs: Date.now() - runStartedMs,
     });
+    await parkNoProgressIssue(runId, runTracer, agentId, companyId, taskId);
     await recordHeartbeatFailure(runId, errorText, companyId, agentId);
     return { runId, status: 'failed', errorText };
   } finally {
@@ -709,6 +716,7 @@ async function runDurableAgentWake(params: {
   }
 
   await logIssueStateAfterRun(runTracer, taskId);
+  await parkNoProgressIssue(runId, runTracer, agentRecord.id, companyId, taskId);
 
   await recordHeartbeatSuccess(runId, agentRecord, companyId, providerConfig.provider, {
     inputTokens,
@@ -728,6 +736,77 @@ async function logIssueStateAfterRun(runTracer: WakeTracer, taskId?: string): Pr
     status: issueAfter?.status,
     checkoutRunId: issueAfter?.checkoutRunId,
     updatedAt: issueAfter?.updatedAt?.toISOString(),
+  });
+}
+
+async function parkNoProgressIssue(
+  runId: string,
+  runTracer: WakeTracer,
+  agentId: string,
+  companyId: string,
+  taskId?: string,
+): Promise<void> {
+  const issueToCheck = await findIssueToPark(runId, agentId, companyId, taskId);
+
+  if (!issueToCheck) {
+    runTracer.info('park check: no issue to check', { taskId, hadCheckout: !taskId });
+    return;
+  }
+
+  // Only park if still in_progress and locked by this run
+  if (!shouldParkIssue(issueToCheck, runId)) {
+    runTracer.info('park check: skipped — status or lock changed', {
+      issueId: issueToCheck.id,
+      status: issueToCheck.status,
+      checkoutRunId: issueToCheck.checkoutRunId,
+    });
+    return;
+  }
+
+  // Check for material work: updateIssue calls (status/comment), subtasks
+  const materialWork = await hasMaterialWork(issueToCheck, runId);
+
+  if (materialWork) {
+    runTracer.info('park check: skipped — material work detected', {
+      issueId: issueToCheck.id,
+    });
+    return;
+  }
+
+  // No material work: park the issue
+  runTracer.warn('parking no-progress issue', {
+    issueId: issueToCheck.id,
+    identifier: issueToCheck.identifier,
+    title: issueToCheck.title,
+  });
+
+  await db.transaction(async (tx) => {
+    await tx
+      .update(issues)
+      .set({
+        status: 'todo',
+        checkoutRunId: null,
+        executionLockedAt: null,
+        executionAgentNameKey: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(issues.id, issueToCheck.id));
+
+    await tx.insert(activityLog).values({
+      companyId: issueToCheck.companyId,
+      actorType: 'system',
+      actorId: 'wake-runner',
+      action: 'issue.updated',
+      entityType: 'issue',
+      entityId: issueToCheck.id,
+      details: {
+        runId,
+        previousStatus: 'in_progress',
+        newStatus: 'todo',
+        comment: '⏸️ Parked: no material progress after checkout. Higher-priority work may now proceed.',
+        reason: 'auto_park_no_progress',
+      },
+    });
   });
 }
 
