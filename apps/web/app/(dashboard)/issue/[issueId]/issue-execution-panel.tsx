@@ -17,7 +17,7 @@ export function IssueExecutionPanel({ queue, jobId, jobState }: IssueExecutionPa
 
     async function load() {
       try {
-        const res = await fetch(`/api/jobs/${queue}/${jobId}/logs`);
+        const res = await fetch(`/api/jobs/${queue}/${jobId}/live`);
         if (!res.ok) return;
         const data = (await res.json()) as { logs: string[] };
         if (!cancelled) setInitialLogs(data.logs);
