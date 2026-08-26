@@ -115,3 +115,22 @@ export function readIssueTablePrefs(): IssueTablePrefs {
 export function writeIssueTablePrefs(prefs: IssueTablePrefs): void {
   localStorage.setItem(ISSUE_TABLE_STORAGE_KEY, JSON.stringify(prefs));
 }
+
+/**
+ * Validate assigneeKey against the current company's agent list.
+ * Returns null (All) if the key is unknown.
+ * Preserves special values (__unassigned__, __board__) and valid agent urlKeys.
+ */
+export function sanitizeAssigneeKey(
+  assigneeKey: string | null,
+  validAgentUrlKeys: readonly string[],
+): string | null {
+  if (!assigneeKey) return null;
+  if (assigneeKey === ISSUE_TABLE_UNASSIGNED || assigneeKey === ISSUE_TABLE_BOARD) {
+    return assigneeKey;
+  }
+  if (validAgentUrlKeys.includes(assigneeKey)) {
+    return assigneeKey;
+  }
+  return null;
+}

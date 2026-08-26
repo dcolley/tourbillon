@@ -8,7 +8,7 @@
     "start": "bash -c 'set -a && source ../../.env && set +a && exec next start'",
     "lint": "eslint .",
     "type-check": "tsc --noEmit",
-    "test": "tsx --test 'app/**/*.test.ts'"
+    "test": "tsx --test 'app/**/*.test.ts' 'lib/**/*.test.ts'"
   },
   "dependencies": {
     "@ai-sdk/openai": "catalog:",

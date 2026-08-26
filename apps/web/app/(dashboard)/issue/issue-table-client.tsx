@@ -19,6 +19,7 @@ import {
   writeIssueTablePrefs,
   isIssueTablePageSize,
   isIssueTablePriorityFilter,
+  sanitizeAssigneeKey,
   type IssueTablePrefs,
   type IssueTableSortColumn,
 } from '@/lib/issue-list-storage';
@@ -120,8 +121,18 @@ export function IssueTableClient({
   const [prefs, setPrefs] = useState<IssueTablePrefs | null>(null);
 
   useEffect(() => {
-    setPrefs(readIssueTablePrefs());
-  }, []);
+    const loaded = readIssueTablePrefs();
+    const validAgentUrlKeys = agents.map((a) => a.urlKey);
+    const sanitized = sanitizeAssigneeKey(loaded.assigneeKey, validAgentUrlKeys);
+
+    if (sanitized !== loaded.assigneeKey) {
+      const corrected = { ...loaded, assigneeKey: sanitized };
+      writeIssueTablePrefs(corrected);
+      setPrefs(corrected);
+    } else {
+      setPrefs(loaded);
+    }
+  }, [agents]);
 
   const filtered = useMemo(
     () => (prefs ? filterRows(issues, prefs) : issues),
