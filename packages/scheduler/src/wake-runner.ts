@@ -14,6 +14,7 @@ import {
   shouldUseHeartbeatMemory,
   clearInboxThread,
   buildHeartbeatTracingOptions,
+  tripwireDetector,
 } from '@tourbillon/mastra';
 import type { HeartbeatJobData, AgentRuntimeConfig } from '@tourbillon/shared';
 import {
@@ -691,16 +692,24 @@ async function runDurableAgentWake(params: {
       durableRunId = observed.runId;
       traceId = observed.runId;
       
-      // Check for tripwire BEFORE awaiting output.text (input processor tripwire may prevent text from resolving)
-      const tripwireData = await Promise.resolve(observed.output.tripwire);
-      const outcome = durableWakeOutcomeFromTripwire(tripwireData);
+      // Set up tripwire detection for this trace
+      tripwireDetector.setTraceId(observed.runId);
+      const tripwirePromise = new Promise<never>((_, reject) => {
+        tripwireDetector.once('tripwire', (errorText: string) => {
+          reject(new Error(errorText));
+        });
+      });
       
-      if (!outcome.recordSuccess) {
-        runTracer.error('system-message tripwire detected', { errorText: outcome.errorText });
-        throw new Error(outcome.errorText);
+      try {
+        // Race between normal completion and tripwire detection
+        // If tripwire is detected before output.text resolves, we fail immediately
+        await Promise.race([
+          awaitWithAbort(observed.output.text, abortSignal),
+          tripwirePromise,
+        ]);
+      } finally {
+        tripwireDetector.clear();
       }
-      
-      await awaitWithAbort(observed.output.text, abortSignal);
       
       observed.cleanup();
       streamResult = undefined;
@@ -734,16 +743,24 @@ async function runDurableAgentWake(params: {
       durableRunId = streamed.runId;
       traceId = streamed.runId;
       
-      // Check for tripwire BEFORE awaiting output.text (input processor tripwire may prevent text from resolving)
-      const tripwireData = await Promise.resolve(streamed.output.tripwire);
-      const outcome = durableWakeOutcomeFromTripwire(tripwireData);
+      // Set up tripwire detection for this trace
+      tripwireDetector.setTraceId(streamed.runId);
+      const tripwirePromise = new Promise<never>((_, reject) => {
+        tripwireDetector.once('tripwire', (errorText: string) => {
+          reject(new Error(errorText));
+        });
+      });
       
-      if (!outcome.recordSuccess) {
-        runTracer.error('system-message tripwire detected', { errorText: outcome.errorText });
-        throw new Error(outcome.errorText);
+      try {
+        // Race between normal completion and tripwire detection
+        // If tripwire is detected before output.text resolves, we fail immediately
+        await Promise.race([
+          awaitWithAbort(streamed.output.text, abortSignal),
+          tripwirePromise,
+        ]);
+      } finally {
+        tripwireDetector.clear();
       }
-      
-      await awaitWithAbort(streamed.output.text, abortSignal);
       
       streamed.cleanup();
       streamResult = undefined;
