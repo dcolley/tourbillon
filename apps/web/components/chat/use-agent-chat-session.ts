@@ -305,7 +305,10 @@ export function useAgentChatSession(options: {
           const elapsed = Date.now() - lastActivity;
           if (elapsed > HANG_TIMEOUT_MS) {
             clearInterval(hangWatchdog);
-            ac.abort(new Error('Chat stream timeout: no activity for 60 seconds'));
+            // Surface error and clear running BEFORE aborting (not silent)
+            setRunning(false);
+            setError('Chat stream timeout: no activity for 60 seconds');
+            ac.abort();
           }
         }, 10000); // Check every 10 seconds
 
