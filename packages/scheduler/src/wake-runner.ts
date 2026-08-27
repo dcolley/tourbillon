@@ -28,6 +28,7 @@ import {
   buildWakeMessage,
   parseCompanySettings,
   createTraceLogger,
+  canForceKillHeartbeat,
 } from '@tourbillon/shared';
 import type { Agent as AgentRecord } from '@tourbillon/db';
 import { randomUUID } from 'crypto';
@@ -38,6 +39,8 @@ import {
   heartbeatAbortedError,
   isAbortLikeError,
   resolveHeartbeatFailureError,
+  operatorForceKillError,
+  OPERATOR_FORCE_KILL_REASON,
 } from './heartbeat-abort';
 import {
   findIssueToPark,
@@ -58,6 +61,9 @@ type WakeTracer = ReturnType<typeof createTraceLogger>;
 /** In-process single-flight + follow-up queue per agent (replaces BullMQ dedupe). */
 const agentLocks = new Map<string, Promise<void>>();
 const agentFollowUps = new Map<string, WakeRequest[]>();
+
+/** In-flight AbortControllers keyed by runId for operator force-kill. */
+const runAbortControllers = new Map<string, AbortController>();
 
 interface TokenUsageResult {
   inputTokens: number;
@@ -126,6 +132,17 @@ async function recordHeartbeatFailure(
 ): Promise<void> {
   if (isMastraTracingEnabled()) {
     await flushObservability().catch(() => undefined);
+  }
+
+  // Check if already terminal to avoid overwriting operator kill
+  const existing = await db.query.heartbeatRuns.findFirst({
+    where: eq(heartbeatRuns.id, runId),
+    columns: { status: true, errorText: true },
+  });
+
+  // Do not overwrite if already terminal
+  if (existing && (existing.status === 'succeeded' || existing.status === 'failed' || existing.status === 'cancelled')) {
+    return;
   }
 
   await db.update(heartbeatRuns)
@@ -357,6 +374,9 @@ async function runWake(
   const staleMs = liveness.staleSec * 1000;
   const runStartedMs = Date.now();
   const abortController = new AbortController();
+  
+  // Register for operator force-kill
+  runAbortControllers.set(runId, abortController);
 
   let watchdog: ReturnType<typeof setTimeout> | undefined;
   const resetWatchdog = () => {
@@ -476,7 +496,11 @@ async function runWake(
     });
     return { runId, status: 'succeeded' };
   } catch (err) {
-    const errorText = resolveHeartbeatFailureError(err, abortController.signal.aborted);
+    const errorText = resolveHeartbeatFailureError(
+      err,
+      abortController.signal.aborted,
+      abortController.signal.reason,
+    );
     runTracer.error('wake run failed', {
       error: errorText,
       aborted: abortController.signal.aborted,
@@ -488,6 +512,7 @@ async function runWake(
   } finally {
     if (watchdog) clearTimeout(watchdog);
     clearInterval(pingInterval);
+    runAbortControllers.delete(runId);
   }
 }
 
@@ -829,4 +854,56 @@ export async function sweepStaleHeartbeatRuns(): Promise<number> {
     .where(and(eq(heartbeatRuns.status, 'running'), lt(heartbeatRuns.lastSeenAt, cutoff)))
     .returning({ id: heartbeatRuns.id });
   return stale.length;
+}
+
+export interface ForceKillResult {
+  success: boolean;
+  hadController: boolean;
+  errorText?: string;
+}
+
+/**
+ * Force-kill a running heartbeat by operator action.
+ * Aborts the in-flight controller (if present), persists terminal status, and releases checkout lock.
+ */
+export async function forceKillHeartbeat(runId: string, companyId: string): Promise<ForceKillResult> {
+  const run = await db.query.heartbeatRuns.findFirst({
+    where: and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, companyId)),
+  });
+
+  if (!run) {
+    return { success: false, hadController: false, errorText: 'Run not found' };
+  }
+
+  // Do not rewrite a finished run (only queued/running can be killed)
+  if (!canForceKillHeartbeat(run.status)) {
+    return { success: false, hadController: false, errorText: 'Run already finished' };
+  }
+
+  const controller = runAbortControllers.get(runId);
+  const hadController = Boolean(controller);
+
+  // Abort the signal with operator kill reason if controller is present
+  if (controller) {
+    controller.abort(operatorForceKillError());
+    runAbortControllers.delete(runId);
+  }
+
+  // Persist terminal status regardless of whether controller was present
+  await db.update(heartbeatRuns)
+    .set({
+      status: 'failed',
+      finishedAt: new Date(),
+      errorText: OPERATOR_FORCE_KILL_REASON,
+    })
+    .where(eq(heartbeatRuns.id, runId));
+
+  // Release checkout lock if any
+  const { releaseStaleCheckoutLocksForRun } = await import('@tourbillon/db');
+  await releaseStaleCheckoutLocksForRun(runId);
+
+  // Publish update
+  await publishHeartbeatRunUpdate(companyId, runId, 'failed', run.agentId);
+
+  return { success: true, hadController };
 }

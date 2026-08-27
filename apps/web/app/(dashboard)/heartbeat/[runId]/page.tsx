@@ -11,6 +11,7 @@ import {
 } from '@/lib/jobs';
 import { JobDetailLive } from '../../jobs/[queue]/[jobId]/job-detail-live';
 import { ChatPageContext } from '@/components/chat/chat-page-context';
+import { HeartbeatRunHeaderActions } from './heartbeat-run-header-actions';
 
 async function dismissHeartbeatAction(_formData: FormData) {
   'use server';
@@ -43,36 +44,45 @@ export default async function HeartbeatRunPage({
         defaultAgentName={agent?.name}
       />
       <div>
-        <Link
-          href="/jobs/heartbeat"
-          className="text-sm text-muted-foreground hover:text-foreground"
-        >
-          ← Back to heartbeats
-        </Link>
-        <h1 className="text-2xl font-bold tracking-tight mt-2">Heartbeat</h1>
-        <p className="font-mono text-sm text-muted-foreground mt-1 break-all">{run.id}</p>
-        <p className="text-muted-foreground">
-          {agent ? (
-            <>
-              <Link
-                href={`/agent/${agent.urlKey}`}
-                className="hover:text-foreground underline-offset-4 hover:underline"
-              >
-                {agent.name}
-              </Link>
-              {` · ${run.invocationSource}`}
-            </>
-          ) : (
-            run.invocationSource
-          )}
-        </p>
-        {taskId && (
-          <p className="text-sm mt-1">
-            <Link href={`/issue/${taskId}`} className="text-muted-foreground hover:underline">
-              Linked issue
+        <div className="flex items-center justify-between">
+          <div className="flex-1">
+            <Link
+              href="/jobs/heartbeat"
+              className="text-sm text-muted-foreground hover:text-foreground"
+            >
+              ← Back to heartbeats
             </Link>
-          </p>
-        )}
+            <h1 className="text-2xl font-bold tracking-tight mt-2">Heartbeat</h1>
+            <p className="font-mono text-sm text-muted-foreground mt-1 break-all">{run.id}</p>
+            <p className="text-muted-foreground">
+              {agent ? (
+                <>
+                  <Link
+                    href={`/agent/${agent.urlKey}`}
+                    className="hover:text-foreground underline-offset-4 hover:underline"
+                  >
+                    {agent.name}
+                  </Link>
+                  {` · ${run.invocationSource}`}
+                </>
+              ) : (
+                run.invocationSource
+              )}
+            </p>
+            {taskId && (
+              <p className="text-sm mt-1">
+                <Link href={`/issue/${taskId}`} className="text-muted-foreground hover:underline">
+                  Linked issue
+                </Link>
+              </p>
+            )}
+          </div>
+          <HeartbeatRunHeaderActions
+            runId={run.id}
+            companyId={run.companyId}
+            status={run.status}
+          />
+        </div>
       </div>
 
       {run.errorText && (

@@ -3,7 +3,7 @@ import { db, agents, routines } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
 import { createTraceLogger, type HeartbeatJobData } from '@tourbillon/shared';
 import { syncAgentTimerSchedule, syncRoutineSchedule, deleteRoutineSchedule } from '@tourbillon/mastra';
-import { startWake, sweepStaleHeartbeatRuns } from './wake-runner';
+import { startWake, sweepStaleHeartbeatRuns, forceKillHeartbeat } from './wake-runner';
 
 const tracer = createTraceLogger('wake-server', {});
 
@@ -135,6 +135,29 @@ export function startWakeServer(): http.Server {
       if (req.method === 'POST' && req.url === '/internal/sweep-stale') {
         const n = await sweepStaleHeartbeatRuns();
         json(res, 200, { swept: n });
+        return;
+      }
+
+      if (req.method === 'POST' && req.url?.startsWith('/internal/force-kill/')) {
+        const runId = req.url.slice('/internal/force-kill/'.length);
+        if (!runId) {
+          json(res, 400, { error: 'runId required' });
+          return;
+        }
+        const raw = await readBody(req);
+        const body = JSON.parse(raw) as { companyId?: string };
+        if (!body.companyId) {
+          json(res, 400, { error: 'companyId required' });
+          return;
+        }
+        const result = await forceKillHeartbeat(runId, body.companyId);
+        if (!result.success) {
+          json(res, result.errorText === 'Run already finished' ? 409 : 404, {
+            error: result.errorText,
+          });
+          return;
+        }
+        json(res, 200, { killed: true, hadController: result.hadController });
         return;
       }
 

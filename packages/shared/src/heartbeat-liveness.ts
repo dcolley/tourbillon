@@ -59,6 +59,14 @@ export function heartbeatStaleErrorText(staleSec: number): string {
   return `Heartbeat worker stopped responding (no ping within ${staleSec}s)`;
 }
 
+/**
+ * Determines if a heartbeat can be force-killed by the operator.
+ * Only queued or running heartbeats can be killed.
+ */
+export function canForceKillHeartbeat(status: string): boolean {
+  return status === 'queued' || status === 'running';
+}
+
 export interface HeartbeatProgressLastEvent {
   type: string;
   at: Date;

@@ -3,7 +3,23 @@
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
-import { triggerAgentHeartbeatAction } from '../actions';
+import { triggerAgentHeartbeatAction, forceKillHeartbeatAction } from '../actions';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { MoreVertical } from 'lucide-react';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { canForceKillHeartbeat } from '@tourbillon/shared';
 
 export type InFlightHeartbeat = {
   id: string;
@@ -25,6 +41,7 @@ export function AgentHeartbeatHeaderActions({
   initialInFlight: InFlightHeartbeat | null;
 }) {
   const [inFlight, setInFlight] = useState<InFlightHeartbeat | null>(initialInFlight);
+  const [showKillDialog, setShowKillDialog] = useState(false);
 
   useEffect(() => {
     setInFlight(initialInFlight);
@@ -43,8 +60,8 @@ export function AgentHeartbeatHeaderActions({
           heartbeatRun?: { status?: string } | null;
         };
         const status = data.heartbeatRun?.status;
-        if (status === 'queued' || status === 'running') {
-          setInFlight({ id: runId, status });
+        if (status && canForceKillHeartbeat(status)) {
+          setInFlight({ id: runId, status: status as 'queued' | 'running' });
           return;
         }
         setInFlight(null);
@@ -78,6 +95,47 @@ export function AgentHeartbeatHeaderActions({
           Run heartbeat
         </Button>
       </form>
+      {inFlight && (
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={<Button variant="ghost" size="sm" className="h-8 w-8 p-0" />}
+          >
+            <span className="sr-only">Open menu</span>
+            <MoreVertical className="h-4 w-4" />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem
+              variant="destructive"
+              onSelect={() => setShowKillDialog(true)}
+            >
+              Force-kill heartbeat
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
+      <Dialog open={showKillDialog} onOpenChange={setShowKillDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Force-kill heartbeat</DialogTitle>
+            <DialogDescription>
+              This stops the wake and releases any checkout lock.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowKillDialog(false)}>
+              Cancel
+            </Button>
+            <form action={forceKillHeartbeatAction}>
+              <input type="hidden" name="runId" value={inFlight?.id ?? ''} />
+              <input type="hidden" name="companyId" value={companyId} />
+              <input type="hidden" name="returnPath" value={`/agent/${urlKey}`} />
+              <Button type="submit" variant="destructive">
+                Force-kill
+              </Button>
+            </form>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }
