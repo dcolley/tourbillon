@@ -4,6 +4,9 @@ import {
   heartbeatProgressStaleErrorText,
   isResumableWakeMatch,
   isTokenLimiterTripwireError,
+  isSystemMessageTripwire,
+  extractTripwireTokenCounts,
+  formatSystemMessageTripwireError,
   parseCompanySettings,
   resolveContextBudget,
   resolveObservationalMemoryModel,
@@ -93,8 +96,104 @@ describe('isTokenLimiterTripwireError', () => {
     assert.equal(isTokenLimiterTripwireError(new Error('TripWire: blocked')), true);
   });
 
+  it('detects system messages alone exceed tripwire', () => {
+    assert.equal(
+      isTokenLimiterTripwireError(
+        new Error('System messages alone exceed token limit. Requests cannot be completed by removing system messages.'),
+      ),
+      true,
+    );
+  });
+
   it('ignores unrelated errors', () => {
     assert.equal(isTokenLimiterTripwireError(new Error('network timeout')), false);
+  });
+});
+
+describe('isSystemMessageTripwire', () => {
+  it('detects system message tripwire in string', () => {
+    assert.equal(
+      isSystemMessageTripwire('System messages alone exceed token limit'),
+      true,
+    );
+  });
+
+  it('detects system message tripwire in object', () => {
+    assert.equal(
+      isSystemMessageTripwire({
+        tripwire: 'TokenLimiterProcessor: System messages alone exceed token limit. Requests cannot be completed by removing system messages.',
+      }),
+      true,
+    );
+  });
+
+  it('detects case-insensitive', () => {
+    assert.equal(
+      isSystemMessageTripwire('SYSTEM MESSAGES ALONE EXCEED'),
+      true,
+    );
+  });
+
+  it('ignores unrelated content', () => {
+    assert.equal(isSystemMessageTripwire('normal output'), false);
+  });
+});
+
+describe('extractTripwireTokenCounts', () => {
+  it('extracts both system tokens and limit', () => {
+    const result = extractTripwireTokenCounts(
+      'System messages are 150000 tokens (limit 120000)'
+    );
+    assert.equal(result.systemTokens, 150000);
+    assert.equal(result.limit, 120000);
+  });
+
+  it('extracts system tokens only', () => {
+    const result = extractTripwireTokenCounts('System messages are 95000 tokens');
+    assert.equal(result.systemTokens, 95000);
+    assert.equal(result.limit, undefined);
+  });
+
+  it('extracts limit only', () => {
+    const result = extractTripwireTokenCounts('Exceeded limit 120000');
+    assert.equal(result.systemTokens, undefined);
+    assert.equal(result.limit, 120000);
+  });
+
+  it('extracts from JSON object', () => {
+    const result = extractTripwireTokenCounts({
+      tripwire: 'System messages 50000 tokens, limit 40000',
+    });
+    assert.equal(result.systemTokens, 50000);
+    assert.equal(result.limit, 40000);
+  });
+
+  it('returns empty object when no counts found', () => {
+    const result = extractTripwireTokenCounts('no numbers here');
+    assert.equal(result.systemTokens, undefined);
+    assert.equal(result.limit, undefined);
+  });
+});
+
+describe('formatSystemMessageTripwireError', () => {
+  it('formats with both counts', () => {
+    const message = formatSystemMessageTripwireError(150000, 120000);
+    assert.equal(message, 'System messages are 150000 tokens (limit 120000). Cannot trim further.');
+  });
+
+  it('formats with system tokens only', () => {
+    const message = formatSystemMessageTripwireError(95000, undefined);
+    assert.equal(message, 'System messages are 95000 tokens. Cannot trim further.');
+  });
+
+  it('formats with limit only', () => {
+    const message = formatSystemMessageTripwireError(undefined, 120000);
+    assert.equal(message, 'System messages exceed limit (120000 tokens). Cannot trim further.');
+  });
+
+  it('formats with no counts', () => {
+    const message = formatSystemMessageTripwireError(undefined, undefined);
+    assert.equal(message, 'System messages alone exceed token limit. Cannot trim further.');
   });
 });
 

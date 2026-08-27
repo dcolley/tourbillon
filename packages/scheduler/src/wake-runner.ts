@@ -28,6 +28,9 @@ import {
   buildWakeMessage,
   parseCompanySettings,
   createTraceLogger,
+  isSystemMessageTripwire,
+  extractTripwireTokenCounts,
+  formatSystemMessageTripwireError,
 } from '@tourbillon/shared';
 import type { Agent as AgentRecord } from '@tourbillon/db';
 import { randomUUID } from 'crypto';
@@ -638,6 +641,8 @@ async function runDurableAgentWake(params: {
   let traceId: string | undefined;
   let durableRunId: string | undefined;
   let streamResult: { cleanup: () => void } | undefined;
+  let tripwireDetected = false;
+  let tripwireError: Error | undefined;
 
   const onAbort = () => {
     streamResult?.cleanup();
@@ -659,6 +664,16 @@ async function runDurableAgentWake(params: {
           } | undefined;
           inputTokens = usage?.inputTokens ?? usage?.promptTokens ?? inputTokens;
           outputTokens = usage?.outputTokens ?? usage?.completionTokens ?? outputTokens;
+          
+          // Check for system-message tripwire in result
+          if (result && typeof result === 'object' && !tripwireDetected) {
+            const resultObj = result as Record<string, unknown>;
+            if (isSystemMessageTripwire(resultObj)) {
+              tripwireDetected = true;
+              const counts = extractTripwireTokenCounts(resultObj);
+              tripwireError = new Error(formatSystemMessageTripwireError(counts.systemTokens, counts.limit));
+            }
+          }
         },
       } as NonNullable<Parameters<typeof durableAgent.observe>[1]> & { abortSignal: AbortSignal });
       streamResult = observed;
@@ -691,6 +706,16 @@ async function runDurableAgentWake(params: {
           } | undefined;
           inputTokens = usage?.inputTokens ?? usage?.promptTokens ?? 0;
           outputTokens = usage?.outputTokens ?? usage?.completionTokens ?? 0;
+          
+          // Check for system-message tripwire in result
+          if (result && typeof result === 'object' && !tripwireDetected) {
+            const resultObj = result as Record<string, unknown>;
+            if (isSystemMessageTripwire(resultObj)) {
+              tripwireDetected = true;
+              const counts = extractTripwireTokenCounts(resultObj);
+              tripwireError = new Error(formatSystemMessageTripwireError(counts.systemTokens, counts.limit));
+            }
+          }
         },
       } as NonNullable<Parameters<typeof durableAgent.stream>[1]> & { abortSignal: AbortSignal });
       streamResult = streamed;
@@ -699,6 +724,14 @@ async function runDurableAgentWake(params: {
       await awaitWithAbort(streamed.output.text, abortSignal);
       streamed.cleanup();
       streamResult = undefined;
+    }
+    
+    // Throw tripwire error after stream completes
+    if (tripwireDetected && tripwireError) {
+      runTracer.error('system-message tripwire detected', {
+        errorText: tripwireError.message,
+      });
+      throw tripwireError;
     }
   } catch (err) {
     streamResult?.cleanup();
