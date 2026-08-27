@@ -671,6 +671,13 @@ async function runDurableAgentWake(params: {
   const detector = new TripwireDetector();
   tripwireDetectorRegistry.register(detector);
 
+  // Attach tripwire listener BEFORE stream/observe (must listen before event fires)
+  const tripwirePromise = new Promise<never>((_, reject) => {
+    detector.once('tripwire', (errorText: string) => {
+      reject(new Error(errorText));
+    });
+  });
+
   const onAbort = () => {
     streamResult?.cleanup();
   };
@@ -679,88 +686,95 @@ async function runDurableAgentWake(params: {
   try {
     if (resumable?.durableRunId) {
       runTracer.info('resuming durable agent run', { durableRunId: resumable.durableRunId });
-      const observed = await durableAgent.observe(resumable.durableRunId, {
-        offset: 0,
-        abortSignal,
-        onFinish: (result) => {
-          const usage = (result.totalUsage ?? result.usage) as {
-            inputTokens?: number;
-            outputTokens?: number;
-            promptTokens?: number;
-            completionTokens?: number;
-          } | undefined;
-          inputTokens = usage?.inputTokens ?? usage?.promptTokens ?? inputTokens;
-          outputTokens = usage?.outputTokens ?? usage?.completionTokens ?? outputTokens;
-        },
-      } as NonNullable<Parameters<typeof durableAgent.observe>[1]> & { abortSignal: AbortSignal });
-      streamResult = observed;
-      durableRunId = observed.runId;
-      traceId = observed.runId;
       
-      // Set traceId on detector now that we have it (for filtering)
-      detector.setTraceId(observed.runId);
-      
-      // Race output.text with tripwire detection
-      const tripwirePromise = new Promise<never>((_, reject) => {
-        detector.once('tripwire', (errorText: string) => {
-          reject(new Error(errorText));
-        });
-      });
-      
+      // Race the observe call with tripwire detection
       await Promise.race([
-        awaitWithAbort(observed.output.text, abortSignal),
+        (async () => {
+          const observed = await durableAgent.observe(resumable.durableRunId, {
+            offset: 0,
+            abortSignal,
+            onFinish: (result) => {
+              const usage = (result.totalUsage ?? result.usage) as {
+                inputTokens?: number;
+                outputTokens?: number;
+                promptTokens?: number;
+                completionTokens?: number;
+              } | undefined;
+              inputTokens = usage?.inputTokens ?? usage?.promptTokens ?? inputTokens;
+              outputTokens = usage?.outputTokens ?? usage?.completionTokens ?? outputTokens;
+            },
+          } as NonNullable<Parameters<typeof durableAgent.observe>[1]> & { abortSignal: AbortSignal });
+          streamResult = observed;
+          durableRunId = observed.runId;
+          traceId = observed.runId;
+          
+          // Check if tripwire fired during observe (before listener was ready)
+          const earlyError = detector.getErrorText();
+          if (earlyError) {
+            throw new Error(earlyError);
+          }
+          
+          // Set traceId for future events
+          detector.setTraceId(observed.runId);
+          
+          // Race output.text with any late tripwires
+          await awaitWithAbort(observed.output.text, abortSignal);
+          
+          observed.cleanup();
+          streamResult = undefined;
+        })(),
         tripwirePromise,
       ]);
-      
-      observed.cleanup();
-      streamResult = undefined;
     } else {
-      const streamed = await durableAgent.stream(wakeMessage, {
-        requestContext: runtimeContext,
-        maxSteps,
-        ...(useMemory
-          ? {
-              memory: {
-                resource: memoryKeys.resource,
-                thread: memoryKeys.thread,
-              },
-            }
-          : {}),
-        ...toMastraCallOptions(generationOptions ?? {}),
-        ...(tracingOptions ? { tracingOptions } : {}),
-        abortSignal,
-        onFinish: (result) => {
-          const usage = (result.totalUsage ?? result.usage) as {
-            inputTokens?: number;
-            outputTokens?: number;
-            promptTokens?: number;
-            completionTokens?: number;
-          } | undefined;
-          inputTokens = usage?.inputTokens ?? usage?.promptTokens ?? 0;
-          outputTokens = usage?.outputTokens ?? usage?.completionTokens ?? 0;
-        },
-      } as NonNullable<Parameters<typeof durableAgent.stream>[1]> & { abortSignal: AbortSignal });
-      streamResult = streamed;
-      durableRunId = streamed.runId;
-      traceId = streamed.runId;
-      
-      // Set traceId on detector now that we have it (for filtering)
-      detector.setTraceId(streamed.runId);
-      
-      // Race output.text with tripwire detection
-      const tripwirePromise = new Promise<never>((_, reject) => {
-        detector.once('tripwire', (errorText: string) => {
-          reject(new Error(errorText));
-        });
-      });
-      
+      // Race the stream call with tripwire detection
       await Promise.race([
-        awaitWithAbort(streamed.output.text, abortSignal),
+        (async () => {
+          const streamed = await durableAgent.stream(wakeMessage, {
+            requestContext: runtimeContext,
+            maxSteps,
+            ...(useMemory
+              ? {
+                  memory: {
+                    resource: memoryKeys.resource,
+                    thread: memoryKeys.thread,
+                  },
+                }
+              : {}),
+            ...toMastraCallOptions(generationOptions ?? {}),
+            ...(tracingOptions ? { tracingOptions } : {}),
+            abortSignal,
+            onFinish: (result) => {
+              const usage = (result.totalUsage ?? result.usage) as {
+                inputTokens?: number;
+                outputTokens?: number;
+                promptTokens?: number;
+                completionTokens?: number;
+              } | undefined;
+              inputTokens = usage?.inputTokens ?? usage?.promptTokens ?? 0;
+              outputTokens = usage?.outputTokens ?? usage?.completionTokens ?? 0;
+            },
+          } as NonNullable<Parameters<typeof durableAgent.stream>[1]> & { abortSignal: AbortSignal });
+          streamResult = streamed;
+          durableRunId = streamed.runId;
+          traceId = streamed.runId;
+          
+          // Check if tripwire fired during stream (before listener was ready)
+          const earlyError = detector.getErrorText();
+          if (earlyError) {
+            throw new Error(earlyError);
+          }
+          
+          // Set traceId for future events
+          detector.setTraceId(streamed.runId);
+          
+          // Race output.text with any late tripwires
+          await awaitWithAbort(streamed.output.text, abortSignal);
+          
+          streamed.cleanup();
+          streamResult = undefined;
+        })(),
         tripwirePromise,
       ]);
-      
-      streamed.cleanup();
-      streamResult = undefined;
     }
   } catch (err) {
     streamResult?.cleanup();

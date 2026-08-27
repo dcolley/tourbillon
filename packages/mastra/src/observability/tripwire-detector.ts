@@ -9,10 +9,14 @@ import { isSystemMessageTripwire, extractTripwireTokenCounts, formatSystemMessag
  * 
  * Accepts any processor tripwire until traceId is set (for spans that arrive
  * DURING stream/observe before runId is known), then filters by traceId.
+ * 
+ * Stores errorText so wake-runner can check if tripwire fired during stream/observe
+ * even if no listener was attached yet.
  */
 export class TripwireDetector extends EventEmitter {
   private traceId: string | null = null;
   private fired = false;
+  private errorText: string | null = null;
 
   setTraceId(traceId: string) {
     this.traceId = traceId;
@@ -30,16 +34,22 @@ export class TripwireDetector extends EventEmitter {
     if (span.type !== SpanType.PROCESSOR) return;
     if (!span.output || !isSystemMessageTripwire(span.output)) return;
 
-    // Tripwire detected - fire once and mark as done
+    // Tripwire detected - fire once and store errorText
     this.fired = true;
     const counts = extractTripwireTokenCounts(span.output);
-    const errorText = formatSystemMessageTripwireError(counts.systemTokens, counts.limit);
-    this.emit('tripwire', errorText);
+    this.errorText = formatSystemMessageTripwireError(counts.systemTokens, counts.limit);
+    this.emit('tripwire', this.errorText);
+  }
+
+  /** Check if tripwire already fired (for checking after stream/observe returns) */
+  getErrorText(): string | null {
+    return this.errorText;
   }
 
   clear() {
     this.fired = false;
     this.traceId = null;
+    this.errorText = null;
     this.removeAllListeners();
   }
 }

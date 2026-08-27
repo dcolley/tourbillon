@@ -98,11 +98,23 @@ describe('durableWakeOutcomeFromTripwire', () => {
 });
 
 describe('TripwireDetector real-time detection', () => {
-  it('detector catches processor tripwire even when output.text never settles', async () => {
+  it('detector catches processor tripwire even when output.text never settles (PRODUCTION ORDER)', async () => {
     // Create per-wake detector (as wake-runner does)
     const detector = new TripwireDetector();
     
-    // Simulate processor span with system-message tripwire
+    // Attach listener BEFORE stream/observe starts (PRODUCTION ORDER)
+    const tripwirePromise = new Promise<never>((_, reject) => {
+      detector.once('tripwire', (errorText: string) => {
+        reject(new Error(errorText));
+      });
+    });
+    
+    // Simulate output.text that never settles (as in TEST hang)
+    const neverSettlingText = new Promise<string>(() => {
+      // Never resolves or rejects
+    });
+    
+    // Simulate processor span with system-message tripwire DURING stream/observe
     const processorSpanEvent: TracingEvent = {
       type: 'span_end' as any,
       exportedSpan: {
@@ -121,18 +133,6 @@ describe('TripwireDetector real-time detection', () => {
         },
       } as any,
     };
-    
-    // Set up tripwire promise (as wake-runner does)
-    const tripwirePromise = new Promise<never>((_, reject) => {
-      detector.once('tripwire', (errorText: string) => {
-        reject(new Error(errorText));
-      });
-    });
-    
-    // Simulate output.text that never settles
-    const neverSettlingText = new Promise<string>(() => {
-      // Never resolves or rejects
-    });
     
     // Fire the processor span event (as exporter does during stream/observe)
     detector.onTracingEvent(processorSpanEvent);
@@ -156,12 +156,18 @@ describe('TripwireDetector real-time detection', () => {
     detector.clear();
   });
 
-  it('detector catches tripwire BEFORE traceId is set (during stream/observe)', async () => {
-    // Create detector without traceId (armed before stream/observe returns)
+  it('detector stores errorText so wake-runner can check after stream returns (PRODUCTION ORDER)', async () => {
+    // Create detector
     const detector = new TripwireDetector();
-    // Do NOT call setTraceId yet - simulating the moment DURING stream/observe
     
-    // Processor span arrives BEFORE we get runId back
+    // Attach listener BEFORE stream starts (PRODUCTION ORDER)
+    const tripwirePromise = new Promise<never>((_, reject) => {
+      detector.once('tripwire', (errorText: string) => {
+        reject(new Error(errorText));
+      });
+    });
+    
+    // Processor span arrives DURING stream (before we get runId back)
     const earlyProcessorSpan: TracingEvent = {
       type: 'span_end' as any,
       exportedSpan: {
@@ -181,27 +187,75 @@ describe('TripwireDetector real-time detection', () => {
       } as any,
     };
     
-    const tripwirePromise = new Promise<never>((_, reject) => {
-      detector.once('tripwire', (errorText: string) => {
-        reject(new Error(errorText));
-      });
-    });
-    
-    // Fire event BEFORE setTraceId (this is the TEST bug case)
+    // Fire event (simulating during stream, before we have runId)
     detector.onTracingEvent(earlyProcessorSpan);
     
-    // Now set traceId (simulating getting runId back from stream/observe)
-    detector.setTraceId('trace-early');
+    // Check stored errorText (as wake-runner does after stream() returns)
+    const storedError = detector.getErrorText();
+    assert.ok(storedError, 'Detector must store errorText when tripwire fires');
+    assert.match(storedError, /System messages are 95000 tokens \(limit 80000\)/);
     
-    // Tripwire should have already fired
+    // tripwirePromise should also reject
     await assert.rejects(
       tripwirePromise,
       (err: Error) => {
         assert.match(err.message, /System messages are 95000 tokens/);
         return true;
       },
-      'Detector must catch tripwire that arrives DURING stream/observe (before traceId set)'
+      'Listener must also fire'
     );
+    
+    detector.clear();
+  });
+
+  it('detector catches tripwire BEFORE traceId is set (during stream/observe) (PRODUCTION ORDER)', async () => {
+    // Create detector without traceId (armed before stream/observe returns)
+    const detector = new TripwireDetector();
+    
+    // Attach listener BEFORE firing span (PRODUCTION ORDER)
+    let tripwireFired = false;
+    let capturedError = '';
+    detector.once('tripwire', (errorText: string) => {
+      tripwireFired = true;
+      capturedError = errorText;
+    });
+    
+    // Processor span arrives BEFORE we get runId back (DURING stream/observe)
+    const earlyProcessorSpan: TracingEvent = {
+      type: 'span_end' as any,
+      exportedSpan: {
+        id: 'span-early',
+        traceId: 'trace-early',
+        type: SpanType.PROCESSOR,
+        name: 'input_processor',
+        output: {
+          reason: 'TokenLimiterProcessor: System messages alone exceed token limit.',
+          options: {
+            metadata: {
+              systemTokens: 95000,
+              limit: 80000,
+            },
+          },
+        },
+      } as any,
+    };
+    
+    // Fire event BEFORE setTraceId (this is the TEST bug case)
+    detector.onTracingEvent(earlyProcessorSpan);
+    
+    // Wait a tick to ensure event fired
+    await new Promise(r => setImmediate(r));
+    
+    assert.equal(tripwireFired, true, 'Detector must fire for processor tripwire even without traceId');
+    assert.match(capturedError, /System messages are 95000 tokens/);
+    
+    // Now set traceId (simulating getting runId back from stream/observe)
+    detector.setTraceId('trace-early');
+    
+    // Stored errorText should also be available
+    const storedError = detector.getErrorText();
+    assert.ok(storedError, 'Stored errorText must be available');
+    assert.match(storedError, /System messages are 95000 tokens/);
     
     detector.clear();
   });
