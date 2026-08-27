@@ -19,6 +19,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import { canForceKillHeartbeat } from '@tourbillon/shared';
 
 export type InFlightHeartbeat = {
   id: string;
@@ -59,8 +60,8 @@ export function AgentHeartbeatHeaderActions({
           heartbeatRun?: { status?: string } | null;
         };
         const status = data.heartbeatRun?.status;
-        if (status === 'queued' || status === 'running') {
-          setInFlight({ id: runId, status });
+        if (status && canForceKillHeartbeat(status)) {
+          setInFlight({ id: runId, status: status as 'queued' | 'running' });
           return;
         }
         setInFlight(null);

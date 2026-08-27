@@ -18,6 +18,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import { canForceKillHeartbeat } from '@tourbillon/shared';
 
 export function HeartbeatRunHeaderActions({
   runId,
@@ -29,9 +30,8 @@ export function HeartbeatRunHeaderActions({
   status: string;
 }) {
   const [showKillDialog, setShowKillDialog] = useState(false);
-  const canKill = status === 'queued' || status === 'running';
 
-  if (!canKill) {
+  if (!canForceKillHeartbeat(status)) {
     return null;
   }
 

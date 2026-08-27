@@ -108,8 +108,9 @@ export async function forceKillHeartbeatAction(formData: FormData) {
 
   if (!apiKey) {
     redirect(`${returnPath}?error=${encodeURIComponent('SCHEDULER_API_KEY not configured')}`);
-    return;
   }
+
+  let errorMessage: string | null = null;
 
   try {
     const response = await fetch(`${schedulerUrl}/internal/force-kill/${runId}`, {
@@ -123,13 +124,17 @@ export async function forceKillHeartbeatAction(formData: FormData) {
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-      throw new Error(error.error ?? 'Failed to force-kill heartbeat');
+      errorMessage = error.error ?? 'Failed to force-kill heartbeat';
     }
-
-    revalidatePath(returnPath);
-    redirect(`${returnPath}?killed=1`);
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Failed to force-kill heartbeat';
-    redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
+    errorMessage = err instanceof Error ? err.message : 'Failed to force-kill heartbeat';
   }
+
+  revalidatePath(returnPath);
+  
+  if (errorMessage) {
+    redirect(`${returnPath}?error=${encodeURIComponent(errorMessage)}`);
+  }
+  
+  redirect(`${returnPath}?killed=1`);
 }

@@ -28,6 +28,7 @@ import {
   buildWakeMessage,
   parseCompanySettings,
   createTraceLogger,
+  canForceKillHeartbeat,
 } from '@tourbillon/shared';
 import type { Agent as AgentRecord } from '@tourbillon/db';
 import { randomUUID } from 'crypto';
@@ -859,8 +860,8 @@ export async function forceKillHeartbeat(runId: string, companyId: string): Prom
     return { success: false, hadController: false, errorText: 'Run not found' };
   }
 
-  // Do not rewrite a finished run
-  if (run.status === 'succeeded' || run.status === 'failed' || run.status === 'cancelled') {
+  // Do not rewrite a finished run (only queued/running can be killed)
+  if (!canForceKillHeartbeat(run.status)) {
     return { success: false, hadController: false, errorText: 'Run already finished' };
   }
 
