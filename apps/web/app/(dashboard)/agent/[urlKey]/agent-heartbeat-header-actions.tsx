@@ -19,7 +19,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { canForceKillHeartbeat } from '@tourbillon/shared';
+import { canForceKillHeartbeat } from '@tourbillon/shared/heartbeat-liveness';
 
 export type InFlightHeartbeat = {
   id: string;
