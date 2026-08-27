@@ -669,14 +669,11 @@ async function runDurableAgentWake(params: {
       traceId = observed.runId;
       await awaitWithAbort(observed.output.text, abortSignal);
       
-      // Check for tripwire after output resolves
-      const result = observed as unknown as Record<string, unknown>;
-      const finishReason = typeof result.finishReason === 'string' ? result.finishReason : undefined;
-      const outputObj = result.output as Record<string, unknown> | undefined;
-      const tripwireData = outputObj?.tripwire;
+      // Check for tripwire in the actual ModelOutput
+      const tripwireData = await Promise.resolve(observed.output.tripwire);
       
-      if (finishReason === 'tripwire' || isSystemMessageTripwire(tripwireData)) {
-        const counts = extractTripwireTokenCounts(tripwireData ?? result);
+      if (tripwireData && isSystemMessageTripwire(tripwireData)) {
+        const counts = extractTripwireTokenCounts(tripwireData);
         const errorText = formatSystemMessageTripwireError(counts.systemTokens, counts.limit);
         runTracer.error('system-message tripwire detected', { errorText, counts });
         throw new Error(errorText);
@@ -715,14 +712,11 @@ async function runDurableAgentWake(params: {
       traceId = streamed.runId;
       await awaitWithAbort(streamed.output.text, abortSignal);
       
-      // Check for tripwire after output resolves
-      const result = streamed as unknown as Record<string, unknown>;
-      const finishReason = typeof result.finishReason === 'string' ? result.finishReason : undefined;
-      const outputObj = result.output as Record<string, unknown> | undefined;
-      const tripwireData = outputObj?.tripwire;
+      // Check for tripwire in the actual ModelOutput
+      const tripwireData = await Promise.resolve(streamed.output.tripwire);
       
-      if (finishReason === 'tripwire' || isSystemMessageTripwire(tripwireData)) {
-        const counts = extractTripwireTokenCounts(tripwireData ?? result);
+      if (tripwireData && isSystemMessageTripwire(tripwireData)) {
+        const counts = extractTripwireTokenCounts(tripwireData);
         const errorText = formatSystemMessageTripwireError(counts.systemTokens, counts.limit);
         runTracer.error('system-message tripwire detected', { errorText, counts });
         throw new Error(errorText);

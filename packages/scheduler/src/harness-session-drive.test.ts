@@ -168,7 +168,20 @@ describe('extractTripwireTokenCounts', () => {
     assert.equal(result.limit, 40000);
   });
 
-  it('extracts from metadata object (Mastra shape)', () => {
+  it('extracts from options.metadata (TripWire shape)', () => {
+    const result = extractTripwireTokenCounts({
+      options: {
+        metadata: {
+          systemTokens: 150000,
+          limit: 120000,
+        },
+      },
+    });
+    assert.equal(result.systemTokens, 150000);
+    assert.equal(result.limit, 120000);
+  });
+
+  it('extracts from metadata object (alternative shape)', () => {
     const result = extractTripwireTokenCounts({
       metadata: {
         systemTokens: 150000,

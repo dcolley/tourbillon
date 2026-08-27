@@ -111,7 +111,18 @@ export function extractTripwireTokenCounts(value: unknown): {
   if (value && typeof value === 'object') {
     const obj = value as Record<string, unknown>;
     
-    // Check for direct metadata fields
+    // Check for options.metadata (TripWire shape)
+    const options = obj.options as Record<string, unknown> | undefined;
+    if (options?.metadata && typeof options.metadata === 'object') {
+      const metadata = options.metadata as Record<string, unknown>;
+      const systemTokens = typeof metadata.systemTokens === 'number' ? metadata.systemTokens : undefined;
+      const limit = typeof metadata.limit === 'number' ? metadata.limit : undefined;
+      if (systemTokens !== undefined || limit !== undefined) {
+        return { systemTokens, limit };
+      }
+    }
+    
+    // Check for direct metadata fields (alternative shape)
     const metadata = obj.metadata as Record<string, unknown> | undefined;
     if (metadata) {
       const systemTokens = typeof metadata.systemTokens === 'number' ? metadata.systemTokens : undefined;
