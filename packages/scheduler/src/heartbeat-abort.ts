@@ -1,9 +1,14 @@
 import { heartbeatStaleErrorText, resolveHeartbeatLivenessConfig } from '@tourbillon/shared';
 
 export const HEARTBEAT_ABORTED = 'Heartbeat aborted';
+export const OPERATOR_FORCE_KILL_REASON = 'Force-killed by operator';
 
 export function heartbeatAbortedError(): Error {
   return new Error(HEARTBEAT_ABORTED);
+}
+
+export function operatorForceKillError(): Error {
+  return new Error(OPERATOR_FORCE_KILL_REASON);
 }
 
 export function isAbortLikeError(err: unknown): boolean {
@@ -18,14 +23,29 @@ export function isAbortLikeError(err: unknown): boolean {
   );
 }
 
-export function resolveHeartbeatFailureError(err: unknown, aborted: boolean): string {
+export function resolveHeartbeatFailureError(
+  err: unknown,
+  aborted: boolean,
+  abortReason?: unknown,
+): string {
+  // Check for operator force-kill first
+  if (
+    abortReason instanceof Error &&
+    abortReason.message === OPERATOR_FORCE_KILL_REASON
+  ) {
+    return OPERATOR_FORCE_KILL_REASON;
+  }
+  
+  // Check for timeout message before abort-like errors (timeout is in isAbortLikeError)
+  if (err instanceof Error && err.message === 'Heartbeat timeout') {
+    return err.message;
+  }
+  
   if (aborted || isAbortLikeError(err)) {
     const { staleSec } = resolveHeartbeatLivenessConfig();
     return heartbeatStaleErrorText(staleSec);
   }
-  if (err instanceof Error && err.message === 'Heartbeat timeout') {
-    return err.message;
-  }
+  
   return err instanceof Error ? err.message : String(err);
 }
 

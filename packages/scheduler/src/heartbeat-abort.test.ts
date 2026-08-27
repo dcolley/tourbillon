@@ -5,6 +5,9 @@ import {
   abortRejectedPromise,
   awaitWithAbort,
   isAbortLikeError,
+  resolveHeartbeatFailureError,
+  operatorForceKillError,
+  OPERATOR_FORCE_KILL_REASON,
 } from './heartbeat-abort';
 
 describe('isAbortLikeError', () => {
@@ -41,5 +44,48 @@ describe('abortRejectedPromise', () => {
     const controller = new AbortController();
     controller.abort();
     await assert.rejects(abortRejectedPromise(controller.signal));
+  });
+});
+
+describe('resolveHeartbeatFailureError', () => {
+  it('returns operator kill text when abort reason is operator kill', () => {
+    const err = new Error('any error');
+    const result = resolveHeartbeatFailureError(err, true, operatorForceKillError());
+    assert.equal(result, OPERATOR_FORCE_KILL_REASON);
+  });
+
+  it('returns operator kill text even when aborted is false but reason is operator kill', () => {
+    const err = new Error('any error');
+    const result = resolveHeartbeatFailureError(err, false, operatorForceKillError());
+    assert.equal(result, OPERATOR_FORCE_KILL_REASON);
+  });
+
+  it('returns stale text when aborted is true without operator reason', () => {
+    const err = new Error('any error');
+    const result = resolveHeartbeatFailureError(err, true);
+    assert.ok(result.includes('stopped responding'));
+  });
+
+  it('returns stale text for abort-like errors without operator reason', () => {
+    const err = new Error(HEARTBEAT_ABORTED);
+    const result = resolveHeartbeatFailureError(err, false);
+    assert.ok(result.includes('stopped responding'));
+  });
+
+  it('returns error message for non-abort errors', () => {
+    const err = new Error('Custom error message');
+    const result = resolveHeartbeatFailureError(err, false);
+    assert.equal(result, 'Custom error message');
+  });
+
+  it('returns timeout message for timeout errors', () => {
+    const err = new Error('Heartbeat timeout');
+    const result = resolveHeartbeatFailureError(err, false);
+    assert.equal(result, 'Heartbeat timeout');
+  });
+
+  it('converts non-Error to string', () => {
+    const result = resolveHeartbeatFailureError('plain string error', false);
+    assert.equal(result, 'plain string error');
   });
 });

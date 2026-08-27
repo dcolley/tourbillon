@@ -39,6 +39,8 @@ import {
   heartbeatAbortedError,
   isAbortLikeError,
   resolveHeartbeatFailureError,
+  operatorForceKillError,
+  OPERATOR_FORCE_KILL_REASON,
 } from './heartbeat-abort';
 import {
   findIssueToPark,
@@ -130,6 +132,17 @@ async function recordHeartbeatFailure(
 ): Promise<void> {
   if (isMastraTracingEnabled()) {
     await flushObservability().catch(() => undefined);
+  }
+
+  // Check if already terminal to avoid overwriting operator kill
+  const existing = await db.query.heartbeatRuns.findFirst({
+    where: eq(heartbeatRuns.id, runId),
+    columns: { status: true, errorText: true },
+  });
+
+  // Do not overwrite if already terminal
+  if (existing && (existing.status === 'succeeded' || existing.status === 'failed' || existing.status === 'cancelled')) {
+    return;
   }
 
   await db.update(heartbeatRuns)
@@ -483,7 +496,11 @@ async function runWake(
     });
     return { runId, status: 'succeeded' };
   } catch (err) {
-    const errorText = resolveHeartbeatFailureError(err, abortController.signal.aborted);
+    const errorText = resolveHeartbeatFailureError(
+      err,
+      abortController.signal.aborted,
+      abortController.signal.reason,
+    );
     runTracer.error('wake run failed', {
       error: errorText,
       aborted: abortController.signal.aborted,
@@ -839,8 +856,6 @@ export async function sweepStaleHeartbeatRuns(): Promise<number> {
   return stale.length;
 }
 
-const OPERATOR_FORCE_KILL_ERROR_TEXT = 'Force-killed by operator';
-
 export interface ForceKillResult {
   success: boolean;
   hadController: boolean;
@@ -868,9 +883,9 @@ export async function forceKillHeartbeat(runId: string, companyId: string): Prom
   const controller = runAbortControllers.get(runId);
   const hadController = Boolean(controller);
 
-  // Abort the signal if controller is present
+  // Abort the signal with operator kill reason if controller is present
   if (controller) {
-    controller.abort();
+    controller.abort(operatorForceKillError());
     runAbortControllers.delete(runId);
   }
 
@@ -879,7 +894,7 @@ export async function forceKillHeartbeat(runId: string, companyId: string): Prom
     .set({
       status: 'failed',
       finishedAt: new Date(),
-      errorText: OPERATOR_FORCE_KILL_ERROR_TEXT,
+      errorText: OPERATOR_FORCE_KILL_REASON,
     })
     .where(eq(heartbeatRuns.id, runId));
 
