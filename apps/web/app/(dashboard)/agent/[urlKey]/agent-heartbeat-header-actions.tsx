@@ -118,7 +118,7 @@ export function AgentHeartbeatHeaderActions({
           <DialogHeader>
             <DialogTitle>Force-kill heartbeat</DialogTitle>
             <DialogDescription>
-              This stops the wake and releases any checkout lock. The heartbeat will be marked as failed.
+              This stops the wake and releases any checkout lock.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
