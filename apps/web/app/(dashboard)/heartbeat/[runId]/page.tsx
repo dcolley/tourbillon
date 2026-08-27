@@ -12,6 +12,7 @@ import {
 import { JobDetailLive } from '../../jobs/[queue]/[jobId]/job-detail-live';
 import { ChatPageContext } from '@/components/chat/chat-page-context';
 import { HeartbeatRunHeaderActions } from './heartbeat-run-header-actions';
+import { HeartbeatRunQueryToast } from './heartbeat-run-query-toast';
 
 async function dismissHeartbeatAction(_formData: FormData) {
   'use server';
@@ -20,10 +21,13 @@ async function dismissHeartbeatAction(_formData: FormData) {
 
 export default async function HeartbeatRunPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ runId: string }>;
+  searchParams: Promise<{ error?: string; killed?: string }>;
 }) {
   const { runId } = await params;
+  const { error, killed } = await searchParams;
   const detail = await getHeartbeatRun(runId);
   if (!detail) notFound();
 
@@ -36,6 +40,7 @@ export default async function HeartbeatRunPage({
 
   return (
     <div className="p-6 space-y-6 max-w-6xl">
+      <HeartbeatRunQueryToast runId={runId} error={error} killed={killed} />
       <ChatPageContext
         contextType="heartbeat"
         contextId={run.id}

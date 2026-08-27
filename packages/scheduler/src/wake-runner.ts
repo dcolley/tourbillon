@@ -690,9 +690,8 @@ async function runDurableAgentWake(params: {
       streamResult = observed;
       durableRunId = observed.runId;
       traceId = observed.runId;
-      await awaitWithAbort(observed.output.text, abortSignal);
       
-      // Check for tripwire in the actual ModelOutput
+      // Check for tripwire BEFORE awaiting output.text (input processor tripwire may prevent text from resolving)
       const tripwireData = await Promise.resolve(observed.output.tripwire);
       const outcome = durableWakeOutcomeFromTripwire(tripwireData);
       
@@ -700,6 +699,8 @@ async function runDurableAgentWake(params: {
         runTracer.error('system-message tripwire detected', { errorText: outcome.errorText });
         throw new Error(outcome.errorText);
       }
+      
+      await awaitWithAbort(observed.output.text, abortSignal);
       
       observed.cleanup();
       streamResult = undefined;
@@ -732,9 +733,8 @@ async function runDurableAgentWake(params: {
       streamResult = streamed;
       durableRunId = streamed.runId;
       traceId = streamed.runId;
-      await awaitWithAbort(streamed.output.text, abortSignal);
       
-      // Check for tripwire in the actual ModelOutput
+      // Check for tripwire BEFORE awaiting output.text (input processor tripwire may prevent text from resolving)
       const tripwireData = await Promise.resolve(streamed.output.tripwire);
       const outcome = durableWakeOutcomeFromTripwire(tripwireData);
       
@@ -742,6 +742,8 @@ async function runDurableAgentWake(params: {
         runTracer.error('system-message tripwire detected', { errorText: outcome.errorText });
         throw new Error(outcome.errorText);
       }
+      
+      await awaitWithAbort(streamed.output.text, abortSignal);
       
       streamed.cleanup();
       streamResult = undefined;
