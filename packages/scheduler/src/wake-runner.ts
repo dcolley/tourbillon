@@ -641,8 +641,6 @@ async function runDurableAgentWake(params: {
   let traceId: string | undefined;
   let durableRunId: string | undefined;
   let streamResult: { cleanup: () => void } | undefined;
-  let tripwireDetected = false;
-  let tripwireError: Error | undefined;
 
   const onAbort = () => {
     streamResult?.cleanup();
@@ -664,22 +662,26 @@ async function runDurableAgentWake(params: {
           } | undefined;
           inputTokens = usage?.inputTokens ?? usage?.promptTokens ?? inputTokens;
           outputTokens = usage?.outputTokens ?? usage?.completionTokens ?? outputTokens;
-          
-          // Check for system-message tripwire in result
-          if (result && typeof result === 'object' && !tripwireDetected) {
-            const resultObj = result as Record<string, unknown>;
-            if (isSystemMessageTripwire(resultObj)) {
-              tripwireDetected = true;
-              const counts = extractTripwireTokenCounts(resultObj);
-              tripwireError = new Error(formatSystemMessageTripwireError(counts.systemTokens, counts.limit));
-            }
-          }
         },
       } as NonNullable<Parameters<typeof durableAgent.observe>[1]> & { abortSignal: AbortSignal });
       streamResult = observed;
       durableRunId = observed.runId;
       traceId = observed.runId;
       await awaitWithAbort(observed.output.text, abortSignal);
+      
+      // Check for tripwire after output resolves
+      const result = observed as unknown as Record<string, unknown>;
+      const finishReason = typeof result.finishReason === 'string' ? result.finishReason : undefined;
+      const outputObj = result.output as Record<string, unknown> | undefined;
+      const tripwireData = outputObj?.tripwire;
+      
+      if (finishReason === 'tripwire' || isSystemMessageTripwire(tripwireData)) {
+        const counts = extractTripwireTokenCounts(tripwireData ?? result);
+        const errorText = formatSystemMessageTripwireError(counts.systemTokens, counts.limit);
+        runTracer.error('system-message tripwire detected', { errorText, counts });
+        throw new Error(errorText);
+      }
+      
       observed.cleanup();
       streamResult = undefined;
     } else {
@@ -706,32 +708,28 @@ async function runDurableAgentWake(params: {
           } | undefined;
           inputTokens = usage?.inputTokens ?? usage?.promptTokens ?? 0;
           outputTokens = usage?.outputTokens ?? usage?.completionTokens ?? 0;
-          
-          // Check for system-message tripwire in result
-          if (result && typeof result === 'object' && !tripwireDetected) {
-            const resultObj = result as Record<string, unknown>;
-            if (isSystemMessageTripwire(resultObj)) {
-              tripwireDetected = true;
-              const counts = extractTripwireTokenCounts(resultObj);
-              tripwireError = new Error(formatSystemMessageTripwireError(counts.systemTokens, counts.limit));
-            }
-          }
         },
       } as NonNullable<Parameters<typeof durableAgent.stream>[1]> & { abortSignal: AbortSignal });
       streamResult = streamed;
       durableRunId = streamed.runId;
       traceId = streamed.runId;
       await awaitWithAbort(streamed.output.text, abortSignal);
+      
+      // Check for tripwire after output resolves
+      const result = streamed as unknown as Record<string, unknown>;
+      const finishReason = typeof result.finishReason === 'string' ? result.finishReason : undefined;
+      const outputObj = result.output as Record<string, unknown> | undefined;
+      const tripwireData = outputObj?.tripwire;
+      
+      if (finishReason === 'tripwire' || isSystemMessageTripwire(tripwireData)) {
+        const counts = extractTripwireTokenCounts(tripwireData ?? result);
+        const errorText = formatSystemMessageTripwireError(counts.systemTokens, counts.limit);
+        runTracer.error('system-message tripwire detected', { errorText, counts });
+        throw new Error(errorText);
+      }
+      
       streamed.cleanup();
       streamResult = undefined;
-    }
-    
-    // Throw tripwire error after stream completes
-    if (tripwireDetected && tripwireError) {
-      runTracer.error('system-message tripwire detected', {
-        errorText: tripwireError.message,
-      });
-      throw tripwireError;
     }
   } catch (err) {
     streamResult?.cleanup();

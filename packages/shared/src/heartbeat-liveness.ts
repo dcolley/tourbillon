@@ -100,14 +100,37 @@ export function isSystemMessageTripwire(value: unknown): boolean {
 /**
  * Extract token counts from a system-message tripwire error or span output.
  * Returns { systemTokens, limit } when both are found, or partial when only one is available.
+ * 
+ * Prefers metadata fields over regex parsing when available (Mastra tripwire chunk shape).
  */
 export function extractTripwireTokenCounts(value: unknown): {
   systemTokens?: number;
   limit?: number;
 } {
-  const text = typeof value === 'string' ? value : JSON.stringify(value ?? '');
+  // Try structured metadata first (Mastra tripwire chunk)
+  if (value && typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    
+    // Check for direct metadata fields
+    const metadata = obj.metadata as Record<string, unknown> | undefined;
+    if (metadata) {
+      const systemTokens = typeof metadata.systemTokens === 'number' ? metadata.systemTokens : undefined;
+      const limit = typeof metadata.limit === 'number' ? metadata.limit : undefined;
+      if (systemTokens !== undefined || limit !== undefined) {
+        return { systemTokens, limit };
+      }
+    }
+    
+    // Check for top-level fields
+    const systemTokens = typeof obj.systemTokens === 'number' ? obj.systemTokens : undefined;
+    const limit = typeof obj.limit === 'number' ? obj.limit : undefined;
+    if (systemTokens !== undefined || limit !== undefined) {
+      return { systemTokens, limit };
+    }
+  }
   
-  // Try to extract numbers from patterns like "N tokens" or "limit M"
+  // Fall back to regex parsing
+  const text = typeof value === 'string' ? value : JSON.stringify(value ?? '');
   const systemMatch = text.match(/system.*?(\d+)\s*tokens/i);
   const limitMatch = text.match(/limit.*?(\d+)/i);
   

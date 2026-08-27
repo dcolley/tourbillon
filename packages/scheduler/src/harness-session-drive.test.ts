@@ -168,6 +168,26 @@ describe('extractTripwireTokenCounts', () => {
     assert.equal(result.limit, 40000);
   });
 
+  it('extracts from metadata object (Mastra shape)', () => {
+    const result = extractTripwireTokenCounts({
+      metadata: {
+        systemTokens: 150000,
+        limit: 120000,
+      },
+    });
+    assert.equal(result.systemTokens, 150000);
+    assert.equal(result.limit, 120000);
+  });
+
+  it('extracts from top-level fields', () => {
+    const result = extractTripwireTokenCounts({
+      systemTokens: 95000,
+      limit: 120000,
+    });
+    assert.equal(result.systemTokens, 95000);
+    assert.equal(result.limit, 120000);
+  });
+
   it('returns empty object when no counts found', () => {
     const result = extractTripwireTokenCounts('no numbers here');
     assert.equal(result.systemTokens, undefined);
@@ -238,7 +258,7 @@ describe('driveSessionHeadless', () => {
           undefined,
           60,
         ),
-      (err: Error) => /TokenLimiter tripwire/i.test(err.message),
+      (err: Error) => /System messages.*Cannot trim further/i.test(err.message),
     );
   });
 
@@ -305,11 +325,21 @@ describe('driveSessionHeadless', () => {
     });
   });
 
-  it('tripwireErrorFromUnknown wraps limiter errors', () => {
+  it('tripwireErrorFromUnknown formats system-message tripwire with counts', () => {
     const err = tripwireErrorFromUnknown(
-      new Error('TokenLimiterProcessor: No messages to process.'),
+      new Error('System messages alone exceed token limit'),
     );
-    assert.match(err.message, /TokenLimiter tripwire/);
+    assert.match(err.message, /System messages.*Cannot trim further/i);
+  });
+
+  it('tripwireErrorFromUnknown extracts counts from error with metadata', () => {
+    const tripwireError = new Error('System messages alone exceed token limit');
+    (tripwireError as Error & { metadata?: unknown }).metadata = {
+      systemTokens: 150000,
+      limit: 120000,
+    };
+    const err = tripwireErrorFromUnknown(tripwireError);
+    assert.equal(err.message, 'System messages are 150000 tokens (limit 120000). Cannot trim further.');
   });
 
   it('aborts when maxSteps is exceeded', async () => {
