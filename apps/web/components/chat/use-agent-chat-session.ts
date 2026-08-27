@@ -373,6 +373,8 @@ export function useAgentChatSession(options: {
 
       void connect().catch((err) => {
         if (ac.signal.aborted) return;
+        // Clear running state when stream errors (don't leave silent clocks)
+        setRunning(false);
         setError(err instanceof Error ? err.message : String(err));
       });
     },
