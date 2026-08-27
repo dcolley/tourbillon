@@ -95,3 +95,41 @@ export async function deleteAgentAction(formData: FormData) {
   revalidatePath('/agent');
   redirect('/agent?deleted=1');
 }
+
+export async function forceKillHeartbeatAction(formData: FormData) {
+  const runId = formData.get('runId') as string;
+  const companyId = formData.get('companyId') as string;
+  const returnPath = formData.get('returnPath') as string;
+
+  if (!runId || !companyId) return;
+
+  const schedulerUrl = process.env.SCHEDULER_WAKE_URL ?? 'http://127.0.0.1:3003';
+  const apiKey = process.env.SCHEDULER_API_KEY;
+
+  if (!apiKey) {
+    redirect(`${returnPath}?error=${encodeURIComponent('SCHEDULER_API_KEY not configured')}`);
+    return;
+  }
+
+  try {
+    const response = await fetch(`${schedulerUrl}/internal/force-kill/${runId}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({ companyId }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+      throw new Error(error.error ?? 'Failed to force-kill heartbeat');
+    }
+
+    revalidatePath(returnPath);
+    redirect(`${returnPath}?killed=1`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to force-kill heartbeat';
+    redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
+  }
+}

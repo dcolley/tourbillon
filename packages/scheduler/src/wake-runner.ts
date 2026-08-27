@@ -59,6 +59,9 @@ type WakeTracer = ReturnType<typeof createTraceLogger>;
 const agentLocks = new Map<string, Promise<void>>();
 const agentFollowUps = new Map<string, WakeRequest[]>();
 
+/** In-flight AbortControllers keyed by runId for operator force-kill. */
+const runAbortControllers = new Map<string, AbortController>();
+
 interface TokenUsageResult {
   inputTokens: number;
   outputTokens: number;
@@ -357,6 +360,9 @@ async function runWake(
   const staleMs = liveness.staleSec * 1000;
   const runStartedMs = Date.now();
   const abortController = new AbortController();
+  
+  // Register for operator force-kill
+  runAbortControllers.set(runId, abortController);
 
   let watchdog: ReturnType<typeof setTimeout> | undefined;
   const resetWatchdog = () => {
@@ -488,6 +494,7 @@ async function runWake(
   } finally {
     if (watchdog) clearTimeout(watchdog);
     clearInterval(pingInterval);
+    runAbortControllers.delete(runId);
   }
 }
 
@@ -829,4 +836,58 @@ export async function sweepStaleHeartbeatRuns(): Promise<number> {
     .where(and(eq(heartbeatRuns.status, 'running'), lt(heartbeatRuns.lastSeenAt, cutoff)))
     .returning({ id: heartbeatRuns.id });
   return stale.length;
+}
+
+const OPERATOR_FORCE_KILL_ERROR_TEXT = 'Force-killed by operator';
+
+export interface ForceKillResult {
+  success: boolean;
+  hadController: boolean;
+  errorText?: string;
+}
+
+/**
+ * Force-kill a running heartbeat by operator action.
+ * Aborts the in-flight controller (if present), persists terminal status, and releases checkout lock.
+ */
+export async function forceKillHeartbeat(runId: string, companyId: string): Promise<ForceKillResult> {
+  const run = await db.query.heartbeatRuns.findFirst({
+    where: and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, companyId)),
+  });
+
+  if (!run) {
+    return { success: false, hadController: false, errorText: 'Run not found' };
+  }
+
+  // Do not rewrite a finished run
+  if (run.status === 'succeeded' || run.status === 'failed' || run.status === 'cancelled') {
+    return { success: false, hadController: false, errorText: 'Run already finished' };
+  }
+
+  const controller = runAbortControllers.get(runId);
+  const hadController = Boolean(controller);
+
+  // Abort the signal if controller is present
+  if (controller) {
+    controller.abort();
+    runAbortControllers.delete(runId);
+  }
+
+  // Persist terminal status regardless of whether controller was present
+  await db.update(heartbeatRuns)
+    .set({
+      status: 'failed',
+      finishedAt: new Date(),
+      errorText: OPERATOR_FORCE_KILL_ERROR_TEXT,
+    })
+    .where(eq(heartbeatRuns.id, runId));
+
+  // Release checkout lock if any
+  const { releaseStaleCheckoutLocksForRun } = await import('@tourbillon/db');
+  await releaseStaleCheckoutLocksForRun(runId);
+
+  // Publish update
+  await publishHeartbeatRunUpdate(companyId, runId, 'failed', run.agentId);
+
+  return { success: true, hadController };
 }
