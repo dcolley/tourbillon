@@ -39,6 +39,8 @@ async function updateHeartbeatConfig(
 ): Promise<ActionResult> {
   'use server';
 
+  const { parseHeartbeatTimeoutSec, validateTimeoutConfig } = await import('@tourbillon/shared/timeout-config');
+
   const agentId = formData.get('agentId') as string;
   const enabled = formData.get('heartbeatEnabled') === 'on';
   const scheduleMode = (formData.get('scheduleMode') as 'interval' | 'cron') || 'interval';
@@ -63,8 +65,20 @@ async function updateHeartbeatConfig(
     heartbeat.maxSteps = maxSteps;
   }
 
+  const timeoutSecRaw = formData.get('timeoutSec') as string;
+  const heartbeatSec = parseHeartbeatTimeoutSec(timeoutSecRaw, 300);
+
+  const timeout: Partial<AgentRuntimeConfig['timeout']> = {
+    heartbeatSec,
+  };
+
+  const timeoutError = validateTimeoutConfig(timeout);
+  if (timeoutError) {
+    return actionError(timeoutError);
+  }
+
   try {
-    await updateAgentRuntimeConfig(agentId, { heartbeat });
+    await updateAgentRuntimeConfig(agentId, { heartbeat, timeout });
   } catch (err) {
     return actionError(
       err instanceof AgentValidationError ? err.message : 'Failed to update heartbeat settings.',
@@ -800,6 +814,7 @@ export default async function AgentDetailPage({
           agentId={agent.id}
           urlKey={agent.urlKey}
           heartbeat={runtime.heartbeat}
+          timeout={runtime.timeout}
           updateHeartbeatConfig={updateHeartbeatConfig}
         />
         <dl className="grid grid-cols-2 gap-3 text-sm border-t pt-3">

@@ -4,6 +4,7 @@ export * from './issue-assignee';
 export * from './heartbeat-liveness';
 export * from './heartbeat-schedule-mode';
 export * from './heartbeat-schedule';
+export * from './timeout-config';
 export * from './trace';
 export * from './model-provider';
 export * from './model-settings';

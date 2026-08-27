@@ -24,6 +24,7 @@ interface AgentHeartbeatFormProps {
   agentId: string;
   urlKey: string;
   heartbeat: AgentRuntimeConfig['heartbeat'];
+  timeout: AgentRuntimeConfig['timeout'];
   updateHeartbeatConfig: (
     prev: ActionResult | null,
     formData: FormData,
@@ -34,6 +35,7 @@ export function AgentHeartbeatForm({
   agentId,
   urlKey,
   heartbeat,
+  timeout,
   updateHeartbeatConfig,
 }: AgentHeartbeatFormProps) {
   const [state, formAction] = useActionState(updateHeartbeatConfig, null);
@@ -54,6 +56,9 @@ export function AgentHeartbeatForm({
   );
   const [maxSteps, setMaxSteps] = useState(
     heartbeat.maxSteps !== undefined ? String(heartbeat.maxSteps) : '30',
+  );
+  const [timeoutSec, setTimeoutSec] = useState(
+    String(timeout?.heartbeatSec ?? 300),
   );
 
   const cronExpression = useMemo(() => {
@@ -194,23 +199,44 @@ export function AgentHeartbeatForm({
         </div>
       )}
 
-      <div>
-        <label htmlFor="maxSteps" className="text-muted-foreground block mb-1">
-          Max steps per heartbeat
-        </label>
-        <input
-          id="maxSteps"
-          name="maxSteps"
-          type="number"
-          min={1}
-          step={1}
-          value={maxSteps}
-          onChange={(event) => setMaxSteps(event.target.value)}
-          className="w-32 rounded-md border border-input bg-background px-3 py-1.5 text-sm"
-        />
-        <p className="text-xs text-muted-foreground mt-1">
-          Maximum model steps per heartbeat. Default 30. Aborts when exceeded.
-        </p>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div>
+          <label htmlFor="maxSteps" className="text-muted-foreground block mb-1">
+            Max steps per heartbeat
+          </label>
+          <input
+            id="maxSteps"
+            name="maxSteps"
+            type="number"
+            min={1}
+            step={1}
+            value={maxSteps}
+            onChange={(event) => setMaxSteps(event.target.value)}
+            className="w-32 rounded-md border border-input bg-background px-3 py-1.5 text-sm"
+          />
+          <p className="text-xs text-muted-foreground mt-1">
+            Maximum model steps per heartbeat. Default 30. Aborts when exceeded.
+          </p>
+        </div>
+
+        <div>
+          <label htmlFor="timeoutSec" className="text-muted-foreground block mb-1">
+            Timeout (seconds)
+          </label>
+          <input
+            id="timeoutSec"
+            name="timeoutSec"
+            type="number"
+            min={60}
+            step={1}
+            value={timeoutSec}
+            onChange={(event) => setTimeoutSec(event.target.value)}
+            className="w-32 rounded-md border border-input bg-background px-3 py-1.5 text-sm"
+          />
+          <p className="text-xs text-muted-foreground mt-1">
+            Wall-clock abort for one wake. Minimum 60s. Requires workers running.
+          </p>
+        </div>
       </div>
 
       <ActionSubmitButton label="Save heartbeat settings" />
