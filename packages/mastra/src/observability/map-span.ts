@@ -5,6 +5,9 @@ import {
   observabilityPreviewChars,
   type ObservabilityEventStatus,
   type ObservabilityEventType,
+  isSystemMessageTripwire,
+  extractTripwireTokenCounts,
+  formatSystemMessageTripwireError,
 } from '@tourbillon/shared';
 import { randomUUID } from 'crypto';
 import { resolveSpanErrorText } from './resolve-span-error-text';
@@ -110,7 +113,14 @@ function mapEventType(span: AnyExportedSpan): ObservabilityEventType {
 }
 
 function mapStatus(span: AnyExportedSpan): ObservabilityEventStatus {
-  return span.errorInfo ? 'error' : 'ok';
+  if (span.errorInfo) return 'error';
+  
+  // Check for system-message tripwire in output
+  if (span.output && isSystemMessageTripwire(span.output)) {
+    return 'error';
+  }
+  
+  return 'ok';
 }
 
 function durationMs(span: AnyExportedSpan): number | undefined {
@@ -151,6 +161,15 @@ export function mapExportedSpanToEvent(span: AnyExportedSpan): NewAgentObservabi
     toolId ||
     eventType;
 
+  const status = mapStatus(span);
+  let errorText = resolveSpanErrorText(span);
+  
+  // For system-message tripwire, enhance error text with token counts
+  if (status === 'error' && !span.errorInfo && span.output && isSystemMessageTripwire(span.output)) {
+    const counts = extractTripwireTokenCounts(span.output);
+    errorText = formatSystemMessageTripwireError(counts.systemTokens, counts.limit);
+  }
+  
   return {
     id: randomUUID(),
     companyId: context.companyId,
@@ -165,7 +184,7 @@ export function mapExportedSpanToEvent(span: AnyExportedSpan): NewAgentObservabi
     goalId: context.goalId,
     eventType,
     name,
-    status: mapStatus(span),
+    status,
     model: asString((attrs as { model?: string } | undefined)?.model),
     toolId,
     inputPreview: previewValue(span.input, previewChars),
@@ -184,7 +203,7 @@ export function mapExportedSpanToEvent(span: AnyExportedSpan): NewAgentObservabi
       },
       maxPayloadBytes
     ),
-    errorText: resolveSpanErrorText(span),
+    errorText,
     durationMs: durationMs(span),
     inputTokens: tokens.input,
     outputTokens: tokens.output,

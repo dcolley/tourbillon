@@ -30,6 +30,7 @@ import {
   createTraceLogger,
   canForceKillHeartbeat,
 } from '@tourbillon/shared';
+import { durableWakeOutcomeFromTripwire } from './durable-wake-outcome';
 import type { Agent as AgentRecord } from '@tourbillon/db';
 import { randomUUID } from 'crypto';
 import { runWithHarness, type HarnessRunResult } from './adapters/harness-adapter';
@@ -690,6 +691,16 @@ async function runDurableAgentWake(params: {
       durableRunId = observed.runId;
       traceId = observed.runId;
       await awaitWithAbort(observed.output.text, abortSignal);
+      
+      // Check for tripwire in the actual ModelOutput
+      const tripwireData = await Promise.resolve(observed.output.tripwire);
+      const outcome = durableWakeOutcomeFromTripwire(tripwireData);
+      
+      if (!outcome.recordSuccess) {
+        runTracer.error('system-message tripwire detected', { errorText: outcome.errorText });
+        throw new Error(outcome.errorText);
+      }
+      
       observed.cleanup();
       streamResult = undefined;
     } else {
@@ -722,6 +733,16 @@ async function runDurableAgentWake(params: {
       durableRunId = streamed.runId;
       traceId = streamed.runId;
       await awaitWithAbort(streamed.output.text, abortSignal);
+      
+      // Check for tripwire in the actual ModelOutput
+      const tripwireData = await Promise.resolve(streamed.output.tripwire);
+      const outcome = durableWakeOutcomeFromTripwire(tripwireData);
+      
+      if (!outcome.recordSuccess) {
+        runTracer.error('system-message tripwire detected', { errorText: outcome.errorText });
+        throw new Error(outcome.errorText);
+      }
+      
       streamed.cleanup();
       streamResult = undefined;
     }

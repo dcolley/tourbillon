@@ -4,6 +4,8 @@ import type { buildHeartbeatTracingOptions } from '@tourbillon/mastra';
 import {
   heartbeatProgressStaleErrorText,
   isTokenLimiterTripwireError,
+  extractTripwireTokenCounts,
+  formatSystemMessageTripwireError,
   resolveHeartbeatLivenessConfig,
 } from '@tourbillon/shared';
 import { heartbeatAbortedError } from './heartbeat-abort';
@@ -46,10 +48,12 @@ export function isHarnessProgressEvent(event: AgentControllerEvent): boolean {
 }
 
 export function tripwireErrorFromUnknown(err: unknown): Error {
-  const message = err instanceof Error ? err.message : String(err ?? 'Unknown tripwire');
   if (isTokenLimiterTripwireError(err)) {
-    return new Error(`TokenLimiter tripwire: ${message}`);
+    // Try to extract token counts from the error
+    const counts = extractTripwireTokenCounts(err);
+    return new Error(formatSystemMessageTripwireError(counts.systemTokens, counts.limit));
   }
+  const message = err instanceof Error ? err.message : String(err ?? 'Unknown error');
   return err instanceof Error ? err : new Error(message);
 }
 
