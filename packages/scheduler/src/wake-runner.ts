@@ -28,10 +28,8 @@ import {
   buildWakeMessage,
   parseCompanySettings,
   createTraceLogger,
-  isSystemMessageTripwire,
-  extractTripwireTokenCounts,
-  formatSystemMessageTripwireError,
 } from '@tourbillon/shared';
+import { durableWakeOutcomeFromTripwire } from './durable-wake-outcome';
 import type { Agent as AgentRecord } from '@tourbillon/db';
 import { randomUUID } from 'crypto';
 import { runWithHarness, type HarnessRunResult } from './adapters/harness-adapter';
@@ -671,12 +669,11 @@ async function runDurableAgentWake(params: {
       
       // Check for tripwire in the actual ModelOutput
       const tripwireData = await Promise.resolve(observed.output.tripwire);
+      const outcome = durableWakeOutcomeFromTripwire(tripwireData);
       
-      if (tripwireData && isSystemMessageTripwire(tripwireData)) {
-        const counts = extractTripwireTokenCounts(tripwireData);
-        const errorText = formatSystemMessageTripwireError(counts.systemTokens, counts.limit);
-        runTracer.error('system-message tripwire detected', { errorText, counts });
-        throw new Error(errorText);
+      if (!outcome.recordSuccess) {
+        runTracer.error('system-message tripwire detected', { errorText: outcome.errorText });
+        throw new Error(outcome.errorText);
       }
       
       observed.cleanup();
@@ -714,12 +711,11 @@ async function runDurableAgentWake(params: {
       
       // Check for tripwire in the actual ModelOutput
       const tripwireData = await Promise.resolve(streamed.output.tripwire);
+      const outcome = durableWakeOutcomeFromTripwire(tripwireData);
       
-      if (tripwireData && isSystemMessageTripwire(tripwireData)) {
-        const counts = extractTripwireTokenCounts(tripwireData);
-        const errorText = formatSystemMessageTripwireError(counts.systemTokens, counts.limit);
-        runTracer.error('system-message tripwire detected', { errorText, counts });
-        throw new Error(errorText);
+      if (!outcome.recordSuccess) {
+        runTracer.error('system-message tripwire detected', { errorText: outcome.errorText });
+        throw new Error(outcome.errorText);
       }
       
       streamed.cleanup();

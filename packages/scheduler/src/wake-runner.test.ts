@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { isSystemMessageTripwire, extractTripwireTokenCounts, formatSystemMessageTripwireError } from '@tourbillon/shared';
+import { durableWakeOutcomeFromTripwire } from './durable-wake-outcome';
 
-describe('wake tripwire handling', () => {
-  it('detects tripwire from output.tripwire with options.metadata', () => {
+describe('durableWakeOutcomeFromTripwire', () => {
+  it('returns recordSuccess false on Mastra tripwire with full metadata', () => {
     const tripwireData = {
       reason: 'TokenLimiterProcessor: System messages alone exceed token limit. Requests cannot be completed by removing system messages.',
       options: {
@@ -14,17 +14,21 @@ describe('wake tripwire handling', () => {
       },
     };
     
-    assert.equal(isSystemMessageTripwire(tripwireData), true);
+    const outcome = durableWakeOutcomeFromTripwire(tripwireData);
     
-    const counts = extractTripwireTokenCounts(tripwireData);
-    assert.equal(counts.systemTokens, 150000);
-    assert.equal(counts.limit, 120000);
+    // This test FAILS if recordHeartbeatSuccess would still run
+    assert.equal(outcome.recordSuccess, false, 'Must not record success on tripwire');
     
-    const errorText = formatSystemMessageTripwireError(counts.systemTokens, counts.limit);
-    assert.equal(errorText, 'System messages are 150000 tokens (limit 120000). Cannot trim further.');
+    if (!outcome.recordSuccess) {
+      assert.equal(
+        outcome.errorText,
+        'System messages are 150000 tokens (limit 120000). Cannot trim further.',
+        'Error text must include N and M from metadata'
+      );
+    }
   });
 
-  it('detects tripwire with partial metadata', () => {
+  it('returns recordSuccess false on tripwire with partial metadata', () => {
     const tripwireData = {
       reason: 'System messages alone exceed token limit',
       options: {
@@ -34,21 +38,58 @@ describe('wake tripwire handling', () => {
       },
     };
     
-    const counts = extractTripwireTokenCounts(tripwireData);
-    assert.equal(counts.systemTokens, 95000);
-    assert.equal(counts.limit, undefined);
+    const outcome = durableWakeOutcomeFromTripwire(tripwireData);
     
-    const errorText = formatSystemMessageTripwireError(counts.systemTokens, counts.limit);
-    assert.equal(errorText, 'System messages are 95000 tokens. Cannot trim further.');
+    assert.equal(outcome.recordSuccess, false, 'Must not record success on tripwire');
+    
+    if (!outcome.recordSuccess) {
+      assert.equal(
+        outcome.errorText,
+        'System messages are 95000 tokens. Cannot trim further.',
+        'Error text must include N from metadata'
+      );
+    }
   });
 
-  it('formats error with no metadata', () => {
+  it('returns recordSuccess false on tripwire with no metadata', () => {
     const tripwireData = {
       reason: 'System messages alone exceed token limit',
     };
     
-    const counts = extractTripwireTokenCounts(tripwireData);
-    const errorText = formatSystemMessageTripwireError(counts.systemTokens, counts.limit);
-    assert.equal(errorText, 'System messages alone exceed token limit. Cannot trim further.');
+    const outcome = durableWakeOutcomeFromTripwire(tripwireData);
+    
+    assert.equal(outcome.recordSuccess, false, 'Must not record success on tripwire');
+    
+    if (!outcome.recordSuccess) {
+      assert.equal(
+        outcome.errorText,
+        'System messages alone exceed token limit. Cannot trim further.',
+        'Error text must use fallback format'
+      );
+    }
+  });
+
+  it('returns recordSuccess true when no tripwire (successful trim)', () => {
+    const noTripwireData = undefined;
+    
+    const outcome = durableWakeOutcomeFromTripwire(noTripwireData);
+    
+    assert.equal(outcome.recordSuccess, true, 'Must record success when no tripwire');
+  });
+
+  it('returns recordSuccess true on null tripwire', () => {
+    const outcome = durableWakeOutcomeFromTripwire(null);
+    
+    assert.equal(outcome.recordSuccess, true, 'Must record success on null tripwire');
+  });
+
+  it('returns recordSuccess true on non-tripwire data', () => {
+    const normalData = {
+      someOtherField: 'normal operation',
+    };
+    
+    const outcome = durableWakeOutcomeFromTripwire(normalData);
+    
+    assert.equal(outcome.recordSuccess, true, 'Must record success on non-tripwire data');
   });
 });
