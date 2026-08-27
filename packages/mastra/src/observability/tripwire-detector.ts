@@ -3,20 +3,52 @@ import type { TracingEvent } from '@mastra/core/observability';
 import { SpanType } from '@mastra/core/observability';
 import { isSystemMessageTripwire, extractTripwireTokenCounts, formatSystemMessageTripwireError } from '@tourbillon/shared';
 
+/** Extract heartbeatRunId from span (matches production extractContext logic) */
+function extractHeartbeatRunId(span: any): string | undefined {
+  const ctx = span.requestContext;
+  const meta = (span.metadata ?? {}) as Record<string, unknown>;
+  
+  // Check requestContext runId first
+  if (ctx && typeof ctx === 'object') {
+    if ('get' in ctx && typeof (ctx as any).get === 'function') {
+      const runId = (ctx as any).get('runId');
+      if (typeof runId === 'string' && runId.length > 0) return runId;
+    }
+    const runId = (ctx as Record<string, unknown>).runId;
+    if (typeof runId === 'string' && runId.length > 0) return runId;
+  }
+  
+  // Fall back to metadata
+  if (typeof meta.heartbeatRunId === 'string' && meta.heartbeatRunId.length > 0) {
+    return meta.heartbeatRunId;
+  }
+  if (typeof meta.runId === 'string' && meta.runId.length > 0) {
+    return meta.runId;
+  }
+  
+  return undefined;
+}
+
 /**
  * Per-wake tripwire detector. Listens to processor span events and emits
- * 'tripwire' when a system-message tripwire is detected.
+ * 'tripwire' when a system-message tripwire is detected for this wake's runId.
  * 
- * Accepts any processor tripwire until traceId is set (for spans that arrive
- * DURING stream/observe before runId is known), then filters by traceId.
+ * Filters spans by heartbeatRunId from construction (no "accept any" fallback).
+ * This prevents concurrent wakes from colliding on early processor spans.
  * 
  * Stores errorText so wake-runner can check if tripwire fired during stream/observe
  * even if no listener was attached yet.
  */
 export class TripwireDetector extends EventEmitter {
+  private heartbeatRunId: string;
   private traceId: string | null = null;
   private fired = false;
   private errorText: string | null = null;
+
+  constructor(heartbeatRunId: string) {
+    super();
+    this.heartbeatRunId = heartbeatRunId;
+  }
 
   setTraceId(traceId: string) {
     this.traceId = traceId;
@@ -28,7 +60,11 @@ export class TripwireDetector extends EventEmitter {
 
     const span = event.exportedSpan;
     
-    // If we have a traceId, filter by it. Otherwise accept any (armed before runId known)
+    // Filter by heartbeatRunId first (fail closed - no "accept any")
+    const spanRunId = extractHeartbeatRunId(span);
+    if (!spanRunId || spanRunId !== this.heartbeatRunId) return;
+    
+    // If we have a traceId, also filter by it
     if (this.traceId && span.traceId !== this.traceId) return;
 
     if (span.type !== SpanType.PROCESSOR) return;

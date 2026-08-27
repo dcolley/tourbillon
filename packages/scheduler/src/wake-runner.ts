@@ -667,8 +667,9 @@ async function runDurableAgentWake(params: {
   let durableRunId: string | undefined;
   let streamResult: { cleanup: () => void } | undefined;
 
-  // Create per-wake tripwire detector and register BEFORE stream/observe
-  const detector = new TripwireDetector();
+  // Create per-wake tripwire detector armed with heartbeat runId BEFORE stream/observe
+  // Filter by heartbeatRunId from construction (no "accept any" fallback - prevents collision)
+  const detector = new TripwireDetector(runId);
   tripwireDetectorRegistry.register(detector);
 
   // Attach tripwire listener BEFORE stream/observe (must listen before event fires)

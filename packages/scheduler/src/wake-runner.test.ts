@@ -99,8 +99,9 @@ describe('durableWakeOutcomeFromTripwire', () => {
 
 describe('TripwireDetector real-time detection', () => {
   it('detector catches processor tripwire even when output.text never settles (PRODUCTION ORDER)', async () => {
-    // Create per-wake detector (as wake-runner does)
-    const detector = new TripwireDetector();
+    // Create per-wake detector armed with heartbeat runId (as wake-runner does)
+    const heartbeatRunId = 'run-abc-123';
+    const detector = new TripwireDetector(heartbeatRunId);
     
     // Attach listener BEFORE stream/observe starts (PRODUCTION ORDER)
     const tripwirePromise = new Promise<never>((_, reject) => {
@@ -122,6 +123,9 @@ describe('TripwireDetector real-time detection', () => {
         traceId: 'trace-abc',
         type: SpanType.PROCESSOR,
         name: 'input_processor',
+        requestContext: {
+          get: (key: string) => (key === 'runId' ? heartbeatRunId : undefined),
+        },
         output: {
           reason: 'TokenLimiterProcessor: System messages alone exceed token limit. Requests cannot be completed by removing system messages.',
           options: {
@@ -157,8 +161,9 @@ describe('TripwireDetector real-time detection', () => {
   });
 
   it('detector stores errorText so wake-runner can check after stream returns (PRODUCTION ORDER)', async () => {
-    // Create detector
-    const detector = new TripwireDetector();
+    // Create detector armed with heartbeat runId
+    const heartbeatRunId = 'run-xyz-456';
+    const detector = new TripwireDetector(heartbeatRunId);
     
     // Attach listener BEFORE stream starts (PRODUCTION ORDER)
     const tripwirePromise = new Promise<never>((_, reject) => {
@@ -167,7 +172,7 @@ describe('TripwireDetector real-time detection', () => {
       });
     });
     
-    // Processor span arrives DURING stream (before we get runId back)
+    // Processor span arrives DURING stream (with matching runId)
     const earlyProcessorSpan: TracingEvent = {
       type: 'span_end' as any,
       exportedSpan: {
@@ -175,6 +180,9 @@ describe('TripwireDetector real-time detection', () => {
         traceId: 'trace-early',
         type: SpanType.PROCESSOR,
         name: 'input_processor',
+        requestContext: {
+          get: (key: string) => (key === 'runId' ? heartbeatRunId : undefined),
+        },
         output: {
           reason: 'TokenLimiterProcessor: System messages alone exceed token limit.',
           options: {
@@ -187,7 +195,7 @@ describe('TripwireDetector real-time detection', () => {
       } as any,
     };
     
-    // Fire event (simulating during stream, before we have runId)
+    // Fire event (simulating during stream, with matching runId)
     detector.onTracingEvent(earlyProcessorSpan);
     
     // Check stored errorText (as wake-runner does after stream() returns)
@@ -208,75 +216,163 @@ describe('TripwireDetector real-time detection', () => {
     detector.clear();
   });
 
-  it('detector catches tripwire BEFORE traceId is set (during stream/observe) (PRODUCTION ORDER)', async () => {
-    // Create detector without traceId (armed before stream/observe returns)
-    const detector = new TripwireDetector();
+  it('detector filters by heartbeatRunId (no collision with concurrent wakes)', async () => {
+    // Two concurrent wakes with different runIds (THE COLLISION TEST)
+    const runIdA = 'run-wake-A';
+    const runIdB = 'run-wake-B';
     
-    // Attach listener BEFORE firing span (PRODUCTION ORDER)
-    let tripwireFired = false;
-    let capturedError = '';
-    detector.once('tripwire', (errorText: string) => {
-      tripwireFired = true;
-      capturedError = errorText;
-    });
+    const detectorA = new TripwireDetector(runIdA);
+    const detectorB = new TripwireDetector(runIdB);
     
-    // Processor span arrives BEFORE we get runId back (DURING stream/observe)
-    const earlyProcessorSpan: TracingEvent = {
+    let aFired = false;
+    let bFired = false;
+    
+    detectorA.once('tripwire', () => { aFired = true; });
+    detectorB.once('tripwire', () => { bFired = true; });
+    
+    // Processor span attributed to wake A (via requestContext runId)
+    const spanForA: TracingEvent = {
       type: 'span_end' as any,
       exportedSpan: {
-        id: 'span-early',
-        traceId: 'trace-early',
+        id: 'span-for-A',
+        traceId: 'trace-A',
         type: SpanType.PROCESSOR,
         name: 'input_processor',
+        requestContext: {
+          get: (key: string) => (key === 'runId' ? runIdA : undefined),
+        },
         output: {
           reason: 'TokenLimiterProcessor: System messages alone exceed token limit.',
           options: {
             metadata: {
-              systemTokens: 95000,
-              limit: 80000,
+              systemTokens: 150000,
+              limit: 120000,
             },
           },
         },
       } as any,
     };
     
-    // Fire event BEFORE setTraceId (this is the TEST bug case)
-    detector.onTracingEvent(earlyProcessorSpan);
+    // Fire span (as if both detectors are notified by registry)
+    detectorA.onTracingEvent(spanForA);
+    detectorB.onTracingEvent(spanForA);
     
-    // Wait a tick to ensure event fired
+    // Wait a tick to ensure events processed
     await new Promise(r => setImmediate(r));
     
-    assert.equal(tripwireFired, true, 'Detector must fire for processor tripwire even without traceId');
-    assert.match(capturedError, /System messages are 95000 tokens/);
+    // Only detector A should fire (span attributed to runIdA)
+    assert.equal(aFired, true, 'Detector A must fire for span attributed to runIdA');
+    assert.equal(bFired, false, 'Detector B must NOT fire for span attributed to runIdA (no collision)');
     
-    // Now set traceId (simulating getting runId back from stream/observe)
-    detector.setTraceId('trace-early');
+    // Verify errorText stored only in A
+    assert.ok(detectorA.getErrorText(), 'Detector A must store errorText');
+    assert.equal(detectorB.getErrorText(), null, 'Detector B must not store errorText');
     
-    // Stored errorText should also be available
-    const storedError = detector.getErrorText();
-    assert.ok(storedError, 'Stored errorText must be available');
-    assert.match(storedError, /System messages are 95000 tokens/);
+    detectorA.clear();
+    detectorB.clear();
+  });
+
+  it('detector ignores span with no heartbeatRunId (fail closed)', async () => {
+    const heartbeatRunId = 'run-test-123';
+    const detector = new TripwireDetector(heartbeatRunId);
+    
+    let tripwireFired = false;
+    detector.once('tripwire', () => { tripwireFired = true; });
+    
+    // Span with NO heartbeatRunId attribution
+    const spanNoAttribution: TracingEvent = {
+      type: 'span_end' as any,
+      exportedSpan: {
+        id: 'span-no-attr',
+        traceId: 'trace-no-attr',
+        type: SpanType.PROCESSOR,
+        name: 'input_processor',
+        // No requestContext, no metadata with runId
+        output: {
+          reason: 'TokenLimiterProcessor: System messages alone exceed token limit.',
+        },
+      } as any,
+    };
+    
+    detector.onTracingEvent(spanNoAttribution);
+    
+    // Wait a tick
+    await new Promise(r => setImmediate(r));
+    
+    // Should NOT fire (fail closed)
+    assert.equal(tripwireFired, false, 'Detector must not fire for span with no heartbeatRunId (fail closed)');
+    assert.equal(detector.getErrorText(), null, 'Detector must not store errorText for unattributed span');
     
     detector.clear();
   });
 
-  it('detector filters by traceId after it is set', async () => {
-    const detector = new TripwireDetector();
+  it('detector catches tripwire with metadata.heartbeatRunId (fallback path)', async () => {
+    const heartbeatRunId = 'run-meta-789';
+    const detector = new TripwireDetector(heartbeatRunId);
+    
+    const tripwirePromise = new Promise<never>((_, reject) => {
+      detector.once('tripwire', (errorText: string) => {
+        reject(new Error(errorText));
+      });
+    });
+    
+    // Span with heartbeatRunId in metadata (not requestContext)
+    const spanMetadata: TracingEvent = {
+      type: 'span_end' as any,
+      exportedSpan: {
+        id: 'span-meta',
+        traceId: 'trace-meta',
+        type: SpanType.PROCESSOR,
+        name: 'input_processor',
+        metadata: {
+          heartbeatRunId: heartbeatRunId,
+        },
+        output: {
+          reason: 'TokenLimiterProcessor: System messages alone exceed token limit.',
+          options: {
+            metadata: {
+              systemTokens: 85000,
+              limit: 70000,
+            },
+          },
+        },
+      } as any,
+    };
+    
+    detector.onTracingEvent(spanMetadata);
+    
+    // Should fire using metadata.heartbeatRunId
+    await assert.rejects(
+      tripwirePromise,
+      (err: Error) => {
+        assert.match(err.message, /System messages are 85000 tokens/);
+        return true;
+      },
+      'Detector must fire for span with metadata.heartbeatRunId'
+    );
+    
+    detector.clear();
+  });
+
+  it('detector filters by traceId after setTraceId (additional filtering)', async () => {
+    const heartbeatRunId = 'run-trace-test';
+    const detector = new TripwireDetector(heartbeatRunId);
     detector.setTraceId('trace-target');
     
     let tripwireFired = false;
-    detector.once('tripwire', () => {
-      tripwireFired = true;
-    });
+    detector.once('tripwire', () => { tripwireFired = true; });
     
-    // Span with DIFFERENT traceId - should be ignored
+    // Span with matching runId but DIFFERENT traceId - should be ignored after setTraceId
     const wrongTraceSpan: TracingEvent = {
       type: 'span_end' as any,
       exportedSpan: {
-        id: 'span-wrong',
+        id: 'span-wrong-trace',
         traceId: 'trace-other',
         type: SpanType.PROCESSOR,
         name: 'input_processor',
+        requestContext: {
+          get: (key: string) => (key === 'runId' ? heartbeatRunId : undefined),
+        },
         output: {
           reason: 'TokenLimiterProcessor: System messages alone exceed token limit.',
         },
@@ -285,28 +381,31 @@ describe('TripwireDetector real-time detection', () => {
     
     detector.onTracingEvent(wrongTraceSpan);
     
-    // Wait a tick to ensure no async firing
+    // Wait a tick
     await new Promise(r => setImmediate(r));
     
-    assert.equal(tripwireFired, false, 'Detector must not fire for wrong traceId');
+    assert.equal(tripwireFired, false, 'Detector must not fire for wrong traceId (even with matching runId)');
     
-    // Now fire correct traceId
-    const correctTraceSpan: TracingEvent = {
+    // Now fire correct traceId with matching runId
+    const correctSpan: TracingEvent = {
       type: 'span_end' as any,
       exportedSpan: {
         id: 'span-correct',
         traceId: 'trace-target',
         type: SpanType.PROCESSOR,
         name: 'input_processor',
+        requestContext: {
+          get: (key: string) => (key === 'runId' ? heartbeatRunId : undefined),
+        },
         output: {
           reason: 'TokenLimiterProcessor: System messages alone exceed token limit.',
         },
       } as any,
     };
     
-    detector.onTracingEvent(correctTraceSpan);
+    detector.onTracingEvent(correctSpan);
     
-    assert.equal(tripwireFired, true, 'Detector must fire for matching traceId');
+    assert.equal(tripwireFired, true, 'Detector must fire for matching runId AND traceId');
     
     detector.clear();
   });
