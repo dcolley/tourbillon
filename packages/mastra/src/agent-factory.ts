@@ -46,34 +46,33 @@ import { isMastraTracingEnabled } from '@tourbillon/shared';
 import { buildHeartbeatInputProcessors } from './heartbeat-processors';
 
 const globalForMastra = globalThis as unknown as {
-  /** Memory instances keyed by OM config (or `base` when OM is off). */
+  /** Memory instances keyed by resolved OM config (or `base` when OM is off). */
   mastraMemoryByKey?: Map<string, Memory>;
 };
 
-function memoryCacheKey(companySettings?: CompanySettings | null): string {
-  const om = resolveObservationalMemoryModel(companySettings);
-  return om ? `om:${om.providerId}:${om.modelId}` : 'base';
-}
-
 /**
  * Shared Mastra Memory for durable Agent and harness AgentController.
- * When company Observational Memory is configured, returns a Memory with OM
- * enabled using that provider/model (never the Gemini default).
+ * When agent or company Observational Memory is configured, returns a Memory with OM
+ * enabled using the resolved provider/model/thresholds (never the Gemini default).
  */
 export async function getAgentMemory(
   companySettings?: CompanySettings | null,
+  agentRuntime?: AgentRuntimeConfig | null,
 ): Promise<Memory> {
   if (!globalForMastra.mastraMemoryByKey) {
     globalForMastra.mastraMemoryByKey = new Map();
   }
-  const key = memoryCacheKey(companySettings);
+  const { memoryCacheKeyForAgent, resolveAgentObservationalMemory } = await import(
+    '@tourbillon/shared/company-settings'
+  );
+  const key = memoryCacheKeyForAgent(companySettings, agentRuntime);
   const cached = globalForMastra.mastraMemoryByKey.get(key);
   if (cached) return cached;
 
   const connectionString = process.env.DATABASE_URL!;
   const semanticRecallEnabled = process.env.MEMORY_SEMANTIC_RECALL === 'true';
   const embeddingModel = process.env.MEMORY_EMBEDDING_MODEL;
-  const om = resolveObservationalMemoryModel(companySettings);
+  const resolved = resolveAgentObservationalMemory(companySettings, agentRuntime);
 
   const config: ConstructorParameters<typeof Memory>[0] = {
     storage: new PostgresStore({ id: 'tourbillon-memory', connectionString }),
@@ -91,9 +90,8 @@ export async function getAgentMemory(
     },
   };
 
-  if (om) {
-    const omModel = await getLanguageModelForProviderRecord(om.providerId, om.modelId);
-    const omSettings = resolveObservationalMemorySettings(companySettings);
+  if (resolved) {
+    const omModel = await getLanguageModelForProviderRecord(resolved.providerId, resolved.modelId);
     config.options = {
       ...config.options,
       observationalMemory: {
@@ -101,18 +99,18 @@ export async function getAgentMemory(
         model: omModel,
         scope: 'thread',
         observation: {
-          messageTokens: omSettings.observeAfterTokens,
+          messageTokens: resolved.observeAfterTokens,
           bufferOnIdle: true,
           modelSettings: {
-            maxOutputTokens: omSettings.maxOutputTokens,
-            ...(omSettings.temperature !== undefined ? { temperature: omSettings.temperature } : {}),
+            maxOutputTokens: resolved.maxOutputTokens,
+            ...(resolved.temperature !== undefined ? { temperature: resolved.temperature } : {}),
           },
         },
         reflection: {
-          observationTokens: omSettings.reflectAfterTokens,
+          observationTokens: resolved.reflectAfterTokens,
           modelSettings: {
-            maxOutputTokens: omSettings.maxOutputTokens,
-            ...(omSettings.temperature !== undefined ? { temperature: omSettings.temperature } : {}),
+            maxOutputTokens: resolved.maxOutputTokens,
+            ...(resolved.temperature !== undefined ? { temperature: resolved.temperature } : {}),
           },
         },
       },
@@ -278,7 +276,7 @@ export async function createAgentWithSkills(
     instructions: systemPrompt,
     model: getLanguageModelForAgent(agentRecord, providerRecord),
     tools: tools as any,
-    memory: await getAgentMemory(options?.companySettings ?? null),
+    memory: await getAgentMemory(options?.companySettings ?? null, agentRecord.runtimeConfig as AgentRuntimeConfig),
     inputProcessors,
     ...(codeExecutionEnabled ? { workspace: buildCodeExecutionWorkspace() } : {}),
     ...toMastraDefaultOptions(generationOptions),

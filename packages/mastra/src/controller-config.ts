@@ -14,6 +14,7 @@ import {
   isMastraTracingEnabled,
   resolveObservationalMemoryModel,
   resolveObservationalMemorySettings,
+  type AgentRuntimeConfig,
 } from '@tourbillon/shared';
 import {
   assembleAgentSystemPrompt,
@@ -112,7 +113,7 @@ async function buildBackingAgent(
     instructions: systemPrompt,
     model: getLanguageModelForAgent(agentRecord, providerRecord),
     tools: tools as any,
-    memory: await getAgentMemory(options?.companySettings ?? null),
+    memory: await getAgentMemory(options?.companySettings ?? null, agentRecord.runtimeConfig as AgentRuntimeConfig),
     inputProcessors: buildHeartbeatInputProcessors({ limit: contextBudget.limiterLimit }),
     ...(codeExecutionEnabled ? { workspace: buildCodeExecutionWorkspace() } : {}),
     ...toMastraDefaultOptions(generationOptions),
@@ -172,9 +173,12 @@ export async function createTourbillonController(
   const { agent, modes } = await buildControllerModes(agentRecord, options);
   const codeExecutionEnabled = await shouldAttachCodeExecutionWorkspace(agentRecord);
 
-  const om = resolveObservationalMemoryModel(options?.companySettings ?? null);
-  const omSettings = resolveObservationalMemorySettings(options?.companySettings ?? null);
-  const memory = await getAgentMemory(options?.companySettings ?? null);
+  const { resolveAgentObservationalMemory } = await import('@tourbillon/shared/company-settings');
+  const resolved = resolveAgentObservationalMemory(
+    options?.companySettings ?? null,
+    agentRecord.runtimeConfig as AgentRuntimeConfig,
+  );
+  const memory = await getAgentMemory(options?.companySettings ?? null, agentRecord.runtimeConfig as AgentRuntimeConfig);
   const providerRow = agentRecord.providerId
     ? await getLlmProviderRowById(agentRecord.providerId)
     : null;
@@ -200,13 +204,14 @@ export async function createTourbillonController(
     ...(isMastraTracingEnabled()
       ? { observability: getMastraInstance().observability }
       : {}),
-    ...(om
+    ...(resolved
       ? {
           omConfig: {
-            defaultObserverModelId: om.modelId,
-            defaultReflectorModelId: om.modelId,
-            defaultObservationThreshold: omSettings.observeAfterTokens,
-            defaultReflectionThreshold: omSettings.reflectAfterTokens,
+            defaultObserverModelId: resolved.modelId,
+            defaultReflectorModelId: resolved.modelId,
+            defaultObservationThreshold: resolved.observeAfterTokens,
+            defaultReflectionThreshold: resolved.reflectAfterTokens,
+            ...(resolved.temperature !== undefined ? { defaultTemperature: resolved.temperature } : {}),
           },
         }
       : {}),

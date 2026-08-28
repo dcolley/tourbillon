@@ -1,12 +1,13 @@
 import { getAgentMemory } from './agent-factory';
 import { deleteControllerThreadIfExists } from './controller-config';
-import { isObservationalMemoryConfigured, type CompanySettings } from '@tourbillon/shared';
+import { isAgentObservationalMemoryConfigured, type CompanySettings, type AgentRuntimeConfig } from '@tourbillon/shared';
 
 export function shouldUseHeartbeatMemory(
   taskId?: string,
   companySettings?: CompanySettings | null,
+  agentRuntime?: AgentRuntimeConfig | null,
 ): boolean {
-  return Boolean(taskId) || isObservationalMemoryConfigured(companySettings);
+  return Boolean(taskId) || isAgentObservationalMemoryConfigured(companySettings, agentRuntime);
 }
 
 export function buildInboxThreadId(companyId: string, agentId: string): string {

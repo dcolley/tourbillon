@@ -3,8 +3,8 @@ import { notFound } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
 import { db, agents, heartbeatRuns } from '@tourbillon/db';
 import { eq, desc } from 'drizzle-orm';
-import type { AgentRuntimeConfig } from '@tourbillon/shared';
-import { modelProviderOverridesFromAgent, resolveModelProviderConfig, isAgentBudgetEnforced, isAgentBudgetExceeded, agentRuntimeLabel, agentRuntimeFromAdapter, resolveAssignedTools, modelSettingsFromFormData, isCodeExecutionAvailable, formatExecutionWorkspacePathPreview } from '@tourbillon/shared';
+import type { AgentRuntimeConfig, ObservationalMemorySettings } from '@tourbillon/shared';
+import { modelProviderOverridesFromAgent, resolveModelProviderConfig, isAgentBudgetEnforced, isAgentBudgetExceeded, agentRuntimeLabel, agentRuntimeFromAdapter, resolveAssignedTools, modelSettingsFromFormData, isCodeExecutionAvailable, formatExecutionWorkspacePathPreview, parseCompanySettings } from '@tourbillon/shared';
 import { AgentValidationError, AGENT_ROLE_OPTIONS, getAgentByUrlKey, listAgentsByUrlKey, updateAgentRuntimeConfig, updateAgentCapabilities, updateAgentBudget, updateAgentInstructions, updateAgentModel, updateAgentModelSettings, updateAgentProfile, updateAgentCodeExecution, cloneAgent, suggestCloneUrlKey } from '@/lib/agents';
 import { actionError, actionSuccess, type ActionResult } from '@/lib/action-result';
 import { AgentDisambiguation } from '@/components/agent-disambiguation';
@@ -32,6 +32,7 @@ import { AgentHeartbeatHeaderActions } from './agent-heartbeat-header-actions';
 import { AgentQueryToast } from './agent-query-toast';
 import { AgentRoutineToggle } from './agent-routine-toggle';
 import { AgentCloneForm } from './agent-clone-form';
+import { AgentOmSettingsForm } from './agent-om-settings-form';
 import { ChatPageContext } from '@/components/chat/chat-page-context';
 
 async function updateHeartbeatConfig(
@@ -275,6 +276,52 @@ async function updateMailConfig(
   );
 }
 
+async function updateAgentOmConfig(
+  _prev: ActionResult | null,
+  formData: FormData,
+): Promise<ActionResult> {
+  'use server';
+
+  const agentId = formData.get('agentId') as string;
+  const mode = (formData.get('mode') as 'inherit' | 'off' | 'on') || 'inherit';
+
+  const providerId = (formData.get('providerId') as string) || undefined;
+  const modelId = (formData.get('modelId') as string) || undefined;
+  
+  const maxOutputTokensRaw = formData.get('maxOutputTokens') as string;
+  const maxOutputTokens = maxOutputTokensRaw ? parseInt(maxOutputTokensRaw, 10) : undefined;
+  
+  const observeAfterTokensRaw = formData.get('observeAfterTokens') as string;
+  const observeAfterTokens = observeAfterTokensRaw ? parseInt(observeAfterTokensRaw, 10) : undefined;
+  
+  const reflectAfterTokensRaw = formData.get('reflectAfterTokens') as string;
+  const reflectAfterTokens = reflectAfterTokensRaw ? parseInt(reflectAfterTokensRaw, 10) : undefined;
+  
+  const temperatureRaw = formData.get('temperature') as string;
+  const temperature = temperatureRaw ? parseFloat(temperatureRaw) : undefined;
+
+  try {
+    const { updateAgentObservationalMemory } = await import('@/lib/agents');
+    await updateAgentObservationalMemory(agentId, {
+      mode,
+      providerId,
+      modelId,
+      maxOutputTokens,
+      observeAfterTokens,
+      reflectAfterTokens,
+      temperature,
+    });
+  } catch (err) {
+    return actionError(
+      err instanceof Error ? err.message : 'Failed to update Observational Memory.',
+    );
+  }
+
+  return actionSuccess(
+    "Observational Memory saved. Changes apply on the agent's next heartbeat or chat session.",
+  );
+}
+
 async function updateProfile(
   _prev: ActionResult | null,
   formData: FormData,
@@ -509,6 +556,12 @@ export default async function AgentDetailPage({
     label: server.label,
     source: server.source ?? 'builtin',
   }));
+
+  // Observational Memory settings
+  const companySettings = parseCompanySettings(company?.settings);
+  const companyOm = companySettings.observationalMemory ?? null;
+  const agentOm = runtime.observationalMemory;
+  const agentOmMode = (agentOm?.mode ?? 'inherit') as 'inherit' | 'off' | 'on';
 
   return (
     <>
@@ -1033,6 +1086,36 @@ export default async function AgentDetailPage({
                 defaultUrlKey={suggestedCloneUrlKey}
                 cloneAgentAction={cloneAgentAction}
               />
+            }
+            om={
+              <section className="border rounded-lg p-4 space-y-4">
+                <div>
+                  <h2 className="text-sm font-semibold">Observational Memory</h2>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Observer + Reflector compaction settings. When enabled, long threads auto-compress observations into reflections.
+                  </p>
+                </div>
+                <AgentOmSettingsForm
+                  agentId={agent.id}
+                  urlKey={agent.urlKey}
+                  initialMode={agentOmMode}
+                  initialProviderId={agentOm?.providerId ?? null}
+                  initialModelId={agentOm?.modelId ?? ''}
+                  initialMaxOutputTokens={agentOm?.maxOutputTokens ?? null}
+                  initialObserveAfterTokens={agentOm?.observeAfterTokens ?? null}
+                  initialReflectAfterTokens={agentOm?.reflectAfterTokens ?? null}
+                  initialTemperature={agentOm?.temperature ?? null}
+                  companyOm={companyOm}
+                  providers={providerList.map((p) => ({
+                    id: p.id,
+                    name: p.name,
+                    type: p.type,
+                    baseURL: p.baseURL,
+                    isDefault: p.isDefault,
+                  }))}
+                  saveAction={updateAgentOmConfig}
+                />
+              </section>
             }
           />
         }

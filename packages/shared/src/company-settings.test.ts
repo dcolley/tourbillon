@@ -4,7 +4,12 @@ import {
   parseCompanySettings,
   resolveObservationalMemorySettings,
   mergeCompanySettings,
+  resolveAgentObservationalMemory,
+  memoryCacheKeyForAgent,
+  isAgentObservationalMemoryConfigured,
+  type ResolvedObservationalMemoryConfig,
 } from './company-settings';
+import type { CompanySettings, AgentRuntimeConfig } from './types';
 
 describe('parseCompanySettings - observationalMemory', () => {
   it('parses enabled flag correctly', () => {
@@ -245,3 +250,290 @@ describe('mergeCompanySettings - observationalMemory', () => {
     assert.equal(merged.observationalMemory?.enabled, false);
   });
 });
+
+describe('resolveAgentObservationalMemory', () => {
+  const companyOmBase: CompanySettings = {
+    observationalMemory: {
+      enabled: true,
+      providerId: 'provider-company',
+      modelId: 'model-company',
+      maxOutputTokens: 4096,
+      observeAfterTokens: 20000,
+      reflectAfterTokens: 30000,
+      temperature: 0.7,
+    },
+  };
+
+  it('mode=inherit: returns company OM when enabled', () => {
+    const resolved = resolveAgentObservationalMemory(companyOmBase, {
+      observationalMemory: { mode: 'inherit' },
+    });
+    assert.ok(resolved);
+    assert.equal(resolved.providerId, 'provider-company');
+    assert.equal(resolved.modelId, 'model-company');
+    assert.equal(resolved.maxOutputTokens, 4096);
+    assert.equal(resolved.observeAfterTokens, 20000);
+    assert.equal(resolved.reflectAfterTokens, 30000);
+    assert.equal(resolved.temperature, 0.7);
+  });
+
+  it('mode=inherit: returns null when company OM is disabled', () => {
+    const companyOff: CompanySettings = {
+      observationalMemory: { enabled: false },
+    };
+    const resolved = resolveAgentObservationalMemory(companyOff, {
+      observationalMemory: { mode: 'inherit' },
+    });
+    assert.equal(resolved, null);
+  });
+
+  it('mode=inherit: returns null when company OM lacks model', () => {
+    const companyNoModel: CompanySettings = {
+      observationalMemory: { enabled: true, providerId: 'p1' },
+    };
+    const resolved = resolveAgentObservationalMemory(companyNoModel, {
+      observationalMemory: { mode: 'inherit' },
+    });
+    assert.equal(resolved, null);
+  });
+
+  it('mode=off: returns null regardless of company settings', () => {
+    const resolved = resolveAgentObservationalMemory(companyOmBase, {
+      observationalMemory: { mode: 'off' },
+    });
+    assert.equal(resolved, null);
+  });
+
+  it('mode=on: uses agent overrides over company defaults', () => {
+    const resolved = resolveAgentObservationalMemory(companyOmBase, {
+      observationalMemory: {
+        mode: 'on',
+        providerId: 'provider-agent',
+        modelId: 'model-agent',
+        maxOutputTokens: 2048,
+        observeAfterTokens: 15000,
+        reflectAfterTokens: 25000,
+        temperature: 0.9,
+      },
+    });
+    assert.ok(resolved);
+    assert.equal(resolved.providerId, 'provider-agent');
+    assert.equal(resolved.modelId, 'model-agent');
+    assert.equal(resolved.maxOutputTokens, 2048);
+    assert.equal(resolved.observeAfterTokens, 15000);
+    assert.equal(resolved.reflectAfterTokens, 25000);
+    assert.equal(resolved.temperature, 0.9);
+  });
+
+  it('mode=on: inherits company values for missing agent overrides', () => {
+    const resolved = resolveAgentObservationalMemory(companyOmBase, {
+      observationalMemory: {
+        mode: 'on',
+        // No agent overrides — should inherit all from company
+      },
+    });
+    assert.ok(resolved);
+    assert.equal(resolved.providerId, 'provider-company');
+    assert.equal(resolved.modelId, 'model-company');
+    assert.equal(resolved.maxOutputTokens, 4096);
+    assert.equal(resolved.observeAfterTokens, 20000);
+    assert.equal(resolved.reflectAfterTokens, 30000);
+    assert.equal(resolved.temperature, 0.7);
+  });
+
+  it('mode=on: partial agent overrides merge with company', () => {
+    const resolved = resolveAgentObservationalMemory(companyOmBase, {
+      observationalMemory: {
+        mode: 'on',
+        modelId: 'model-agent-override',
+        observeAfterTokens: 25000,
+      },
+    });
+    assert.ok(resolved);
+    assert.equal(resolved.providerId, 'provider-company'); // inherited
+    assert.equal(resolved.modelId, 'model-agent-override'); // overridden
+    assert.equal(resolved.maxOutputTokens, 4096); // inherited
+    assert.equal(resolved.observeAfterTokens, 25000); // overridden
+    assert.equal(resolved.reflectAfterTokens, 30000); // inherited
+    assert.equal(resolved.temperature, 0.7); // inherited
+  });
+
+  it('mode=on: uses defaults when company and agent lack values', () => {
+    const companyNoOm: CompanySettings = {};
+    const resolved = resolveAgentObservationalMemory(companyNoOm, {
+      observationalMemory: {
+        mode: 'on',
+        providerId: 'provider-agent',
+        modelId: 'model-agent',
+      },
+    });
+    assert.ok(resolved);
+    assert.equal(resolved.providerId, 'provider-agent');
+    assert.equal(resolved.modelId, 'model-agent');
+    assert.equal(resolved.maxOutputTokens, 8192); // default
+    assert.equal(resolved.observeAfterTokens, 30000); // default
+    assert.equal(resolved.reflectAfterTokens, 40000); // default
+    assert.equal(resolved.temperature, undefined); // no default
+  });
+
+  it('mode=on: returns null when no resolvable model', () => {
+    const companyNoOm: CompanySettings = {};
+    const resolved = resolveAgentObservationalMemory(companyNoOm, {
+      observationalMemory: { mode: 'on' },
+    });
+    assert.equal(resolved, null);
+  });
+
+  it('missing mode defaults to inherit', () => {
+    const resolved = resolveAgentObservationalMemory(companyOmBase, {
+      observationalMemory: {},
+    });
+    assert.ok(resolved);
+    assert.equal(resolved.providerId, 'provider-company');
+  });
+
+  it('no agent runtime config defaults to inherit', () => {
+    const resolved = resolveAgentObservationalMemory(companyOmBase, null);
+    assert.ok(resolved);
+    assert.equal(resolved.providerId, 'provider-company');
+  });
+});
+
+describe('memoryCacheKeyForAgent', () => {
+  const baseCompany: CompanySettings = {
+    observationalMemory: {
+      enabled: true,
+      providerId: 'provider-1',
+      modelId: 'model-1',
+      maxOutputTokens: 8192,
+      observeAfterTokens: 30000,
+      reflectAfterTokens: 40000,
+      temperature: 0.7,
+    },
+  };
+
+  it('returns "base" when OM is off', () => {
+    const key = memoryCacheKeyForAgent(baseCompany, {
+      observationalMemory: { mode: 'off' },
+    });
+    assert.equal(key, 'base');
+  });
+
+  it('returns "base" when OM is not configured', () => {
+    const key = memoryCacheKeyForAgent({ observationalMemory: { enabled: false } }, null);
+    assert.equal(key, 'base');
+  });
+
+  it('includes all resolved config fields when OM is on', () => {
+    const key = memoryCacheKeyForAgent(baseCompany, {
+      observationalMemory: { mode: 'inherit' },
+    });
+    assert.equal(key, 'om:provider-1:model-1:8192:30000:40000:0.7');
+  });
+
+  it('omits temperature from key when undefined', () => {
+    const companyNoTemp: CompanySettings = {
+      observationalMemory: {
+        enabled: true,
+        providerId: 'provider-1',
+        modelId: 'model-1',
+        maxOutputTokens: 8192,
+        observeAfterTokens: 30000,
+        reflectAfterTokens: 40000,
+      },
+    };
+    const key = memoryCacheKeyForAgent(companyNoTemp, {
+      observationalMemory: { mode: 'inherit' },
+    });
+    assert.equal(key, 'om:provider-1:model-1:8192:30000:40000');
+  });
+
+  it('produces different keys for different providers', () => {
+    const key1 = memoryCacheKeyForAgent(baseCompany, {
+      observationalMemory: { mode: 'inherit' },
+    });
+    const key2 = memoryCacheKeyForAgent(baseCompany, {
+      observationalMemory: { mode: 'on', providerId: 'provider-2' },
+    });
+    assert.notEqual(key1, key2);
+    assert.ok(key2.startsWith('om:provider-2:'));
+  });
+
+  it('produces different keys for different models', () => {
+    const key1 = memoryCacheKeyForAgent(baseCompany, {
+      observationalMemory: { mode: 'inherit' },
+    });
+    const key2 = memoryCacheKeyForAgent(baseCompany, {
+      observationalMemory: { mode: 'on', modelId: 'model-2' },
+    });
+    assert.notEqual(key1, key2);
+    assert.ok(key2.includes(':model-2:'));
+  });
+
+  it('produces different keys for different maxOutputTokens', () => {
+    const key1 = memoryCacheKeyForAgent(baseCompany, {
+      observationalMemory: { mode: 'inherit' },
+    });
+    const key2 = memoryCacheKeyForAgent(baseCompany, {
+      observationalMemory: { mode: 'on', maxOutputTokens: 16384 },
+    });
+    assert.notEqual(key1, key2);
+    assert.ok(key2.includes(':16384:'));
+  });
+
+  it('produces different keys for different observeAfterTokens', () => {
+    const key1 = memoryCacheKeyForAgent(baseCompany, {
+      observationalMemory: { mode: 'inherit' },
+    });
+    const key2 = memoryCacheKeyForAgent(baseCompany, {
+      observationalMemory: { mode: 'on', observeAfterTokens: 50000 },
+    });
+    assert.notEqual(key1, key2);
+    assert.ok(key2.includes(':50000:'));
+  });
+
+  it('produces different keys for different reflectAfterTokens', () => {
+    const key1 = memoryCacheKeyForAgent(baseCompany, {
+      observationalMemory: { mode: 'inherit' },
+    });
+    const key2 = memoryCacheKeyForAgent(baseCompany, {
+      observationalMemory: { mode: 'on', reflectAfterTokens: 60000 },
+    });
+    assert.notEqual(key1, key2);
+    assert.ok(key2.includes(':60000:'));
+  });
+
+  it('produces different keys for different temperatures', () => {
+    const key1 = memoryCacheKeyForAgent(baseCompany, {
+      observationalMemory: { mode: 'inherit' },
+    });
+    const key2 = memoryCacheKeyForAgent(baseCompany, {
+      observationalMemory: { mode: 'on', temperature: 0.5 },
+    });
+    assert.notEqual(key1, key2);
+    assert.ok(key2.endsWith(':0.5'));
+  });
+
+  it('produces different keys when temperature is present vs absent', () => {
+    const companyNoTemp: CompanySettings = {
+      observationalMemory: {
+        enabled: true,
+        providerId: 'provider-1',
+        modelId: 'model-1',
+        maxOutputTokens: 8192,
+        observeAfterTokens: 30000,
+        reflectAfterTokens: 40000,
+      },
+    };
+    const key1 = memoryCacheKeyForAgent(companyNoTemp, {
+      observationalMemory: { mode: 'inherit' },
+    });
+    const key2 = memoryCacheKeyForAgent(companyNoTemp, {
+      observationalMemory: { mode: 'on', temperature: 0.7 },
+    });
+    assert.notEqual(key1, key2);
+    assert.ok(!key1.includes(':0.7'));
+    assert.ok(key2.includes(':0.7'));
+  });
+});
+
