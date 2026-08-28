@@ -645,6 +645,12 @@ async function runDurableAgentWake(params: {
     runTracer.info('cleared inbox thread for stateless wake');
   }
 
+  if (!resumable && useIdleThread) {
+    const { clearAgentIdleThread } = await import('@tourbillon/mastra');
+    await clearAgentIdleThread(agentRecord.id);
+    runTracer.info('cleared durable agent idle thread for stateless wake with OM');
+  }
+
   runTracer.info('wake memory', {
     useMemory,
     thread: useMemory ? memoryKeys.thread : undefined,
