@@ -7,7 +7,10 @@ import {
 import { chatErrorResponse, decodeResourceId } from '@/lib/chat/route-helpers';
 import { chatModelIdFromSearch } from '@/lib/chat/model-query';
 
-/** Abort the in-flight chat run and force-clear display state. */
+/**
+ * Abort the in-flight chat run. Mastra 1.63+ Session.abort() clears running
+ * state internally (displayState is read-only). UI will receive agent_end event.
+ */
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ agentId: string; resourceId: string }> },
@@ -24,8 +27,6 @@ export async function POST(
       scope: sessionScope,
     });
     session.abort();
-    
-    // Note: displayState is now read-only; abort() handles state cleanup internally
     
     return NextResponse.json({ ok: true });
   } catch (err) {
