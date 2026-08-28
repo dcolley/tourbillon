@@ -122,7 +122,7 @@ export function isTokenLimiterTripwireInSpan(value: unknown): boolean {
   // Check for tripwire field (Mastra 1.63+ shape)
   if (obj.tripwire) {
     const text = typeof obj.tripwire === 'string' ? obj.tripwire : JSON.stringify(obj.tripwire);
-    if (isTokenLimiterTripwireError({ message: text } as Error)) {
+    if (isTokenLimiterTripwireError(new Error(text))) {
       return true;
     }
   }
@@ -130,15 +130,9 @@ export function isTokenLimiterTripwireInSpan(value: unknown): boolean {
   // Check for reason field (alternative shape)
   if (obj.reason) {
     const text = typeof obj.reason === 'string' ? obj.reason : JSON.stringify(obj.reason);
-    if (isTokenLimiterTripwireError({ message: text } as Error)) {
+    if (isTokenLimiterTripwireError(new Error(text))) {
       return true;
     }
-  }
-  
-  // Stringify and check the whole object (fallback for embedded tripwire strings)
-  const fullText = JSON.stringify(obj);
-  if (isTokenLimiterTripwireError({ message: fullText } as Error)) {
-    return true;
   }
   
   return false;

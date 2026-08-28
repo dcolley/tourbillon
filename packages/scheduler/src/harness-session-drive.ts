@@ -5,6 +5,7 @@ import { tripwireDetectorRegistry } from '@tourbillon/mastra';
 import {
   heartbeatProgressStaleErrorText,
   isTokenLimiterTripwireError,
+  isSystemMessageTripwire,
   extractTripwireTokenCounts,
   formatSystemMessageTripwireError,
   resolveHeartbeatLivenessConfig,
@@ -50,9 +51,27 @@ export function isHarnessProgressEvent(event: AgentControllerEvent): boolean {
 
 export function tripwireErrorFromUnknown(err: unknown): Error {
   if (isTokenLimiterTripwireError(err)) {
-    // Try to extract token counts from the error
+    const originalMessage = err instanceof Error ? err.message : String(err ?? 'TokenLimiter tripwire');
+    
+    // Check if it's specifically the system-message-alone case
+    // Pass the message string (not the Error object) to avoid JSON.stringify issues
+    if (isSystemMessageTripwire(originalMessage)) {
+      const counts = extractTripwireTokenCounts(err);
+      return new Error(formatSystemMessageTripwireError(counts.systemTokens, counts.limit));
+    }
+    
+    // Generic TokenLimiter error - preserve original message and append counts if available
     const counts = extractTripwireTokenCounts(err);
-    return new Error(formatSystemMessageTripwireError(counts.systemTokens, counts.limit));
+    
+    if (counts.systemTokens !== undefined && counts.limit !== undefined) {
+      return new Error(`${originalMessage} (${counts.systemTokens} tokens, limit ${counts.limit})`);
+    } else if (counts.systemTokens !== undefined) {
+      return new Error(`${originalMessage} (${counts.systemTokens} tokens)`);
+    } else if (counts.limit !== undefined) {
+      return new Error(`${originalMessage} (limit ${counts.limit})`);
+    }
+    
+    return new Error(originalMessage);
   }
   const message = err instanceof Error ? err.message : String(err ?? 'Unknown error');
   return err instanceof Error ? err : new Error(message);
