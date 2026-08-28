@@ -9,6 +9,7 @@ import {
   updateAgentRole,
 } from '@/lib/agents';
 import { triggerAgentHeartbeat } from '@/lib/heartbeat';
+import { actionError, actionSuccess, type ActionResult } from '@/lib/action-result';
 
 export async function triggerAgentHeartbeatAction(formData: FormData) {
   const agentId = formData.get('agentId') as string;
@@ -59,22 +60,25 @@ export async function toggleAgentActiveAction(formData: FormData) {
   revalidatePath('/agent');
 }
 
-export async function updateAgentRoleAction(formData: FormData) {
+export async function updateAgentRoleAction(
+  _prev: ActionResult | null,
+  formData: FormData,
+): Promise<ActionResult> {
+  'use server';
+
   const agentId = formData.get('agentId') as string;
-  const urlKey = formData.get('urlKey') as string;
   const role = formData.get('role') as string;
 
-  if (!agentId || !urlKey) return;
+  if (!agentId) return actionError('Agent ID is required.');
 
   try {
     await updateAgentRole(agentId, role);
+    return actionSuccess('Role saved. Skills, toolsets, and assigned tools reset to role defaults.');
   } catch (err) {
     const message =
       err instanceof AgentValidationError ? err.message : 'Failed to update agent role.';
-    redirect(`/agent/${urlKey}?error=${encodeURIComponent(message)}`);
+    return actionError(message);
   }
-
-  redirect(`/agent/${urlKey}?saved=role`);
 }
 
 export async function deleteAgentAction(formData: FormData) {
