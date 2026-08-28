@@ -1,7 +1,12 @@
 import { EventEmitter } from 'events';
 import type { TracingEvent } from '@mastra/core/observability';
 import { SpanType } from '@mastra/core/observability';
-import { isSystemMessageTripwire, extractTripwireTokenCounts, formatSystemMessageTripwireError } from '@tourbillon/shared';
+import {
+  isSystemMessageTripwire,
+  isTokenLimiterTripwireInSpan,
+  extractTripwireTokenCounts,
+  formatSystemMessageTripwireError,
+} from '@tourbillon/shared';
 
 /** Extract heartbeatRunId from span (matches production extractContext logic) */
 function extractHeartbeatRunId(span: any): string | undefined {
@@ -31,7 +36,11 @@ function extractHeartbeatRunId(span: any): string | undefined {
 
 /**
  * Per-wake tripwire detector. Listens to processor span events and emits
- * 'tripwire' when a system-message tripwire is detected for this wake's runId.
+ * 'tripwire' when a TokenLimiter tripwire is detected for this wake's runId.
+ * 
+ * Detects ANY TokenLimiter tripwire (not just system-messages-alone) that means
+ * the model cannot continue. Mastra 1.63+ logs tripwires in output with span status ok,
+ * so we check output.tripwire / output.reason even when status is not error.
  * 
  * Filters spans by heartbeatRunId from construction (no "accept any" fallback).
  * This prevents concurrent wakes from colliding on early processor spans.
@@ -67,15 +76,38 @@ export class TripwireDetector extends EventEmitter {
     // If we have a traceId, also filter by it
     if (this.traceId && span.traceId !== this.traceId) return;
 
-    // Check for system-message tripwire in output (span type agnostic)
-    // Mastra 1.63+: appears in MODEL_STEP output
+    // Check for TokenLimiter tripwire in output (span type agnostic)
+    // Mastra 1.63+: appears in MODEL_STEP output with status ok
     // Earlier versions or tests: may appear in PROCESSOR output
-    if (!span.output || !isSystemMessageTripwire(span.output)) return;
+    // Detects ANY TokenLimiter tripwire, not just system-messages-alone
+    if (!span.output || !isTokenLimiterTripwireInSpan(span.output)) return;
 
     // Tripwire detected - fire once and store errorText
     this.fired = true;
     const counts = extractTripwireTokenCounts(span.output);
-    this.errorText = formatSystemMessageTripwireError(counts.systemTokens, counts.limit);
+    
+    // Format error text: prefer system-message-alone format when detected,
+    // otherwise generic TokenLimiter error with any available counts
+    if (isSystemMessageTripwire(span.output)) {
+      this.errorText = formatSystemMessageTripwireError(counts.systemTokens, counts.limit);
+    } else {
+      // Generic TokenLimiter tripwire
+      const outputStr = typeof span.output === 'string' ? span.output : JSON.stringify(span.output);
+      const reasonMatch = outputStr.match(/reason['":\s]+([^"'}]+)/i);
+      const tripwireMatch = outputStr.match(/tripwire['":\s]+([^"'}]+)/i);
+      const rawMessage = reasonMatch?.[1] || tripwireMatch?.[1] || 'TokenLimiter tripwire';
+      
+      if (counts.systemTokens !== undefined && counts.limit !== undefined) {
+        this.errorText = `${rawMessage} (${counts.systemTokens} tokens, limit ${counts.limit})`;
+      } else if (counts.systemTokens !== undefined) {
+        this.errorText = `${rawMessage} (${counts.systemTokens} tokens)`;
+      } else if (counts.limit !== undefined) {
+        this.errorText = `${rawMessage} (limit ${counts.limit})`;
+      } else {
+        this.errorText = rawMessage;
+      }
+    }
+    
     this.emit('tripwire', this.errorText);
   }
 

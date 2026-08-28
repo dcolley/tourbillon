@@ -14,6 +14,7 @@ import {
   type HarnessObservabilityContext,
   buildHeartbeatTracingOptions,
   createHeartbeatTraceId,
+  TripwireDetector,
 } from '@tourbillon/mastra';
 import type { HeartbeatJobData, AgentRuntimeConfig } from '@tourbillon/shared';
 import {
@@ -144,6 +145,10 @@ export async function runWithHarness(
   const maxSteps = runtimeConfig.heartbeat?.maxSteps ?? 30;
   const timeoutSec = runtimeConfig.timeout?.heartbeatSec ?? 300;
 
+  // Create per-wake tripwire detector armed with heartbeat runId BEFORE driveSessionHeadless
+  // Filter by heartbeatRunId from construction (no "accept any" fallback - prevents collision)
+  const tripwireDetector = new TripwireDetector(runId);
+
   try {
     const result = await driveSessionHeadless(
       session,
@@ -155,6 +160,7 @@ export async function runWithHarness(
       undefined,
       maxSteps,
       timeoutSec,
+      tripwireDetector,
     );
 
     const harnessRunId = session.getCurrentRunId() ?? undefined;

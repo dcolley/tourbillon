@@ -5,6 +5,7 @@ import {
   isResumableWakeMatch,
   isTokenLimiterTripwireError,
   isSystemMessageTripwire,
+  isTokenLimiterTripwireInSpan,
   extractTripwireTokenCounts,
   formatSystemMessageTripwireError,
   parseCompanySettings,
@@ -17,6 +18,7 @@ import {
   tripwireErrorFromUnknown,
 } from './harness-session-drive';
 import type { AgentControllerEvent } from '@tourbillon/mastra';
+import { TripwireDetector } from '@tourbillon/mastra';
 
 describe('resolveObservationalMemoryModel', () => {
   it('resolves enabled company OM settings', () => {
@@ -136,6 +138,71 @@ describe('isSystemMessageTripwire', () => {
 
   it('ignores unrelated content', () => {
     assert.equal(isSystemMessageTripwire('normal output'), false);
+  });
+});
+
+describe('isTokenLimiterTripwireInSpan', () => {
+  it('detects generic TokenLimiter tripwire in output.tripwire', () => {
+    assert.equal(
+      isTokenLimiterTripwireInSpan({
+        tripwire: 'TokenLimiterProcessor: No messages fit within the remaining token budget.',
+      }),
+      true,
+    );
+  });
+
+  it('detects TokenLimiter tripwire in output.reason', () => {
+    assert.equal(
+      isTokenLimiterTripwireInSpan({
+        reason: 'TokenLimiterProcessor: System messages alone exceed token limit.',
+      }),
+      true,
+    );
+  });
+
+  it('detects system-message-alone tripwire', () => {
+    assert.equal(
+      isTokenLimiterTripwireInSpan({
+        reason: 'TokenLimiterProcessor: System messages alone exceed token limit.',
+        options: {
+          metadata: {
+            systemTokens: 150000,
+            limit: 120000,
+          },
+        },
+      }),
+      true,
+    );
+  });
+
+  it('detects generic TokenLimiter tripwire with metadata', () => {
+    assert.equal(
+      isTokenLimiterTripwireInSpan({
+        tripwire: 'TokenLimiterProcessor: No messages to process.',
+        options: {
+          metadata: {
+            systemTokens: 31511,
+            limit: 120000,
+          },
+        },
+      }),
+      true,
+    );
+  });
+
+  it('ignores non-tripwire output', () => {
+    assert.equal(
+      isTokenLimiterTripwireInSpan({
+        text: 'normal model output',
+      }),
+      false,
+    );
+  });
+
+  it('returns false for null or non-object', () => {
+    assert.equal(isTokenLimiterTripwireInSpan(null), false);
+    assert.equal(isTokenLimiterTripwireInSpan('string'), false);
+    assert.equal(isTokenLimiterTripwireInSpan(123), false);
   });
 });
 
@@ -271,7 +338,14 @@ describe('driveSessionHeadless', () => {
           undefined,
           60,
         ),
-      (err: Error) => /System messages.*Cannot trim further/i.test(err.message),
+      (err: Error) => {
+        // Generic TokenLimiter error - preserve original message (not system-message-alone)
+        assert.ok(
+          err.message.includes('No messages fit within the remaining token budget'),
+          'Error must include original TokenLimiter message'
+        );
+        return true;
+      },
     );
   });
 
@@ -475,5 +549,99 @@ describe('driveSessionHeadless', () => {
 
     assert.equal(abortCalled, false);
     assert.equal(result.finishReason, 'complete');
+  });
+
+  it('fails on generic TokenLimiter tripwire detected via TripwireDetector (ok span, not sendMessage throw)', async () => {
+    // This is the TEST COO case: output.tripwire on an ok span must fail the wake
+    const heartbeatRunId = 'run-harness-generic-tripwire';
+    const detector = new TripwireDetector(heartbeatRunId);
+    
+    const listeners = new Set<(event: AgentControllerEvent) => void>();
+    let abortCalled = false;
+    const session = {
+      subscribe(listener: (event: AgentControllerEvent) => void) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      abort() {
+        abortCalled = true;
+      },
+      getCurrentRunId() {
+        return 'harness-run-123';
+      },
+      run: { 
+        isRunning: () => true,
+        getTraceId: () => 'trace-123',
+      },
+      sendMessage: async () => {
+        // sendMessage does NOT throw - but detector will fire after span arrives
+        for (const listener of listeners) {
+          listener({ type: 'message_start' } as AgentControllerEvent);
+        }
+      },
+    };
+
+    const drivePromise = driveSessionHeadless(
+      session as never,
+      'wake',
+      {},
+      () => undefined,
+      undefined,
+      undefined,
+      60,
+      30,
+      300,
+      detector,
+    );
+
+    // Wait a tick for sendMessage to start
+    await new Promise(r => setImmediate(r));
+
+    // Simulate MODEL_STEP span with generic TokenLimiter tripwire arriving AFTER sendMessage
+    // (Mastra 1.63+: span status ok, output.tripwire contains the error)
+    detector.onTracingEvent({
+      type: 'span_end' as any,
+      exportedSpan: {
+        id: 'span-generic-tripwire',
+        traceId: 'trace-123',
+        type: 'MODEL_STEP' as any,
+        name: 'model_step',
+        requestContext: {
+          get: (key: string) => (key === 'runId' ? heartbeatRunId : undefined),
+        },
+        output: {
+          tripwire: 'TokenLimiterProcessor: No messages fit within the remaining token budget.',
+          options: {
+            metadata: {
+              systemTokens: 31511,
+              limit: 120000,
+            },
+          },
+        },
+      } as any,
+    });
+
+    // Drive should reject with the tripwire error
+    await assert.rejects(
+      drivePromise,
+      (err: Error) => {
+        assert.ok(
+          err.message.includes('No messages fit within the remaining token budget'),
+          'Error must include tripwire reason'
+        );
+        assert.ok(
+          err.message.includes('31511 tokens'),
+          'Error must include token count'
+        );
+        assert.ok(
+          err.message.includes('limit 120000'),
+          'Error must include limit'
+        );
+        return true;
+      },
+      'driveSessionHeadless must reject on generic tripwire detected via TripwireDetector'
+    );
+
+    assert.equal(abortCalled, true, 'Session must be aborted on tripwire');
   });
 });

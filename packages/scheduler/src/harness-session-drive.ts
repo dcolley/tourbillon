@@ -1,9 +1,11 @@
 import type { Session, AgentControllerEvent } from '@tourbillon/mastra';
 import type { TourbillonControllerState } from '@tourbillon/mastra';
-import type { buildHeartbeatTracingOptions } from '@tourbillon/mastra';
+import type { buildHeartbeatTracingOptions, TripwireDetector } from '@tourbillon/mastra';
+import { tripwireDetectorRegistry } from '@tourbillon/mastra';
 import {
   heartbeatProgressStaleErrorText,
   isTokenLimiterTripwireError,
+  isSystemMessageTripwire,
   extractTripwireTokenCounts,
   formatSystemMessageTripwireError,
   resolveHeartbeatLivenessConfig,
@@ -49,16 +51,34 @@ export function isHarnessProgressEvent(event: AgentControllerEvent): boolean {
 
 export function tripwireErrorFromUnknown(err: unknown): Error {
   if (isTokenLimiterTripwireError(err)) {
-    // Try to extract token counts from the error
+    const originalMessage = err instanceof Error ? err.message : String(err ?? 'TokenLimiter tripwire');
+    
+    // Check if it's specifically the system-message-alone case
+    // Pass the message string (not the Error object) to avoid JSON.stringify issues
+    if (isSystemMessageTripwire(originalMessage)) {
+      const counts = extractTripwireTokenCounts(err);
+      return new Error(formatSystemMessageTripwireError(counts.systemTokens, counts.limit));
+    }
+    
+    // Generic TokenLimiter error - preserve original message and append counts if available
     const counts = extractTripwireTokenCounts(err);
-    return new Error(formatSystemMessageTripwireError(counts.systemTokens, counts.limit));
+    
+    if (counts.systemTokens !== undefined && counts.limit !== undefined) {
+      return new Error(`${originalMessage} (${counts.systemTokens} tokens, limit ${counts.limit})`);
+    } else if (counts.systemTokens !== undefined) {
+      return new Error(`${originalMessage} (${counts.systemTokens} tokens)`);
+    } else if (counts.limit !== undefined) {
+      return new Error(`${originalMessage} (limit ${counts.limit})`);
+    }
+    
+    return new Error(originalMessage);
   }
   const message = err instanceof Error ? err.message : String(err ?? 'Unknown error');
   return err instanceof Error ? err : new Error(message);
 }
 
 /**
- * Drive a headless Session until agent_end / suspend / error / abort / progress stale / max steps / repeated tool loop.
+ * Drive a headless Session until agent_end / suspend / error / abort / progress stale / max steps / repeated tool loop / tripwire.
  */
 export async function driveSessionHeadless(
   session: Session<TourbillonControllerState>,
@@ -70,6 +90,7 @@ export async function driveSessionHeadless(
   progressStaleSec?: number,
   maxSteps?: number,
   timeoutSec?: number,
+  tripwireDetector?: TripwireDetector,
 ): Promise<HarnessDriveResult> {
   let inputTokens = 0;
   let outputTokens = 0;
@@ -88,12 +109,18 @@ export async function driveSessionHeadless(
     let modelStepCount = 0;
     const recentToolNames: string[] = [];
     const REPEATED_TOOL_BREAKER_THRESHOLD = 5;
+    let tripwireRegistered = false;
 
     const cleanup = () => {
       if (progressTimer) clearTimeout(progressTimer);
       if (wallClockTimer) clearTimeout(wallClockTimer);
       abortSignal?.removeEventListener('abort', onAbort);
       unsub?.();
+      if (tripwireDetector && tripwireRegistered) {
+        tripwireDetectorRegistry.unregister(tripwireDetector);
+        tripwireDetector.clear();
+        tripwireRegistered = false;
+      }
     };
 
     const finish = (result: HarnessDriveResult) => {
@@ -139,6 +166,21 @@ export async function driveSessionHeadless(
         }
         fail(new Error(`Heartbeat exceeded wall-clock timeout of ${timeoutSec}s`));
       }, timeoutSec * 1000);
+    }
+
+    // Register tripwire detector BEFORE sendMessage (must listen before event fires)
+    if (tripwireDetector) {
+      tripwireDetectorRegistry.register(tripwireDetector);
+      tripwireRegistered = true;
+      tripwireDetector.once('tripwire', (errorText: string) => {
+        // Tripwire detected - abort session and fail
+        try {
+          session.abort();
+        } catch {
+          // ignore
+        }
+        fail(new Error(errorText));
+      });
     }
 
     unsub = session.subscribe((event) => {
@@ -241,6 +283,21 @@ export async function driveSessionHeadless(
         tracingOptions: tracingOptions ?? undefined,
       })
       .then(() => {
+        // Check if tripwire fired during sendMessage (before listener was ready)
+        if (tripwireDetector) {
+          const earlyError = tripwireDetector.getErrorText();
+          if (earlyError) {
+            fail(new Error(earlyError));
+            return;
+          }
+          
+          // Set traceId for future events (if session has a traceId)
+          const traceId = session.run.getTraceId?.();
+          if (traceId) {
+            tripwireDetector.setTraceId(traceId);
+          }
+        }
+        
         if (!session.run.isRunning()) {
           finish({ inputTokens, outputTokens, finishReason: 'complete', suspendedToolCallId });
         }
