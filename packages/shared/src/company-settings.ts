@@ -24,11 +24,25 @@ function parseObservationalMemorySettings(raw: unknown): ObservationalMemorySett
   const modelId =
     typeof record.modelId === 'string' ? record.modelId.trim() || undefined : undefined;
   const enabled = record.enabled === true;
-  if (!enabled && !providerId && !modelId) return undefined;
+  
+  const maxOutputTokens = typeof record.maxOutputTokens === 'number' ? record.maxOutputTokens : undefined;
+  const observeAfterTokens = typeof record.observeAfterTokens === 'number' ? record.observeAfterTokens : undefined;
+  const reflectAfterTokens = typeof record.reflectAfterTokens === 'number' ? record.reflectAfterTokens : undefined;
+  const temperature = typeof record.temperature === 'number' ? record.temperature : undefined;
+  
+  if (!enabled && !providerId && !modelId && maxOutputTokens === undefined && 
+      observeAfterTokens === undefined && reflectAfterTokens === undefined && temperature === undefined) {
+    return undefined;
+  }
+  
   return {
     enabled,
     ...(providerId ? { providerId } : {}),
     ...(modelId ? { modelId } : {}),
+    ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+    ...(observeAfterTokens !== undefined ? { observeAfterTokens } : {}),
+    ...(reflectAfterTokens !== undefined ? { reflectAfterTokens } : {}),
+    ...(temperature !== undefined ? { temperature } : {}),
   };
 }
 
@@ -103,6 +117,10 @@ export function mergeCompanySettings(
       enabled: om.enabled === true,
       ...(om.providerId?.trim() ? { providerId: om.providerId.trim() } : {}),
       ...(om.modelId?.trim() ? { modelId: om.modelId.trim() } : {}),
+      ...(om.maxOutputTokens !== undefined ? { maxOutputTokens: om.maxOutputTokens } : {}),
+      ...(om.observeAfterTokens !== undefined ? { observeAfterTokens: om.observeAfterTokens } : {}),
+      ...(om.reflectAfterTokens !== undefined ? { reflectAfterTokens: om.reflectAfterTokens } : {}),
+      ...(om.temperature !== undefined ? { temperature: om.temperature } : {}),
     };
   }
   if (patch.hitlyGate !== undefined) {
@@ -136,6 +154,41 @@ export function isObservationalMemoryConfigured(
   companySettings?: CompanySettings | null,
 ): boolean {
   return resolveObservationalMemoryModel(companySettings) !== null;
+}
+
+/** OM defaults (min 1024, min 8000, min 8000). */
+const DEFAULT_OM_MAX_OUTPUT_TOKENS = 8192;
+const DEFAULT_OM_OBSERVE_AFTER_TOKENS = 30_000;
+const DEFAULT_OM_REFLECT_AFTER_TOKENS = 40_000;
+const MIN_OM_MAX_OUTPUT_TOKENS = 1024;
+const MIN_OM_OBSERVE_AFTER_TOKENS = 8_000;
+const MIN_OM_REFLECT_AFTER_TOKENS = 8_000;
+
+/** Resolve OM settings with defaults applied. */
+export function resolveObservationalMemorySettings(
+  companySettings?: CompanySettings | null,
+): {
+  maxOutputTokens: number;
+  observeAfterTokens: number;
+  reflectAfterTokens: number;
+  temperature?: number;
+} {
+  const om = companySettings?.observationalMemory;
+  return {
+    maxOutputTokens: Math.max(
+      om?.maxOutputTokens ?? DEFAULT_OM_MAX_OUTPUT_TOKENS,
+      MIN_OM_MAX_OUTPUT_TOKENS,
+    ),
+    observeAfterTokens: Math.max(
+      om?.observeAfterTokens ?? DEFAULT_OM_OBSERVE_AFTER_TOKENS,
+      MIN_OM_OBSERVE_AFTER_TOKENS,
+    ),
+    reflectAfterTokens: Math.max(
+      om?.reflectAfterTokens ?? DEFAULT_OM_REFLECT_AFTER_TOKENS,
+      MIN_OM_REFLECT_AFTER_TOKENS,
+    ),
+    ...(om?.temperature !== undefined ? { temperature: om.temperature } : {}),
+  };
 }
 
 export function resolveSearxngBaseUrl(

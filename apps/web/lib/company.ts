@@ -214,6 +214,10 @@ export async function updateCompanyObservationalMemory(
     enabled: boolean;
     providerId?: string;
     modelId?: string;
+    maxOutputTokens?: number;
+    observeAfterTokens?: number;
+    reflectAfterTokens?: number;
+    temperature?: number;
   },
 ): Promise<Company> {
   const company = await db.query.companies.findFirst({ where: eq(companies.id, companyId) });
@@ -226,11 +230,44 @@ export async function updateCompanyObservationalMemory(
     if (!modelId) throw new Error('Model ID is required when Observational Memory is enabled.');
   }
 
+  // Validate numeric fields when provided
+  if (input.maxOutputTokens !== undefined) {
+    const val = input.maxOutputTokens;
+    if (!Number.isInteger(val) || val < 1024) {
+      throw new Error('Max output tokens must be an integer of at least 1024.');
+    }
+  }
+
+  if (input.observeAfterTokens !== undefined) {
+    const val = input.observeAfterTokens;
+    if (!Number.isInteger(val) || val < 8000) {
+      throw new Error('Observe after tokens must be an integer of at least 8000.');
+    }
+  }
+
+  if (input.reflectAfterTokens !== undefined) {
+    const val = input.reflectAfterTokens;
+    if (!Number.isInteger(val) || val < 8000) {
+      throw new Error('Reflect after tokens must be an integer of at least 8000.');
+    }
+  }
+
+  if (input.temperature !== undefined && input.temperature !== null) {
+    const val = input.temperature;
+    if (typeof val !== 'number' || val < 0 || val > 2) {
+      throw new Error('Temperature must be a number between 0 and 2.');
+    }
+  }
+
   const settings = mergeCompanySettings(company.settings, {
     observationalMemory: {
       enabled: input.enabled,
       providerId: input.providerId?.trim() || undefined,
       modelId: input.modelId?.trim() || undefined,
+      maxOutputTokens: input.maxOutputTokens,
+      observeAfterTokens: input.observeAfterTokens,
+      reflectAfterTokens: input.reflectAfterTokens,
+      temperature: input.temperature,
     },
   });
 

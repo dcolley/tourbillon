@@ -10,6 +10,7 @@ import {
   resolveModelProviderConfig,
   resolveAssignedTools,
   resolveObservationalMemoryModel,
+  resolveObservationalMemorySettings,
   type AgentRuntimeConfig,
   type CompanySettings,
   isSearxngConfigured,
@@ -92,6 +93,7 @@ export async function getAgentMemory(
 
   if (om) {
     const omModel = await getLanguageModelForProviderRecord(om.providerId, om.modelId);
+    const omSettings = resolveObservationalMemorySettings(companySettings);
     config.options = {
       ...config.options,
       observationalMemory: {
@@ -99,11 +101,19 @@ export async function getAgentMemory(
         model: omModel,
         scope: 'thread',
         observation: {
-          messageTokens: 30_000,
+          messageTokens: omSettings.observeAfterTokens,
           bufferOnIdle: true,
+          modelSettings: {
+            maxOutputTokens: omSettings.maxOutputTokens,
+            ...(omSettings.temperature !== undefined ? { temperature: omSettings.temperature } : {}),
+          },
         },
         reflection: {
-          observationTokens: 40_000,
+          observationTokens: omSettings.reflectAfterTokens,
+          modelSettings: {
+            maxOutputTokens: omSettings.maxOutputTokens,
+            ...(omSettings.temperature !== undefined ? { temperature: omSettings.temperature } : {}),
+          },
         },
       },
     };

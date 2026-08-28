@@ -17,6 +17,10 @@ interface ObservationalMemorySettingsFormProps {
   initialEnabled: boolean;
   initialProviderId: string | null;
   initialModelId: string;
+  initialMaxOutputTokens?: number;
+  initialObserveAfterTokens?: number;
+  initialReflectAfterTokens?: number;
+  initialTemperature?: number;
   providers: ProviderOption[];
   saveAction: (prev: ActionResult | null, formData: FormData) => Promise<ActionResult>;
 }
@@ -25,6 +29,10 @@ export function ObservationalMemorySettingsForm({
   initialEnabled,
   initialProviderId,
   initialModelId,
+  initialMaxOutputTokens,
+  initialObserveAfterTokens,
+  initialReflectAfterTokens,
+  initialTemperature,
   providers,
   saveAction,
 }: ObservationalMemorySettingsFormProps) {
@@ -37,6 +45,18 @@ export function ObservationalMemorySettingsForm({
   const [enabled, setEnabled] = useState(initialEnabled);
   const [providerId, setProviderId] = useState(defaultProviderId);
   const [modelId, setModelId] = useState(initialModelId);
+  const [maxOutputTokens, setMaxOutputTokens] = useState(
+    initialMaxOutputTokens !== undefined ? String(initialMaxOutputTokens) : '',
+  );
+  const [observeAfterTokens, setObserveAfterTokens] = useState(
+    initialObserveAfterTokens !== undefined ? String(initialObserveAfterTokens) : '',
+  );
+  const [reflectAfterTokens, setReflectAfterTokens] = useState(
+    initialReflectAfterTokens !== undefined ? String(initialReflectAfterTokens) : '',
+  );
+  const [temperature, setTemperature] = useState(
+    initialTemperature !== undefined ? String(initialTemperature) : '',
+  );
   const [models, setModels] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
@@ -138,6 +158,88 @@ export function ObservationalMemorySettingsForm({
         />
         <p className="text-xs text-muted-foreground">
           Used for both Observer and Reflector compaction on durable Agent and harness heartbeats.
+        </p>
+      </div>
+
+      <div className="space-y-1.5">
+        <label htmlFor="omMaxOutputTokens" className="text-sm font-medium">
+          Max output tokens
+        </label>
+        <input
+          id="omMaxOutputTokens"
+          name="maxOutputTokens"
+          type="number"
+          min={1024}
+          disabled={!enabled}
+          value={maxOutputTokens}
+          onChange={(e) => setMaxOutputTokens(e.target.value)}
+          placeholder="8192"
+          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm disabled:opacity-50"
+        />
+        <p className="text-xs text-muted-foreground">
+          Used by Observer and Reflector. Raise this if compaction stops at max output length. Default: 8192.
+        </p>
+      </div>
+
+      <div className="space-y-1.5">
+        <label htmlFor="omObserveAfterTokens" className="text-sm font-medium">
+          Observe after (tokens)
+        </label>
+        <input
+          id="omObserveAfterTokens"
+          name="observeAfterTokens"
+          type="number"
+          min={8000}
+          disabled={!enabled}
+          value={observeAfterTokens}
+          onChange={(e) => setObserveAfterTokens(e.target.value)}
+          placeholder="30000"
+          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm disabled:opacity-50"
+        />
+        <p className="text-xs text-muted-foreground">
+          Unobserved message count that triggers compaction. Default: 30000.
+        </p>
+      </div>
+
+      <div className="space-y-1.5">
+        <label htmlFor="omReflectAfterTokens" className="text-sm font-medium">
+          Reflect after (tokens)
+        </label>
+        <input
+          id="omReflectAfterTokens"
+          name="reflectAfterTokens"
+          type="number"
+          min={8000}
+          disabled={!enabled}
+          value={reflectAfterTokens}
+          onChange={(e) => setReflectAfterTokens(e.target.value)}
+          placeholder="40000"
+          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm disabled:opacity-50"
+        />
+        <p className="text-xs text-muted-foreground">
+          Observation log size that triggers reflection. Default: 40000.
+        </p>
+      </div>
+
+      <div className="space-y-1.5">
+        <label htmlFor="omTemperature" className="text-sm font-medium">
+          Temperature (optional)
+        </label>
+        <input
+          id="omTemperature"
+          name="temperature"
+          type="number"
+          step="0.1"
+          min={0}
+          max={2}
+          disabled={!enabled}
+          value={temperature}
+          onChange={(e) => setTemperature(e.target.value)}
+          placeholder="Mastra defaults (observer 0.3, reflector 0)"
+          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm disabled:opacity-50"
+        />
+        <p className="text-xs text-muted-foreground">
+          Applied to both Observer and Reflector if set. Empty uses Mastra defaults.
         </p>
       </div>
 

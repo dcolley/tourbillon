@@ -13,6 +13,7 @@ import {
   ensureExecutionWorkspace,
   isMastraTracingEnabled,
   resolveObservationalMemoryModel,
+  resolveObservationalMemorySettings,
 } from '@tourbillon/shared';
 import {
   assembleAgentSystemPrompt,
@@ -172,6 +173,7 @@ export async function createTourbillonController(
   const codeExecutionEnabled = await shouldAttachCodeExecutionWorkspace(agentRecord);
 
   const om = resolveObservationalMemoryModel(options?.companySettings ?? null);
+  const omSettings = resolveObservationalMemorySettings(options?.companySettings ?? null);
   const memory = await getAgentMemory(options?.companySettings ?? null);
   const providerRow = agentRecord.providerId
     ? await getLlmProviderRowById(agentRecord.providerId)
@@ -203,8 +205,8 @@ export async function createTourbillonController(
           omConfig: {
             defaultObserverModelId: om.modelId,
             defaultReflectorModelId: om.modelId,
-            defaultObservationThreshold: contextBudget.observationThreshold,
-            defaultReflectionThreshold: contextBudget.reflectionThreshold,
+            defaultObservationThreshold: omSettings.observeAfterTokens,
+            defaultReflectionThreshold: omSettings.reflectAfterTokens,
           },
         }
       : {}),
