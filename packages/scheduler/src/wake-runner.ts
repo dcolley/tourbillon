@@ -11,8 +11,7 @@ import {
   resolveAgentGenerationOptions,
   toMastraCallOptions,
   type AgentGenerationOptions,
-  shouldUseHeartbeatMemory,
-  clearInboxThread,
+  clearAllHeartbeatThreads,
   buildHeartbeatTracingOptions,
   TripwireDetector,
   tripwireDetectorRegistry,
@@ -627,28 +626,12 @@ async function runDurableAgentWake(params: {
     agentRuntimeConfig: agentRecord.runtimeConfig as AgentRuntimeConfig,
   });
 
-  const resumable = await getResumableDurableRun(agentRecord.id, taskId);
-  const useMemory = shouldUseHeartbeatMemory(taskId, companySettings, agentRecord.runtimeConfig as AgentRuntimeConfig);
-  const useIdleThread = !taskId && useMemory;
-
-  const memoryKeys = buildHeartbeatMemoryKeys({
-    companyId,
-    agentId: agentRecord.id,
-    issueId: taskId,
-    goalId: issueForTask?.goalId ?? undefined,
-    projectId: issueForTask?.projectId ?? undefined,
-    useIdleThread,
-  });
-
-  if (!resumable && !useMemory) {
-    await clearInboxThread(companyId, agentRecord.id);
-    runTracer.info('cleared inbox thread for stateless wake');
-  }
-
-  runTracer.info('wake memory', {
-    useMemory,
-    thread: useMemory ? memoryKeys.thread : undefined,
-  });
+  // Product lock: all non-chat wakes start with empty context (no prior thread history).
+  // Clear all thread types (idle, inbox, issue) before each heartbeat wake.
+  // OM may still run on the current wake, but it will not load prior wake transcripts.
+  const resumable = null; // Never resume prior runs for heartbeat wakes
+  await clearAllHeartbeatThreads(companyId, agentRecord.id, taskId);
+  runTracer.info('cleared all heartbeat threads for empty-context wake');
 
   const tracingOptions = buildHeartbeatTracingOptions({
     companyId,
@@ -685,98 +668,51 @@ async function runDurableAgentWake(params: {
   abortSignal.addEventListener('abort', onAbort);
 
   try {
-    if (resumable?.durableRunId) {
-      runTracer.info('resuming durable agent run', { durableRunId: resumable.durableRunId });
-      
-      // Race the observe call with tripwire detection
-      await Promise.race([
-        (async () => {
-          const observed = await durableAgent.observe(resumable.durableRunId, {
-            offset: 0,
-            abortSignal,
-            onFinish: (result) => {
-              const usage = (result.totalUsage ?? result.usage) as {
-                inputTokens?: number;
-                outputTokens?: number;
-                promptTokens?: number;
-                completionTokens?: number;
-              } | undefined;
-              inputTokens = usage?.inputTokens ?? usage?.promptTokens ?? inputTokens;
-              outputTokens = usage?.outputTokens ?? usage?.completionTokens ?? outputTokens;
-            },
-          } as NonNullable<Parameters<typeof durableAgent.observe>[1]> & { abortSignal: AbortSignal });
-          streamResult = observed;
-          durableRunId = observed.runId;
-          traceId = observed.runId;
-          
-          // Check if tripwire fired during observe (before listener was ready)
-          const earlyError = detector.getErrorText();
-          if (earlyError) {
-            throw new Error(earlyError);
-          }
-          
-          // Set traceId for future events
-          detector.setTraceId(observed.runId);
-          
-          // Race output.text with any late tripwires
-          await awaitWithAbort(observed.output.text, abortSignal);
-          
-          observed.cleanup();
-          streamResult = undefined;
-        })(),
-        tripwirePromise,
-      ]);
-    } else {
-      // Race the stream call with tripwire detection
-      await Promise.race([
-        (async () => {
-          const streamed = await durableAgent.stream(wakeMessage, {
-            requestContext: runtimeContext,
-            maxSteps,
-            ...(useMemory
-              ? {
-                  memory: {
-                    resource: memoryKeys.resource,
-                    thread: memoryKeys.thread,
-                  },
-                }
-              : {}),
-            ...toMastraCallOptions(generationOptions ?? {}),
-            ...(tracingOptions ? { tracingOptions } : {}),
-            abortSignal,
-            onFinish: (result) => {
-              const usage = (result.totalUsage ?? result.usage) as {
-                inputTokens?: number;
-                outputTokens?: number;
-                promptTokens?: number;
-                completionTokens?: number;
-              } | undefined;
-              inputTokens = usage?.inputTokens ?? usage?.promptTokens ?? 0;
-              outputTokens = usage?.outputTokens ?? usage?.completionTokens ?? 0;
-            },
-          } as NonNullable<Parameters<typeof durableAgent.stream>[1]> & { abortSignal: AbortSignal });
-          streamResult = streamed;
-          durableRunId = streamed.runId;
-          traceId = streamed.runId;
-          
-          // Check if tripwire fired during stream (before listener was ready)
-          const earlyError = detector.getErrorText();
-          if (earlyError) {
-            throw new Error(earlyError);
-          }
-          
-          // Set traceId for future events
-          detector.setTraceId(streamed.runId);
-          
-          // Race output.text with any late tripwires
-          await awaitWithAbort(streamed.output.text, abortSignal);
-          
-          streamed.cleanup();
-          streamResult = undefined;
-        })(),
-        tripwirePromise,
-      ]);
-    }
+    // Product lock: never resume prior runs. All heartbeat wakes start with empty context.
+    // Race the stream call with tripwire detection
+    await Promise.race([
+      (async () => {
+        // Do NOT pass memory keys — heartbeat wakes start with empty message history.
+        // OM may still be configured (it will observe the current wake only).
+        const streamed = await durableAgent.stream(wakeMessage, {
+          requestContext: runtimeContext,
+          maxSteps,
+          // No memory keys passed — empty context for all heartbeat wakes
+          ...toMastraCallOptions(generationOptions ?? {}),
+          ...(tracingOptions ? { tracingOptions } : {}),
+          abortSignal,
+          onFinish: (result) => {
+            const usage = (result.totalUsage ?? result.usage) as {
+              inputTokens?: number;
+              outputTokens?: number;
+              promptTokens?: number;
+              completionTokens?: number;
+            } | undefined;
+            inputTokens = usage?.inputTokens ?? usage?.promptTokens ?? 0;
+            outputTokens = usage?.outputTokens ?? usage?.completionTokens ?? 0;
+          },
+        } as NonNullable<Parameters<typeof durableAgent.stream>[1]> & { abortSignal: AbortSignal });
+        streamResult = streamed;
+        durableRunId = streamed.runId;
+        traceId = streamed.runId;
+        
+        // Check if tripwire fired during stream (before listener was ready)
+        const earlyError = detector.getErrorText();
+        if (earlyError) {
+          throw new Error(earlyError);
+        }
+        
+        // Set traceId for future events
+        detector.setTraceId(streamed.runId);
+        
+        // Race output.text with any late tripwires
+        await awaitWithAbort(streamed.output.text, abortSignal);
+        
+        streamed.cleanup();
+        streamResult = undefined;
+      })(),
+      tripwirePromise,
+    ]);
   } catch (err) {
     streamResult?.cleanup();
     streamResult = undefined;

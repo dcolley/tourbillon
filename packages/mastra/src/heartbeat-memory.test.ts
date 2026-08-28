@@ -10,9 +10,9 @@ import { buildHeartbeatMemoryKeys } from './memory-keys';
 import type { CompanySettings } from '@tourbillon/shared';
 
 describe('shouldUseHeartbeatMemory', () => {
-  it('returns true when taskId is set', () => {
+  it('returns false when taskId is set (product lock: all heartbeat wakes start empty)', () => {
     const result = shouldUseHeartbeatMemory('task-123', null);
-    assert.equal(result, true);
+    assert.equal(result, false);
   });
 
   it('returns false when taskId is not set and OM is off', () => {
@@ -36,7 +36,7 @@ describe('shouldUseHeartbeatMemory', () => {
     assert.equal(result, false);
   });
 
-  it('returns true when taskId is not set but OM is fully configured', () => {
+  it('returns false when taskId is not set but OM is fully configured (product lock)', () => {
     const settings: CompanySettings = {
       observationalMemory: {
         enabled: true,
@@ -45,10 +45,10 @@ describe('shouldUseHeartbeatMemory', () => {
       },
     };
     const result = shouldUseHeartbeatMemory(undefined, settings);
-    assert.equal(result, true);
+    assert.equal(result, false);
   });
 
-  it('returns true when both taskId and OM are set', () => {
+  it('returns false when both taskId and OM are set (product lock: empty context)', () => {
     const settings: CompanySettings = {
       observationalMemory: {
         enabled: true,
@@ -57,7 +57,7 @@ describe('shouldUseHeartbeatMemory', () => {
       },
     };
     const result = shouldUseHeartbeatMemory('task-123', settings);
-    assert.equal(result, true);
+    assert.equal(result, false);
   });
 });
 

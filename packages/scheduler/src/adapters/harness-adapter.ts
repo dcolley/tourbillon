@@ -2,13 +2,11 @@ import type { Agent as AgentRecord } from '@tourbillon/db';
 import {
   createHeartbeatRuntimeContext,
   buildControllerCwd,
-  buildControllerThreadId,
   createTourbillonController,
   ensureControllerThread,
-  clearHarnessIdleThread,
+  clearAllHeartbeatThreads,
   type AgentControllerEvent,
   CONTROLLER_THREAD_MESSAGE_CAP,
-  getResumableHarnessRun,
   persistHarnessRunId,
   writeHarnessObservabilityEvent,
   type HarnessObservabilityContext,
@@ -74,12 +72,12 @@ export async function runWithHarness(
 
   await controller.init();
 
-  const resumable = await getResumableHarnessRun(agentRecord.id, taskId);
-  const omEnabled = isObservationalMemoryConfigured(options.companySettings);
-  if (!resumable && !taskId && !omEnabled) {
-    await clearHarnessIdleThread(agentRecord.id);
-  }
-  const threadId = resumable?.threadId ?? buildControllerThreadId(agentRecord, taskId);
+  // Product lock: all non-chat wakes start with empty context (no prior thread history).
+  // Clear all thread types before each heartbeat wake. Never resume prior runs.
+  await clearAllHeartbeatThreads(agentRecord.companyId, agentRecord.id, taskId);
+  
+  // Create a fresh thread ID for this wake. Do not reuse issue threads across heartbeats.
+  const threadId = `hb-${runId}${taskId ? `-issue-${taskId}` : ''}`;
 
   const session = await controller.createSession({
     resourceId: `company-${agentRecord.companyId}`,
