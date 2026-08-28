@@ -19,6 +19,8 @@ export interface HeartbeatRuntimeValues {
 
 export interface ToolRuntimeContext extends TraceContext {
   apiKey?: string;
+  goalId?: string;
+  projectId?: string;
 }
 
 export function createHeartbeatRuntimeContext(
@@ -34,7 +36,7 @@ export function createHeartbeatRuntimeContext(
   if (values.projectId) requestContext.set('projectId', values.projectId);
   if (values.jobId) requestContext.set('jobId', values.jobId);
   if (values.agentRuntimeConfig) {
-    requestContext.set('codeExecutionConfig', values.agentRuntimeConfig);
+    requestContext.set('agentRuntimeConfig', values.agentRuntimeConfig);
   }
   return requestContext;
 }

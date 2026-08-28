@@ -115,14 +115,15 @@ describe('TripwireDetector real-time detection', () => {
       // Never resolves or rejects
     });
     
-    // Simulate processor span with system-message tripwire DURING stream/observe
+    // Simulate MODEL_STEP span with system-message tripwire DURING stream/observe
+    // (Mastra 1.63+: tripwire appears in MODEL_STEP output, not separate PROCESSOR span)
     const processorSpanEvent: TracingEvent = {
       type: 'span_end' as any,
       exportedSpan: {
         id: 'span-123',
         traceId: 'trace-abc',
-        type: SpanType.PROCESSOR,
-        name: 'input_processor',
+        type: SpanType.MODEL_STEP,
+        name: 'model_step',
         requestContext: {
           get: (key: string) => (key === 'runId' ? heartbeatRunId : undefined),
         },
@@ -172,14 +173,14 @@ describe('TripwireDetector real-time detection', () => {
       });
     });
     
-    // Processor span arrives DURING stream (with matching runId)
+    // MODEL_STEP span arrives DURING stream (with matching runId)
     const earlyProcessorSpan: TracingEvent = {
       type: 'span_end' as any,
       exportedSpan: {
         id: 'span-early',
         traceId: 'trace-early',
-        type: SpanType.PROCESSOR,
-        name: 'input_processor',
+        type: SpanType.MODEL_STEP,
+        name: 'model_step',
         requestContext: {
           get: (key: string) => (key === 'runId' ? heartbeatRunId : undefined),
         },
@@ -230,14 +231,14 @@ describe('TripwireDetector real-time detection', () => {
     detectorA.once('tripwire', () => { aFired = true; });
     detectorB.once('tripwire', () => { bFired = true; });
     
-    // Processor span attributed to wake A (via requestContext runId)
+    // MODEL_STEP span attributed to wake A (via requestContext runId)
     const spanForA: TracingEvent = {
       type: 'span_end' as any,
       exportedSpan: {
         id: 'span-for-A',
         traceId: 'trace-A',
-        type: SpanType.PROCESSOR,
-        name: 'input_processor',
+        type: SpanType.MODEL_STEP,
+        name: 'model_step',
         requestContext: {
           get: (key: string) => (key === 'runId' ? runIdA : undefined),
         },
@@ -285,8 +286,8 @@ describe('TripwireDetector real-time detection', () => {
       exportedSpan: {
         id: 'span-no-attr',
         traceId: 'trace-no-attr',
-        type: SpanType.PROCESSOR,
-        name: 'input_processor',
+        type: SpanType.MODEL_STEP,
+        name: 'model_step',
         // No requestContext, no metadata with runId
         output: {
           reason: 'TokenLimiterProcessor: System messages alone exceed token limit.',
@@ -322,8 +323,8 @@ describe('TripwireDetector real-time detection', () => {
       exportedSpan: {
         id: 'span-meta',
         traceId: 'trace-meta',
-        type: SpanType.PROCESSOR,
-        name: 'input_processor',
+        type: SpanType.MODEL_STEP,
+        name: 'model_step',
         metadata: {
           heartbeatRunId: heartbeatRunId,
         },
@@ -368,8 +369,8 @@ describe('TripwireDetector real-time detection', () => {
       exportedSpan: {
         id: 'span-wrong-trace',
         traceId: 'trace-other',
-        type: SpanType.PROCESSOR,
-        name: 'input_processor',
+        type: SpanType.MODEL_STEP,
+        name: 'model_step',
         requestContext: {
           get: (key: string) => (key === 'runId' ? heartbeatRunId : undefined),
         },
@@ -392,8 +393,8 @@ describe('TripwireDetector real-time detection', () => {
       exportedSpan: {
         id: 'span-correct',
         traceId: 'trace-target',
-        type: SpanType.PROCESSOR,
-        name: 'input_processor',
+        type: SpanType.MODEL_STEP,
+        name: 'model_step',
         requestContext: {
           get: (key: string) => (key === 'runId' ? heartbeatRunId : undefined),
         },

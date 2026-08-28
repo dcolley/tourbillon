@@ -67,7 +67,9 @@ export class TripwireDetector extends EventEmitter {
     // If we have a traceId, also filter by it
     if (this.traceId && span.traceId !== this.traceId) return;
 
-    if (span.type !== SpanType.PROCESSOR) return;
+    // Check for system-message tripwire in output (span type agnostic)
+    // Mastra 1.63+: appears in MODEL_STEP output
+    // Earlier versions or tests: may appear in PROCESSOR output
     if (!span.output || !isSystemMessageTripwire(span.output)) return;
 
     // Tripwire detected - fire once and store errorText
