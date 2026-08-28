@@ -918,3 +918,108 @@ export async function updateAgentBudget(
 
   return updated;
 }
+
+export interface UpdateAgentObservationalMemoryInput {
+  mode: 'inherit' | 'off' | 'on';
+  providerId?: string;
+  modelId?: string;
+  maxOutputTokens?: number;
+  observeAfterTokens?: number;
+  reflectAfterTokens?: number;
+  temperature?: number;
+}
+
+export async function updateAgentObservationalMemory(
+  agentId: string,
+  input: UpdateAgentObservationalMemoryInput,
+): Promise<Agent> {
+  const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+  if (!agent) throw new AgentValidationError('Agent not found.');
+
+  // Validate mode
+  if (!['inherit', 'off', 'on'].includes(input.mode)) {
+    throw new AgentValidationError('Invalid mode. Must be inherit, off, or on.');
+  }
+
+  // Validate integer thresholds
+  if (input.maxOutputTokens !== undefined) {
+    if (!Number.isInteger(input.maxOutputTokens) || input.maxOutputTokens < 1024) {
+      throw new AgentValidationError('Max output tokens must be at least 1024.');
+    }
+  }
+  if (input.observeAfterTokens !== undefined) {
+    if (!Number.isInteger(input.observeAfterTokens) || input.observeAfterTokens < 8000) {
+      throw new AgentValidationError('Observe after tokens must be at least 8000.');
+    }
+  }
+  if (input.reflectAfterTokens !== undefined) {
+    if (!Number.isInteger(input.reflectAfterTokens) || input.reflectAfterTokens < 8000) {
+      throw new AgentValidationError('Reflect after tokens must be at least 8000.');
+    }
+  }
+  if (input.temperature !== undefined) {
+    if (typeof input.temperature !== 'number' || input.temperature < 0 || input.temperature > 2) {
+      throw new AgentValidationError('Temperature must be between 0 and 2.');
+    }
+  }
+
+  // For mode=on, require resolvable model (agent or company)
+  if (input.mode === 'on') {
+    const hasAgentModel = input.providerId?.trim() && input.modelId?.trim();
+    if (!hasAgentModel) {
+      // Check if company has a model to inherit
+      const company = await db.query.companies.findFirst({
+        where: eq(companies.id, agent.companyId),
+      });
+      const companyOm = (company?.settings as { observationalMemory?: { providerId?: string; modelId?: string } })?.observationalMemory;
+      const hasCompanyModel = companyOm?.providerId?.trim() && companyOm?.modelId?.trim();
+      if (!hasCompanyModel) {
+        throw new AgentValidationError(
+          'mode=on requires providerId and modelId on the agent or company settings.',
+        );
+      }
+    }
+  }
+
+  const current = agent.runtimeConfig as AgentRuntimeConfig;
+  const observationalMemory: AgentRuntimeConfig['observationalMemory'] = {
+    mode: input.mode,
+  };
+
+  if (input.providerId?.trim()) {
+    observationalMemory.providerId = input.providerId.trim();
+  }
+  if (input.modelId?.trim()) {
+    observationalMemory.modelId = input.modelId.trim();
+  }
+  if (input.maxOutputTokens !== undefined) {
+    observationalMemory.maxOutputTokens = input.maxOutputTokens;
+  }
+  if (input.observeAfterTokens !== undefined) {
+    observationalMemory.observeAfterTokens = input.observeAfterTokens;
+  }
+  if (input.reflectAfterTokens !== undefined) {
+    observationalMemory.reflectAfterTokens = input.reflectAfterTokens;
+  }
+  if (input.temperature !== undefined) {
+    observationalMemory.temperature = input.temperature;
+  }
+
+  const runtimeConfig: AgentRuntimeConfig = {
+    ...current,
+    observationalMemory,
+  };
+
+  const [updated] = await db
+    .update(agents)
+    .set({
+      runtimeConfig,
+      updatedAt: new Date(),
+    })
+    .where(eq(agents.id, agentId))
+    .returning();
+
+  invalidateChatControllerForAgent(agentId);
+
+  return updated;
+}

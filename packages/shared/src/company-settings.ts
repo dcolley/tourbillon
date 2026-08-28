@@ -191,6 +191,116 @@ export function resolveObservationalMemorySettings(
   };
 }
 
+/**
+ * Resolved per-agent Observational Memory settings.
+ * Includes full config with thresholds when OM is active, or null when off.
+ */
+export interface ResolvedObservationalMemoryConfig {
+  providerId: string;
+  modelId: string;
+  maxOutputTokens: number;
+  observeAfterTokens: number;
+  reflectAfterTokens: number;
+  temperature?: number;
+}
+
+/**
+ * Resolve per-agent Observational Memory config based on mode and overrides.
+ * 
+ * Resolution rules:
+ * - mode='inherit' or missing: use company OM settings
+ * - mode='off': OM disabled regardless of company settings
+ * - mode='on': OM enabled with agent overrides merged over company defaults
+ * 
+ * For mode='on', each override field inherits from company if not set on agent.
+ * Returns null if resolved config lacks both provider and model.
+ */
+export function resolveAgentObservationalMemory(
+  companySettings?: CompanySettings | null,
+  agentRuntime?: { observationalMemory?: AgentRuntimeConfig['observationalMemory'] } | null,
+): ResolvedObservationalMemoryConfig | null {
+  const agentOm = agentRuntime?.observationalMemory;
+  const mode = agentOm?.mode ?? 'inherit';
+
+  if (mode === 'off') {
+    return null;
+  }
+
+  const companyOm = companySettings?.observationalMemory;
+
+  if (mode === 'inherit') {
+    // Inherit from company
+    if (!companyOm?.enabled) return null;
+    const providerId = companyOm.providerId?.trim();
+    const modelId = companyOm.modelId?.trim();
+    if (!providerId || !modelId) return null;
+    return {
+      providerId,
+      modelId,
+      maxOutputTokens: companyOm.maxOutputTokens ?? DEFAULT_OM_MAX_OUTPUT_TOKENS,
+      observeAfterTokens: companyOm.observeAfterTokens ?? DEFAULT_OM_OBSERVE_AFTER_TOKENS,
+      reflectAfterTokens: companyOm.reflectAfterTokens ?? DEFAULT_OM_REFLECT_AFTER_TOKENS,
+      temperature: companyOm.temperature,
+    };
+  }
+
+  // mode === 'on': merge agent overrides over company, then defaults
+  const agentProviderId = agentOm?.providerId?.trim();
+  const agentModelId = agentOm?.modelId?.trim();
+  const companyProviderId = companyOm?.providerId?.trim();
+  const companyModelId = companyOm?.modelId?.trim();
+
+  const providerId = agentProviderId || companyProviderId;
+  const modelId = agentModelId || companyModelId;
+
+  if (!providerId || !modelId) {
+    // mode=on but no resolvable model — OM stays off
+    return null;
+  }
+
+  return {
+    providerId,
+    modelId,
+    maxOutputTokens:
+      agentOm?.maxOutputTokens ??
+      companyOm?.maxOutputTokens ??
+      DEFAULT_OM_MAX_OUTPUT_TOKENS,
+    observeAfterTokens:
+      agentOm?.observeAfterTokens ??
+      companyOm?.observeAfterTokens ??
+      DEFAULT_OM_OBSERVE_AFTER_TOKENS,
+    reflectAfterTokens:
+      agentOm?.reflectAfterTokens ??
+      companyOm?.reflectAfterTokens ??
+      DEFAULT_OM_REFLECT_AFTER_TOKENS,
+    temperature: agentOm?.temperature ?? companyOm?.temperature,
+  };
+}
+
+/**
+ * Stable cache key for Memory instances keyed by resolved OM config.
+ * When OM is off or unconfigured, returns 'base'.
+ * When OM is on, returns 'om:{providerId}:{modelId}:{thresholds}'.
+ */
+export function memoryCacheKeyForAgent(
+  companySettings?: CompanySettings | null,
+  agentRuntime?: { observationalMemory?: AgentRuntimeConfig['observationalMemory'] } | null,
+): string {
+  const resolved = resolveAgentObservationalMemory(companySettings, agentRuntime);
+  if (!resolved) return 'base';
+  return `om:${resolved.providerId}:${resolved.modelId}:${resolved.observeAfterTokens}:${resolved.reflectAfterTokens}`;
+}
+
+/**
+ * Whether this agent uses Observational Memory (resolved mode is not off and has model).
+ */
+export function isAgentObservationalMemoryConfigured(
+  companySettings?: CompanySettings | null,
+  agentRuntime?: { observationalMemory?: AgentRuntimeConfig['observationalMemory'] } | null,
+): boolean {
+  return resolveAgentObservationalMemory(companySettings, agentRuntime) !== null;
+}
+
 export function resolveSearxngBaseUrl(
   companySettings?: CompanySettings | null,
   agentRuntime?: AgentRuntimeConfig | null,

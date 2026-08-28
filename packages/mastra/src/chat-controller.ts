@@ -19,6 +19,7 @@ import {
   resolveObservationalMemoryModel,
   isMastraTracingEnabled,
   type CompanySettings,
+  type AgentRuntimeConfig,
 } from '@tourbillon/shared';
 import {
   assembleAgentTools,
@@ -298,7 +299,7 @@ export async function createChatAgentWithSkills(
       apiModeOverride: chatApiMode,
     }),
     tools: tools as never,
-    memory: await getAgentMemory(options?.companySettings ?? null),
+    memory: await getAgentMemory(options?.companySettings ?? null, effectiveRecord.runtimeConfig as AgentRuntimeConfig),
     inputProcessors,
     ...toMastraDefaultOptions(generationOptions),
   });
@@ -348,8 +349,12 @@ export async function createChatController(
     },
   ];
 
-  const om = resolveObservationalMemoryModel(options?.companySettings ?? null);
-  const memory = await getAgentMemory(options?.companySettings ?? null);
+  const { resolveAgentObservationalMemory } = await import('@tourbillon/shared/company-settings');
+  const resolved = resolveAgentObservationalMemory(
+    options?.companySettings ?? null,
+    agentRecord.runtimeConfig as AgentRuntimeConfig,
+  );
+  const memory = await getAgentMemory(options?.companySettings ?? null, agentRecord.runtimeConfig as AgentRuntimeConfig);
   const providerRow = agentRecord.providerId
     ? await getLlmProviderRowById(agentRecord.providerId)
     : null;
@@ -373,13 +378,15 @@ export async function createChatController(
     ...(isMastraTracingEnabled()
       ? { observability: getMastraInstance().observability }
       : {}),
-    ...(om
+    ...(resolved
       ? {
           omConfig: {
-            defaultObserverModelId: om.modelId,
-            defaultReflectorModelId: om.modelId,
-            defaultObservationThreshold: contextBudget.observationThreshold,
-            defaultReflectionThreshold: contextBudget.reflectionThreshold,
+            defaultObserverModelId: resolved.modelId,
+            defaultReflectorModelId: resolved.modelId,
+            defaultObservationThreshold: resolved.observeAfterTokens,
+            defaultReflectionThreshold: resolved.reflectAfterTokens,
+            ...(resolved.maxOutputTokens ? { defaultMaxOutputTokens: resolved.maxOutputTokens } : {}),
+            ...(resolved.temperature !== undefined ? { defaultTemperature: resolved.temperature } : {}),
           },
         }
       : {}),

@@ -119,6 +119,26 @@ export interface AgentRuntimeConfig {
   mail?: {
     enabled?: boolean;
   };
+  /**
+   * Per-agent Observational Memory config (Observer + Reflector).
+   * When missing or mode='inherit', inherits company OM settings.
+   */
+  observationalMemory?: {
+    /** inherit = use company OM; off = disable OM; on = enable with overrides. */
+    mode?: 'inherit' | 'off' | 'on';
+    /** Override: FK to llm_providers.id (system-wide registry). */
+    providerId?: string;
+    /** Override: Model id on that provider. */
+    modelId?: string;
+    /** Override: Max output tokens for OM model calls. */
+    maxOutputTokens?: number;
+    /** Override: Observation threshold (message tokens). */
+    observeAfterTokens?: number;
+    /** Override: Reflection threshold (observation tokens). */
+    reflectAfterTokens?: number;
+    /** Override: Temperature for OM model calls. */
+    temperature?: number;
+  };
 }
 
 /** Company Observational Memory compaction model (Observer + Reflector). */

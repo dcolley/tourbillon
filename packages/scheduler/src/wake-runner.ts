@@ -628,7 +628,7 @@ async function runDurableAgentWake(params: {
   });
 
   const resumable = await getResumableDurableRun(agentRecord.id, taskId);
-  const useMemory = shouldUseHeartbeatMemory(taskId, companySettings);
+  const useMemory = shouldUseHeartbeatMemory(taskId, companySettings, agentRecord.runtimeConfig as AgentRuntimeConfig);
   const useIdleThread = !taskId && useMemory;
 
   const memoryKeys = buildHeartbeatMemoryKeys({
