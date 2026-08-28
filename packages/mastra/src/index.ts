@@ -19,6 +19,7 @@ export * from './heartbeat-processors';
 export * from './tools/skill-tools';
 export * from './observability/harness-event-writer';
 export * from './observability/heartbeat-tracing-options';
+export { TripwireDetector, tripwireDetectorRegistry } from './observability/tripwire-detector';
 export {
   buildMCPTools,
   listMcpToolsForAgent,

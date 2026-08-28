@@ -297,65 +297,85 @@ export function useAgentChatSession(options: {
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
+        let lastActivity = Date.now();
+        const HANG_TIMEOUT_MS = 60000; // 60 seconds without any data = hung
 
-        while (!ac.signal.aborted) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
+        // Watchdog to detect hung streams
+        const hangWatchdog = setInterval(() => {
+          const elapsed = Date.now() - lastActivity;
+          if (elapsed > HANG_TIMEOUT_MS) {
+            clearInterval(hangWatchdog);
+            // Surface error and clear running BEFORE aborting (not silent)
+            setRunning(false);
+            setError('Chat stream timeout: no activity for 60 seconds');
+            ac.abort();
+          }
+        }, 10000); // Check every 10 seconds
 
-          let sep: number;
-          while ((sep = buffer.indexOf('\n\n')) !== -1) {
-            const frame = buffer.slice(0, sep);
-            buffer = buffer.slice(sep + 2);
-            for (const line of frame.split('\n')) {
-              if (!line.startsWith('data:')) continue;
-              const raw = line.slice(5).trim();
-              if (!raw) continue;
-              let event: { type?: string; [key: string]: unknown };
-              try {
-                event = JSON.parse(raw) as typeof event;
-              } catch {
-                continue;
-              }
+        try {
+          while (!ac.signal.aborted) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            
+            lastActivity = Date.now(); // Update activity timestamp on any data
+            buffer += decoder.decode(value, { stream: true });
 
-              if (
-                event.type === 'message_start' ||
-                event.type === 'message_update' ||
-                event.type === 'message_end'
-              ) {
-                const message = event.message as ChatMessage | undefined;
-                if (message?.id) mergeMessage(message);
-              } else if (event.type === 'display_state_changed') {
-                const ds = event.displayState as { isRunning?: boolean } | undefined;
-                setRunning(ds?.isRunning === true);
-              } else if (event.type === 'agent_start') {
-                setRunning(true);
-              } else if (event.type === 'agent_end') {
-                setRunning(false);
-                setPendingApproval(null);
-              } else if (event.type === 'tool_approval_required') {
-                setPendingApproval({
-                  toolCallId: String(event.toolCallId ?? ''),
-                  toolName: String(event.toolName ?? 'tool'),
-                  args: event.args,
-                });
-              } else if (event.type === 'thread_changed') {
-                const tid = event.threadId as string | undefined;
-                if (tid) {
-                  setThreadId(tid);
-                  const currentRid = resourceIdRef.current;
-                  if (currentRid) void loadMessages(agentKey, currentRid, tid);
+            let sep: number;
+            while ((sep = buffer.indexOf('\n\n')) !== -1) {
+              const frame = buffer.slice(0, sep);
+              buffer = buffer.slice(sep + 2);
+              for (const line of frame.split('\n')) {
+                if (!line.startsWith('data:')) continue;
+                const raw = line.slice(5).trim();
+                if (!raw) continue;
+                let event: { type?: string; [key: string]: unknown };
+                try {
+                  event = JSON.parse(raw) as typeof event;
+                } catch {
+                  continue;
                 }
-              } else if (event.type === 'error') {
-                const errObj = event.error as { message?: string } | string | undefined;
-                const msg =
-                  typeof errObj === 'string'
-                    ? errObj
-                    : errObj?.message ?? 'Chat stream error';
-                setError(msg);
+
+                if (
+                  event.type === 'message_start' ||
+                  event.type === 'message_update' ||
+                  event.type === 'message_end'
+                ) {
+                  const message = event.message as ChatMessage | undefined;
+                  if (message?.id) mergeMessage(message);
+                } else if (event.type === 'display_state_changed') {
+                  const ds = event.displayState as { isRunning?: boolean } | undefined;
+                  setRunning(ds?.isRunning === true);
+                } else if (event.type === 'agent_start') {
+                  setRunning(true);
+                } else if (event.type === 'agent_end') {
+                  setRunning(false);
+                  setPendingApproval(null);
+                } else if (event.type === 'tool_approval_required') {
+                  setPendingApproval({
+                    toolCallId: String(event.toolCallId ?? ''),
+                    toolName: String(event.toolName ?? 'tool'),
+                    args: event.args,
+                  });
+                } else if (event.type === 'thread_changed') {
+                  const tid = event.threadId as string | undefined;
+                  if (tid) {
+                    setThreadId(tid);
+                    const currentRid = resourceIdRef.current;
+                    if (currentRid) void loadMessages(agentKey, currentRid, tid);
+                  }
+                } else if (event.type === 'error') {
+                  const errObj = event.error as { message?: string } | string | undefined;
+                  const msg =
+                    typeof errObj === 'string'
+                      ? errObj
+                      : errObj?.message ?? 'Chat stream error';
+                  setError(msg);
+                }
               }
             }
           }
+        } finally {
+          clearInterval(hangWatchdog);
         }
 
         if (!ac.signal.aborted) {
@@ -373,6 +393,8 @@ export function useAgentChatSession(options: {
 
       void connect().catch((err) => {
         if (ac.signal.aborted) return;
+        // Clear running state when stream errors (don't leave silent clocks)
+        setRunning(false);
         setError(err instanceof Error ? err.message : String(err));
       });
     },

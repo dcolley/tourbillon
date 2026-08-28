@@ -6,6 +6,7 @@ import { BaseExporter } from '@mastra/observability';
 import { db, agentObservabilityEvents } from '@tourbillon/db';
 import { isObservabilityEnabled } from '@tourbillon/shared';
 import { mapExportedSpanToEvent, shouldPersistTracingEvent } from './map-span';
+import { tripwireDetectorRegistry } from './tripwire-detector';
 
 const DEFAULT_BATCH_SIZE = 50;
 const DEFAULT_FLUSH_MS = 2000;
@@ -25,6 +26,9 @@ export class TourbillonPostgresExporter extends BaseExporter {
   }
 
   protected async _exportTracingEvent(event: TracingEvent): Promise<void> {
+    // Notify all active detectors first (before batching)
+    tripwireDetectorRegistry.onTracingEvent(event);
+    
     if (!shouldPersistTracingEvent(event.type)) return;
     const row = mapExportedSpanToEvent(event.exportedSpan);
     if (!row) return;

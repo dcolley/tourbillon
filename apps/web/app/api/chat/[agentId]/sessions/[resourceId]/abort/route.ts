@@ -7,7 +7,7 @@ import {
 import { chatErrorResponse, decodeResourceId } from '@/lib/chat/route-helpers';
 import { chatModelIdFromSearch } from '@/lib/chat/model-query';
 
-/** Abort the in-flight chat run. */
+/** Abort the in-flight chat run and force-clear display state. */
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ agentId: string; resourceId: string }> },
@@ -24,6 +24,13 @@ export async function POST(
       scope: sessionScope,
     });
     session.abort();
+    
+    // Force-clear display state in case agent_end event was missed (e.g. tripwire)
+    const displayState = session.displayState.get();
+    if (displayState.isRunning) {
+      session.displayState.set({ ...displayState, isRunning: false });
+    }
+    
     return NextResponse.json({ ok: true });
   } catch (err) {
     return chatErrorResponse(err);

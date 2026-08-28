@@ -101,7 +101,10 @@ export async function forceKillHeartbeatAction(formData: FormData) {
   const companyId = formData.get('companyId') as string;
   const returnPath = formData.get('returnPath') as string;
 
-  if (!runId || !companyId) return;
+  if (!runId || !companyId) {
+    const errorMessage = !runId ? 'Run ID is required' : 'Company ID is required';
+    redirect(`${returnPath}?error=${encodeURIComponent(errorMessage)}`);
+  }
 
   const schedulerUrl = process.env.SCHEDULER_WAKE_URL ?? 'http://127.0.0.1:3003';
   const apiKey = process.env.SCHEDULER_API_KEY;
