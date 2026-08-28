@@ -1098,11 +1098,22 @@ export default async function AgentDetailPage({
                 <AgentOmSettingsForm
                   agentId={agent.id}
                   urlKey={agent.urlKey}
-                  mode={agentOmMode}
-                  agentOm={agentOm ?? undefined}
+                  initialMode={agentOmMode}
+                  initialProviderId={agentOm?.providerId ?? null}
+                  initialModelId={agentOm?.modelId ?? ''}
+                  initialMaxOutputTokens={agentOm?.maxOutputTokens ?? null}
+                  initialObserveAfterTokens={agentOm?.observeAfterTokens ?? null}
+                  initialReflectAfterTokens={agentOm?.reflectAfterTokens ?? null}
+                  initialTemperature={agentOm?.temperature ?? null}
                   companyOm={companyOm}
-                  providerList={providerList}
-                  updateAgentOmConfig={updateAgentOmConfig}
+                  providers={providerList.map((p) => ({
+                    id: p.id,
+                    name: p.name,
+                    type: p.type,
+                    baseURL: p.baseURL,
+                    isDefault: p.isDefault,
+                  }))}
+                  saveAction={updateAgentOmConfig}
                 />
               </section>
             }

@@ -275,7 +275,7 @@ export async function createAgentWithSkills(
     name: agentRecord.name,
     instructions: systemPrompt,
     model: getLanguageModelForAgent(agentRecord, providerRecord),
-    tools: tools as Parameters<typeof Agent>[0]['tools'],
+    tools: tools as any,
     memory: await getAgentMemory(options?.companySettings ?? null, agentRecord.runtimeConfig as AgentRuntimeConfig),
     inputProcessors,
     ...(codeExecutionEnabled ? { workspace: buildCodeExecutionWorkspace() } : {}),

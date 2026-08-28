@@ -112,7 +112,7 @@ async function buildBackingAgent(
     name: agentRecord.name,
     instructions: systemPrompt,
     model: getLanguageModelForAgent(agentRecord, providerRecord),
-    tools: tools as Agent['tools'] & Record<string, unknown>,
+    tools: tools as any,
     memory: await getAgentMemory(options?.companySettings ?? null, agentRecord.runtimeConfig as AgentRuntimeConfig),
     inputProcessors: buildHeartbeatInputProcessors({ limit: contextBudget.limiterLimit }),
     ...(codeExecutionEnabled ? { workspace: buildCodeExecutionWorkspace() } : {}),
@@ -211,7 +211,6 @@ export async function createTourbillonController(
             defaultReflectorModelId: resolved.modelId,
             defaultObservationThreshold: resolved.observeAfterTokens,
             defaultReflectionThreshold: resolved.reflectAfterTokens,
-            defaultMaxOutputTokens: resolved.maxOutputTokens,
             ...(resolved.temperature !== undefined ? { defaultTemperature: resolved.temperature } : {}),
           },
         }
