@@ -418,11 +418,11 @@ export default async function AgentDetailPage({
   searchParams,
 }: {
   params: Promise<{ urlKey: string }>;
-  searchParams: Promise<{ saved?: string; error?: string; c?: string }>;
+  searchParams: Promise<{ saved?: string; error?: string; c?: string; killed?: string }>;
 }) {
   const { urlKey } = await params;
   const resolvedSearchParams = await searchParams;
-  const { saved, error: errorParam } = resolvedSearchParams;
+  const { saved, error: errorParam, killed } = resolvedSearchParams;
   const companyIdParam = parseCompanyIdFromSearchParams(resolvedSearchParams);
 
   let agent = companyIdParam
@@ -551,7 +551,7 @@ export default async function AgentDetailPage({
         </div>
       </div>
 
-      <AgentQueryToast saved={saved} error={error} urlKey={agent.urlKey} />
+      <AgentQueryToast saved={saved} error={error} killed={killed} urlKey={agent.urlKey} />
 
       <AgentDetailTabs
         overview={
