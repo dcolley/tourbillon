@@ -106,6 +106,45 @@ export function isSystemMessageTripwire(value: unknown): boolean {
 }
 
 /**
+ * True when a span output contains ANY TokenLimiter tripwire (generic or system-messages-alone).
+ * Matches the broader set of TokenLimiter failures that mean the model cannot continue.
+ * 
+ * Use this for tripwire detection in processor/MODEL_STEP spans where the span status is ok
+ * but output.tripwire or output.reason contains a TokenLimiter error.
+ */
+export function isTokenLimiterTripwireInSpan(value: unknown): boolean {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  
+  const obj = value as Record<string, unknown>;
+  
+  // Check for tripwire field (Mastra 1.63+ shape)
+  if (obj.tripwire) {
+    const text = typeof obj.tripwire === 'string' ? obj.tripwire : JSON.stringify(obj.tripwire);
+    if (isTokenLimiterTripwireError({ message: text } as Error)) {
+      return true;
+    }
+  }
+  
+  // Check for reason field (alternative shape)
+  if (obj.reason) {
+    const text = typeof obj.reason === 'string' ? obj.reason : JSON.stringify(obj.reason);
+    if (isTokenLimiterTripwireError({ message: text } as Error)) {
+      return true;
+    }
+  }
+  
+  // Stringify and check the whole object (fallback for embedded tripwire strings)
+  const fullText = JSON.stringify(obj);
+  if (isTokenLimiterTripwireError({ message: fullText } as Error)) {
+    return true;
+  }
+  
+  return false;
+}
+
+/**
  * Extract token counts from a system-message tripwire error or span output.
  * Returns { systemTokens, limit } when both are found, or partial when only one is available.
  * 

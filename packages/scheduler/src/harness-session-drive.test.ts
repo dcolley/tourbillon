@@ -5,6 +5,7 @@ import {
   isResumableWakeMatch,
   isTokenLimiterTripwireError,
   isSystemMessageTripwire,
+  isTokenLimiterTripwireInSpan,
   extractTripwireTokenCounts,
   formatSystemMessageTripwireError,
   parseCompanySettings,
@@ -136,6 +137,71 @@ describe('isSystemMessageTripwire', () => {
 
   it('ignores unrelated content', () => {
     assert.equal(isSystemMessageTripwire('normal output'), false);
+  });
+});
+
+describe('isTokenLimiterTripwireInSpan', () => {
+  it('detects generic TokenLimiter tripwire in output.tripwire', () => {
+    assert.equal(
+      isTokenLimiterTripwireInSpan({
+        tripwire: 'TokenLimiterProcessor: No messages fit within the remaining token budget.',
+      }),
+      true,
+    );
+  });
+
+  it('detects TokenLimiter tripwire in output.reason', () => {
+    assert.equal(
+      isTokenLimiterTripwireInSpan({
+        reason: 'TokenLimiterProcessor: System messages alone exceed token limit.',
+      }),
+      true,
+    );
+  });
+
+  it('detects system-message-alone tripwire', () => {
+    assert.equal(
+      isTokenLimiterTripwireInSpan({
+        reason: 'TokenLimiterProcessor: System messages alone exceed token limit.',
+        options: {
+          metadata: {
+            systemTokens: 150000,
+            limit: 120000,
+          },
+        },
+      }),
+      true,
+    );
+  });
+
+  it('detects generic TokenLimiter tripwire with metadata', () => {
+    assert.equal(
+      isTokenLimiterTripwireInSpan({
+        tripwire: 'TokenLimiterProcessor: No messages to process.',
+        options: {
+          metadata: {
+            systemTokens: 31511,
+            limit: 120000,
+          },
+        },
+      }),
+      true,
+    );
+  });
+
+  it('ignores non-tripwire output', () => {
+    assert.equal(
+      isTokenLimiterTripwireInSpan({
+        text: 'normal model output',
+      }),
+      false,
+    );
+  });
+
+  it('returns false for null or non-object', () => {
+    assert.equal(isTokenLimiterTripwireInSpan(null), false);
+    assert.equal(isTokenLimiterTripwireInSpan('string'), false);
+    assert.equal(isTokenLimiterTripwireInSpan(123), false);
   });
 });
 

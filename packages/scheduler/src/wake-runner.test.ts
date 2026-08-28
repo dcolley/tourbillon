@@ -95,6 +95,54 @@ describe('durableWakeOutcomeFromTripwire', () => {
     
     assert.equal(outcome.recordSuccess, true, 'Must record success on non-tripwire data');
   });
+
+  it('returns recordSuccess false on generic TokenLimiter tripwire (not system-message-alone)', () => {
+    const tripwireData = {
+      tripwire: 'TokenLimiterProcessor: No messages fit within the remaining token budget.',
+      options: {
+        metadata: {
+          systemTokens: 31511,
+          limit: 120000,
+        },
+      },
+    };
+    
+    const outcome = durableWakeOutcomeFromTripwire(tripwireData);
+    
+    assert.equal(outcome.recordSuccess, false, 'Must not record success on generic tripwire');
+    
+    if (!outcome.recordSuccess) {
+      assert.ok(
+        outcome.errorText.includes('No messages fit within the remaining token budget'),
+        'Error text must include tripwire reason'
+      );
+      assert.ok(
+        outcome.errorText.includes('31511 tokens'),
+        'Error text must include token count'
+      );
+      assert.ok(
+        outcome.errorText.includes('limit 120000'),
+        'Error text must include limit'
+      );
+    }
+  });
+
+  it('returns recordSuccess false on generic TokenLimiter tripwire with no metadata', () => {
+    const tripwireData = {
+      reason: 'TokenLimiterProcessor: No messages to process.',
+    };
+    
+    const outcome = durableWakeOutcomeFromTripwire(tripwireData);
+    
+    assert.equal(outcome.recordSuccess, false, 'Must not record success on generic tripwire');
+    
+    if (!outcome.recordSuccess) {
+      assert.ok(
+        outcome.errorText.includes('No messages to process'),
+        'Error text must include tripwire reason'
+      );
+    }
+  });
 });
 
 describe('TripwireDetector real-time detection', () => {
@@ -407,6 +455,106 @@ describe('TripwireDetector real-time detection', () => {
     detector.onTracingEvent(correctSpan);
     
     assert.equal(tripwireFired, true, 'Detector must fire for matching runId AND traceId');
+    
+    detector.clear();
+  });
+
+  it('detector detects generic TokenLimiter tripwire (not just system-message-alone)', async () => {
+    // Create detector armed with heartbeat runId
+    const heartbeatRunId = 'run-generic-tripwire';
+    const detector = new TripwireDetector(heartbeatRunId);
+    
+    let firedErrorText: string | null = null;
+    detector.once('tripwire', (errorText: string) => {
+      firedErrorText = errorText;
+    });
+    
+    // MODEL_STEP span with generic TokenLimiter tripwire (not system-message-alone)
+    const genericTripwireSpan: TracingEvent = {
+      type: 'span_end' as any,
+      exportedSpan: {
+        id: 'span-generic',
+        traceId: 'trace-generic',
+        type: SpanType.MODEL_STEP,
+        name: 'model_step',
+        requestContext: {
+          get: (key: string) => (key === 'runId' ? heartbeatRunId : undefined),
+        },
+        output: {
+          tripwire: 'TokenLimiterProcessor: No messages fit within the remaining token budget.',
+          options: {
+            metadata: {
+              systemTokens: 31511,
+              limit: 120000,
+            },
+          },
+        },
+      } as any,
+    };
+    
+    detector.onTracingEvent(genericTripwireSpan);
+    
+    // Wait a tick
+    await new Promise(r => setImmediate(r));
+    
+    assert.ok(firedErrorText, 'Detector must fire on generic TokenLimiter tripwire');
+    assert.ok(
+      firedErrorText!.includes('No messages fit within the remaining token budget'),
+      'Error text must include tripwire reason'
+    );
+    assert.ok(
+      firedErrorText!.includes('31511 tokens'),
+      'Error text must include token count'
+    );
+    assert.ok(
+      firedErrorText!.includes('limit 120000'),
+      'Error text must include limit'
+    );
+    
+    // Check stored errorText
+    const storedError = detector.getErrorText();
+    assert.equal(storedError, firedErrorText, 'Stored error must match fired error');
+    
+    detector.clear();
+  });
+
+  it('detector detects generic TokenLimiter tripwire with no metadata', async () => {
+    // Create detector armed with heartbeat runId
+    const heartbeatRunId = 'run-no-metadata';
+    const detector = new TripwireDetector(heartbeatRunId);
+    
+    let firedErrorText: string | null = null;
+    detector.once('tripwire', (errorText: string) => {
+      firedErrorText = errorText;
+    });
+    
+    // MODEL_STEP span with generic TokenLimiter tripwire and no metadata
+    const noMetadataSpan: TracingEvent = {
+      type: 'span_end' as any,
+      exportedSpan: {
+        id: 'span-no-meta',
+        traceId: 'trace-no-meta',
+        type: SpanType.MODEL_STEP,
+        name: 'model_step',
+        requestContext: {
+          get: (key: string) => (key === 'runId' ? heartbeatRunId : undefined),
+        },
+        output: {
+          reason: 'TokenLimiterProcessor: No messages to process.',
+        },
+      } as any,
+    };
+    
+    detector.onTracingEvent(noMetadataSpan);
+    
+    // Wait a tick
+    await new Promise(r => setImmediate(r));
+    
+    assert.ok(firedErrorText, 'Detector must fire on generic tripwire with no metadata');
+    assert.ok(
+      firedErrorText!.includes('No messages to process'),
+      'Error text must include tripwire reason'
+    );
     
     detector.clear();
   });
