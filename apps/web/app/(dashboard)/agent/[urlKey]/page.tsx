@@ -21,6 +21,7 @@ import { listRoutinesForAgent, setRoutineEnabled } from '@/lib/routines';
 import { listGoalOptions } from '@/lib/goals';
 import { listProjectOptions } from '@/lib/projects';
 import { AgentDetailTabs } from './agent-detail-tabs';
+import { AgentOverviewConfigTabs } from './agent-overview-config-tabs';
 import { AgentObservabilityTab } from './agent-observability-tab';
 import { AgentMemoryTab } from './agent-memory-tab';
 import { AgentMailTab } from './agent-mail-tab';
@@ -555,483 +556,485 @@ export default async function AgentDetailPage({
 
       <AgentDetailTabs
         overview={
-          <>
-      <section className="border rounded-lg p-4 space-y-4">
-        <div>
-          <h2 className="text-sm font-semibold">Profile</h2>
-          <p className="text-xs text-muted-foreground mt-1">Name, URL slug, and reporting line.</p>
-        </div>
-        <ActionForm action={updateProfile} className="space-y-4">
-          <input type="hidden" name="agentId" value={agent.id} />
-          <input type="hidden" name="currentUrlKey" value={agent.urlKey} />
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="space-y-1.5">
-              <label htmlFor="agent-name" className="text-sm font-medium">
-                Name
-              </label>
-              <input
-                id="agent-name"
-                name="name"
-                type="text"
-                required
-                defaultValue={agent.name}
-                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-              />
-            </div>
-            <div className="space-y-1.5">
-              <label htmlFor="agent-url-key" className="text-sm font-medium">
-                Agent ID
-              </label>
-              <input
-                id="agent-url-key"
-                name="urlKey"
-                type="text"
-                required
-                defaultValue={agent.urlKey}
-                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
-              />
-              <p className="text-xs text-muted-foreground">
-                URL slug — <span className="font-mono">/agent/{agent.urlKey}</span>. Changing this
-                only updates the link; issues, heartbeats, and other records stay tied to the same
-                internal agent.
-              </p>
-            </div>
-          </div>
-          <div className="space-y-1.5 max-w-md">
-            <label htmlFor="agent-reports-to" className="text-sm font-medium">
-              Reports to
-            </label>
-            <select
-              id="agent-reports-to"
-              name="reportsToId"
-              defaultValue={agent.reportsToId ?? ''}
-              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-            >
-              <option value="">None</option>
-              {companyAgents
-                .filter((a) => a.id !== agent.id)
-                .map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.name} ({a.title})
-                  </option>
-                ))}
-            </select>
-          </div>
-          <ActionSubmitButton label="Save profile" />
-        </ActionForm>
-        {directReports.length > 0 && (
-          <div className="border-t pt-4 text-sm">
-            <p className="text-muted-foreground mb-2">Direct reports</p>
-            <ul className="space-y-1">
-              {directReports.map((report) => (
-                <li key={report.id}>
-                  <Link href={`/agent/${report.urlKey}`} className="font-medium hover:underline">
-                    {report.name}
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-      </section>
+          <AgentOverviewConfigTabs
+            profile={
+              <>
+                <section className="border rounded-lg p-4 space-y-4">
+                  <div>
+                    <h2 className="text-sm font-semibold">Profile</h2>
+                    <p className="text-xs text-muted-foreground mt-1">Name, URL slug, and reporting line.</p>
+                  </div>
+                  <ActionForm action={updateProfile} className="space-y-4">
+                    <input type="hidden" name="agentId" value={agent.id} />
+                    <input type="hidden" name="currentUrlKey" value={agent.urlKey} />
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div className="space-y-1.5">
+                        <label htmlFor="agent-name" className="text-sm font-medium">
+                          Name
+                        </label>
+                        <input
+                          id="agent-name"
+                          name="name"
+                          type="text"
+                          required
+                          defaultValue={agent.name}
+                          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <label htmlFor="agent-url-key" className="text-sm font-medium">
+                          Agent ID
+                        </label>
+                        <input
+                          id="agent-url-key"
+                          name="urlKey"
+                          type="text"
+                          required
+                          defaultValue={agent.urlKey}
+                          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          URL slug — <span className="font-mono">/agent/{agent.urlKey}</span>. Changing this
+                          only updates the link; issues, heartbeats, and other records stay tied to the same
+                          internal agent.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="space-y-1.5 max-w-md">
+                      <label htmlFor="agent-reports-to" className="text-sm font-medium">
+                        Reports to
+                      </label>
+                      <select
+                        id="agent-reports-to"
+                        name="reportsToId"
+                        defaultValue={agent.reportsToId ?? ''}
+                        className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                      >
+                        <option value="">None</option>
+                        {companyAgents
+                          .filter((a) => a.id !== agent.id)
+                          .map((a) => (
+                            <option key={a.id} value={a.id}>
+                              {a.name} ({a.title})
+                            </option>
+                          ))}
+                      </select>
+                    </div>
+                    <ActionSubmitButton label="Save profile" />
+                  </ActionForm>
+                  {directReports.length > 0 && (
+                    <div className="border-t pt-4 text-sm">
+                      <p className="text-muted-foreground mb-2">Direct reports</p>
+                      <ul className="space-y-1">
+                        {directReports.map((report) => (
+                          <li key={report.id}>
+                            <Link href={`/agent/${report.urlKey}`} className="font-medium hover:underline">
+                              {report.name}
+                            </Link>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </section>
 
-      <section className="border rounded-lg p-4 space-y-4">
-        <div>
-          <h2 className="text-sm font-semibold">Model</h2>
-          <p className="text-xs text-muted-foreground mt-1">
-            LLM used on heartbeats. Select a registered provider and model identifier.
-          </p>
-        </div>
-        <div className="grid grid-cols-2 gap-4 text-sm">
-          <DetailCard label="Agent type" value={agentRuntimeLabel(agent.adapterType)} />
-          <DetailCard
-            label="Provider"
-            value={providerConfig.providerName ?? providerConfig.provider}
+                <section className="border rounded-lg p-4 space-y-4">
+                  <div>
+                    <h2 className="text-sm font-semibold">Role</h2>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Changing role resets skills, toolsets, and assigned tools to that role&apos;s defaults.
+                    </p>
+                  </div>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <ActionForm action={updateAgentRoleAction} className="space-y-4">
+                      <input type="hidden" name="agentId" value={agent.id} />
+                      <div className="space-y-1.5">
+                        <label htmlFor="agent-role" className="text-sm font-medium">
+                          Role
+                        </label>
+                        <select
+                          id="agent-role"
+                          name="role"
+                          required
+                          defaultValue={agent.role}
+                          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                        >
+                          {AGENT_ROLE_OPTIONS.map((role) => (
+                            <option key={role.value} value={role.value}>
+                              {role.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <ActionSubmitButton label="Save role" />
+                    </ActionForm>
+                    <DetailCard label="Title" value={agent.title} />
+                  </div>
+                </section>
+
+                <section className="border rounded-lg p-4 space-y-4">
+                  <div>
+                    <h2 className="text-sm font-semibold">Instructions</h2>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Injected into the system prompt on every heartbeat — SOUL first, then AGENTS, then assigned skills.
+                    </p>
+                    {agent.assignedToolsets.includes('knowledge-graph') && (
+                      <p className="text-xs text-muted-foreground mt-2 rounded-md border border-dashed p-2">
+                        Knowledge graph tip for SOUL/AGENTS: name which mounts this agent has (private / company), prefer
+                        company for shared durable facts, private for hypotheses and sensitive notes, and always search the
+                        target scope before writing. Full protocol is in the knowledge-graph skill.
+                      </p>
+                    )}
+                  </div>
+                  <ActionForm action={updateInstructions} className="space-y-4">
+                    <input type="hidden" name="agentId" value={agent.id} />
+                    <div className="space-y-1.5">
+                      <label htmlFor="instructionsBundleSoulMd" className="text-sm font-medium">
+                        SOUL.md
+                      </label>
+                      <p className="text-xs text-muted-foreground">Personality, values, and communication style.</p>
+                      <textarea
+                        id="instructionsBundleSoulMd"
+                        name="instructionsBundleSoulMd"
+                        rows={12}
+                        defaultValue={agent.instructionsBundleSoulMd ?? ''}
+                        className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <label htmlFor="instructionsBundleAgentsMd" className="text-sm font-medium">
+                        AGENTS.md
+                      </label>
+                      <p className="text-xs text-muted-foreground">Role responsibilities, domain context, and constraints.</p>
+                      <textarea
+                        id="instructionsBundleAgentsMd"
+                        name="instructionsBundleAgentsMd"
+                        rows={12}
+                        defaultValue={agent.instructionsBundleAgentsMd ?? ''}
+                        className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+                      />
+                    </div>
+                    <ActionSubmitButton label="Save instructions" />
+                  </ActionForm>
+                </section>
+              </>
+            }
+            model={
+              <>
+                <section className="border rounded-lg p-4 space-y-4">
+                  <div>
+                    <h2 className="text-sm font-semibold">Model</h2>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      LLM used on heartbeats. Select a registered provider and model identifier.
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4 text-sm">
+                    <DetailCard label="Agent type" value={agentRuntimeLabel(agent.adapterType)} />
+                    <DetailCard
+                      label="Provider"
+                      value={providerConfig.providerName ?? providerConfig.provider}
+                    />
+                    <DetailCard label="API mode" value={providerConfig.apiMode} />
+                    <DetailCard label="Endpoint" value={providerConfig.baseURL} />
+                  </div>
+                  <AgentModelForm
+                    agentId={agent.id}
+                    urlKey={agent.urlKey}
+                    initialModelId={agent.modelId ?? providerConfig.defaultModel}
+                    initialProviderId={agent.providerId}
+                    providers={providerList.map((p) => ({
+                      id: p.id,
+                      name: p.name,
+                      type: p.type,
+                      baseURL: p.baseURL,
+                      isDefault: p.isDefault,
+                    }))}
+                    updateModel={updateModel}
+                  />
+                  <AgentModelSettingsForm
+                    agentId={agent.id}
+                    urlKey={agent.urlKey}
+                    initialSettings={runtime.model}
+                    providerDefaults={providerRecord?.defaultModelSettings}
+                    updateModelSettings={updateModelSettings}
+                  />
+                </section>
+              </>
+            }
+            runtime={
+              <section className="border rounded-lg p-4 space-y-4">
+                <div>
+                  <h2 className="text-sm font-semibold">Code &amp; execution</h2>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Runtime type and isolated sandbox for writing and running code. Orthogonal to other toolsets
+                    below.
+                  </p>
+                </div>
+                <AgentCodeExecutionForm
+                  agentId={agent.id}
+                  urlKey={agent.urlKey}
+                  runtimeType={agentRuntimeType}
+                  codeExecutionEnabled={codeExecutionEnabled}
+                  availability={codeExecutionAvailability}
+                  sandboxPathPreview={sandboxPathPreview}
+                  timeoutOverride={runtime.codeExecution?.timeoutMs}
+                  isolationOverride={runtime.codeExecution?.isolation}
+                  updateCodeExecution={updateCodeExecution}
+                />
+              </section>
+            }
+            heartbeats={
+              <>
+                <section className="border rounded-lg p-4 space-y-4">
+                  <h2 className="text-sm font-semibold">Automatic heartbeats</h2>
+                  <AgentHeartbeatForm
+                    agentId={agent.id}
+                    urlKey={agent.urlKey}
+                    heartbeat={runtime.heartbeat}
+                    timeout={runtime.timeout}
+                    updateHeartbeatConfig={updateHeartbeatConfig}
+                  />
+                  <dl className="grid grid-cols-2 gap-3 text-sm border-t pt-3">
+                    <div>
+                      <dt className="text-muted-foreground">Timeout</dt>
+                      <dd className="font-medium mt-0.5">{runtime.timeout?.heartbeatSec ?? 300}s</dd>
+                    </div>
+                    <div>
+                      <dt className="text-muted-foreground">Max steps</dt>
+                      <dd className="font-medium mt-0.5">{runtime.heartbeat?.maxSteps ?? 30}</dd>
+                    </div>
+                  </dl>
+                </section>
+              </>
+            }
+            capabilities={
+              <>
+                <section className="border rounded-lg p-4 space-y-4">
+                  <h2 className="text-sm font-semibold">Capabilities</h2>
+                  <AgentCapabilitiesForm
+                    agentId={agent.id}
+                    urlKey={agent.urlKey}
+                    assignedSkills={agent.assignedSkills}
+                    companySkillSlugs={companySkillSlugs}
+                    assignedToolsets={agent.assignedToolsets}
+                    assignedMcpServerIds={agent.mcpServerIds}
+                    toggleableMcpServers={toggleableMcpServers}
+                    enabledTools={enabledTools}
+                    mcpToolPolicy={runtime.mcpToolPolicy}
+                    knowledgeGraph={runtime.knowledgeGraph}
+                    integrationOverrides={{
+                      ...(runtime.tavilyApiKey ? { tavilyApiKey: runtime.tavilyApiKey } : {}),
+                      ...(runtime.mcpCredentials?.['buffer-mcp']
+                        ? { bufferApiKey: runtime.mcpCredentials['buffer-mcp'] }
+                        : {}),
+                      ...(runtime.searxngUrl ? { searxngUrl: runtime.searxngUrl } : {}),
+                      ...(runtime.searxngApiKey ? { searxngApiKey: runtime.searxngApiKey } : {}),
+                    }}
+                    updateCapabilities={updateCapabilities}
+                  />
+                </section>
+
+                <section className="border rounded-lg p-4 space-y-4">
+                  <div>
+                    <h2 className="text-sm font-semibold">Direct messages to other agents</h2>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      When enabled, this agent can send and receive DMs via <code className="text-xs">sendToAgent</code>.
+                      The agent-dm skill is auto-loaded when DMs are enabled.
+                    </p>
+                  </div>
+                  <ActionForm action={updateMailConfig} className="space-y-4 text-sm">
+                    <input type="hidden" name="agentId" value={agent.id} />
+                    <label className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        name="mailEnabled"
+                        defaultChecked={runtime.mail?.enabled ?? true}
+                        className="rounded border-input"
+                      />
+                      <span>Allow DMs</span>
+                    </label>
+                    <p className="text-xs text-muted-foreground -mt-2 pl-6">
+                      When disabled, <code className="text-xs">sendToAgent</code> is removed from this agent&apos;s toolset.
+                    </p>
+                    <ActionSubmitButton label="Save DM settings" />
+                  </ActionForm>
+                </section>
+              </>
+            }
+            budget={
+              <section className="border rounded-lg p-4 space-y-4">
+                <h2 className="text-sm font-semibold">Budget</h2>
+                <div className="text-sm">
+                  <p className="font-medium">
+                    {agent.spentMonthlyTokens.toLocaleString()} / {agent.budgetMonthlyTokens.toLocaleString()} tokens
+                  </p>
+                  <div className="mt-2 h-2 rounded-full bg-muted overflow-hidden">
+                    <div
+                      className={`h-full rounded-full ${budgetEnforced && budgetUsedPct >= 100 ? 'bg-destructive' : 'bg-primary'}`}
+                      style={{ width: `${Math.min(budgetUsedPct, 100)}%` }}
+                    />
+                  </div>
+                  <p className="text-muted-foreground mt-1">
+                    {budgetUsedPct}% used this month
+                    {!budgetEnforced && ' · enforcement off'}
+                  </p>
+                </div>
+
+                <ActionForm action={updateBudgetConfig} className="space-y-4 border-t pt-4 text-sm">
+                  <input type="hidden" name="agentId" value={agent.id} />
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      name="enforceBudget"
+                      defaultChecked={budgetEnforced}
+                      className="rounded border-input"
+                    />
+                    <span>Enforce monthly token budget</span>
+                  </label>
+                  <p className="text-xs text-muted-foreground -mt-2 pl-6">
+                    When off, heartbeats run even if the agent is over its allocation. Usage is still tracked.
+                  </p>
+
+                  <div>
+                    <label htmlFor="budgetMonthlyTokens" className="text-muted-foreground block mb-1">
+                      Monthly token allocation
+                    </label>
+                    <input
+                      id="budgetMonthlyTokens"
+                      name="budgetMonthlyTokens"
+                      type="number"
+                      min={0}
+                      step={1}
+                      required
+                      defaultValue={agent.budgetMonthlyTokens}
+                      className="w-full max-w-xs rounded-md border border-input bg-background px-3 py-1.5 text-sm"
+                    />
+                  </div>
+
+                  <ActionSubmitButton label="Save budget settings" />
+                </ActionForm>
+              </section>
+            }
+            routines={
+              agentRoutines.length > 0 ? (
+                <section className="border rounded-lg divide-y">
+                  <div className="p-4">
+                    <h2 className="text-sm font-semibold">Routines</h2>
+                    <p className="text-xs text-muted-foreground mt-1">Cron-based wakes that create issues then trigger heartbeats.</p>
+                  </div>
+                  {agentRoutines.map((routine) => (
+                    <div key={routine.id} className="flex items-center justify-between gap-4 p-4 text-sm">
+                      <div>
+                        <p className="font-medium">{routine.name}</p>
+                        <p className="text-xs font-mono text-muted-foreground mt-0.5">{routine.cronExpression}</p>
+                        <p className="text-xs text-muted-foreground">{routine.timezone}</p>
+                      </div>
+                      <AgentRoutineToggle
+                        routineId={routine.id}
+                        agentId={agent.id}
+                        urlKey={agent.urlKey}
+                        initiallyEnabled={routine.enabled}
+                        toggleRoutine={toggleRoutine}
+                      />
+                    </div>
+                  ))}
+                </section>
+              ) : null
+            }
+            danger={
+              <section className="border border-destructive/30 rounded-lg p-4 space-y-4">
+                <div>
+                  <h2 className="text-sm font-semibold text-destructive">Danger zone</h2>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Permanently deletes this agent and cascades heartbeat, cost, and routine history.
+                    Assigned issues, goals, and projects become unassigned.
+                  </p>
+                </div>
+                {directReports.length > 0 ? (
+                  <div className="rounded-md border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+                    Cannot delete while this agent has direct reports:{' '}
+                    {directReports.map((report, i) => (
+                      <span key={report.id}>
+                        {i > 0 ? ', ' : ''}
+                        <Link href={`/agent/${report.urlKey}`} className="font-medium underline">
+                          {report.name}
+                        </Link>
+                      </span>
+                    ))}
+                    . Reassign them first.
+                  </div>
+                ) : (
+                  <form action={deleteAgentAction} className="space-y-4 max-w-md">
+                    <input type="hidden" name="agentId" value={agent.id} />
+                    <input type="hidden" name="urlKey" value={agent.urlKey} />
+                    <div className="space-y-1.5">
+                      <label htmlFor="confirm-url-key" className="text-sm font-medium">
+                        Type <span className="font-mono">{agent.urlKey}</span> to confirm
+                      </label>
+                      <input
+                        id="confirm-url-key"
+                        name="confirmUrlKey"
+                        type="text"
+                        required
+                        autoComplete="off"
+                        placeholder={agent.urlKey}
+                        className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+                      />
+                    </div>
+                    <button
+                      type="submit"
+                      className="inline-flex items-center justify-center rounded-md border border-destructive px-3 py-1.5 text-sm font-medium text-destructive hover:bg-destructive/10"
+                    >
+                      Delete agent
+                    </button>
+                  </form>
+                )}
+              </section>
+            }
+            recentHeartbeats={
+              <section className="border rounded-lg divide-y">
+                <div className="flex items-center justify-between p-4">
+                  <h2 className="text-sm font-semibold">Recent heartbeats</h2>
+                  {recentRuns.length > 0 && (
+                    <Link
+                      href={`/jobs/heartbeat?agent=${agent.urlKey}`}
+                      className="text-xs text-muted-foreground hover:text-foreground"
+                    >
+                      View all
+                    </Link>
+                  )}
+                </div>
+                {recentRuns.length === 0 ? (
+                  <p className="p-4 text-sm text-muted-foreground">No heartbeats yet.</p>
+                ) : (
+                  recentRuns.map((run) => (
+                    <Link
+                      key={run.id}
+                      href={heartbeatJobHref(run) ?? `/heartbeat/${run.id}`}
+                      className="flex items-center justify-between p-4 text-sm hover:bg-accent/50 transition-colors"
+                    >
+                      <div className="space-y-0.5 min-w-0">
+                        <p className="font-mono text-xs text-muted-foreground">{run.id.slice(0, 8)}…</p>
+                        <p className="text-muted-foreground capitalize">{run.invocationSource.replace(/_/g, ' ')}</p>
+                        <time className="text-xs text-muted-foreground" dateTime={run.startedAt.toISOString()}>
+                          {run.startedAt.toLocaleString()}
+                        </time>
+                      </div>
+                      <RunStatusBadge status={run.status} />
+                    </Link>
+                  ))
+                )}
+              </section>
+            }
+            clone={
+              <AgentCloneForm
+                sourceAgentId={agent.id}
+                defaultName={`${agent.name} (copy)`}
+                defaultUrlKey={suggestedCloneUrlKey}
+                cloneAgentAction={cloneAgentAction}
+              />
+            }
           />
-          <DetailCard label="API mode" value={providerConfig.apiMode} />
-          <DetailCard label="Endpoint" value={providerConfig.baseURL} />
-        </div>
-        <AgentModelForm
-          agentId={agent.id}
-          urlKey={agent.urlKey}
-          initialModelId={agent.modelId ?? providerConfig.defaultModel}
-          initialProviderId={agent.providerId}
-          providers={providerList.map((p) => ({
-            id: p.id,
-            name: p.name,
-            type: p.type,
-            baseURL: p.baseURL,
-            isDefault: p.isDefault,
-          }))}
-          updateModel={updateModel}
-        />
-        <AgentModelSettingsForm
-          agentId={agent.id}
-          urlKey={agent.urlKey}
-          initialSettings={runtime.model}
-          providerDefaults={providerRecord?.defaultModelSettings}
-          updateModelSettings={updateModelSettings}
-        />
-      </section>
-
-      <section className="border rounded-lg p-4 space-y-4">
-        <div>
-          <h2 className="text-sm font-semibold">Role</h2>
-          <p className="text-xs text-muted-foreground mt-1">
-            Changing role resets skills, toolsets, and assigned tools to that role&apos;s defaults.
-          </p>
-        </div>
-        <div className="grid gap-4 sm:grid-cols-2">
-          <form action={updateAgentRoleAction} className="space-y-4">
-            <input type="hidden" name="agentId" value={agent.id} />
-            <input type="hidden" name="urlKey" value={agent.urlKey} />
-            <div className="space-y-1.5">
-              <label htmlFor="agent-role" className="text-sm font-medium">
-                Role
-              </label>
-              <select
-                id="agent-role"
-                name="role"
-                required
-                defaultValue={agent.role}
-                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-              >
-                {AGENT_ROLE_OPTIONS.map((role) => (
-                  <option key={role.value} value={role.value}>
-                    {role.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <button
-              type="submit"
-              className="inline-flex items-center justify-center rounded-md border px-3 py-1.5 text-sm font-medium hover:bg-muted"
-            >
-              Save role
-            </button>
-          </form>
-          <DetailCard label="Title" value={agent.title} />
-        </div>
-      </section>
-
-      <section className="border rounded-lg p-4 space-y-4">
-        <div>
-          <h2 className="text-sm font-semibold">Code &amp; execution</h2>
-          <p className="text-xs text-muted-foreground mt-1">
-            Runtime type and isolated sandbox for writing and running code. Orthogonal to other toolsets
-            below.
-          </p>
-        </div>
-        <AgentCodeExecutionForm
-          agentId={agent.id}
-          urlKey={agent.urlKey}
-          runtimeType={agentRuntimeType}
-          codeExecutionEnabled={codeExecutionEnabled}
-          availability={codeExecutionAvailability}
-          sandboxPathPreview={sandboxPathPreview}
-          timeoutOverride={runtime.codeExecution?.timeoutMs}
-          isolationOverride={runtime.codeExecution?.isolation}
-          updateCodeExecution={updateCodeExecution}
-        />
-      </section>
-
-      <section className="border rounded-lg p-4 space-y-4">
-        <h2 className="text-sm font-semibold">Capabilities</h2>
-
-        <AgentCapabilitiesForm
-          agentId={agent.id}
-          urlKey={agent.urlKey}
-          assignedSkills={agent.assignedSkills}
-          companySkillSlugs={companySkillSlugs}
-          assignedToolsets={agent.assignedToolsets}
-          assignedMcpServerIds={agent.mcpServerIds}
-          toggleableMcpServers={toggleableMcpServers}
-          enabledTools={enabledTools}
-          mcpToolPolicy={runtime.mcpToolPolicy}
-          knowledgeGraph={runtime.knowledgeGraph}
-          integrationOverrides={{
-            ...(runtime.tavilyApiKey ? { tavilyApiKey: runtime.tavilyApiKey } : {}),
-            ...(runtime.mcpCredentials?.['buffer-mcp']
-              ? { bufferApiKey: runtime.mcpCredentials['buffer-mcp'] }
-              : {}),
-            ...(runtime.searxngUrl ? { searxngUrl: runtime.searxngUrl } : {}),
-            ...(runtime.searxngApiKey ? { searxngApiKey: runtime.searxngApiKey } : {}),
-          }}
-          updateCapabilities={updateCapabilities}
-        />
-      </section>
-
-      <section className="border rounded-lg p-4 space-y-4">
-        <div>
-          <h2 className="text-sm font-semibold">Instructions</h2>
-          <p className="text-xs text-muted-foreground mt-1">
-            Injected into the system prompt on every heartbeat — SOUL first, then AGENTS, then assigned skills.
-          </p>
-          {agent.assignedToolsets.includes('knowledge-graph') && (
-            <p className="text-xs text-muted-foreground mt-2 rounded-md border border-dashed p-2">
-              Knowledge graph tip for SOUL/AGENTS: name which mounts this agent has (private / company), prefer
-              company for shared durable facts, private for hypotheses and sensitive notes, and always search the
-              target scope before writing. Full protocol is in the knowledge-graph skill.
-            </p>
-          )}
-        </div>
-        <ActionForm action={updateInstructions} className="space-y-4">
-          <input type="hidden" name="agentId" value={agent.id} />
-          <input type="hidden" name="urlKey" value={agent.urlKey} />
-          <div className="space-y-1.5">
-            <label htmlFor="instructionsBundleSoulMd" className="text-sm font-medium">
-              SOUL.md
-            </label>
-            <p className="text-xs text-muted-foreground">Personality, values, and communication style.</p>
-            <textarea
-              id="instructionsBundleSoulMd"
-              name="instructionsBundleSoulMd"
-              rows={12}
-              defaultValue={agent.instructionsBundleSoulMd ?? ''}
-              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
-            />
-          </div>
-          <div className="space-y-1.5">
-            <label htmlFor="instructionsBundleAgentsMd" className="text-sm font-medium">
-              AGENTS.md
-            </label>
-            <p className="text-xs text-muted-foreground">Role responsibilities, domain context, and constraints.</p>
-            <textarea
-              id="instructionsBundleAgentsMd"
-              name="instructionsBundleAgentsMd"
-              rows={12}
-              defaultValue={agent.instructionsBundleAgentsMd ?? ''}
-              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
-            />
-          </div>
-          <ActionSubmitButton label="Save instructions" />
-        </ActionForm>
-      </section>
-
-      <section className="border rounded-lg p-4 space-y-4">
-        <h2 className="text-sm font-semibold">Automatic heartbeats</h2>
-        <AgentHeartbeatForm
-          agentId={agent.id}
-          urlKey={agent.urlKey}
-          heartbeat={runtime.heartbeat}
-          timeout={runtime.timeout}
-          updateHeartbeatConfig={updateHeartbeatConfig}
-        />
-        <dl className="grid grid-cols-2 gap-3 text-sm border-t pt-3">
-          <div>
-            <dt className="text-muted-foreground">Timeout</dt>
-            <dd className="font-medium mt-0.5">{runtime.timeout?.heartbeatSec ?? 300}s</dd>
-          </div>
-          <div>
-            <dt className="text-muted-foreground">Max steps</dt>
-            <dd className="font-medium mt-0.5">{runtime.heartbeat?.maxSteps ?? 30}</dd>
-          </div>
-        </dl>
-      </section>
-
-      <section className="border rounded-lg p-4 space-y-4">
-        <div>
-          <h2 className="text-sm font-semibold">Direct messages to other agents</h2>
-          <p className="text-xs text-muted-foreground mt-1">
-            When enabled, this agent can send and receive DMs via <code className="text-xs">sendToAgent</code>.
-            The agent-dm skill is auto-loaded when DMs are enabled.
-          </p>
-        </div>
-        <ActionForm action={updateMailConfig} className="space-y-4 text-sm">
-          <input type="hidden" name="agentId" value={agent.id} />
-          <input type="hidden" name="urlKey" value={agent.urlKey} />
-
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              name="mailEnabled"
-              defaultChecked={runtime.mail?.enabled ?? true}
-              className="rounded border-input"
-            />
-            <span>Allow DMs</span>
-          </label>
-          <p className="text-xs text-muted-foreground -mt-2 pl-6">
-            When disabled, <code className="text-xs">sendToAgent</code> is removed from this agent&apos;s toolset.
-          </p>
-
-          <ActionSubmitButton label="Save DM settings" />
-        </ActionForm>
-      </section>
-
-      {agentRoutines.length > 0 && (
-        <section className="border rounded-lg divide-y">
-          <div className="p-4">
-            <h2 className="text-sm font-semibold">Routines</h2>
-            <p className="text-xs text-muted-foreground mt-1">Cron-based wakes that create issues then trigger heartbeats.</p>
-          </div>
-          {agentRoutines.map((routine) => (
-            <div key={routine.id} className="flex items-center justify-between gap-4 p-4 text-sm">
-              <div>
-                <p className="font-medium">{routine.name}</p>
-                <p className="text-xs font-mono text-muted-foreground mt-0.5">{routine.cronExpression}</p>
-                <p className="text-xs text-muted-foreground">{routine.timezone}</p>
-              </div>
-              <AgentRoutineToggle
-                routineId={routine.id}
-                agentId={agent.id}
-                urlKey={agent.urlKey}
-                initiallyEnabled={routine.enabled}
-                toggleRoutine={toggleRoutine}
-              />
-            </div>
-          ))}
-        </section>
-      )}
-
-      <section className="border rounded-lg p-4 space-y-4">
-        <h2 className="text-sm font-semibold">Budget</h2>
-        <div className="text-sm">
-          <p className="font-medium">
-            {agent.spentMonthlyTokens.toLocaleString()} / {agent.budgetMonthlyTokens.toLocaleString()} tokens
-          </p>
-          <div className="mt-2 h-2 rounded-full bg-muted overflow-hidden">
-            <div
-              className={`h-full rounded-full ${budgetEnforced && budgetUsedPct >= 100 ? 'bg-destructive' : 'bg-primary'}`}
-              style={{ width: `${Math.min(budgetUsedPct, 100)}%` }}
-            />
-          </div>
-          <p className="text-muted-foreground mt-1">
-            {budgetUsedPct}% used this month
-            {!budgetEnforced && ' · enforcement off'}
-          </p>
-        </div>
-
-        <ActionForm action={updateBudgetConfig} className="space-y-4 border-t pt-4 text-sm">
-          <input type="hidden" name="agentId" value={agent.id} />
-          <input type="hidden" name="urlKey" value={agent.urlKey} />
-
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              name="enforceBudget"
-              defaultChecked={budgetEnforced}
-              className="rounded border-input"
-            />
-            <span>Enforce monthly token budget</span>
-          </label>
-          <p className="text-xs text-muted-foreground -mt-2 pl-6">
-            When off, heartbeats run even if the agent is over its allocation. Usage is still tracked.
-          </p>
-
-          <div>
-            <label htmlFor="budgetMonthlyTokens" className="text-muted-foreground block mb-1">
-              Monthly token allocation
-            </label>
-            <input
-              id="budgetMonthlyTokens"
-              name="budgetMonthlyTokens"
-              type="number"
-              min={0}
-              step={1}
-              required
-              defaultValue={agent.budgetMonthlyTokens}
-              className="w-full max-w-xs rounded-md border border-input bg-background px-3 py-1.5 text-sm"
-            />
-          </div>
-
-          <ActionSubmitButton label="Save budget settings" />
-        </ActionForm>
-      </section>
-
-      <section className="border rounded-lg divide-y">
-        <div className="flex items-center justify-between p-4">
-          <h2 className="text-sm font-semibold">Recent heartbeats</h2>
-          {recentRuns.length > 0 && (
-            <Link
-              href={`/jobs/heartbeat?agent=${agent.urlKey}`}
-              className="text-xs text-muted-foreground hover:text-foreground"
-            >
-              View all
-            </Link>
-          )}
-        </div>
-        {recentRuns.length === 0 ? (
-          <p className="p-4 text-sm text-muted-foreground">No heartbeats yet.</p>
-        ) : (
-          recentRuns.map((run) => (
-            <Link
-              key={run.id}
-              href={heartbeatJobHref(run) ?? `/heartbeat/${run.id}`}
-              className="flex items-center justify-between p-4 text-sm hover:bg-accent/50 transition-colors"
-            >
-              <div className="space-y-0.5 min-w-0">
-                <p className="font-mono text-xs text-muted-foreground">{run.id.slice(0, 8)}…</p>
-                <p className="text-muted-foreground capitalize">{run.invocationSource.replace(/_/g, ' ')}</p>
-                <time className="text-xs text-muted-foreground" dateTime={run.startedAt.toISOString()}>
-                  {run.startedAt.toLocaleString()}
-                </time>
-              </div>
-              <RunStatusBadge status={run.status} />
-            </Link>
-          ))
-        )}
-      </section>
-
-      <AgentCloneForm
-        sourceAgentId={agent.id}
-        defaultName={`${agent.name} (copy)`}
-        defaultUrlKey={suggestedCloneUrlKey}
-        cloneAgentAction={cloneAgentAction}
-      />
-
-      <section className="border border-destructive/30 rounded-lg p-4 space-y-4">
-        <div>
-          <h2 className="text-sm font-semibold text-destructive">Danger zone</h2>
-          <p className="text-xs text-muted-foreground mt-1">
-            Permanently deletes this agent and cascades heartbeat, cost, and routine history.
-            Assigned issues, goals, and projects become unassigned.
-          </p>
-        </div>
-        {directReports.length > 0 ? (
-          <div className="rounded-md border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-            Cannot delete while this agent has direct reports:{' '}
-            {directReports.map((report, i) => (
-              <span key={report.id}>
-                {i > 0 ? ', ' : ''}
-                <Link href={`/agent/${report.urlKey}`} className="font-medium underline">
-                  {report.name}
-                </Link>
-              </span>
-            ))}
-            . Reassign them first.
-          </div>
-        ) : (
-          <form action={deleteAgentAction} className="space-y-4 max-w-md">
-            <input type="hidden" name="agentId" value={agent.id} />
-            <input type="hidden" name="urlKey" value={agent.urlKey} />
-            <div className="space-y-1.5">
-              <label htmlFor="confirm-url-key" className="text-sm font-medium">
-                Type <span className="font-mono">{agent.urlKey}</span> to confirm
-              </label>
-              <input
-                id="confirm-url-key"
-                name="confirmUrlKey"
-                type="text"
-                required
-                autoComplete="off"
-                placeholder={agent.urlKey}
-                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
-              />
-            </div>
-            <button
-              type="submit"
-              className="inline-flex items-center justify-center rounded-md border border-destructive px-3 py-1.5 text-sm font-medium text-destructive hover:bg-destructive/10"
-            >
-              Delete agent
-            </button>
-          </form>
-        )}
-      </section>
-
-      <p className="text-xs text-muted-foreground">
-        Created {new Date(agent.createdAt).toLocaleString()}
-      </p>
-          </>
         }
         memory={
           <section className="border rounded-lg p-4">
