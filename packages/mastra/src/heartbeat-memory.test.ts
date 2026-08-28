@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import {
   shouldUseHeartbeatMemory,
   buildInboxThreadId,
+  buildAgentIdleThreadId,
   buildHarnessIdleThreadId,
 } from './heartbeat-memory';
 import { buildHeartbeatMemoryKeys } from './memory-keys';
@@ -67,10 +68,17 @@ describe('buildInboxThreadId', () => {
   });
 });
 
+describe('buildAgentIdleThreadId', () => {
+  it('builds idle thread id for durable Agent runtime with OM', () => {
+    const result = buildAgentIdleThreadId('12345');
+    assert.equal(result, 'agent-durable-12345');
+  });
+});
+
 describe('buildHarnessIdleThreadId', () => {
-  it('builds idle thread id for harness and durable OM', () => {
+  it('builds idle thread id for harness (AgentController) runtime with OM', () => {
     const result = buildHarnessIdleThreadId('12345');
-    assert.equal(result, 'agent-12345');
+    assert.equal(result, 'agent-harness-12345');
   });
 });
 
@@ -85,14 +93,14 @@ describe('buildHeartbeatMemoryKeys', () => {
     assert.equal(result.thread, 'issue-1:12345');
   });
 
-  it('builds idle thread when useIdleThread is true and no issueId', () => {
+  it('builds durable agent idle thread when useIdleThread is true and no issueId', () => {
     const result = buildHeartbeatMemoryKeys({
       companyId: 'company-1',
       agentId: '12345',
       useIdleThread: true,
     });
     assert.equal(result.resource, 'company-1:12345');
-    assert.equal(result.thread, 'agent-12345');
+    assert.equal(result.thread, 'agent-durable-12345');
   });
 
   it('builds inbox thread when no issueId and no useIdleThread', () => {
@@ -113,5 +121,56 @@ describe('buildHeartbeatMemoryKeys', () => {
     });
     assert.equal(result.resource, 'company-1:12345');
     assert.equal(result.thread, 'issue-1:12345');
+  });
+});
+
+describe('Runtime idle thread isolation', () => {
+  it('durable agent and harness runtimes use distinct idle thread ids', () => {
+    const agentId = '12345';
+    const durableThread = buildAgentIdleThreadId(agentId);
+    const harnessThread = buildHarnessIdleThreadId(agentId);
+    
+    assert.notEqual(durableThread, harnessThread, 'Idle threads must differ by runtime');
+    assert.equal(durableThread, 'agent-durable-12345');
+    assert.equal(harnessThread, 'agent-harness-12345');
+  });
+
+  it('durable agent idle thread matches memory keys with useIdleThread', () => {
+    const agentId = '12345';
+    const explicitIdleThread = buildAgentIdleThreadId(agentId);
+    const memoryKeys = buildHeartbeatMemoryKeys({
+      companyId: 'company-1',
+      agentId,
+      useIdleThread: true,
+    });
+    
+    assert.equal(memoryKeys.thread, explicitIdleThread);
+  });
+
+  it('harness controller idle thread matches heartbeat-memory harness idle', async () => {
+    const { buildControllerThreadId } = await import('./controller-config');
+    const agentId = '12345';
+    const mockAgent = { id: agentId, companyId: 'company-1' } as any;
+    
+    const controllerIdleThread = buildControllerThreadId(mockAgent, undefined);
+    const memoryHarnessIdleThread = buildHarnessIdleThreadId(agentId);
+    
+    assert.equal(
+      controllerIdleThread,
+      memoryHarnessIdleThread,
+      'Controller and memory must use the same harness idle thread id'
+    );
+    assert.equal(controllerIdleThread, 'agent-harness-12345');
+  });
+
+  it('legacy harness idle thread differs from namespaced keys', () => {
+    const agentId = '12345';
+    const legacyThread = `agent-${agentId}`;
+    const durableThread = buildAgentIdleThreadId(agentId);
+    const harnessThread = buildHarnessIdleThreadId(agentId);
+    
+    assert.notEqual(legacyThread, durableThread);
+    assert.notEqual(legacyThread, harnessThread);
+    assert.equal(legacyThread, 'agent-12345', 'Legacy thread is unnamespaced');
   });
 });

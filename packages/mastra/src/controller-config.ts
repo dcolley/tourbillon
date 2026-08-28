@@ -34,10 +34,12 @@ import { getMastraInstance } from './mastra-instance';
 
 export type { AgentController, AgentControllerEvent, AgentControllerMode, Session };
 
+import { buildHarnessIdleThreadId } from './heartbeat-memory';
+
 export function buildControllerThreadId(agentRecord: AgentRecord, taskId?: string): string {
   return taskId
     ? `issue-${agentRecord.companyId}-${taskId}`
-    : `agent-${agentRecord.id}`;
+    : buildHarnessIdleThreadId(agentRecord.id);
 }
 
 /** @deprecated Prefer {@link buildControllerThreadId}. */

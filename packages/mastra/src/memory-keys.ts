@@ -1,4 +1,4 @@
-import { buildInboxThreadId, buildHarnessIdleThreadId } from './heartbeat-memory';
+import { buildInboxThreadId, buildAgentIdleThreadId } from './heartbeat-memory';
 
 export interface HeartbeatMemoryKeyInput {
   companyId: string;
@@ -37,7 +37,7 @@ export function buildHeartbeatMemoryKeys(input: HeartbeatMemoryKeyInput): Heartb
   if (issueId) {
     thread = `${issueId}:${agentId}`;
   } else if (useIdleThread) {
-    thread = buildHarnessIdleThreadId(agentId);
+    thread = buildAgentIdleThreadId(agentId);
   } else {
     thread = buildInboxThreadId(companyId, agentId);
   }

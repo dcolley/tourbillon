@@ -38,6 +38,7 @@ import {
 import { getActiveCompany } from './company';
 import { getDefaultLlmProviderRecord } from './llm-providers';
 import { invalidateChatControllerForAgent } from './chat';
+import { clearIdleThreadOnRuntimeSwitch } from '@tourbillon/mastra';
 
 const AGENT_ROLES = ['ceo', 'cto', 'engineer', 'pm', 'qa', 'designer', 'custom'] as const;
 export type AgentRole = (typeof AGENT_ROLES)[number];
@@ -615,12 +616,17 @@ export async function updateAgentCodeExecution(
 
   let adapterType = agent.adapterType;
   let adapterConfig = agent.adapterConfig as Record<string, unknown>;
+  let runtimeChanged = false;
 
   if (runtimeType === 'harness') {
     const harnessFields = resolveAdapterFieldsForRuntime('harness');
+    if (!isHarnessAdapter(agent.adapterType)) {
+      runtimeChanged = true;
+    }
     adapterType = harnessFields.adapterType;
     adapterConfig = harnessFields.adapterConfig;
   } else if (isHarnessAdapter(agent.adapterType)) {
+    runtimeChanged = true;
     adapterType = defaultAgentAdapterType();
     adapterConfig = {};
   }
@@ -646,6 +652,12 @@ export async function updateAgentCodeExecution(
       codeExecution.timeoutMs !== undefined || codeExecution.isolation !== undefined
         ? codeExecution
         : undefined;
+  }
+
+  // Clean up idle threads when switching between Agent and Harness runtimes.
+  // This prevents observational memory from rejecting messages with wrong resourceId.
+  if (runtimeChanged) {
+    await clearIdleThreadOnRuntimeSwitch(agentId);
   }
 
   const [updated] = await db
