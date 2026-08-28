@@ -157,7 +157,7 @@ export function ObservationalMemorySettingsForm({
           className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono disabled:opacity-50"
         />
         <p className="text-xs text-muted-foreground">
-          Used for both Observer and Reflector compaction on durable Agent and harness heartbeats.
+          Used for Observer and Reflector compaction on the current heartbeat wake. Each wake starts with empty message context; OM compacts that wake only. Chat retains long-context history.
         </p>
       </div>
 

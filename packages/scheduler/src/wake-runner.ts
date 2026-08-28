@@ -633,6 +633,24 @@ async function runDurableAgentWake(params: {
   await clearAllHeartbeatThreads(companyId, agentRecord.id, taskId);
   runTracer.info('cleared all heartbeat threads for empty-context wake');
 
+  // Build memory keys with a FRESH per-wake thread so OM can observe this wake only.
+  // Do not reuse idle/issue/inbox threads — use hb-${runId} instead.
+  const memoryKeys = buildHeartbeatMemoryKeys({
+    companyId,
+    agentId: agentRecord.id,
+    issueId: undefined, // Do not use issue thread
+    goalId: issueForTask?.goalId ?? undefined,
+    projectId: issueForTask?.projectId ?? undefined,
+    useIdleThread: false, // Do not use idle thread
+  });
+  // Override thread with fresh per-wake ID (OM processor requires a threadId)
+  memoryKeys.thread = `hb-${runId}`;
+  
+  runTracer.info('wake memory', {
+    freshThread: memoryKeys.thread,
+    resource: memoryKeys.resource,
+  });
+
   const tracingOptions = buildHeartbeatTracingOptions({
     companyId,
     agentId: agentRecord.id,
@@ -669,15 +687,18 @@ async function runDurableAgentWake(params: {
 
   try {
     // Product lock: never resume prior runs. All heartbeat wakes start with empty context.
+    // Pass memory keys with a FRESH thread so OM can observe this wake only (no history loaded).
     // Race the stream call with tripwire detection
     await Promise.race([
       (async () => {
-        // Do NOT pass memory keys — heartbeat wakes start with empty message history.
-        // OM may still be configured (it will observe the current wake only).
         const streamed = await durableAgent.stream(wakeMessage, {
           requestContext: runtimeContext,
           maxSteps,
-          // No memory keys passed — empty context for all heartbeat wakes
+          // Fresh thread per wake — OM processor requires a threadId
+          memory: {
+            resource: memoryKeys.resource,
+            thread: memoryKeys.thread,
+          },
           ...toMastraCallOptions(generationOptions ?? {}),
           ...(tracingOptions ? { tracingOptions } : {}),
           abortSignal,
