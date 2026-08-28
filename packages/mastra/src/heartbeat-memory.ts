@@ -52,8 +52,14 @@ export async function clearHarnessIdleThread(agentId: string): Promise<void> {
 /**
  * Clear the idle thread for an agent when switching runtimes.
  * Deletes both harness and durable agent idle threads to ensure clean memory break.
+ * Also cleans up legacy `agent-{agentId}` thread (pre-namespace harness idle).
  */
 export async function clearIdleThreadOnRuntimeSwitch(agentId: string): Promise<void> {
   await clearHarnessIdleThread(agentId);
   await clearAgentIdleThread(agentId);
+  
+  // Clean up legacy harness idle thread (pre-namespace: `agent-{agentId}`).
+  // Controller storage uses the new namespaced key, so only Memory cleanup needed.
+  const legacyThreadId = `agent-${agentId}`;
+  await deleteThreadIfExists(legacyThreadId);
 }

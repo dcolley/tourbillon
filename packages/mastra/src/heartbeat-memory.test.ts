@@ -146,4 +146,31 @@ describe('Runtime idle thread isolation', () => {
     
     assert.equal(memoryKeys.thread, explicitIdleThread);
   });
+
+  it('harness controller idle thread matches heartbeat-memory harness idle', async () => {
+    const { buildControllerThreadId } = await import('./controller-config');
+    const agentId = '12345';
+    const mockAgent = { id: agentId, companyId: 'company-1' } as any;
+    
+    const controllerIdleThread = buildControllerThreadId(mockAgent, undefined);
+    const memoryHarnessIdleThread = buildHarnessIdleThreadId(agentId);
+    
+    assert.equal(
+      controllerIdleThread,
+      memoryHarnessIdleThread,
+      'Controller and memory must use the same harness idle thread id'
+    );
+    assert.equal(controllerIdleThread, 'agent-harness-12345');
+  });
+
+  it('legacy harness idle thread differs from namespaced keys', () => {
+    const agentId = '12345';
+    const legacyThread = `agent-${agentId}`;
+    const durableThread = buildAgentIdleThreadId(agentId);
+    const harnessThread = buildHarnessIdleThreadId(agentId);
+    
+    assert.notEqual(legacyThread, durableThread);
+    assert.notEqual(legacyThread, harnessThread);
+    assert.equal(legacyThread, 'agent-12345', 'Legacy thread is unnamespaced');
+  });
 });
