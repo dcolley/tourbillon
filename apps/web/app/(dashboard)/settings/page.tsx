@@ -77,10 +77,53 @@ async function saveObservationalMemory(
 
   try {
     const company = await getActiveCompany();
+    
+    // Parse numeric fields
+    let maxOutputTokens: number | undefined;
+    let observeAfterTokens: number | undefined;
+    let reflectAfterTokens: number | undefined;
+    let temperature: number | undefined;
+
+    const maxOutputRaw = formData.get('maxOutputTokens');
+    if (maxOutputRaw && String(maxOutputRaw).trim()) {
+      maxOutputTokens = parseInt(String(maxOutputRaw), 10);
+      if (!Number.isFinite(maxOutputTokens)) {
+        return actionError('Max output tokens must be a valid number.');
+      }
+    }
+
+    const observeAfterRaw = formData.get('observeAfterTokens');
+    if (observeAfterRaw && String(observeAfterRaw).trim()) {
+      observeAfterTokens = parseInt(String(observeAfterRaw), 10);
+      if (!Number.isFinite(observeAfterTokens)) {
+        return actionError('Observe after tokens must be a valid number.');
+      }
+    }
+
+    const reflectAfterRaw = formData.get('reflectAfterTokens');
+    if (reflectAfterRaw && String(reflectAfterRaw).trim()) {
+      reflectAfterTokens = parseInt(String(reflectAfterRaw), 10);
+      if (!Number.isFinite(reflectAfterTokens)) {
+        return actionError('Reflect after tokens must be a valid number.');
+      }
+    }
+
+    const temperatureRaw = formData.get('temperature');
+    if (temperatureRaw && String(temperatureRaw).trim()) {
+      temperature = parseFloat(String(temperatureRaw));
+      if (!Number.isFinite(temperature)) {
+        return actionError('Temperature must be a valid number.');
+      }
+    }
+
     await updateCompanyObservationalMemory(company.id, {
       enabled: formData.get('enabled') === 'on',
       providerId: (formData.get('providerId') as string) || undefined,
       modelId: (formData.get('modelId') as string) || undefined,
+      maxOutputTokens,
+      observeAfterTokens,
+      reflectAfterTokens,
+      temperature,
     });
     return actionSuccess('Observational Memory settings saved.');
   } catch (err) {
@@ -556,6 +599,10 @@ function ObservationalMemoryTab({
           initialEnabled={integrationSettings.observationalMemory?.enabled === true}
           initialProviderId={integrationSettings.observationalMemory?.providerId ?? null}
           initialModelId={integrationSettings.observationalMemory?.modelId ?? ''}
+          initialMaxOutputTokens={integrationSettings.observationalMemory?.maxOutputTokens}
+          initialObserveAfterTokens={integrationSettings.observationalMemory?.observeAfterTokens}
+          initialReflectAfterTokens={integrationSettings.observationalMemory?.reflectAfterTokens}
+          initialTemperature={integrationSettings.observationalMemory?.temperature}
           providers={providers}
           saveAction={saveObservationalMemory}
         />

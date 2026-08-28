@@ -195,12 +195,10 @@ function mapHarnessEventType(event: HarnessEvent): string {
     case 'om_buffering_end':
     case 'om_buffering_failed':
     case 'om_model_changed':
-    case 'om_observation':
       return 'om_observation';
     case 'om_reflection_start':
     case 'om_reflection_end':
     case 'om_reflection_failed':
-    case 'om_reflection':
       return 'om_reflection';
     default:
       return event.type;

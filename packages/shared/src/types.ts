@@ -129,6 +129,14 @@ export interface ObservationalMemorySettings {
   providerId?: string;
   /** Model id on that provider (same as agents.modelId). */
   modelId?: string;
+  /** Max output tokens for both Observer and Reflector (default 8192, min 1024). */
+  maxOutputTokens?: number;
+  /** Observation threshold in message tokens (default 30000, min 8000). */
+  observeAfterTokens?: number;
+  /** Reflection threshold in observation tokens (default 40000, min 8000). */
+  reflectAfterTokens?: number;
+  /** Temperature for both Observer and Reflector (optional; empty = Mastra defaults 0.3/0). */
+  temperature?: number;
 }
 
 /** HITLy approval gate settings. */
