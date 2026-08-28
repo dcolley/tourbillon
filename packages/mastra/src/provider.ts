@@ -1,6 +1,9 @@
 import { createOpenAI, type OpenAIProvider } from '@ai-sdk/openai';
 import type { Agent as AgentRecord } from '@tourbillon/db';
-import type { EmbeddingModelV3, LanguageModelV3 } from '@ai-sdk/provider';
+
+// Infer model types from the provider methods (V4 types no longer exported directly)
+type LanguageModelV3 = ReturnType<OpenAIProvider['chat']>;
+type EmbeddingModelV3 = ReturnType<OpenAIProvider['embedding']>;
 import {
   buildProviderRequestHeaders,
   modelProviderOverridesFromAgent,

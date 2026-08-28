@@ -108,7 +108,7 @@ async function buildBackingAgent(
     name: agentRecord.name,
     instructions: systemPrompt,
     model: getLanguageModelForAgent(agentRecord, providerRecord),
-    tools: tools as Agent['tools'] & Record<string, unknown>,
+    tools: tools as any,
     memory: await getAgentMemory(options?.companySettings ?? null),
     inputProcessors: buildHeartbeatInputProcessors({ limit: contextBudget.limiterLimit }),
     ...(codeExecutionEnabled ? { workspace: buildCodeExecutionWorkspace() } : {}),

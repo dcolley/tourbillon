@@ -25,11 +25,7 @@ export async function POST(
     });
     session.abort();
     
-    // Force-clear display state in case agent_end event was missed (e.g. tripwire)
-    const displayState = session.displayState.get();
-    if (displayState.isRunning) {
-      session.displayState.set({ ...displayState, isRunning: false });
-    }
+    // Note: displayState is now read-only; abort() handles state cleanup internally
     
     return NextResponse.json({ ok: true });
   } catch (err) {

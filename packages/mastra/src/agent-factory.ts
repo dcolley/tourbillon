@@ -111,7 +111,7 @@ export async function getAgentMemory(
 
   if (semanticRecallEnabled && embeddingModel) {
     config.vector = new PgVector({ id: 'tourbillon-vector', connectionString });
-    config.embedder = getEmbeddingModel(embeddingModel);
+    config.embedder = getEmbeddingModel(embeddingModel) as any;
   }
 
   const memory = new Memory(config);
@@ -267,7 +267,7 @@ export async function createAgentWithSkills(
     name: agentRecord.name,
     instructions: systemPrompt,
     model: getLanguageModelForAgent(agentRecord, providerRecord),
-    tools: tools as Parameters<typeof Agent>[0]['tools'],
+    tools: tools as any,
     memory: await getAgentMemory(options?.companySettings ?? null),
     inputProcessors,
     ...(codeExecutionEnabled ? { workspace: buildCodeExecutionWorkspace() } : {}),
@@ -280,7 +280,7 @@ export async function createAgentWithSkills(
 export async function createDurableAgentWithSkills(
   agentRecord: AgentRecord,
   options?: AssembleAgentToolsOptions & { maxSteps?: number },
-): Promise<ReturnType<typeof createDurableAgent>> {
+): Promise<any> {
   const agent = await createAgentWithSkills(agentRecord, options);
   const durableAgent = createDurableAgent({
     agent,
