@@ -9,70 +9,104 @@ import { createOpenAI } from '@ai-sdk/openai';
  * 
  * #24 required Stop to clear a false working state when abort() left isRunning true.
  * This test FAILS if abort() doesn't clear isRunning.
+ * 
+ * Uses REAL Mastra Session with streaming mock that sets isRunning: true.
  */
 describe('Session.abort() clears running state (Mastra 1.63)', () => {
-  it('abort() clears displayState.isRunning to false', async () => {
-    // Create minimal agent for controller
-    const testProvider = createOpenAI({
-      apiKey: 'test-key',
-      baseURL: 'http://localhost:1234/v1',
-    });
+  it('abort() during sendMessage clears isRunning from true to false', async () => {
+    // Mock fetch to return a slow streaming response (keeps session running)
+    const originalFetch = globalThis.fetch;
+    let streamController: ReadableStreamDefaultController | null = null;
     
-    const agent = new Agent({
-      id: 'test-agent',
-      name: 'Test Agent',
-      instructions: 'Test agent',
-      model: testProvider.chat('test-model'),
-      tools: {},
-    });
+    globalThis.fetch = async (url: any, init?: any) => {
+      if (typeof url === 'string' && url.includes('/chat/completions')) {
+        // Return a streaming response that never finishes (until aborted)
+        const stream = new ReadableStream({
+          start(controller) {
+            streamController = controller;
+            // Send SSE prefix but don't close - keeps session running
+            const chunk = 'data: {"id":"test","object":"chat.completion.chunk","created":1234567890,"model":"test","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}\n\n';
+            controller.enqueue(new TextEncoder().encode(chunk));
+          },
+        });
+        
+        return new Response(stream, {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        }) as any;
+      }
+      return originalFetch(url as any, init);
+    };
     
-    // Create controller with one mode
-    const controller = new AgentController({
-      id: 'test-controller',
-      resourceId: 'test-resource',
-      agent,
-      modes: [{
-        id: 'test-mode',
-        name: 'Test Mode',
-      }],
-    });
-    
-    // Create session
-    const session = await controller.createSession({
-      resourceId: 'test-resource',
-      id: 'test-thread',
-      ownerId: 'test-controller',
-    });
-    
-    // Simulate session becoming "running" (as it would during sendMessage)
-    // In real usage, sendMessage() sets isRunning: true while processing
-    // We can't easily trigger real running state without mocking network,
-    // but we can verify abort() is callable and displayState is accessible
-    
-    const displayStateBefore = session.displayState.get();
-    
-    // Call abort (as the route does)
-    session.abort();
-    
-    // After abort, displayState should reflect not-running
-    // In Mastra 1.63+, abort() emits agent_end which updates displayState
-    const displayStateAfter = session.displayState.get();
-    
-    // The key assertion: abort() is callable and displayState.get() works
-    assert.ok(displayStateBefore !== undefined, 'displayState.get() should return state');
-    assert.ok(displayStateAfter !== undefined, 'displayState.get() should return state after abort');
-    
-    // Verify displayState.set does not exist (read-only in 1.63+)
-    assert.equal('set' in session.displayState, false, 'displayState.set should not exist in Mastra 1.63+');
-    
-    // If isRunning is present, it should be false after abort
-    // (may not be present in idle session, but if present must be false)
-    if ('isRunning' in displayStateAfter) {
+    try {
+      const testProvider = createOpenAI({
+        apiKey: 'test-key',
+        baseURL: 'http://fake-test.local/v1',
+      });
+      
+      const agent = new Agent({
+        id: 'test-agent',
+        name: 'Test Agent',
+        instructions: 'Test agent',
+        model: testProvider.chat('test-model'),
+        tools: {},
+      });
+      
+      const controller = new AgentController({
+        id: 'test-controller',
+        resourceId: 'test-resource',
+        agent,
+        modes: [{ id: 'test-mode', name: 'Test Mode' }],
+      });
+      
+      const session = await controller.createSession({
+        resourceId: 'test-resource',
+        id: 'test-thread',
+        ownerId: 'test-controller',
+      });
+      
+      // Start sendMessage (sets isRunning: true while streaming)
+      const messagePromise = session.sendMessage({ role: 'user', content: 'test' });
+      
+      // Wait for stream to start and isRunning to become true
+      await new Promise(resolve => setTimeout(resolve, 200));
+      
+      const displayStateDuringStream = session.displayState.get();
+      
+      // KEY ASSERTION: isRunning should be true during active sendMessage
+      // This FAILS if Mastra doesn't set isRunning during stream
       assert.equal(
-        displayStateAfter.isRunning,
-        false,
-        'If displayState has isRunning field, abort() must clear it to false'
+        displayStateDuringStream.isRunning,
+        true,
+        'isRunning must be true during active sendMessage stream'
       );
+      
+      // Now abort (as the route does)
+      session.abort();
+      
+      // Clean up stream
+      streamController?.close();
+      await messagePromise.catch(() => {}); // Swallow abort error
+      
+      const displayStateAfterAbort = session.displayState.get();
+      
+      // KEY ASSERTION: abort() must clear isRunning to false
+      // This FAILS if abort() doesn't clear running state
+      assert.equal(
+        displayStateAfterAbort.isRunning,
+        false,
+        'abort() must clear isRunning to false (HOLD 2 requirement)'
+      );
+      
+      // Also verify displayState.set() doesn't exist (read-only in 1.63+)
+      assert.equal(
+        'set' in session.displayState,
+        false,
+        'displayState.set should not exist in Mastra 1.63+ (read-only)'
+      );
+      
+    } finally {
+      globalThis.fetch = originalFetch;
     }
   });
   
