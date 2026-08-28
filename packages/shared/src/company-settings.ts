@@ -280,7 +280,8 @@ export function resolveAgentObservationalMemory(
 /**
  * Stable cache key for Memory instances keyed by resolved OM config.
  * When OM is off or unconfigured, returns 'base'.
- * When OM is on, returns 'om:{providerId}:{modelId}:{thresholds}'.
+ * When OM is on, returns 'om:{providerId}:{modelId}:{maxOutputTokens}:{observeAfterTokens}:{reflectAfterTokens}[:{temperature}]'.
+ * Temperature is included only when defined.
  */
 export function memoryCacheKeyForAgent(
   companySettings?: CompanySettings | null,
@@ -288,7 +289,8 @@ export function memoryCacheKeyForAgent(
 ): string {
   const resolved = resolveAgentObservationalMemory(companySettings, agentRuntime);
   if (!resolved) return 'base';
-  return `om:${resolved.providerId}:${resolved.modelId}:${resolved.observeAfterTokens}:${resolved.reflectAfterTokens}`;
+  const tempPart = resolved.temperature !== undefined ? `:${resolved.temperature}` : '';
+  return `om:${resolved.providerId}:${resolved.modelId}:${resolved.maxOutputTokens}:${resolved.observeAfterTokens}:${resolved.reflectAfterTokens}${tempPart}`;
 }
 
 /**
