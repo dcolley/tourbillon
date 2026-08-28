@@ -2,12 +2,20 @@ import { getAgentMemory } from './agent-factory';
 import { deleteControllerThreadIfExists } from './controller-config';
 import { isAgentObservationalMemoryConfigured, type CompanySettings, type AgentRuntimeConfig } from '@tourbillon/shared';
 
+/**
+ * Heartbeat wakes always start with empty context (no prior thread history).
+ * Chat is the only long-context surface. OM may observe the current wake only.
+ * 
+ * @returns false - all heartbeat wakes start empty regardless of taskId or OM config
+ */
 export function shouldUseHeartbeatMemory(
   taskId?: string,
   companySettings?: CompanySettings | null,
   agentRuntime?: AgentRuntimeConfig | null,
 ): boolean {
-  return Boolean(taskId) || isAgentObservationalMemoryConfigured(companySettings, agentRuntime);
+  // Product lock: all non-chat wakes start with empty context.
+  // OM may still run on the current wake, but it must not load prior wake history.
+  return false;
 }
 
 export function buildInboxThreadId(companyId: string, agentId: string): string {
@@ -61,6 +69,34 @@ export async function clearIdleThreadOnRuntimeSwitch(agentId: string): Promise<v
   
   // Clean up legacy harness idle thread (pre-namespace: `agent-{agentId}`).
   // Controller storage uses the new namespaced key, so only Memory cleanup needed.
+  const legacyThreadId = `agent-${agentId}`;
+  await deleteThreadIfExists(legacyThreadId);
+}
+
+/**
+ * Clear all thread history before a heartbeat wake to enforce empty-context product lock.
+ * Deletes idle, inbox, and issue threads so the wake starts with no prior messages.
+ * OM may still run on the current wake, but it will not load prior wake transcripts.
+ */
+export async function clearAllHeartbeatThreads(
+  companyId: string,
+  agentId: string,
+  taskId?: string,
+): Promise<void> {
+  // Clear idle threads (both durable and harness runtimes)
+  await clearAgentIdleThread(agentId);
+  await clearHarnessIdleThread(agentId);
+  
+  // Clear inbox thread (legacy stateless path)
+  await clearInboxThread(companyId, agentId);
+  
+  // Clear issue thread if this is an assignment wake
+  if (taskId) {
+    const issueThreadId = `${taskId}:${agentId}`;
+    await deleteThreadIfExists(issueThreadId);
+  }
+  
+  // Clean up legacy harness idle thread (pre-namespace: `agent-{agentId}`)
   const legacyThreadId = `agent-${agentId}`;
   await deleteThreadIfExists(legacyThreadId);
 }

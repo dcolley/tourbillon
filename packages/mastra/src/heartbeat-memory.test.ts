@@ -10,9 +10,9 @@ import { buildHeartbeatMemoryKeys } from './memory-keys';
 import type { CompanySettings } from '@tourbillon/shared';
 
 describe('shouldUseHeartbeatMemory', () => {
-  it('returns true when taskId is set', () => {
+  it('returns false when taskId is set (product lock: all heartbeat wakes start empty)', () => {
     const result = shouldUseHeartbeatMemory('task-123', null);
-    assert.equal(result, true);
+    assert.equal(result, false);
   });
 
   it('returns false when taskId is not set and OM is off', () => {
@@ -36,7 +36,7 @@ describe('shouldUseHeartbeatMemory', () => {
     assert.equal(result, false);
   });
 
-  it('returns true when taskId is not set but OM is fully configured', () => {
+  it('returns false when taskId is not set but OM is fully configured (product lock)', () => {
     const settings: CompanySettings = {
       observationalMemory: {
         enabled: true,
@@ -45,10 +45,10 @@ describe('shouldUseHeartbeatMemory', () => {
       },
     };
     const result = shouldUseHeartbeatMemory(undefined, settings);
-    assert.equal(result, true);
+    assert.equal(result, false);
   });
 
-  it('returns true when both taskId and OM are set', () => {
+  it('returns false when both taskId and OM are set (product lock: empty context)', () => {
     const settings: CompanySettings = {
       observationalMemory: {
         enabled: true,
@@ -57,7 +57,7 @@ describe('shouldUseHeartbeatMemory', () => {
       },
     };
     const result = shouldUseHeartbeatMemory('task-123', settings);
-    assert.equal(result, true);
+    assert.equal(result, false);
   });
 });
 
@@ -172,5 +172,106 @@ describe('Runtime idle thread isolation', () => {
     assert.notEqual(legacyThread, durableThread);
     assert.notEqual(legacyThread, harnessThread);
     assert.equal(legacyThread, 'agent-12345', 'Legacy thread is unnamespaced');
+  });
+});
+
+describe('clearAllHeartbeatThreads', () => {
+  it('clears heartbeat threads but never chat threads', () => {
+    // US5: chat thread IDs must not be in the clear list
+    const companyId = 'company-1';
+    const agentId = '12345';
+    const taskId = 'issue-1';
+    
+    // Chat thread IDs use company-*:chat:* pattern
+    const chatFreeThread = `company-${companyId}:chat:free`;
+    const chatIssueThread = `company-${companyId}:chat:issue:${taskId}`;
+    const chatProjectThread = `company-${companyId}:chat:project:proj-1`;
+    
+    // Heartbeat thread IDs
+    const durableIdleThread = buildAgentIdleThreadId(agentId);
+    const harnessIdleThread = buildHarnessIdleThreadId(agentId);
+    const inboxThread = buildInboxThreadId(companyId, agentId);
+    const issueThread = `${taskId}:${agentId}`;
+    const legacyThread = `agent-${agentId}`;
+    
+    // Chat threads must NOT match heartbeat thread patterns
+    assert.notEqual(chatFreeThread, durableIdleThread);
+    assert.notEqual(chatFreeThread, harnessIdleThread);
+    assert.notEqual(chatFreeThread, inboxThread);
+    assert.notEqual(chatFreeThread, issueThread);
+    assert.notEqual(chatFreeThread, legacyThread);
+    
+    assert.notEqual(chatIssueThread, durableIdleThread);
+    assert.notEqual(chatIssueThread, harnessIdleThread);
+    assert.notEqual(chatIssueThread, inboxThread);
+    assert.notEqual(chatIssueThread, issueThread);
+    
+    assert.notEqual(chatProjectThread, durableIdleThread);
+    assert.notEqual(chatProjectThread, harnessIdleThread);
+    assert.notEqual(chatProjectThread, inboxThread);
+    
+    // Verify chat threads have distinct prefix
+    assert.ok(chatFreeThread.includes(':chat:'));
+    assert.ok(chatIssueThread.includes(':chat:'));
+    assert.ok(chatProjectThread.includes(':chat:'));
+    
+    // Verify heartbeat threads do NOT have :chat: prefix
+    assert.ok(!durableIdleThread.includes(':chat:'));
+    assert.ok(!harnessIdleThread.includes(':chat:'));
+    assert.ok(!inboxThread.includes(':chat:'));
+    assert.ok(!issueThread.includes(':chat:'));
+  });
+});
+
+describe('Consecutive wake isolation', () => {
+  it('consecutive heartbeats use distinct thread IDs and do not share history', () => {
+    // US6: Two consecutive heartbeats must not see each other's messages
+    const companyId = 'company-1';
+    const agentId = '12345';
+    const runId1 = 'run-001';
+    const runId2 = 'run-002';
+    
+    // Each wake gets a fresh thread ID based on runId
+    const wake1Thread = `hb-${runId1}`;
+    const wake2Thread = `hb-${runId2}`;
+    
+    // Threads must differ across consecutive wakes
+    assert.notEqual(wake1Thread, wake2Thread);
+    
+    // Neither wake reuses idle threads
+    const durableIdleThread = buildAgentIdleThreadId(agentId);
+    const harnessIdleThread = buildHarnessIdleThreadId(agentId);
+    const inboxThread = buildInboxThreadId(companyId, agentId);
+    
+    assert.notEqual(wake1Thread, durableIdleThread);
+    assert.notEqual(wake1Thread, harnessIdleThread);
+    assert.notEqual(wake1Thread, inboxThread);
+    
+    assert.notEqual(wake2Thread, durableIdleThread);
+    assert.notEqual(wake2Thread, harnessIdleThread);
+    assert.notEqual(wake2Thread, inboxThread);
+  });
+  
+  it('assignment wakes use fresh thread IDs per run, not per issue', () => {
+    // US6: Assignment wakes must not reuse issue threads across heartbeats
+    const companyId = 'company-1';
+    const agentId = '12345';
+    const taskId = 'issue-1';
+    const runId1 = 'run-001';
+    const runId2 = 'run-002';
+    
+    // Legacy issue thread pattern (not used after product lock)
+    const legacyIssueThread = `${taskId}:${agentId}`;
+    
+    // Fresh thread IDs per wake
+    const wake1Thread = `hb-${runId1}`;
+    const wake2Thread = `hb-${runId2}`;
+    
+    // Neither wake reuses the issue thread
+    assert.notEqual(wake1Thread, legacyIssueThread);
+    assert.notEqual(wake2Thread, legacyIssueThread);
+    
+    // Consecutive assignment wakes have distinct threads
+    assert.notEqual(wake1Thread, wake2Thread);
   });
 });
