@@ -152,11 +152,14 @@ export function startWakeServer(): http.Server {
         }
         const result = await forceKillHeartbeat(runId, body.companyId);
         if (!result.success) {
-          json(res, result.errorText === 'Run already finished' ? 409 : 404, {
+          const status = result.errorText === 'Run already finished' ? 409 : 404;
+          tracer.info('force-kill attempt', { runId, status, hadController: result.hadController });
+          json(res, status, {
             error: result.errorText,
           });
           return;
         }
+        tracer.info('force-kill attempt', { runId, status: 200, hadController: result.hadController });
         json(res, 200, { killed: true, hadController: result.hadController });
         return;
       }
