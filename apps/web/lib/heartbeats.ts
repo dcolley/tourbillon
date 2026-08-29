@@ -178,11 +178,14 @@ export async function getHeartbeatList(opts: {
   page?: number;
   pageSize?: number;
   agentId?: string;
+  companyId?: string;
 } = {}): Promise<HeartbeatListResult> {
   const filter = opts.filter === 'in_queue' ? 'running' : (opts.filter ?? 'all');
   const page = Math.max(0, opts.page ?? 0);
   const pageSize = opts.pageSize ?? DEFAULT_PAGE_SIZE;
-  const company = await getActiveCompany();
+  const company = opts.companyId 
+    ? { id: opts.companyId }
+    : await getActiveCompany();
 
   const statusCond = runStatusCondition(filter);
   const where = and(

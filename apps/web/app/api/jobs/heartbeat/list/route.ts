@@ -6,8 +6,19 @@ import {
   isHeartbeatPageSize,
   type HeartbeatListFilter,
 } from '@/lib/heartbeat-list-storage';
+import { verifyMobileToken } from '@/lib/mobile-auth';
+import { getActiveCompanyOrNull } from '@/lib/company';
 
 export async function GET(req: NextRequest) {
+  const mobileCompanyId = await verifyMobileToken(req);
+  const company = await getActiveCompanyOrNull(mobileCompanyId);
+  
+  if (!company) {
+    return NextResponse.json(
+      { error: 'No active company selected' },
+      { status: 401 }
+    );
+  }
   const filterParam = req.nextUrl.searchParams.get('filter') ?? 'all';
   const filter: HeartbeatListFilter = isHeartbeatListFilter(filterParam) ? filterParam : 'all';
 
@@ -25,6 +36,7 @@ export async function GET(req: NextRequest) {
     page,
     pageSize,
     agentId: agent?.id,
+    companyId: company.id,
   });
 
   return NextResponse.json({
