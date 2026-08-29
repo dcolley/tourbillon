@@ -193,7 +193,7 @@ describe('Production enforceHeartbeatWallClock timeout enforcement', () => {
       companyId,
       agentId,
       status: 'running',
-      wakeReason: 'on_demand',
+      invocationSource: 'on_demand',
       startedAt: new Date(),
     });
     
