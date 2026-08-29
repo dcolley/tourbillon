@@ -15,6 +15,7 @@ import {
   buildHeartbeatTracingOptions,
   TripwireDetector,
   tripwireDetectorRegistry,
+  runWithHeartbeatContext,
 } from '@tourbillon/mastra';
 import type { HeartbeatJobData, AgentRuntimeConfig } from '@tourbillon/shared';
 import {
@@ -66,6 +67,67 @@ const agentFollowUps = new Map<string, WakeRequest[]>();
 
 /** In-flight AbortControllers keyed by runId for operator force-kill. */
 const runAbortControllers = new Map<string, AbortController>();
+
+/**
+ * Persist context budget snapshot before streaming for diagnostics.
+ * Helps identify when tool schemas exceed reserves and cause provider rejections.
+ */
+async function persistContextBudgetSnapshot(
+  runId: string,
+  agentRecord: AgentRecord,
+  generationOptions: AgentGenerationOptions | undefined,
+  tracer: WakeTracer,
+): Promise<void> {
+  const runtimeConfig = agentRecord.runtimeConfig as AgentRuntimeConfig;
+  const kind = isHarnessAdapter(agentRecord.adapterType) ? 'harness' : 'durable';
+  
+  const { resolveContextBudget, createContextBudgetSnapshot, parseCompanySettings } = await import('@tourbillon/shared');
+  const { assembleAgentTools, assembleAgentSystemPrompt } = await import('@tourbillon/mastra');
+  
+  const budget = resolveContextBudget({
+    maxContextTokens: generationOptions?.maxContextTokens ?? runtimeConfig.model?.maxContextTokens,
+    maxOutputTokens: generationOptions?.maxOutputTokens ?? runtimeConfig.model?.maxOutputTokens,
+    kind,
+  });
+  
+  // Assemble tools and system prompt to get accurate token estimates
+  let toolSchemas: unknown[] | undefined;
+  let systemPrompt: string | undefined;
+  
+  try {
+    const company = await db.query.companies.findFirst({ 
+      where: eq(companies.id, agentRecord.companyId) 
+    });
+    const companySettings = parseCompanySettings(company?.settings);
+    
+    const tools = await assembleAgentTools(agentRecord, {
+      allowedMcpServerIds: company?.allowedMcpServerIds ?? [],
+      companySettings,
+    });
+    toolSchemas = Object.values(tools);
+    
+    systemPrompt = await assembleAgentSystemPrompt(agentRecord);
+  } catch (err) {
+    tracer.warn('failed to assemble tools/prompt for budget snapshot', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  
+  const snapshot = createContextBudgetSnapshot({
+    budget,
+    kind,
+    toolSchemas,
+    systemPrompt,
+  });
+  
+  tracer.info('context budget snapshot', snapshot);
+  
+  await db.update(heartbeatRuns)
+    .set({
+      contextSnapshot: sql`${heartbeatRuns.contextSnapshot} || ${JSON.stringify({ contextBudget: snapshot })}::jsonb`,
+    })
+    .where(eq(heartbeatRuns.id, runId));
+}
 
 interface TokenUsageResult {
   inputTokens: number;
@@ -422,100 +484,109 @@ async function runWake(
     wakeMessagePreview: wakeMessage.slice(0, 400),
   });
 
-  try {
-    if (isHarnessAdapter(agentRecord.adapterType)) {
-      const harnessResult = await runWithHarness(
-        agentRecord,
-        {
+  // Persist context budget snapshot early for diagnostics
+  await persistContextBudgetSnapshot(runId, agentRecord, generationOptions, runTracer);
+
+  // Wrap agent execution in heartbeat context so fetch wrapper can access runId via AsyncLocalStorage
+  return await runWithHeartbeatContext(
+    { runId, companyId, agentId },
+    async () => {
+      try {
+        if (isHarnessAdapter(agentRecord.adapterType)) {
+          const harnessResult = await runWithHarness(
+            agentRecord,
+            {
+              wake,
+              runId,
+              apiKey,
+              goalId: issueForTask?.goalId ?? undefined,
+              projectId: issueForTask?.projectId ?? undefined,
+            },
+            {
+              allowedMcpServerIds: company.allowedMcpServerIds ?? [],
+              companySettings: parseCompanySettings(company.settings),
+              abortSignal: abortController.signal,
+            },
+          );
+
+          await logIssueStateAfterRun(runTracer, taskId);
+          await parkNoProgressIssue(runId, runTracer, agentRecord.id, companyId, taskId);
+          await recordHarnessResult(
+            runId,
+            agentRecord,
+            companyId,
+            providerConfig.provider,
+            harnessResult,
+          );
+
+          if (
+            harnessResult.finishReason === 'timeout' ||
+            harnessResult.finishReason === 'error' ||
+            harnessResult.finishReason === 'max_steps' ||
+            harnessResult.finishReason === 'repeated_tool_loop'
+          ) {
+            const { staleSec } = resolveHeartbeatLivenessConfig();
+            let errorText: string;
+            switch (harnessResult.finishReason) {
+              case 'timeout':
+                errorText = heartbeatStaleErrorText(staleSec);
+                break;
+              case 'max_steps':
+                errorText = 'Heartbeat exceeded maxSteps limit';
+                break;
+              case 'repeated_tool_loop':
+                errorText = 'Repeated tool loop detected';
+                break;
+              default:
+                errorText = 'Harness run failed';
+                break;
+            }
+            return { runId, status: 'failed', errorText };
+          }
+
+          runTracer.info('harness wake succeeded', {
+            finishReason: harnessResult.finishReason,
+            traceId: harnessResult.traceId,
+          });
+          return { runId, status: 'succeeded' };
+        }
+
+        await runDurableAgentWake({
+          agentRecord,
           wake,
           runId,
+          runTracer,
           apiKey,
-          goalId: issueForTask?.goalId ?? undefined,
-          projectId: issueForTask?.projectId ?? undefined,
-        },
-        {
-          allowedMcpServerIds: company.allowedMcpServerIds ?? [],
-          companySettings: parseCompanySettings(company.settings),
+          wakeMessage,
           abortSignal: abortController.signal,
-        },
-      );
-
-      await logIssueStateAfterRun(runTracer, taskId);
-      await parkNoProgressIssue(runId, runTracer, agentRecord.id, companyId, taskId);
-      await recordHarnessResult(
-        runId,
-        agentRecord,
-        companyId,
-        providerConfig.provider,
-        harnessResult,
-      );
-
-      if (
-        harnessResult.finishReason === 'timeout' ||
-        harnessResult.finishReason === 'error' ||
-        harnessResult.finishReason === 'max_steps' ||
-        harnessResult.finishReason === 'repeated_tool_loop'
-      ) {
-        const { staleSec } = resolveHeartbeatLivenessConfig();
-        let errorText: string;
-        switch (harnessResult.finishReason) {
-          case 'timeout':
-            errorText = heartbeatStaleErrorText(staleSec);
-            break;
-          case 'max_steps':
-            errorText = 'Heartbeat exceeded maxSteps limit';
-            break;
-          case 'repeated_tool_loop':
-            errorText = 'Repeated tool loop detected';
-            break;
-          default:
-            errorText = 'Harness run failed';
-            break;
-        }
+          taskId,
+          issueForTask,
+          providerConfig,
+          companyId,
+          generationOptions,
+        });
+        return { runId, status: 'succeeded' };
+      } catch (err) {
+        const errorText = resolveHeartbeatFailureError(
+          err,
+          abortController.signal.aborted,
+          abortController.signal.reason,
+        );
+        runTracer.error('wake run failed', {
+          error: errorText,
+          aborted: abortController.signal.aborted,
+          durationMs: Date.now() - runStartedMs,
+        });
+        await parkNoProgressIssue(runId, runTracer, agentId, companyId, taskId);
+        await recordHeartbeatFailure(runId, errorText, companyId, agentId);
         return { runId, status: 'failed', errorText };
+      } finally {
+        if (watchdog) clearTimeout(watchdog);
+        clearInterval(pingInterval);
+        runAbortControllers.delete(runId);
       }
-
-      runTracer.info('harness wake succeeded', {
-        finishReason: harnessResult.finishReason,
-        traceId: harnessResult.traceId,
-      });
-      return { runId, status: 'succeeded' };
     }
-
-    await runDurableAgentWake({
-      agentRecord,
-      wake,
-      runId,
-      runTracer,
-      apiKey,
-      wakeMessage,
-      abortSignal: abortController.signal,
-      taskId,
-      issueForTask,
-      providerConfig,
-      companyId,
-      generationOptions,
-    });
-    return { runId, status: 'succeeded' };
-  } catch (err) {
-    const errorText = resolveHeartbeatFailureError(
-      err,
-      abortController.signal.aborted,
-      abortController.signal.reason,
-    );
-    runTracer.error('wake run failed', {
-      error: errorText,
-      aborted: abortController.signal.aborted,
-      durationMs: Date.now() - runStartedMs,
-    });
-    await parkNoProgressIssue(runId, runTracer, agentId, companyId, taskId);
-    await recordHeartbeatFailure(runId, errorText, companyId, agentId);
-    return { runId, status: 'failed', errorText };
-  } finally {
-    if (watchdog) clearTimeout(watchdog);
-    clearInterval(pingInterval);
-    runAbortControllers.delete(runId);
-  }
+  );
 }
 
 async function recordHarnessResult(
@@ -737,6 +808,48 @@ async function runDurableAgentWake(params: {
   } catch (err) {
     streamResult?.cleanup();
     streamResult = undefined;
+    
+    // Transfer error details from requestKey to runId registry
+    // Fetch wrapper stores by requestKey (before SPAN_ENDED); we re-store by runId
+    // so exporter can find using span metadata (doesn't need __firstFrameRequestKey from errorInfo)
+    if (err && typeof err === 'object') {
+      const apiError = err as Record<string, unknown>;
+      
+      // Read requestKey from raw error object (not from errorInfo - Mastra doesn't copy it)
+      const requestKey = '__firstFrameRequestKey' in apiError 
+        ? (typeof apiError.__firstFrameRequestKey === 'string' ? apiError.__firstFrameRequestKey : undefined)
+        : undefined;
+      
+      if (requestKey) {
+        const { consumeApiErrorDetailsByRequestKey, storeApiErrorDetails } = require('@tourbillon/mastra') as typeof import('@tourbillon/mastra');
+        
+        // Look up by requestKey and re-store by runId
+        const details = consumeApiErrorDetailsByRequestKey(requestKey);
+        if (details) {
+          storeApiErrorDetails(runId, {
+            statusCode: details.statusCode,
+            url: details.url,
+            responseBody: details.responseBody,
+            data: details.data,
+            firstFrameRequestKey: requestKey,
+          });
+        }
+      } else if (apiError.statusCode !== undefined || apiError.url !== undefined || apiError.responseBody !== undefined) {
+        // Fallback: store directly from error object if no requestKey
+        const { storeApiErrorDetails } = require('@tourbillon/mastra') as typeof import('@tourbillon/mastra');
+        
+        storeApiErrorDetails(runId, {
+          statusCode: typeof apiError.statusCode === 'number' ? apiError.statusCode : undefined,
+          url: typeof apiError.url === 'string' ? apiError.url : undefined,
+          responseBody: typeof apiError.responseBody === 'string' 
+            ? apiError.responseBody.slice(0, 2000) 
+            : undefined,
+          data: apiError.data,
+          firstFrameRequestKey: undefined,
+        });
+      }
+    }
+    
     if (abortSignal.aborted || isAbortLikeError(err)) {
       throw heartbeatAbortedError();
     }

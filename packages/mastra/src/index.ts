@@ -1,5 +1,6 @@
 export * from './memory-keys';
 export * from './heartbeat-memory';
+export * from './heartbeat-context';
 export * from './provider';
 export * from './model-settings';
 export * from './agent-factory';
@@ -19,6 +20,7 @@ export * from './heartbeat-processors';
 export * from './tools/skill-tools';
 export * from './observability/harness-event-writer';
 export * from './observability/heartbeat-tracing-options';
+export * from './observability/error-details-registry';
 export { TripwireDetector, tripwireDetectorRegistry } from './observability/tripwire-detector';
 export {
   buildMCPTools,
@@ -28,3 +30,12 @@ export {
   type ListMcpToolsForAgentOptions,
   type BuildMCPToolsOptions,
 } from './tools/mcp-tools';
+export {
+  getRecentFirstFrameCapture,
+  getFirstFrameCapture,
+  extractFirstFrameRequestKey,
+  formatFirstFrameCapture,
+  clearAllFirstFrameCaptures,
+  type FirstFrameKind,
+  type FirstFrameCapture,
+} from './first-frame-capture';

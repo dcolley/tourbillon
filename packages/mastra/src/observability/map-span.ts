@@ -140,6 +140,31 @@ function tokenUsage(span: AnyExportedSpan): { input?: number; output?: number } 
   };
 }
 
+/**
+ * Enrich errorInfo with full AI_APICallError fields for diagnostics.
+ * Ensures statusCode, url, responseBody, and data are preserved in the payload.
+ * Note: errorInfo is enriched by the exporter before this function is called.
+ */
+function enrichErrorInfo(errorInfo: unknown, context: ReturnType<typeof extractContext>): unknown {
+  if (!errorInfo || typeof errorInfo !== 'object') return errorInfo;
+  
+  const err = errorInfo as Record<string, unknown>;
+  
+  // errorInfo already has the enriched fields from the exporter
+  // We just need to cap responseBody if present
+  const enriched: Record<string, unknown> = { ...err };
+
+  // Cap responseBody to prevent huge payloads
+  if (typeof enriched.responseBody === 'string') {
+    const body = enriched.responseBody as string;
+    if (body.length > 2000) {
+      enriched.responseBody = `${body.slice(0, 2000)}… [truncated, full length: ${body.length}]`;
+    }
+  }
+  
+  return enriched;
+}
+
 export function mapExportedSpanToEvent(span: AnyExportedSpan): NewAgentObservabilityEvent | null {
   const context = extractContext(span);
   if (!context.companyId) return null;
@@ -195,7 +220,7 @@ export function mapExportedSpanToEvent(span: AnyExportedSpan): NewAgentObservabi
         output: span.output,
         attributes: span.attributes,
         metadata: span.metadata,
-        errorInfo: span.errorInfo,
+        errorInfo: enrichErrorInfo(span.errorInfo, context),
         tags: span.tags,
         entityType: span.entityType,
         entityId: span.entityId,
