@@ -77,10 +77,21 @@ describe('Mobile API Routes - Integration', () => {
         };
       }
       
+      if (id === 'drizzle-orm' || id.endsWith('drizzle-orm')) {
+        return {
+          ...originalRequire.apply(this, arguments as any),
+          eq: (field: any, value: any) => {
+            (global as any).__mockCompanyId = value;
+            return { _mock: 'eq', field, value };
+          },
+        };
+      }
+      
       if (id === '@tourbillon/db' || id.endsWith('@tourbillon/db')) {
-        const mockAgents = [
+        const allMockAgents = [
           { id: 'agent-a1', name: 'Alice', urlKey: 'alice', companyId: 'company-a', modelId: 'model-1', adapterType: 'lmstudio' },
           { id: 'agent-a2', name: 'Bob', urlKey: 'bob', companyId: 'company-a', modelId: 'model-1', adapterType: 'lmstudio' },
+          { id: 'agent-b1', name: 'Charlie', urlKey: 'charlie', companyId: 'company-b', modelId: 'model-1', adapterType: 'lmstudio' },
         ];
         
         return {
@@ -88,8 +99,15 @@ describe('Mobile API Routes - Integration', () => {
             select: () => ({
               from: () => ({
                 leftJoin: () => ({
-                  where: () => ({
-                    orderBy: () => Promise.resolve(mockAgents),
+                  where: (condition: any) => ({
+                    orderBy: () => {
+                      const capturedCompanyId = (global as any).__mockCompanyId;
+                      if (capturedCompanyId) {
+                        const filtered = allMockAgents.filter(a => a.companyId === capturedCompanyId);
+                        return Promise.resolve(filtered);
+                      }
+                      return Promise.resolve(allMockAgents);
+                    },
                   }),
                 }),
               }),
@@ -97,7 +115,6 @@ describe('Mobile API Routes - Integration', () => {
           },
           agents: {},
           llmProviders: {},
-          eq: () => {},
         };
       }
       
@@ -183,6 +200,7 @@ describe('Mobile API Routes - Integration', () => {
       const response = await getAgents(req);
       const data = await response.json();
       
+      assert.strictEqual(response.status, 200);
       assert.ok(data.agents && Array.isArray(data.agents));
       assert.ok(data.agents.every((agent: any) => agent.urlKey === 'alice' || agent.urlKey === 'bob'));
       assert.ok(!data.agents.some((agent: any) => agent.urlKey === 'charlie'));
