@@ -598,24 +598,29 @@ async function runWake(
  * 
  * This function:
  * 1. Reads timeout.heartbeatSec from runtimeConfig (default 300)
- * 2. Arms wall-clock timer that aborts with timeout error
- * 3. Races stream with abort signal and tripwire
- * 4. Clears timer in finally
+ * 2. Registers abortController in runAbortControllers map (for forceKillHeartbeat)
+ * 3. Arms wall-clock timer that aborts with timeout error
+ * 4. Races stream with abort signal and tripwire
+ * 5. Clears timer and unregisters controller in finally
  * 
  * Exported for testing. Tests MUST call this function to hang production timeout path.
  * Deleting the timer or default 300 from this function WILL fail tests.
  */
 export async function enforceHeartbeatWallClock<T extends { runId: string; output: { text: Promise<string> }; cleanup: () => void }>(params: {
+  runId: string;
   runtimeConfig: AgentRuntimeConfig;
   abortController: AbortController;
   streamFn: () => Promise<T>;
   tripwireDetector: TripwireDetector;
   onStreamResult?: (stream: T) => void;
 }): Promise<{ runId: string; timeoutSec: number }> {
-  const { runtimeConfig, abortController, streamFn, tripwireDetector, onStreamResult } = params;
+  const { runId, runtimeConfig, abortController, streamFn, tripwireDetector, onStreamResult } = params;
   
   // Read timeout from agent config (default 300s if unset)
   const timeoutSec = runtimeConfig.timeout?.heartbeatSec ?? 300;
+  
+  // Register for operator force-kill (same map forceKillHeartbeat reads)
+  runAbortControllers.set(runId, abortController);
   
   // Arm wall-clock timer - aborts with timeout error when time expires
   let wallClockTimer: ReturnType<typeof setTimeout> | undefined;
@@ -635,6 +640,7 @@ export async function enforceHeartbeatWallClock<T extends { runId: string; outpu
     return { ...result, timeoutSec };
   } finally {
     if (wallClockTimer) clearTimeout(wallClockTimer);
+    runAbortControllers.delete(runId);
   }
 }
 
@@ -884,6 +890,7 @@ export async function runDurableAgentWake(params: {
   try {
     // Call production wall-clock enforcement (reads timeout.heartbeatSec ?? 300)
     const result = await enforceHeartbeatWallClock({
+      runId,
       runtimeConfig,
       abortController,
       streamFn: async () => {

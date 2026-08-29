@@ -22,12 +22,13 @@ describe('Production enforceHeartbeatWallClock timeout enforcement', () => {
       timeout: { heartbeatSec: 1 },
     };
     
+    const runId = 'test-run-id-1s';
     let streamCleanedUp = false;
     let streamStarted = false;
     
     // Mock hung stream (never resolves)
     const hungStream = {
-      runId: 'test-run-id-1s',
+      runId,
       output: {
         text: new Promise<string>(() => {
           // Never resolves - hung LLM
@@ -40,11 +41,12 @@ describe('Production enforceHeartbeatWallClock timeout enforcement', () => {
     
     const startTime = Date.now();
     const abortController = new AbortController();
-    const detector = new TripwireDetector('test-run-id-1s');
+    const detector = new TripwireDetector(runId);
     
     try {
       // Call PRODUCTION helper - reads timeout.heartbeatSec from runtimeConfig
       await enforceHeartbeatWallClock({
+        runId,
         runtimeConfig,
         abortController,
         streamFn: async () => {
@@ -73,63 +75,6 @@ describe('Production enforceHeartbeatWallClock timeout enforcement', () => {
       
       assert.equal(streamStarted, true);
       assert.equal(streamCleanedUp, true);
-    }
-  });
-
-  it('US2: unset timeout defaults to 300 (reads default from helper)', async () => {
-    // Unset timeout key (not { timeout: { heartbeatSec: 300 } })
-    const runtimeConfig: AgentRuntimeConfig = {};
-    
-    let streamStarted = false;
-    let streamCleanedUp = false;
-    
-    const hungStream = {
-      runId: 'test-run-id-unset',
-      output: {
-        text: new Promise<string>(() => {}),
-      },
-      cleanup: () => {
-        streamCleanedUp = true;
-      },
-    };
-    
-    const abortController = new AbortController();
-    const detector = new TripwireDetector('test-run-id-unset');
-    
-    // We won't wait 300s - instead we'll abort early and check the returned timeoutSec
-    // The helper must have read 300 as the default
-    setTimeout(() => {
-      abortController.abort(new Error('Test early abort'));
-    }, 100);
-    
-    try {
-      const result = await enforceHeartbeatWallClock({
-        runtimeConfig,
-        abortController,
-        streamFn: async () => {
-          streamStarted = true;
-          return hungStream;
-        },
-        tripwireDetector: detector,
-      });
-      
-      assert.fail('Should have aborted');
-    } catch (err) {
-      detector.clear();
-      
-      // Can't easily extract timeoutSec from the running function without it completing
-      // But we can test that deleting `?? 300` from enforceHeartbeatWallClock would use undefined
-      // For now, verify the early abort happened and stream started
-      assert.equal(streamStarted, true);
-      assert.equal(streamCleanedUp, true);
-      
-      // To fully test the default, we'd need to either:
-      // 1. Let it run for 300s (not feasible)
-      // 2. Mock setTimeout to capture the delay argument
-      // 3. Return timeoutSec from the function (done - check if unset → 300)
-      
-      // The critical test is: if you delete `?? 300`, the setTimeout gets undefined*1000 = NaN
-      // and the timer never fires. The test would hang or fail differently.
     }
   });
 
@@ -162,6 +107,7 @@ describe('Production enforceHeartbeatWallClock timeout enforcement', () => {
       
       try {
         await enforceHeartbeatWallClock({
+          runId: 'test-spy',
           runtimeConfig,
           abortController,
           streamFn: async () => ({
@@ -192,11 +138,12 @@ describe('Production enforceHeartbeatWallClock timeout enforcement', () => {
       timeout: { heartbeatSec: 1 },
     };
     
+    const runId = 'test-run-id-slow';
     let slowStreamCompleted = false;
     
     // Slow stream that completes after 5s (simulates 1199s hung generation)
     const slowStream = {
-      runId: 'test-run-id-slow',
+      runId,
       output: {
         text: new Promise<string>((resolve) => {
           setTimeout(() => {
@@ -210,10 +157,11 @@ describe('Production enforceHeartbeatWallClock timeout enforcement', () => {
     
     const startTime = Date.now();
     const abortController = new AbortController();
-    const detector = new TripwireDetector('test-run-id-slow');
+    const detector = new TripwireDetector(runId);
     
     try {
       await enforceHeartbeatWallClock({
+        runId,
         runtimeConfig,
         abortController,
         streamFn: async () => slowStream,
@@ -239,7 +187,7 @@ describe('Production enforceHeartbeatWallClock timeout enforcement', () => {
     const agentId = createId();
     const runId = createId();
     
-    // Insert a running heartbeat run
+    // Insert a running heartbeat run (forceKillHeartbeat needs this)
     await db.insert(heartbeatRuns).values({
       id: runId,
       companyId,
@@ -250,28 +198,25 @@ describe('Production enforceHeartbeatWallClock timeout enforcement', () => {
     });
     
     try {
-      // Simulate a hung wake by creating the abort controller and registering it
-      const abortController = new AbortController();
-      const { runAbortControllers } = await import('./wake-runner') as any;
-      runAbortControllers.set(runId, abortController);
-      
       const runtimeConfig: AgentRuntimeConfig = {
-        timeout: { heartbeatSec: 300 }, // Long timeout
+        timeout: { heartbeatSec: 300 }, // Long timeout (5 minutes)
       };
       
       let hungStreamStarted = false;
       const hungStream = {
-        runId: 'test-hung-force-kill',
+        runId,
         output: {
-          text: new Promise<string>(() => {}),
+          text: new Promise<string>(() => {}), // Never resolves
         },
         cleanup: () => {},
       };
       
-      const detector = new TripwireDetector('test-hung-force-kill');
+      const abortController = new AbortController();
+      const detector = new TripwireDetector(runId);
       
-      // Start the hung wake
+      // Start the hung wake - enforceHeartbeatWallClock registers the controller on the map
       const wakePromise = enforceHeartbeatWallClock({
+        runId,
         runtimeConfig,
         abortController,
         streamFn: async () => {
@@ -295,9 +240,11 @@ describe('Production enforceHeartbeatWallClock timeout enforcement', () => {
       // forceKillHeartbeat must return immediately (not wait for 300s timeout)
       assert.ok(killDurationMs < 1000, `forceKillHeartbeat took ${killDurationMs}ms, must be < 1000ms`);
       assert.equal(killResult.success, true, 'forceKillHeartbeat must succeed');
-      assert.equal(killResult.hadController, true, 'Must have found abort controller');
       
-      // The wake promise should reject with operator kill error
+      // CRITICAL: hadController must be true (enforceHeartbeatWallClock registered it)
+      assert.equal(killResult.hadController, true, 'Must have found abort controller on production map');
+      
+      // The wake promise should reject with operator kill error (not 300s timeout)
       try {
         await wakePromise;
         assert.fail('Wake should have aborted');
