@@ -15,6 +15,13 @@ function span(partial: Partial<AnyExportedSpan>): AnyExportedSpan {
   } as AnyExportedSpan;
 }
 
+function mockRequestContext(values: Record<string, unknown>): { get: (key: string) => unknown; set: (key: string, value: unknown) => void } {
+  return {
+    get: (key: string) => values[key],
+    set: (key: string, value: unknown) => { values[key] = value; },
+  };
+}
+
 describe('mapExportedSpanToEvent', () => {
   it('preserves AI_APICallError fields in payload.errorInfo', () => {
     const event = mapExportedSpanToEvent(
@@ -24,7 +31,7 @@ describe('mapExportedSpanToEvent', () => {
           name: 'AI_APICallError',
           stack: 'Error: ...',
         } as any,
-        requestContext: {
+        requestContext: mockRequestContext({
           companyId: 'company-1',
           __errorStatusCode: 400,
           __errorUrl: 'http://192.168.10.199:1234/v1/chat/completions',
@@ -35,7 +42,7 @@ describe('mapExportedSpanToEvent', () => {
               type: 'invalid_request_error',
             },
           },
-        },
+        }),
       })
     );
 
@@ -61,11 +68,11 @@ describe('mapExportedSpanToEvent', () => {
         errorInfo: {
           message: 'Error',
         } as any,
-        requestContext: {
+        requestContext: mockRequestContext({
           companyId: 'company-1',
           __errorStatusCode: 500,
           __errorResponseBody: longBody,
-        },
+        }),
       })
     );
 
@@ -87,7 +94,7 @@ describe('mapExportedSpanToEvent', () => {
           name: 'Error',
           stack: 'Error: ...',
         } as any,
-        requestContext: { companyId: 'company-1' },
+        requestContext: mockRequestContext({ companyId: 'company-1' }),
       })
     );
 

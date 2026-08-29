@@ -806,23 +806,23 @@ async function runDurableAgentWake(params: {
     if (err && typeof err === 'object') {
       const apiError = err as Record<string, unknown>;
       
-      // Attach AI_APICallError fields to runtime context so they reach observability
-      if (apiError.statusCode !== undefined || apiError.url !== undefined) {
-        Object.assign(runtimeContext, {
-          __errorStatusCode: apiError.statusCode,
-          __errorUrl: apiError.url,
-          __errorResponseBody: typeof apiError.responseBody === 'string' 
-            ? apiError.responseBody.slice(0, 2000) 
-            : undefined,
-          __errorData: apiError.data,
-        });
+      // Store AI_APICallError fields in RequestContext using set() so they reach observability
+      if (apiError.statusCode !== undefined) {
+        runtimeContext.set('__errorStatusCode', apiError.statusCode);
+      }
+      if (apiError.url !== undefined) {
+        runtimeContext.set('__errorUrl', apiError.url);
+      }
+      if (typeof apiError.responseBody === 'string') {
+        runtimeContext.set('__errorResponseBody', apiError.responseBody.slice(0, 2000));
+      }
+      if (apiError.data !== undefined) {
+        runtimeContext.set('__errorData', apiError.data);
       }
       
       // Also store the first frame request key if present
       if ('__firstFrameRequestKey' in apiError) {
-        Object.assign(runtimeContext, {
-          __firstFrameRequestKey: apiError.__firstFrameRequestKey,
-        });
+        runtimeContext.set('__firstFrameRequestKey', apiError.__firstFrameRequestKey);
       }
     }
     

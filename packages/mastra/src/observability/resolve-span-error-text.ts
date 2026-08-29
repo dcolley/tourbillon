@@ -134,12 +134,28 @@ export function resolveSpanErrorText(span: AnyExportedSpan): string | undefined 
 
   if (!errorInfo) return undefined;
   
-  // Extract request key from span context
-  const requestKey = extractRequestKey(span);
+  // Extract AI_APICallError fields from requestContext
+  const ctx = span.requestContext;
+  const contextStatusCode = extractContextNumber(ctx, '__errorStatusCode');
+  const contextUrl = extractContextString(ctx, '__errorUrl');
+  const contextResponseBody = extractContextString(ctx, '__errorResponseBody');
+  const contextData = extractContextRaw(ctx, '__errorData');
+  const requestKey = extractContextString(ctx, '__firstFrameRequestKey');
 
-  // Try AI_APICallError enriched extraction first
-  if (errorInfo.statusCode !== undefined || errorInfo.url !== undefined || errorInfo.responseBody !== undefined) {
-    const enriched = buildApiCallErrorText(errorInfo as Record<string, unknown>);
+  // Try AI_APICallError enriched extraction first (context overrides errorInfo)
+  if (contextStatusCode !== undefined || contextUrl !== undefined || contextResponseBody !== undefined ||
+      errorInfo.statusCode !== undefined || errorInfo.url !== undefined || errorInfo.responseBody !== undefined) {
+    
+    // Build enriched error object with context values taking precedence
+    const enrichedError: Record<string, unknown> = {
+      ...errorInfo,
+      statusCode: contextStatusCode ?? errorInfo.statusCode,
+      url: contextUrl ?? errorInfo.url,
+      responseBody: contextResponseBody ?? errorInfo.responseBody,
+      data: contextData ?? errorInfo.data,
+    };
+    
+    const enriched = buildApiCallErrorText(enrichedError);
     if (enriched) {
       // Try to append first frame capture if available
       const firstFrame = tryGetFirstFrameCapture(requestKey);
@@ -177,15 +193,53 @@ export function resolveSpanErrorText(span: AnyExportedSpan): string | undefined 
 }
 
 /**
- * Extract request key from span's requestContext.
+ * Extract string value from requestContext.
+ */
+function extractContextString(ctx: unknown, key: string): string | undefined {
+  if (!ctx || typeof ctx !== 'object') return undefined;
+  
+  if ('get' in ctx && typeof (ctx as { get: unknown }).get === 'function') {
+    const value = (ctx as { get: (k: string) => unknown }).get(key);
+    return typeof value === 'string' ? value : undefined;
+  }
+  
+  const value = (ctx as Record<string, unknown>)[key];
+  return typeof value === 'string' ? value : undefined;
+}
+
+/**
+ * Extract number value from requestContext.
+ */
+function extractContextNumber(ctx: unknown, key: string): number | undefined {
+  if (!ctx || typeof ctx !== 'object') return undefined;
+  
+  if ('get' in ctx && typeof (ctx as { get: unknown }).get === 'function') {
+    const value = (ctx as { get: (k: string) => unknown }).get(key);
+    return typeof value === 'number' ? value : undefined;
+  }
+  
+  const value = (ctx as Record<string, unknown>)[key];
+  return typeof value === 'number' ? value : undefined;
+}
+
+/**
+ * Extract raw value from requestContext.
+ */
+function extractContextRaw(ctx: unknown, key: string): unknown {
+  if (!ctx || typeof ctx !== 'object') return undefined;
+  
+  if ('get' in ctx && typeof (ctx as { get: unknown }).get === 'function') {
+    return (ctx as { get: (k: string) => unknown }).get(key);
+  }
+  
+  return (ctx as Record<string, unknown>)[key];
+}
+
+/**
+ * Extract request key from span's requestContext (deprecated in favor of extractContextString).
  */
 function extractRequestKey(span: AnyExportedSpan): string | undefined {
-  const ctx = span.requestContext;
-  if (ctx && typeof ctx === 'object' && '__firstFrameRequestKey' in ctx) {
-    const key = (ctx as { __firstFrameRequestKey?: unknown }).__firstFrameRequestKey;
-    return typeof key === 'string' ? key : undefined;
-  }
-  return undefined;
+  return extractContextString(span.requestContext, '__firstFrameRequestKey');
 }
 
 /**

@@ -76,6 +76,21 @@ function readContextValue(ctx: unknown, key: string): string | undefined {
   return undefined;
 }
 
+function readContextRawValue(ctx: unknown, key: string): unknown {
+  if (
+    ctx &&
+    typeof ctx === 'object' &&
+    'get' in ctx &&
+    typeof (ctx as { get: unknown }).get === 'function'
+  ) {
+    return (ctx as { get: (k: string) => unknown }).get(key);
+  }
+  if (ctx && typeof ctx === 'object') {
+    return (ctx as Record<string, unknown>)[key];
+  }
+  return undefined;
+}
+
 function extractContext(span: AnyExportedSpan): {
   companyId?: string;
   heartbeatRunId?: string;
@@ -110,15 +125,13 @@ function extractContext(span: AnyExportedSpan): {
       asString(meta.taskId),
     projectId: readContextValue(ctx, 'projectId') ?? asString(meta.projectId),
     goalId: readContextValue(ctx, 'goalId') ?? asString(meta.goalId),
-    // Extract AI_APICallError fields from runtime context
-    errorStatusCode: typeof ctx === 'object' && ctx && '__errorStatusCode' in ctx 
-      ? (ctx as { __errorStatusCode?: number }).__errorStatusCode 
+    // Extract AI_APICallError fields from runtime context via get()
+    errorStatusCode: typeof readContextRawValue(ctx, '__errorStatusCode') === 'number' 
+      ? readContextRawValue(ctx, '__errorStatusCode') as number
       : undefined,
     errorUrl: readContextValue(ctx, '__errorUrl'),
     errorResponseBody: readContextValue(ctx, '__errorResponseBody'),
-    errorData: ctx && typeof ctx === 'object' && '__errorData' in ctx 
-      ? (ctx as { __errorData?: unknown }).__errorData 
-      : undefined,
+    errorData: readContextRawValue(ctx, '__errorData'),
     firstFrameRequestKey: readContextValue(ctx, '__firstFrameRequestKey'),
   };
 }
