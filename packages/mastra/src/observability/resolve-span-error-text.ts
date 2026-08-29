@@ -125,6 +125,7 @@ function buildApiCallErrorText(errorInfo: Record<string, unknown>): string | und
  * Build a human-readable error string from a Mastra exported span.
  * Mastra often sets errorInfo without message when runs abort with finishReason "terminated".
  * For AI_APICallError, includes statusCode, URL host+path, and capped responseBody.
+ * When available, includes first stream frame kind for debugging SDK vs provider issues.
  */
 export function resolveSpanErrorText(span: AnyExportedSpan): string | undefined {
   const errorInfo = span.errorInfo as
@@ -136,12 +137,28 @@ export function resolveSpanErrorText(span: AnyExportedSpan): string | undefined 
   // Try AI_APICallError enriched extraction first
   if (errorInfo.statusCode !== undefined || errorInfo.url !== undefined || errorInfo.responseBody !== undefined) {
     const enriched = buildApiCallErrorText(errorInfo as Record<string, unknown>);
-    if (enriched) return enriched;
+    if (enriched) {
+      // Try to append first frame capture if available
+      const firstFrame = tryGetFirstFrameCapture();
+      if (firstFrame) {
+        return `${enriched} | ${firstFrame}`;
+      }
+      return enriched;
+    }
   }
 
   const message = asNonEmptyString(errorInfo.message);
   if (message === 'terminated') return TERMINATED_MESSAGE;
-  if (message) return message;
+  if (message) {
+    // Try to append first frame capture if this looks like a stream failure
+    if (message.includes('stream') || message.includes('output')) {
+      const firstFrame = tryGetFirstFrameCapture();
+      if (firstFrame) {
+        return `${message} | ${firstFrame}`;
+      }
+    }
+    return message;
+  }
 
   const name = asNonEmptyString(errorInfo.name);
   if (name) return name;
@@ -154,4 +171,20 @@ export function resolveSpanErrorText(span: AnyExportedSpan): string | undefined 
   if (finishReason) return messageFromFinishReason(finishReason);
 
   return 'Unknown error (no message from runtime)';
+}
+
+/**
+ * Try to get first frame capture from the diagnostics module.
+ * Returns undefined if the module is not available or no capture exists.
+ */
+function tryGetFirstFrameCapture(): string | undefined {
+  try {
+    // Dynamic import to avoid circular dependencies
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getRecentFirstFrameCapture, formatFirstFrameCapture } = require('../first-frame-capture') as typeof import('../first-frame-capture');
+    const capture = getRecentFirstFrameCapture();
+    return capture ? formatFirstFrameCapture(capture) : undefined;
+  } catch {
+    return undefined;
+  }
 }

@@ -125,10 +125,41 @@ export function resolveHeartbeatFailureError(
   // Try to extract enriched AI_APICallError details
   const apiErrorText = extractApiCallErrorText(err);
   if (apiErrorText) {
+    // Try to append first frame capture if available
+    const firstFrame = tryGetFirstFrameCapture();
+    if (firstFrame) {
+      return `${apiErrorText} | ${firstFrame}`;
+    }
     return apiErrorText;
   }
   
-  return err instanceof Error ? err.message : String(err);
+  const baseMessage = err instanceof Error ? err.message : String(err);
+  
+  // Try to append first frame capture if this looks like a stream failure
+  if (baseMessage.includes('stream') || baseMessage.includes('output')) {
+    const firstFrame = tryGetFirstFrameCapture();
+    if (firstFrame) {
+      return `${baseMessage} | ${firstFrame}`;
+    }
+  }
+  
+  return baseMessage;
+}
+
+/**
+ * Try to get first frame capture from the diagnostics module.
+ * Returns undefined if the module is not available or no capture exists.
+ */
+function tryGetFirstFrameCapture(): string | undefined {
+  try {
+    // Dynamic import to avoid circular dependencies
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getRecentFirstFrameCapture, formatFirstFrameCapture } = require('@tourbillon/mastra/first-frame-capture') as typeof import('@tourbillon/mastra/first-frame-capture');
+    const capture = getRecentFirstFrameCapture();
+    return capture ? formatFirstFrameCapture(capture) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function abortRejectedPromise(signal: AbortSignal): Promise<never> {

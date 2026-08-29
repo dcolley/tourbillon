@@ -28,3 +28,10 @@ export {
   type ListMcpToolsForAgentOptions,
   type BuildMCPToolsOptions,
 } from './tools/mcp-tools';
+export {
+  getRecentFirstFrameCapture,
+  formatFirstFrameCapture,
+  clearAllFirstFrameCaptures,
+  type FirstFrameKind,
+  type FirstFrameCapture,
+} from './first-frame-capture';
