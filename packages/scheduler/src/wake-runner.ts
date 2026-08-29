@@ -658,7 +658,7 @@ async function recordHarnessResult(
   });
 }
 
-async function runDurableAgentWake(params: {
+export async function runDurableAgentWake(params: {
   agentRecord: AgentRecord;
   wake: WakeRequest;
   runId: string;
