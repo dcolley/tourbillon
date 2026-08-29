@@ -37,7 +37,14 @@ export async function getCompanyById(companyId: string): Promise<Company | null>
   return company;
 }
 
-export async function getActiveCompanyOrNull(): Promise<Company | null> {
+export async function getActiveCompanyOrNull(
+  companyIdOverride?: string | null
+): Promise<Company | null> {
+  // Allow header-based company override for mobile/API clients
+  if (companyIdOverride) {
+    return getCompanyById(companyIdOverride);
+  }
+  
   const cookieStore = await cookies();
   const companyId = cookieStore.get(ACTIVE_COMPANY_COOKIE)?.value;
   if (!companyId) return null;

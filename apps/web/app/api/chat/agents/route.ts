@@ -1,12 +1,23 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { db, agents, llmProviders } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
-import { getActiveCompany } from '@/lib/company';
+import { getActiveCompanyOrNull } from '@/lib/company';
+import { verifyMobileToken } from '@/lib/mobile-auth';
 
 /** List company agents available for chat agent-switching. */
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
-    const company = await getActiveCompany();
+    // Support mobile token-based auth
+    const mobileCompanyId = await verifyMobileToken(req);
+    const company = await getActiveCompanyOrNull(mobileCompanyId);
+    
+    if (!company) {
+      return NextResponse.json(
+        { error: 'No active company selected' },
+        { status: 401 }
+      );
+    }
+    
     const rows = await db
       .select({
         id: agents.id,

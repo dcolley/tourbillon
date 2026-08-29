@@ -63,13 +63,18 @@ pnpm dev
 pnpm workers:dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000).
+Open [http://localhost:3002](http://localhost:3002).
+
+### Mobile Companion App
+
+See [`apps/mobile/README.md`](apps/mobile/README.md) for instructions on running the iOS/Android companion app.
 
 ## Project Structure
 
 ```
 apps/
   web/                  Next.js 14 App Router + shadcn/ui
+  mobile/               Expo React Native companion app (iOS/Android)
 packages/
   db/                   Drizzle ORM schema + migrations
   mastra/               Mastra agents, workflows, tools

@@ -1,0 +1,29 @@
+{
+  "name": "mobile",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "dependencies": {
+    "@react-navigation/native": "^7.0.13",
+    "@react-navigation/native-stack": "^7.2.3",
+    "expo": "~57.0.18",
+    "expo-secure-store": "~57.0.2",
+    "expo-status-bar": "~57.0.1",
+    "react": "19.2.3",
+    "react-native": "0.86.3",
+    "react-native-safe-area-context": "~5.9.1",
+    "react-native-screens": "~4.27.0",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "typescript": "catalog:"
+  },
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web",
+    "type-check": "tsc --noEmit"
+  },
+  "private": true
+}

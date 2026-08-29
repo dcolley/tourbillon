@@ -13,7 +13,7 @@ import {
 } from '@tourbillon/db';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import type { IssuePriority, IssueStatus } from '@tourbillon/db';
-import { assertCompanyAccess, getActiveCompany } from './company';
+import { assertCompanyAccess, getActiveCompany, getCompanyById } from './company';
 import { validateGoalId } from './goals';
 import { validateProjectId } from './projects';
 import {
@@ -474,10 +474,17 @@ export async function listIssues(opts: {
   pageSize?: number;
   /** When set, only issues assigned to this user id (e.g. board). */
   assigneeUserId?: string;
+  /** Company ID override for mobile/API auth. */
+  companyIdOverride?: string;
 }): Promise<IssueListResult> {
   const page = Math.max(0, opts.page ?? 0);
   const pageSize = opts.pageSize ?? ISSUE_LIST_PAGE_SIZE;
-  const company = await getActiveCompany();
+  const company = opts.companyIdOverride
+    ? await getCompanyById(opts.companyIdOverride)
+    : await getActiveCompany();
+  if (!company) {
+    throw new IssueValidationError('Company not found or not selected');
+  }
   const statusList = opts.statuses as IssueStatus[];
 
   const where = and(
