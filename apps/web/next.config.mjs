@@ -8,6 +8,7 @@ loadDotenv({ path: path.resolve(__dirname, '../../.env') });
 
 const allowedDevOrigins = [
   '100.118.152.28',
+  'tourbillon-test.metaspan.com',
   ...(process.env.ALLOWED_DEV_ORIGINS
     ? process.env.ALLOWED_DEV_ORIGINS.split(',')
         .map((origin) => origin.trim())
