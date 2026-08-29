@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { randomUUID } from 'node:crypto';
 import { enforceHeartbeatWallClock, forceKillHeartbeat } from './wake-runner';
 import { TripwireDetector } from '@tourbillon/mastra';
 import type { AgentRuntimeConfig } from '@tourbillon/shared';
 import { db, heartbeatRuns, eq } from '@tourbillon/db';
-import { createId } from '@tourbillon/db';
 
 /**
  * Tests call PRODUCTION enforceHeartbeatWallClock from wake-runner.ts.
@@ -183,9 +183,9 @@ describe('Production enforceHeartbeatWallClock timeout enforcement', () => {
 
   it('US6: forceKillHeartbeat aborts before wall-clock timeout', async () => {
     // This tests the PRODUCTION forceKillHeartbeat function
-    const companyId = createId();
-    const agentId = createId();
-    const runId = createId();
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const runId = randomUUID();
     
     // Insert a running heartbeat run (forceKillHeartbeat needs this)
     await db.insert(heartbeatRuns).values({
