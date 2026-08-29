@@ -27,6 +27,8 @@ export async function GET(req: NextRequest) {
         adapterType: agents.adapterType,
         providerName: llmProviders.name,
         providerType: llmProviders.type,
+        status: agents.status,
+        runtimeConfig: agents.runtimeConfig,
       })
       .from(agents)
       .leftJoin(llmProviders, eq(agents.providerId, llmProviders.id))
@@ -34,14 +36,26 @@ export async function GET(req: NextRequest) {
       .orderBy(agents.name);
 
     return NextResponse.json({
-      agents: rows.map((a) => ({
-        id: a.id,
-        name: a.name,
-        urlKey: a.urlKey,
-        modelId: a.modelId ?? null,
-        providerName: a.providerName ?? a.adapterType ?? null,
-        providerType: a.providerType ?? null,
-      })),
+      agents: rows.map((a) => {
+        const config = a.runtimeConfig as any;
+        const heartbeat = config?.heartbeat ?? {};
+        const observationalMemory = config?.observationalMemory ?? {};
+        
+        return {
+          id: a.id,
+          name: a.name,
+          urlKey: a.urlKey,
+          modelId: a.modelId ?? null,
+          providerName: a.providerName ?? a.adapterType ?? null,
+          providerType: a.providerType ?? null,
+          active: a.status === 'active',
+          heartbeatEnabled: heartbeat.enabled ?? false,
+          heartbeatIntervalSec: heartbeat.intervalSec ?? null,
+          heartbeatCronExpression: heartbeat.cronExpression ?? null,
+          heartbeatScheduleMode: heartbeat.scheduleMode ?? null,
+          observationalMemoryMode: observationalMemory.mode ?? 'inherit',
+        };
+      }),
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Failed to list agents';
