@@ -131,6 +131,44 @@ function estimateTokens(text: string): number {
 }
 
 /**
+ * Extract JSON schemas from Mastra tool objects for token estimation.
+ * Mastra tools created with createTool have internal structure; we need the
+ * JSON Schema representation that the provider actually sees.
+ */
+function extractToolJsonSchemas(tools: unknown[]): unknown[] {
+  const schemas: unknown[] = [];
+  
+  for (const tool of tools) {
+    if (!tool || typeof tool !== 'object') continue;
+    
+    const toolObj = tool as Record<string, unknown>;
+    
+    // Try to extract schema from various possible locations
+    // Mastra tools have different internal structures depending on version
+    if ('schema' in toolObj && toolObj.schema) {
+      schemas.push(toolObj.schema);
+    } else if ('inputSchema' in toolObj && toolObj.inputSchema) {
+      schemas.push(toolObj.inputSchema);
+    } else if ('parameters' in toolObj && toolObj.parameters) {
+      // Already in JSON Schema format
+      schemas.push({
+        name: toolObj.name,
+        description: toolObj.description,
+        parameters: toolObj.parameters,
+      });
+    } else {
+      // Fallback: try to create a minimal schema representation
+      schemas.push({
+        name: toolObj.name ?? 'unknown',
+        description: toolObj.description ?? '',
+      });
+    }
+  }
+  
+  return schemas;
+}
+
+/**
  * Create a context budget snapshot for diagnostics.
  * Includes actual tool schema token estimate and system prompt size.
  */
@@ -145,7 +183,9 @@ export function createContextBudgetSnapshot(input: {
   let estimatedToolSchemaTokens = 0;
   if (input.toolSchemas && input.toolSchemas.length > 0) {
     try {
-      const serialized = JSON.stringify(input.toolSchemas);
+      // Extract JSON schemas from tool objects (not the createTool wrappers)
+      const schemas = extractToolJsonSchemas(input.toolSchemas);
+      const serialized = JSON.stringify(schemas);
       estimatedToolSchemaTokens = estimateTokens(serialized);
     } catch {
       estimatedToolSchemaTokens = 0;

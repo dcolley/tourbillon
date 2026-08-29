@@ -143,18 +143,36 @@ function tokenUsage(span: AnyExportedSpan): { input?: number; output?: number } 
 /**
  * Enrich errorInfo with full AI_APICallError fields for diagnostics.
  * Ensures statusCode, url, responseBody, and data are preserved in the payload.
+ * Mastra may only copy message/name/stack; we need the rest for diagnostics.
  */
 function enrichErrorInfo(errorInfo: unknown): unknown {
   if (!errorInfo || typeof errorInfo !== 'object') return errorInfo;
   
   const err = errorInfo as Record<string, unknown>;
   
-  // Already has the fields we need
-  if ('statusCode' in err || 'url' in err || 'responseBody' in err || 'data' in err) {
-    return errorInfo;
+  // Create enriched object with all available fields
+  const enriched: Record<string, unknown> = { ...err };
+  
+  // Ensure AI_APICallError fields are preserved if present
+  const apiErrorFields = ['statusCode', 'url', 'responseBody', 'responseHeaders', 'data', 'isRetryable', 'cause', 'requestBodyValues'];
+  
+  let hasApiErrorFields = false;
+  for (const field of apiErrorFields) {
+    if (field in err && err[field] !== undefined) {
+      enriched[field] = err[field];
+      hasApiErrorFields = true;
+    }
   }
   
-  return errorInfo;
+  // If this looks like an API error, cap the responseBody to prevent huge payloads
+  if (hasApiErrorFields && typeof enriched.responseBody === 'string') {
+    const body = enriched.responseBody as string;
+    if (body.length > 2000) {
+      enriched.responseBody = `${body.slice(0, 2000)}… [truncated, full length: ${body.length}]`;
+    }
+  }
+  
+  return enriched;
 }
 
 export function mapExportedSpanToEvent(span: AnyExportedSpan): NewAgentObservabilityEvent | null {

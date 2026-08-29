@@ -3,6 +3,8 @@ import { describe, it, beforeEach } from 'node:test';
 import {
   createFirstFrameCaptureFetch,
   getRecentFirstFrameCapture,
+  getFirstFrameCapture,
+  extractFirstFrameRequestKey,
   clearAllFirstFrameCaptures,
   formatFirstFrameCapture,
   type FirstFrameCapture,
@@ -176,15 +178,78 @@ describe('first-frame-capture', () => {
       const capture = getRecentFirstFrameCapture();
       assert.equal(capture, undefined);
     });
+
+    it('does not consume the rest of the stream after peeking first frame', async () => {
+      let chunkCount = 0;
+      const mockFetch = async () => {
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream({
+          start(controller) {
+            // First chunk with reasoning_content
+            controller.enqueue(
+              encoder.encode(
+                'data: {"choices":[{"delta":{"reasoning_content":"Thinking...","role":"assistant"},"index":0}]}\n\n'
+              )
+            );
+            // Second chunk with content
+            controller.enqueue(
+              encoder.encode(
+                'data: {"choices":[{"delta":{"content":"Answer","role":"assistant"},"index":0}]}\n\n'
+              )
+            );
+            // Done
+            controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+            controller.close();
+          },
+        });
+
+        return new Response(stream, {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        });
+      };
+
+      const wrappedFetch = createFirstFrameCaptureFetch(mockFetch as typeof fetch);
+
+      const response = await wrappedFetch('http://localhost:1234/v1/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify({ messages: [] }),
+      });
+
+      // Verify first frame was captured
+      const capture = getRecentFirstFrameCapture();
+      assert.ok(capture);
+      assert.equal(capture.kind, 'reasoning_content');
+
+      // Verify the stream is still consumable
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let fullText = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          chunkCount++;
+          fullText += decoder.decode(value, { stream: true });
+        }
+      }
+
+      // Should have read all chunks
+      assert.ok(chunkCount > 0, 'Should have read at least one chunk');
+      assert.ok(fullText.includes('reasoning_content'), 'Should contain first frame');
+      assert.ok(fullText.includes('content'), 'Should contain second frame');
+      assert.ok(fullText.includes('[DONE]'), 'Should contain done marker');
+    });
   });
 
-  describe('getRecentFirstFrameCapture', () => {
+  describe('getFirstFrameCapture', () => {
     it('returns undefined when no captures exist', () => {
-      const capture = getRecentFirstFrameCapture();
+      const capture = getFirstFrameCapture('nonexistent-key');
       assert.equal(capture, undefined);
     });
 
-    it('returns the most recent capture', async () => {
+    it('returns capture for specific request key', async () => {
       const mockFetch1 = async () => {
         return new Response('data: {"choices":[{"delta":{"content":"First"}}]}\n', {
           status: 200,
@@ -202,15 +267,33 @@ describe('first-frame-capture', () => {
         );
       };
 
-      const wrappedFetch = createFirstFrameCaptureFetch(mockFetch1 as typeof fetch);
-      await wrappedFetch('http://localhost:1234/v1/chat/completions', { method: 'POST' });
+      const wrappedFetch1 = createFirstFrameCaptureFetch(mockFetch1 as typeof fetch);
+      const response1 = await wrappedFetch1('http://localhost:1234/v1/chat/completions', {
+        method: 'POST',
+      });
 
       const wrappedFetch2 = createFirstFrameCaptureFetch(mockFetch2 as typeof fetch);
-      await wrappedFetch2('http://localhost:1234/v1/chat/completions', { method: 'POST' });
+      const response2 = await wrappedFetch2('http://localhost:1234/v1/chat/completions', {
+        method: 'POST',
+      });
 
-      const capture = getRecentFirstFrameCapture();
-      assert.ok(capture);
-      assert.equal(capture.kind, 'reasoning_content');
+      // Extract request keys from responses
+      const key1 = extractFirstFrameRequestKey(response1);
+      const key2 = extractFirstFrameRequestKey(response2);
+
+      assert.ok(key1);
+      assert.ok(key2);
+      assert.notEqual(key1, key2, 'Request keys should be unique');
+
+      // Verify each capture is retrievable by its key
+      const capture1 = getFirstFrameCapture(key1);
+      const capture2 = getFirstFrameCapture(key2);
+
+      assert.ok(capture1);
+      assert.equal(capture1.kind, 'content');
+
+      assert.ok(capture2);
+      assert.equal(capture2.kind, 'reasoning_content');
     });
   });
 

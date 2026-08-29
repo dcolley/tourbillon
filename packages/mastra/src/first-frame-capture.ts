@@ -17,19 +17,42 @@ export interface FirstFrameCapture {
 interface FirstFrameCaptureEntry {
   capture: FirstFrameCapture;
   timestamp: number;
-  url: string;
+  requestKey: string;
 }
 
 /**
- * Thread-local storage for first frame captures.
- * Time-based cleanup allows error handlers to retrieve recent captures.
+ * Per-request storage for first frame captures.
+ * Each request gets a unique key to avoid collisions in concurrent heartbeats.
  */
 const firstFrameStore: FirstFrameCaptureEntry[] = [];
 const MAX_CAPTURE_AGE_MS = 10_000; // 10 seconds
 
 /**
- * Get the most recent first frame capture, if any exists within the time window.
- * Used by error handlers to include frame diagnostics.
+ * Generate a unique key for this request based on URL and timestamp.
+ */
+function makeRequestKey(url: string): string {
+  return `${url}:${Date.now()}:${Math.random().toString(36).slice(2, 11)}`;
+}
+
+/**
+ * Get the first frame capture for a specific request key.
+ */
+export function getFirstFrameCapture(requestKey: string): FirstFrameCapture | undefined {
+  const now = Date.now();
+  
+  // Clean up old captures
+  while (firstFrameStore.length > 0 && now - firstFrameStore[0].timestamp > MAX_CAPTURE_AGE_MS) {
+    firstFrameStore.shift();
+  }
+  
+  // Find the capture for this specific request
+  const entry = firstFrameStore.find(e => e.requestKey === requestKey);
+  return entry?.capture;
+}
+
+/**
+ * Get the most recent first frame capture (for backward compatibility).
+ * Prefer getFirstFrameCapture(requestKey) when available.
  */
 export function getRecentFirstFrameCapture(): FirstFrameCapture | undefined {
   const now = Date.now();
@@ -55,15 +78,15 @@ export function clearAllFirstFrameCaptures(): void {
   firstFrameStore.length = 0;
 }
 
-function storeFirstFrameCapture(url: string, capture: FirstFrameCapture): void {
+function storeFirstFrameCapture(requestKey: string, capture: FirstFrameCapture): void {
   firstFrameStore.push({
     capture,
     timestamp: Date.now(),
-    url,
+    requestKey,
   });
   
-  // Keep only the most recent 10 captures to prevent unbounded growth
-  if (firstFrameStore.length > 10) {
+  // Keep only the most recent 20 captures to prevent unbounded growth
+  if (firstFrameStore.length > 20) {
     firstFrameStore.shift();
   }
 }
@@ -81,90 +104,136 @@ function isEventStreamResponse(response: Response): boolean {
 }
 
 /**
- * Extract first frame kind from the first SSE data event.
- * Chat completions format: `data: {"choices":[{"delta":{"content":"...","reasoning_content":"..."},...}],...}`
+ * Peek at the first SSE data event from a ReadableStream without consuming the rest.
+ * Tees the stream and reads only until the first frame is found.
  */
-function detectFirstFrameKind(sseBody: string): FirstFrameCapture {
-  const lines = sseBody.split('\n');
+async function peekFirstSseFrame(stream: ReadableStream<Uint8Array>): Promise<{
+  capture: FirstFrameCapture;
+  stream: ReadableStream<Uint8Array>;
+}> {
+  // Tee the stream so we can read from one branch and return the other
+  const [peekStream, passStream] = stream.tee();
   
-  for (const line of lines) {
-    // Check for error events first
-    if (line.startsWith('event:') && line.includes('error')) {
-      return { kind: 'error' };
-    }
-    
-    if (!line.startsWith('data:')) continue;
-    
-    const payload = line.slice(5).trim();
-    if (!payload || payload === '[DONE]') continue;
-    
-    try {
-      const parsed = JSON.parse(payload) as Record<string, unknown>;
+  const reader = peekStream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let capture: FirstFrameCapture = { kind: 'other' };
+  let found = false;
+
+  try {
+    // Read chunks until we find the first data frame
+    while (!found) {
+      const { done, value } = await reader.read();
       
-      // OpenAI chat completions format
-      const choices = parsed.choices;
-      if (Array.isArray(choices) && choices.length > 0) {
-        const firstChoice = choices[0] as Record<string, unknown>;
-        const delta = firstChoice.delta;
+      if (done) {
+        break;
+      }
+
+      if (value) {
+        buffer += decoder.decode(value, { stream: true });
+      }
+
+      // Look for first data event in accumulated buffer
+      const lines = buffer.split('\n');
+      
+      for (const line of lines) {
+        // Check for error events first
+        if (line.startsWith('event:') && line.includes('error')) {
+          capture = { kind: 'error' };
+          found = true;
+          break;
+        }
         
-        if (delta && typeof delta === 'object') {
-          const deltaObj = delta as Record<string, unknown>;
+        if (line.startsWith('data:')) {
+          const payload = line.slice(5).trim();
+          if (!payload || payload === '[DONE]') continue;
           
-          // Check reasoning_content first (Nemotron-omni sends this before content)
-          if ('reasoning_content' in deltaObj) {
-            return {
-              kind: 'reasoning_content',
+          try {
+            const parsed = JSON.parse(payload) as Record<string, unknown>;
+            
+            // OpenAI chat completions format
+            const choices = parsed.choices;
+            if (Array.isArray(choices) && choices.length > 0) {
+              const firstChoice = choices[0] as Record<string, unknown>;
+              const delta = firstChoice.delta;
+              
+              if (delta && typeof delta === 'object') {
+                const deltaObj = delta as Record<string, unknown>;
+                
+                // Check reasoning_content first (Nemotron-omni sends this before content)
+                if ('reasoning_content' in deltaObj) {
+                  capture = {
+                    kind: 'reasoning_content',
+                    excerpt: payload.slice(0, MAX_FRAME_EXCERPT_CHARS),
+                  };
+                  found = true;
+                  break;
+                }
+                
+                if ('content' in deltaObj) {
+                  capture = {
+                    kind: 'content',
+                    excerpt: payload.slice(0, MAX_FRAME_EXCERPT_CHARS),
+                  };
+                  found = true;
+                  break;
+                }
+              }
+            }
+            
+            // Responses API format (response.*)
+            const type = parsed.type;
+            if (typeof type === 'string') {
+              if (type.includes('error')) {
+                capture = { kind: 'error' };
+                found = true;
+                break;
+              }
+              if (type.includes('reasoning')) {
+                capture = {
+                  kind: 'reasoning_content',
+                  excerpt: payload.slice(0, MAX_FRAME_EXCERPT_CHARS),
+                };
+                found = true;
+                break;
+              }
+              if (type.includes('content')) {
+                capture = {
+                  kind: 'content',
+                  excerpt: payload.slice(0, MAX_FRAME_EXCERPT_CHARS),
+                };
+                found = true;
+                break;
+              }
+            }
+            
+            // Found a data frame but couldn't classify it
+            capture = {
+              kind: 'other',
               excerpt: payload.slice(0, MAX_FRAME_EXCERPT_CHARS),
             };
-          }
-          
-          if ('content' in deltaObj) {
-            return {
-              kind: 'content',
-              excerpt: payload.slice(0, MAX_FRAME_EXCERPT_CHARS),
-            };
+            found = true;
+            break;
+          } catch {
+            // Malformed JSON in data line
+            continue;
           }
         }
       }
-      
-      // Responses API format (response.*)
-      const type = parsed.type;
-      if (typeof type === 'string') {
-        if (type.includes('error')) {
-          return { kind: 'error' };
-        }
-        if (type.includes('reasoning')) {
-          return {
-            kind: 'reasoning_content',
-            excerpt: payload.slice(0, MAX_FRAME_EXCERPT_CHARS),
-          };
-        }
-        if (type.includes('content')) {
-          return {
-            kind: 'content',
-            excerpt: payload.slice(0, MAX_FRAME_EXCERPT_CHARS),
-          };
-        }
-      }
-      
-      // Found a data frame but couldn't classify it
-      return {
-        kind: 'other',
-        excerpt: payload.slice(0, MAX_FRAME_EXCERPT_CHARS),
-      };
-    } catch {
-      // Malformed JSON in data line
-      continue;
     }
+  } finally {
+    // Cancel the peek reader to avoid holding resources
+    reader.cancel().catch(() => undefined);
   }
-  
-  // No data frames found
-  return { kind: 'other' };
+
+  // Return the untouched pass-through stream
+  return { capture, stream: passStream };
 }
 
 /**
  * Wraps fetch to capture the first SSE frame kind from chat/completions streams.
- * Stores the capture in a time-based registry that error handlers can query.
+ * Peeks at the first frame without consuming the entire stream, preserving streaming.
+ * Returns a Response with an attached request key for error correlation.
  */
 export function createFirstFrameCaptureFetch(baseFetch: typeof fetch): typeof fetch {
   return async (input, init) => {
@@ -176,6 +245,7 @@ export function createFirstFrameCaptureFetch(baseFetch: typeof fetch): typeof fe
     }
 
     const urlString = typeof url === 'string' ? url : url.toString();
+    const requestKey = makeRequestKey(urlString);
     
     try {
       const response = await baseFetch(input, init);
@@ -190,17 +260,30 @@ export function createFirstFrameCaptureFetch(baseFetch: typeof fetch): typeof fe
         return response;
       }
 
-      // Read the stream body to detect first frame
-      const body = await response.text();
-      const capture = detectFirstFrameKind(body);
-      storeFirstFrameCapture(urlString, capture);
+      if (!response.body) {
+        // No body to peek
+        return response;
+      }
 
-      // Create a new Response with the same body so the SDK can still consume it
-      return new Response(body, {
+      // Peek at the first frame without consuming the entire stream
+      const { capture, stream: newStream } = await peekFirstSseFrame(response.body);
+      storeFirstFrameCapture(requestKey, capture);
+
+      // Create a new Response with the peeked stream (all content intact)
+      const newResponse = new Response(newStream, {
         status: response.status,
         statusText: response.statusText,
         headers: response.headers,
       });
+
+      // Attach request key to response for error handlers to retrieve capture
+      Object.defineProperty(newResponse, '__firstFrameRequestKey', {
+        value: requestKey,
+        enumerable: false,
+        writable: false,
+      });
+
+      return newResponse;
     } catch (err) {
       throw err;
     }
@@ -209,9 +292,12 @@ export function createFirstFrameCaptureFetch(baseFetch: typeof fetch): typeof fe
 
 /**
  * Extract request key from a Response object that was created by createFirstFrameCaptureFetch.
- * @deprecated Use getRecentFirstFrameCapture() instead.
  */
 export function extractFirstFrameRequestKey(response: unknown): string | undefined {
+  if (response && typeof response === 'object' && '__firstFrameRequestKey' in response) {
+    const key = (response as { __firstFrameRequestKey?: unknown }).__firstFrameRequestKey;
+    return typeof key === 'string' ? key : undefined;
+  }
   return undefined;
 }
 

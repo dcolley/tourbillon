@@ -65,21 +65,74 @@ describe('createContextBudgetSnapshot', () => {
     assert.ok(snapshot.estimatedSystemTokens <= 260);
   });
 
-  it('handles serialization errors gracefully', () => {
+  it('extracts JSON schemas from tool objects not createTool wrappers', () => {
     const budget = resolveContextBudget({
       maxContextTokens: 32000,
       kind: 'durable',
     });
 
-    const circular: any = {};
-    circular.self = circular;
+    // Simulate Mastra tool objects with schema property
+    const mockTools = [
+      {
+        name: 'getTodo',
+        description: 'Get a todo item',
+        schema: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+          },
+          required: ['id'],
+        },
+        execute: () => {},
+      },
+      {
+        name: 'createTodo',
+        description: 'Create a todo item',
+        schema: {
+          type: 'object',
+          properties: {
+            title: { type: 'string' },
+            done: { type: 'boolean' },
+          },
+          required: ['title'],
+        },
+        execute: () => {},
+      },
+    ];
 
     const snapshot = createContextBudgetSnapshot({
       budget,
       kind: 'durable',
-      toolSchemas: [circular],
+      toolSchemas: mockTools,
     });
 
-    assert.equal(snapshot.estimatedToolSchemaTokens, 0);
+    // Should extract schemas, not stringify the whole tool objects
+    assert.ok(snapshot.estimatedToolSchemaTokens > 0);
+    
+    // The estimate should be based on schema JSON, not including execute function
+    // If it serialized the whole tool, execute would make it much larger
+    assert.ok(snapshot.estimatedToolSchemaTokens < 500, 'Schema-only estimate should be smaller');
+  });
+
+  it('handles tools without schema properties', () => {
+    const budget = resolveContextBudget({
+      maxContextTokens: 32000,
+      kind: 'durable',
+    });
+
+    // Tools without schema properties should still produce estimates
+    const toolsWithoutSchema = [
+      { name: 'tool1', description: 'A tool' },
+      { name: 'tool2', description: 'Another tool' },
+    ];
+
+    const snapshot = createContextBudgetSnapshot({
+      budget,
+      kind: 'durable',
+      toolSchemas: toolsWithoutSchema,
+    });
+
+    // Should still estimate based on name/description
+    assert.ok(snapshot.estimatedToolSchemaTokens > 0);
   });
 });

@@ -30,6 +30,8 @@ export {
 } from './tools/mcp-tools';
 export {
   getRecentFirstFrameCapture,
+  getFirstFrameCapture,
+  extractFirstFrameRequestKey,
   formatFirstFrameCapture,
   clearAllFirstFrameCaptures,
   type FirstFrameKind,
