@@ -6,9 +6,11 @@ import {
   updateAgentObservationalMemory,
   type UpdateAgentObservationalMemoryInput,
 } from '@/lib/agents';
-import { db, agents, llmProviders } from '@tourbillon/db';
+import { db, agents, llmProviders, companies } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
-import { getHeartbeatList } from '@/lib/heartbeats';
+import { getHeartbeatList, getHeartbeatRun } from '@/lib/heartbeats';
+import { listObservabilityEvents } from '@/lib/observability';
+import { getJobLiveSnapshot } from '@/lib/jobs';
 
 interface McpRequest {
   jsonrpc: '2.0';
@@ -40,11 +42,25 @@ interface McpTool {
 
 const MCP_TOOLS: McpTool[] = [
   {
+    name: 'company_list',
+    description: 'List companies this token can act as (returns the single company from the JWT)',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
     name: 'list_agents',
     description: 'List all agents in the company with their configuration (active status, heartbeat settings, observational memory mode)',
     inputSchema: {
       type: 'object',
-      properties: {},
+      properties: {
+        company_id: {
+          type: 'string',
+          description: 'Company ID (UUID)',
+        },
+      },
+      required: ['company_id'],
     },
   },
   {
@@ -53,7 +69,11 @@ const MCP_TOOLS: McpTool[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        agentId: {
+        company_id: {
+          type: 'string',
+          description: 'Company ID (UUID)',
+        },
+        agent_id: {
           type: 'string',
           description: 'The agent ID (UUID)',
         },
@@ -62,16 +82,20 @@ const MCP_TOOLS: McpTool[] = [
           description: 'True to activate, false to pause',
         },
       },
-      required: ['agentId', 'active'],
+      required: ['company_id', 'agent_id', 'active'],
     },
   },
   {
-    name: 'set_agent_heartbeat',
+    name: 'set_heartbeat',
     description: 'Configure agent heartbeat timer (interval in seconds, cron schedule, or disable)',
     inputSchema: {
       type: 'object',
       properties: {
-        agentId: {
+        company_id: {
+          type: 'string',
+          description: 'Company ID (UUID)',
+        },
+        agent_id: {
           type: 'string',
           description: 'The agent ID (UUID)',
         },
@@ -79,25 +103,29 @@ const MCP_TOOLS: McpTool[] = [
           type: 'boolean',
           description: 'Enable or disable heartbeat timer',
         },
-        intervalSec: {
+        interval_sec: {
           type: 'number',
           description: 'Heartbeat interval in seconds (if enabled and using interval mode)',
         },
-        cronExpression: {
+        cron_expression: {
           type: 'string',
           description: 'Cron schedule (if enabled and using cron mode)',
         },
       },
-      required: ['agentId'],
+      required: ['company_id', 'agent_id'],
     },
   },
   {
-    name: 'set_agent_observational_memory',
+    name: 'set_om',
     description: 'Set agent observational memory mode (inherit, off, or on)',
     inputSchema: {
       type: 'object',
       properties: {
-        agentId: {
+        company_id: {
+          type: 'string',
+          description: 'Company ID (UUID)',
+        },
+        agent_id: {
           type: 'string',
           description: 'The agent ID (UUID)',
         },
@@ -106,38 +134,136 @@ const MCP_TOOLS: McpTool[] = [
           enum: ['inherit', 'off', 'on'],
           description: 'Observational memory mode',
         },
-        providerId: {
+        provider_id: {
           type: 'string',
           description: 'LLM provider ID (required if mode=on and not inheriting)',
         },
-        modelId: {
+        model_id: {
           type: 'string',
           description: 'Model ID (required if mode=on and not inheriting)',
         },
       },
-      required: ['agentId', 'mode'],
+      required: ['company_id', 'agent_id', 'mode'],
     },
   },
   {
-    name: 'list_failed_heartbeats',
+    name: 'list_failed_jobs',
     description: 'List recent failed heartbeat runs with error details',
     inputSchema: {
       type: 'object',
       properties: {
+        company_id: {
+          type: 'string',
+          description: 'Company ID (UUID)',
+        },
         page: {
           type: 'number',
           description: 'Page number (0-based)',
         },
-        pageSize: {
+        page_size: {
           type: 'number',
           description: 'Number of items per page (default 25)',
         },
       },
+      required: ['company_id'],
+    },
+  },
+  {
+    name: 'get_heartbeat',
+    description: 'Get heartbeat run details (status, agent, model, provider, source, timing, tokens, error)',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        company_id: {
+          type: 'string',
+          description: 'Company ID (UUID)',
+        },
+        run_id: {
+          type: 'string',
+          description: 'Heartbeat run ID (UUID)',
+        },
+      },
+      required: ['company_id', 'run_id'],
+    },
+  },
+  {
+    name: 'list_heartbeat_events',
+    description: 'List observability events for a heartbeat run (time, type, name, duration, tokens, status, preview, errorInfo)',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        company_id: {
+          type: 'string',
+          description: 'Company ID (UUID)',
+        },
+        run_id: {
+          type: 'string',
+          description: 'Heartbeat run ID (UUID)',
+        },
+        page: {
+          type: 'number',
+          description: 'Page number (0-based, default 0)',
+        },
+        page_size: {
+          type: 'number',
+          description: 'Items per page (default 25)',
+        },
+      },
+      required: ['company_id', 'run_id'],
+    },
+  },
+  {
+    name: 'live_heartbeat',
+    description: 'Get live snapshot of a heartbeat run (status, timing, logs, poll until settled)',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        company_id: {
+          type: 'string',
+          description: 'Company ID (UUID)',
+        },
+        run_id: {
+          type: 'string',
+          description: 'Heartbeat run ID (UUID)',
+        },
+      },
+      required: ['company_id', 'run_id'],
     },
   },
 ];
 
-async function handleListAgents(companyId: string) {
+function validateCompanyAccess(tokenCompanyId: string, requestedCompanyId: string) {
+  if (tokenCompanyId !== requestedCompanyId) {
+    throw new Error('Company not found');
+  }
+}
+
+async function handleCompanyList(tokenCompanyId: string) {
+  const company = await db.query.companies.findFirst({
+    where: eq(companies.id, tokenCompanyId),
+  });
+
+  if (!company) {
+    return { companies: [] };
+  }
+
+  return {
+    companies: [
+      {
+        id: company.id,
+        name: company.name,
+      },
+    ],
+  };
+}
+
+async function handleListAgents(tokenCompanyId: string, params: any) {
+  const { company_id } = params;
+  if (!company_id) {
+    throw new Error('company_id is required');
+  }
+  validateCompanyAccess(tokenCompanyId, company_id);
+
   const rows = await db
     .select({
       id: agents.id,
@@ -151,7 +277,7 @@ async function handleListAgents(companyId: string) {
     })
     .from(agents)
     .leftJoin(llmProviders, eq(agents.providerId, llmProviders.id))
-    .where(eq(agents.companyId, companyId))
+    .where(eq(agents.companyId, company_id))
     .orderBy(agents.name);
 
   return rows.map((a) => {
@@ -176,60 +302,68 @@ async function handleListAgents(companyId: string) {
   });
 }
 
-async function handleSetAgentActive(companyId: string, params: any) {
-  const { agentId, active } = params;
-  if (!agentId || typeof active !== 'boolean') {
-    throw new Error('agentId (string) and active (boolean) are required');
+async function handleSetAgentActive(tokenCompanyId: string, params: any) {
+  const { company_id, agent_id, active } = params;
+  if (!company_id) {
+    throw new Error('company_id is required');
   }
+  if (!agent_id || typeof active !== 'boolean') {
+    throw new Error('agent_id (string) and active (boolean) are required');
+  }
+  validateCompanyAccess(tokenCompanyId, company_id);
 
   const agent = await db.query.agents.findFirst({
-    where: eq(agents.id, agentId),
+    where: eq(agents.id, agent_id),
   });
 
   if (!agent) {
     throw new Error('Agent not found');
   }
 
-  if (agent.companyId !== companyId) {
-    throw new Error('Agent does not belong to this company');
+  if (agent.companyId !== company_id) {
+    throw new Error('Agent not found');
   }
 
-  const updated = await setAgentActive(agentId, active);
+  const updated = await setAgentActive(agent_id, active);
   return { success: true, status: updated.status };
 }
 
-async function handleSetAgentHeartbeat(companyId: string, params: any) {
-  const { agentId, enabled, intervalSec, cronExpression } = params;
-  if (!agentId) {
-    throw new Error('agentId is required');
+async function handleSetHeartbeat(tokenCompanyId: string, params: any) {
+  const { company_id, agent_id, enabled, interval_sec, cron_expression } = params;
+  if (!company_id) {
+    throw new Error('company_id is required');
   }
+  if (!agent_id) {
+    throw new Error('agent_id is required');
+  }
+  validateCompanyAccess(tokenCompanyId, company_id);
 
   const agent = await db.query.agents.findFirst({
-    where: eq(agents.id, agentId),
+    where: eq(agents.id, agent_id),
   });
 
   if (!agent) {
     throw new Error('Agent not found');
   }
 
-  if (agent.companyId !== companyId) {
-    throw new Error('Agent does not belong to this company');
+  if (agent.companyId !== company_id) {
+    throw new Error('Agent not found');
   }
 
   const heartbeatPatch: any = {};
   if (typeof enabled === 'boolean') {
     heartbeatPatch.enabled = enabled;
   }
-  if (intervalSec !== undefined) {
-    heartbeatPatch.intervalSec = intervalSec;
+  if (interval_sec !== undefined) {
+    heartbeatPatch.intervalSec = interval_sec;
     heartbeatPatch.scheduleMode = 'interval';
   }
-  if (cronExpression !== undefined) {
-    heartbeatPatch.cronExpression = cronExpression;
+  if (cron_expression !== undefined) {
+    heartbeatPatch.cronExpression = cron_expression;
     heartbeatPatch.scheduleMode = 'cron';
   }
 
-  const updated = await updateAgentRuntimeConfig(agentId, {
+  const updated = await updateAgentRuntimeConfig(agent_id, {
     heartbeat: heartbeatPatch,
   });
 
@@ -245,31 +379,35 @@ async function handleSetAgentHeartbeat(companyId: string, params: any) {
   };
 }
 
-async function handleSetAgentObservationalMemory(companyId: string, params: any) {
-  const { agentId, mode, providerId, modelId } = params;
-  if (!agentId || !mode) {
-    throw new Error('agentId and mode are required');
+async function handleSetOm(tokenCompanyId: string, params: any) {
+  const { company_id, agent_id, mode, provider_id, model_id } = params;
+  if (!company_id) {
+    throw new Error('company_id is required');
   }
+  if (!agent_id || !mode) {
+    throw new Error('agent_id and mode are required');
+  }
+  validateCompanyAccess(tokenCompanyId, company_id);
 
   const agent = await db.query.agents.findFirst({
-    where: eq(agents.id, agentId),
+    where: eq(agents.id, agent_id),
   });
 
   if (!agent) {
     throw new Error('Agent not found');
   }
 
-  if (agent.companyId !== companyId) {
-    throw new Error('Agent does not belong to this company');
+  if (agent.companyId !== company_id) {
+    throw new Error('Agent not found');
   }
 
   const input: UpdateAgentObservationalMemoryInput = {
     mode,
-    ...(providerId && { providerId }),
-    ...(modelId && { modelId }),
+    ...(provider_id && { providerId: provider_id }),
+    ...(model_id && { modelId: model_id }),
   };
 
-  const updated = await updateAgentObservationalMemory(agentId, input);
+  const updated = await updateAgentObservationalMemory(agent_id, input);
   const config = updated.runtimeConfig as any;
   const observationalMemory = config?.observationalMemory ?? {};
 
@@ -279,15 +417,18 @@ async function handleSetAgentObservationalMemory(companyId: string, params: any)
   };
 }
 
-async function handleListFailedHeartbeats(companyId: string, params: any) {
-  const page = params?.page ?? 0;
-  const pageSize = params?.pageSize ?? 25;
+async function handleListFailedJobs(tokenCompanyId: string, params: any) {
+  const { company_id, page = 0, page_size = 25 } = params;
+  if (!company_id) {
+    throw new Error('company_id is required');
+  }
+  validateCompanyAccess(tokenCompanyId, company_id);
 
   const result = await getHeartbeatList({
     filter: 'failed',
     page,
-    pageSize,
-    companyId,
+    pageSize: page_size,
+    companyId: company_id,
   });
 
   return {
@@ -309,18 +450,170 @@ async function handleListFailedHeartbeats(companyId: string, params: any) {
   };
 }
 
-async function handleToolCall(companyId: string, toolName: string, params: any) {
+async function handleGetHeartbeat(tokenCompanyId: string, params: any) {
+  const { company_id, run_id } = params;
+  if (!company_id) {
+    throw new Error('company_id is required');
+  }
+  if (!run_id) {
+    throw new Error('run_id is required');
+  }
+  validateCompanyAccess(tokenCompanyId, company_id);
+
+  const result = await getHeartbeatRun(run_id);
+  if (!result) {
+    throw new Error('Heartbeat run not found');
+  }
+
+  if (result.run.companyId !== company_id) {
+    throw new Error('Heartbeat run not found');
+  }
+
+  const snapshot = result.run.contextSnapshot as any;
+  const liveData = await getJobLiveSnapshot('heartbeat', run_id);
+
+  return {
+    runId: result.run.id,
+    status: result.run.status,
+    agentId: result.run.agentId,
+    agentName: result.agent?.name ?? null,
+    agentUrlKey: result.agent?.urlKey ?? null,
+    modelId: snapshot?.modelId ?? result.agent?.modelId ?? null,
+    providerName: snapshot?.providerName ?? result.agent?.providerName ?? null,
+    invocationSource: result.run.invocationSource,
+    startedAt: result.run.startedAt.toISOString(),
+    lastSeenAt: result.run.lastSeenAt?.toISOString() ?? null,
+    finishedAt: result.run.finishedAt?.toISOString() ?? null,
+    errorText: result.run.errorText,
+    inputTokens: liveData?.heartbeatRun?.contextSnapshot
+      ? (liveData.heartbeatRun.contextSnapshot as any).inputTokens ?? null
+      : null,
+    outputTokens: liveData?.heartbeatRun?.contextSnapshot
+      ? (liveData.heartbeatRun.contextSnapshot as any).outputTokens ?? null
+      : null,
+  };
+}
+
+async function handleListHeartbeatEvents(tokenCompanyId: string, params: any) {
+  const { company_id, run_id, page = 0, page_size = 25 } = params;
+  if (!company_id) {
+    throw new Error('company_id is required');
+  }
+  if (!run_id) {
+    throw new Error('run_id is required');
+  }
+  validateCompanyAccess(tokenCompanyId, company_id);
+
+  const runCheck = await getHeartbeatRun(run_id);
+  if (!runCheck) {
+    throw new Error('Heartbeat run not found');
+  }
+  if (runCheck.run.companyId !== company_id) {
+    throw new Error('Heartbeat run not found');
+  }
+
+  const result = await listObservabilityEvents({
+    companyId: company_id,
+    heartbeatRunId: run_id,
+    page,
+    pageSize: page_size,
+  });
+
+  return {
+    events: result.events.map((event) => {
+      const payload = event.payload as Record<string, unknown>;
+      const errorInfo =
+        payload.errorInfo && typeof payload.errorInfo === 'object' && !Array.isArray(payload.errorInfo)
+          ? (payload.errorInfo as Record<string, unknown>)
+          : null;
+
+      return {
+        id: event.id,
+        occurredAt: event.occurredAt,
+        eventType: event.eventType,
+        name: event.name,
+        status: event.status,
+        durationMs: event.durationMs,
+        inputTokens: event.inputTokens,
+        outputTokens: event.outputTokens,
+        inputPreview: event.inputPreview,
+        outputPreview: event.outputPreview,
+        errorText: event.errorText,
+        errorInfo: errorInfo
+          ? {
+              statusCode: typeof errorInfo.statusCode === 'number' ? errorInfo.statusCode : null,
+              url: typeof errorInfo.url === 'string' ? errorInfo.url : null,
+              responseBody:
+                typeof errorInfo.responseBody === 'string' ? errorInfo.responseBody : null,
+              firstFrame:
+                typeof errorInfo.first_frame === 'string' ? errorInfo.first_frame : null,
+            }
+          : null,
+      };
+    }),
+    total: result.total,
+    page: result.page,
+    pageSize: result.pageSize,
+  };
+}
+
+async function handleLiveHeartbeat(tokenCompanyId: string, params: any) {
+  const { company_id, run_id } = params;
+  if (!company_id) {
+    throw new Error('company_id is required');
+  }
+  if (!run_id) {
+    throw new Error('run_id is required');
+  }
+  validateCompanyAccess(tokenCompanyId, company_id);
+
+  const runCheck = await getHeartbeatRun(run_id);
+  if (!runCheck) {
+    throw new Error('Heartbeat run not found');
+  }
+  if (runCheck.run.companyId !== company_id) {
+    throw new Error('Heartbeat run not found');
+  }
+
+  const snapshot = await getJobLiveSnapshot('heartbeat', run_id);
+  if (!snapshot) {
+    throw new Error('Live snapshot not available');
+  }
+
+  return {
+    runId: run_id,
+    status: snapshot.heartbeatRun?.status ?? snapshot.state,
+    state: snapshot.state,
+    attemptsMade: snapshot.attemptsMade,
+    startedAt: snapshot.heartbeatRun?.startedAt ?? null,
+    lastSeenAt: snapshot.heartbeatRun?.lastSeenAt ?? null,
+    finishedAt: snapshot.heartbeatRun?.finishedAt ?? null,
+    errorText: snapshot.heartbeatRun?.errorText ?? null,
+    logs: snapshot.logs,
+    logCount: snapshot.count,
+  };
+}
+
+async function handleToolCall(tokenCompanyId: string, toolName: string, params: any) {
   switch (toolName) {
+    case 'company_list':
+      return await handleCompanyList(tokenCompanyId);
     case 'list_agents':
-      return await handleListAgents(companyId);
+      return await handleListAgents(tokenCompanyId, params);
     case 'set_agent_active':
-      return await handleSetAgentActive(companyId, params);
-    case 'set_agent_heartbeat':
-      return await handleSetAgentHeartbeat(companyId, params);
-    case 'set_agent_observational_memory':
-      return await handleSetAgentObservationalMemory(companyId, params);
-    case 'list_failed_heartbeats':
-      return await handleListFailedHeartbeats(companyId, params);
+      return await handleSetAgentActive(tokenCompanyId, params);
+    case 'set_heartbeat':
+      return await handleSetHeartbeat(tokenCompanyId, params);
+    case 'set_om':
+      return await handleSetOm(tokenCompanyId, params);
+    case 'list_failed_jobs':
+      return await handleListFailedJobs(tokenCompanyId, params);
+    case 'get_heartbeat':
+      return await handleGetHeartbeat(tokenCompanyId, params);
+    case 'list_heartbeat_events':
+      return await handleListHeartbeatEvents(tokenCompanyId, params);
+    case 'live_heartbeat':
+      return await handleLiveHeartbeat(tokenCompanyId, params);
     default:
       throw new Error(`Unknown tool: ${toolName}`);
   }

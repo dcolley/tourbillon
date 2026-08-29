@@ -5,11 +5,13 @@ This document describes how to connect to the Tourbillon control-plane MCP (Mode
 ## Overview
 
 The control-plane MCP server provides ops tools for managing TEST (Test Environment/System) agents, including:
+- Listing companies this token can access
 - Listing agents with configuration
 - Setting agent active/paused status
 - Configuring heartbeat timers
 - Managing observational memory mode
 - Viewing failed heartbeat runs
+- Inspecting heartbeat run details and observability events
 
 ## Connection Details
 
@@ -87,11 +89,27 @@ To add this MCP server to Grok Bot or other MCP clients that support HTTP transp
 
 ## Available Tools
 
-### 1. list_agents
+**Note:** All tools except `company_list` require a `company_id` parameter. The token identifies the operator; `company_id` specifies which company to operate on. The token must grant access to the requested company.
+
+### 1. company_list
+
+List companies this token can act as (returns the single company from the JWT).
+
+**Parameters:** None
+
+**Returns:**
+- `companies`: Array of company objects
+  - `id`: Company UUID
+  - `name`: Company name
+
+### 2. list_agents
 
 List all agents in the company with their configuration.
 
-**Returns:**
+**Parameters:**
+- `company_id` (string, required): Company UUID
+
+**Returns:** Array of agent objects with:
 - `id`: Agent UUID
 - `name`: Agent name
 - `urlKey`: Agent URL key
@@ -104,43 +122,47 @@ List all agents in the company with their configuration.
 - `heartbeatScheduleMode`: 'interval' | 'cron' (or null)
 - `observationalMemoryMode`: 'inherit' | 'off' | 'on'
 
-### 2. set_agent_active
+### 3. set_agent_active
 
 Set an agent active (true) or paused (false).
 
 **Parameters:**
-- `agentId` (string, required): Agent UUID
+- `company_id` (string, required): Company UUID
+- `agent_id` (string, required): Agent UUID
 - `active` (boolean, required): true to activate, false to pause
 
-### 3. set_agent_heartbeat
+### 4. set_heartbeat
 
 Configure agent heartbeat timer.
 
 **Parameters:**
-- `agentId` (string, required): Agent UUID
+- `company_id` (string, required): Company UUID
+- `agent_id` (string, required): Agent UUID
 - `enabled` (boolean): Enable or disable heartbeat timer
-- `intervalSec` (number): Heartbeat interval in seconds (sets scheduleMode to 'interval')
-- `cronExpression` (string): Cron schedule (e.g., "0 9 * * 1-5", sets scheduleMode to 'cron')
+- `interval_sec` (number): Heartbeat interval in seconds (sets scheduleMode to 'interval')
+- `cron_expression` (string): Cron schedule (e.g., "0 9 * * 1-5", sets scheduleMode to 'cron')
 
 **Note**: Timer off is achieved by setting `enabled: false`.
 
-### 4. set_agent_observational_memory
+### 5. set_om
 
 Set agent observational memory mode.
 
 **Parameters:**
-- `agentId` (string, required): Agent UUID
+- `company_id` (string, required): Company UUID
+- `agent_id` (string, required): Agent UUID
 - `mode` (string, required): 'inherit' | 'off' | 'on'
-- `providerId` (string): LLM provider ID (if mode=on)
-- `modelId` (string): Model ID (if mode=on)
+- `provider_id` (string): LLM provider ID (if mode=on)
+- `model_id` (string): Model ID (if mode=on)
 
-### 5. list_failed_heartbeats
+### 6. list_failed_jobs
 
 List recent failed heartbeat runs with error details.
 
 **Parameters:**
+- `company_id` (string, required): Company UUID
 - `page` (number): Page number (0-based, default 0)
-- `pageSize` (number): Items per page (default 25)
+- `page_size` (number): Items per page (default 25)
 
 **Returns:**
 - `entries`: Array of failed heartbeat runs
@@ -150,7 +172,7 @@ List recent failed heartbeat runs with error details.
   - `agentUrlKey`: Agent URL key
   - `modelId`: Model used
   - `providerName`: Provider name
-  - `invocationSource`: 'timer' | 'on-demand'
+  - `invocationSource`: 'timer' | 'on_demand'
   - `errorText`: Error message
   - `startedAt`: ISO timestamp
   - `finishedAt`: ISO timestamp
@@ -158,12 +180,91 @@ List recent failed heartbeat runs with error details.
 - `page`: Current page
 - `pageSize`: Page size
 
+### 7. get_heartbeat
+
+Get heartbeat run details including status, agent, model, provider, timing, and token usage.
+
+**Parameters:**
+- `company_id` (string, required): Company UUID
+- `run_id` (string, required): Heartbeat run UUID
+
+**Returns:**
+- `runId`: Heartbeat run UUID
+- `status`: 'queued' | 'running' | 'succeeded' | 'failed'
+- `agentId`: Agent UUID
+- `agentName`: Agent name
+- `agentUrlKey`: Agent URL key
+- `modelId`: Model identifier
+- `providerName`: Provider name
+- `invocationSource`: 'timer' | 'on_demand' | 'assignment' | etc.
+- `startedAt`: ISO timestamp
+- `lastSeenAt`: ISO timestamp (or null)
+- `finishedAt`: ISO timestamp (or null)
+- `errorText`: Error message (or null)
+- `inputTokens`: Input token count (or null)
+- `outputTokens`: Output token count (or null)
+
+### 8. list_heartbeat_events
+
+List observability events for a heartbeat run (model steps, tool calls, provider calls, etc.).
+
+**Parameters:**
+- `company_id` (string, required): Company UUID
+- `run_id` (string, required): Heartbeat run UUID
+- `page` (number): Page number (0-based, default 0)
+- `page_size` (number): Items per page (default 25)
+
+**Returns:**
+- `events`: Array of observability events
+  - `id`: Event UUID
+  - `occurredAt`: ISO timestamp
+  - `eventType`: 'model_step' | 'tool_call' | 'model_inference' | etc.
+  - `name`: Event name
+  - `status`: 'success' | 'error' | 'in_progress'
+  - `durationMs`: Duration in milliseconds (or null)
+  - `inputTokens`: Input token count (or null)
+  - `outputTokens`: Output token count (or null)
+  - `inputPreview`: Input preview text (or null)
+  - `outputPreview`: Output preview text (or null)
+  - `errorText`: Error message (or null)
+  - `errorInfo`: Error details object (or null)
+    - `statusCode`: HTTP status code (or null)
+    - `url`: API endpoint URL (or null)
+    - `responseBody`: Response body text (or null)
+    - `firstFrame`: First frame of response (or null)
+- `total`: Total event count
+- `page`: Current page
+- `pageSize`: Page size
+
+### 9. live_heartbeat
+
+Get live snapshot of a heartbeat run (status, timing, logs). Poll this endpoint to monitor run progress.
+
+**Parameters:**
+- `company_id` (string, required): Company UUID
+- `run_id` (string, required): Heartbeat run UUID
+
+**Returns:**
+- `runId`: Heartbeat run UUID
+- `status`: 'queued' | 'running' | 'succeeded' | 'failed'
+- `state`: Job state ('waiting' | 'active' | 'completed' | 'failed')
+- `attemptsMade`: Number of attempts
+- `startedAt`: ISO timestamp (or null)
+- `lastSeenAt`: ISO timestamp (or null)
+- `finishedAt`: ISO timestamp (or null)
+- `errorText`: Error message (or null)
+- `logs`: Array of log lines
+- `logCount`: Total log count
+
 ## Security
 
 - Each company token is scoped to a single company
-- Cross-company access is prevented (company A cannot list or mutate company B agents)
+- All tools (except `company_list`) require `company_id` argument
+- Cross-company access is prevented (company A token cannot access company B resources)
 - Invalid or missing tokens return 401 Unauthorized
+- Invalid or unauthorized `company_id` values return errors
 - All mutations verify agent ownership before applying changes
+- No cookie or session-based authentication — all access is via `X-Company-Token` header
 
 ## Out of Scope
 
