@@ -23,6 +23,82 @@ export function isAbortLikeError(err: unknown): boolean {
   );
 }
 
+/**
+ * Extract enriched error text from AI_APICallError when available.
+ */
+function extractApiCallErrorText(err: unknown): string | undefined {
+  if (!(err instanceof Error)) return undefined;
+  
+  const apiError = err as Error & {
+    statusCode?: number;
+    url?: string;
+    responseBody?: string;
+    data?: unknown;
+  };
+  
+  // Check if this looks like an AI_APICallError
+  if (apiError.statusCode === undefined && apiError.url === undefined && apiError.responseBody === undefined) {
+    return undefined;
+  }
+  
+  const parts: string[] = [];
+  
+  // Try to extract structured error message from data or responseBody
+  if (apiError.data && typeof apiError.data === 'object') {
+    const data = apiError.data as Record<string, unknown>;
+    const error = data.error as Record<string, unknown> | undefined;
+    if (error && typeof error === 'object') {
+      const msg = error.message;
+      if (typeof msg === 'string' && msg.trim()) {
+        parts.push(msg.trim());
+      }
+    }
+  } else if (apiError.responseBody && typeof apiError.responseBody === 'string') {
+    const trimmed = apiError.responseBody.trim();
+    if (trimmed.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+        const error = parsed.error as Record<string, unknown> | undefined;
+        if (error && typeof error === 'object') {
+          const msg = error.message;
+          if (typeof msg === 'string' && msg.trim()) {
+            parts.push(msg.trim());
+          }
+        }
+      } catch {
+        // Not valid JSON, use raw message
+      }
+    }
+  }
+  
+  // Fallback to original message if no structured error found
+  if (parts.length === 0) {
+    parts.push(err.message);
+  }
+  
+  if (apiError.statusCode !== undefined) {
+    parts.push(`HTTP ${apiError.statusCode}`);
+  }
+  
+  if (apiError.url && typeof apiError.url === 'string') {
+    try {
+      const parsed = new URL(apiError.url);
+      parts.push(`at ${parsed.host}${parsed.pathname}`);
+    } catch {
+      // Invalid URL, skip
+    }
+  }
+  
+  // Cap responseBody excerpt
+  if (apiError.responseBody && typeof apiError.responseBody === 'string' && parts.length <= 2) {
+    const trimmed = apiError.responseBody.trim();
+    const excerpt = trimmed.length > 500 ? `${trimmed.slice(0, 500)}…` : trimmed;
+    parts.push(`Response: ${excerpt}`);
+  }
+  
+  return parts.join(' | ');
+}
+
 export function resolveHeartbeatFailureError(
   err: unknown,
   aborted: boolean,
@@ -44,6 +120,12 @@ export function resolveHeartbeatFailureError(
   if (aborted || isAbortLikeError(err)) {
     const { staleSec } = resolveHeartbeatLivenessConfig();
     return heartbeatStaleErrorText(staleSec);
+  }
+  
+  // Try to extract enriched AI_APICallError details
+  const apiErrorText = extractApiCallErrorText(err);
+  if (apiErrorText) {
+    return apiErrorText;
   }
   
   return err instanceof Error ? err.message : String(err);

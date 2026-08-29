@@ -67,6 +67,67 @@ const agentFollowUps = new Map<string, WakeRequest[]>();
 /** In-flight AbortControllers keyed by runId for operator force-kill. */
 const runAbortControllers = new Map<string, AbortController>();
 
+/**
+ * Persist context budget snapshot before streaming for diagnostics.
+ * Helps identify when tool schemas exceed reserves and cause provider rejections.
+ */
+async function persistContextBudgetSnapshot(
+  runId: string,
+  agentRecord: AgentRecord,
+  generationOptions: AgentGenerationOptions | undefined,
+  tracer: WakeTracer,
+): Promise<void> {
+  const runtimeConfig = agentRecord.runtimeConfig as AgentRuntimeConfig;
+  const kind = isHarnessAdapter(agentRecord.adapterType) ? 'harness' : 'durable';
+  
+  const { resolveContextBudget, createContextBudgetSnapshot, parseCompanySettings } = await import('@tourbillon/shared');
+  const { assembleAgentTools, assembleAgentSystemPrompt } = await import('@tourbillon/mastra');
+  
+  const budget = resolveContextBudget({
+    maxContextTokens: generationOptions?.maxContextTokens ?? runtimeConfig.model?.maxContextTokens,
+    maxOutputTokens: generationOptions?.maxOutputTokens ?? runtimeConfig.model?.maxOutputTokens,
+    kind,
+  });
+  
+  // Assemble tools and system prompt to get accurate token estimates
+  let toolSchemas: unknown[] | undefined;
+  let systemPrompt: string | undefined;
+  
+  try {
+    const company = await db.query.companies.findFirst({ 
+      where: eq(companies.id, agentRecord.companyId) 
+    });
+    const companySettings = parseCompanySettings(company?.settings);
+    
+    const tools = await assembleAgentTools(agentRecord, {
+      allowedMcpServerIds: company?.allowedMcpServerIds ?? [],
+      companySettings,
+    });
+    toolSchemas = Object.values(tools);
+    
+    systemPrompt = await assembleAgentSystemPrompt(agentRecord);
+  } catch (err) {
+    tracer.warn('failed to assemble tools/prompt for budget snapshot', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  
+  const snapshot = createContextBudgetSnapshot({
+    budget,
+    kind,
+    toolSchemas,
+    systemPrompt,
+  });
+  
+  tracer.info('context budget snapshot', snapshot);
+  
+  await db.update(heartbeatRuns)
+    .set({
+      contextSnapshot: sql`${heartbeatRuns.contextSnapshot} || ${JSON.stringify({ contextBudget: snapshot })}::jsonb`,
+    })
+    .where(eq(heartbeatRuns.id, runId));
+}
+
 interface TokenUsageResult {
   inputTokens: number;
   outputTokens: number;
@@ -421,6 +482,9 @@ async function runWake(
     staleSec: liveness.staleSec,
     wakeMessagePreview: wakeMessage.slice(0, 400),
   });
+
+  // Persist context budget snapshot early for diagnostics
+  await persistContextBudgetSnapshot(runId, agentRecord, generationOptions, runTracer);
 
   try {
     if (isHarnessAdapter(agentRecord.adapterType)) {

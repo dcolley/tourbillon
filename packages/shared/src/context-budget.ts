@@ -19,6 +19,22 @@ export interface ContextBudget {
   reflectionThreshold: number;
 }
 
+/**
+ * Context budget snapshot persisted before streaming for diagnostics.
+ * Helps identify when tool schemas exceed reserves and cause provider rejections.
+ */
+export interface ContextBudgetSnapshot {
+  kind: ContextBudgetKind;
+  maxContextTokens: number | null;
+  limiterLimit: number;
+  outputReserve: number;
+  toolReserve: number;
+  /** Rough estimate of actual tool schema tokens (JSON length * 0.25). */
+  estimatedToolSchemaTokens: number;
+  /** Rough estimate of system prompt tokens (length * 0.25). */
+  estimatedSystemTokens: number;
+}
+
 export function toolSchemaReserveForKind(kind: ContextBudgetKind): number {
   return kind === 'harness' ? HARNESS_TOOL_SCHEMA_RESERVE : DURABLE_TOOL_SCHEMA_RESERVE;
 }
@@ -104,4 +120,49 @@ export function isResumableWakeMatch(
   snapshotTaskId?: string,
 ): boolean {
   return Boolean(wakeTaskId) && wakeTaskId === snapshotTaskId;
+}
+
+/**
+ * Rough token estimate for debugging: char count * 0.25.
+ * Not accurate but sufficient for diagnosing context budget overflows.
+ */
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length * 0.25);
+}
+
+/**
+ * Create a context budget snapshot for diagnostics.
+ * Includes actual tool schema token estimate and system prompt size.
+ */
+export function createContextBudgetSnapshot(input: {
+  budget: ContextBudget;
+  kind: ContextBudgetKind;
+  toolSchemas?: unknown[];
+  systemPrompt?: string;
+}): ContextBudgetSnapshot {
+  const toolReserve = toolSchemaReserveForKind(input.kind);
+  
+  let estimatedToolSchemaTokens = 0;
+  if (input.toolSchemas && input.toolSchemas.length > 0) {
+    try {
+      const serialized = JSON.stringify(input.toolSchemas);
+      estimatedToolSchemaTokens = estimateTokens(serialized);
+    } catch {
+      estimatedToolSchemaTokens = 0;
+    }
+  }
+
+  const estimatedSystemTokens = input.systemPrompt 
+    ? estimateTokens(input.systemPrompt) 
+    : 0;
+
+  return {
+    kind: input.kind,
+    maxContextTokens: input.budget.contextTokens,
+    limiterLimit: input.budget.limiterLimit,
+    outputReserve: input.budget.outputReserve,
+    toolReserve,
+    estimatedToolSchemaTokens,
+    estimatedSystemTokens,
+  };
 }
