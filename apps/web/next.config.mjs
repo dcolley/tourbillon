@@ -6,11 +6,15 @@ import { config as loadDotenv } from 'dotenv';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 loadDotenv({ path: path.resolve(__dirname, '../../.env') });
 
-const allowedDevOrigins = process.env.ALLOWED_DEV_ORIGINS
-  ? process.env.ALLOWED_DEV_ORIGINS.split(',')
-      .map((origin) => origin.trim())
-      .filter(Boolean)
-  : undefined;
+const allowedDevOrigins = [
+  '100.118.152.28',
+  ...(process.env.ALLOWED_DEV_ORIGINS
+    ? process.env.ALLOWED_DEV_ORIGINS.split(',')
+        .map((origin) => origin.trim())
+        .filter(Boolean)
+    : [])
+];
+const uniqueAllowedDevOrigins = [...new Set(allowedDevOrigins)];
 
 function resolveGitCommit() {
   if (process.env.TOURBILLON_BUILD_COMMIT?.trim()) {
@@ -36,7 +40,7 @@ const nextConfig = {
     TOURBILLON_BUILD_COMMIT: resolveGitCommit(),
     TOURBILLON_BUILD_DATE: process.env.TOURBILLON_BUILD_DATE ?? new Date().toISOString(),
   },
-  ...(allowedDevOrigins?.length ? { allowedDevOrigins } : {}),
+  allowedDevOrigins: uniqueAllowedDevOrigins,
   transpilePackages: [
     '@tourbillon/db',
     '@tourbillon/shared',
