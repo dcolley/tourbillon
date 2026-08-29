@@ -21,6 +21,8 @@ const SPAN_TYPE_MAP: Partial<Record<SpanType, ObservabilityEventType>> = {
   [SpanType.TOOL_CALL]: 'tool_call',
   [SpanType.MCP_TOOL_CALL]: 'mcp_tool_call',
   [SpanType.CLIENT_TOOL_CALL]: 'tool_call',
+  [SpanType.MEMORY_OPERATION]: 'generic', // Will be refined by isObservationalMemorySpan
+  [SpanType.PROCESSOR_RUN]: 'generic', // May contain OM operations
 };
 
 function asString(value: unknown): string | undefined {
@@ -108,7 +110,58 @@ function extractContext(span: AnyExportedSpan): {
   };
 }
 
+/**
+ * Detect if a span is an Observational Memory operation and return the specific type.
+ * Mastra Memory emits MEMORY_OPERATION or PROCESSOR_RUN spans for OM.
+ * Distinguish observation vs reflection by span name, metadata, or entity name.
+ */
+function detectObservationalMemoryType(span: AnyExportedSpan): ObservabilityEventType | null {
+  const spanType = span.type as SpanType;
+  if (spanType !== SpanType.MEMORY_OPERATION && spanType !== SpanType.PROCESSOR_RUN) {
+    return null;
+  }
+
+  // Check span name for OM keywords
+  const name = typeof span.name === 'string' ? span.name.toLowerCase() : '';
+  const entityName = typeof span.entityName === 'string' ? span.entityName.toLowerCase() : '';
+  
+  // Check metadata and attributes for OM indicators
+  const meta = (span.metadata ?? {}) as Record<string, unknown>;
+  const attrs = (span.attributes ?? {}) as Record<string, unknown>;
+  
+  // Look for observation indicators
+  if (
+    name.includes('observation') ||
+    name.includes('observe') ||
+    entityName.includes('observation') ||
+    meta.observation !== undefined ||
+    attrs.observation !== undefined ||
+    attrs.observations !== undefined ||
+    meta.observations !== undefined
+  ) {
+    return 'om_observation';
+  }
+  
+  // Look for reflection indicators
+  if (
+    name.includes('reflection') ||
+    name.includes('reflect') ||
+    entityName.includes('reflection') ||
+    meta.reflection !== undefined ||
+    attrs.reflection !== undefined
+  ) {
+    return 'om_reflection';
+  }
+  
+  // If it's a memory operation but not clearly observation/reflection, keep as generic
+  return null;
+}
+
 function mapEventType(span: AnyExportedSpan): ObservabilityEventType {
+  // Check for Observational Memory first
+  const omType = detectObservationalMemoryType(span);
+  if (omType) return omType;
+  
   return SPAN_TYPE_MAP[span.type as SpanType] ?? 'generic';
 }
 

@@ -268,3 +268,147 @@ describe('mapExportedSpanToEvent', () => {
     assert.ok(errorInfo.stack);
   });
 });
+
+describe('Observational Memory span detection', () => {
+  it('detects OM observation span by name', () => {
+    const testSpan = span({
+      type: 'memory_operation' as any,
+      name: 'Observation',
+      metadata: { 
+        companyId: 'company-1',
+        heartbeatRunId: 'run-1',
+      },
+      attributes: {
+        observations: 'Some observed text',
+      },
+    });
+
+    const event = mapExportedSpanToEvent(testSpan);
+
+    assert.ok(event);
+    assert.equal(event.eventType, 'om_observation', 'Span with observation name should map to om_observation');
+  });
+
+  it('detects OM reflection span by name', () => {
+    const testSpan = span({
+      type: 'memory_operation' as any,
+      name: 'Reflection',
+      metadata: { 
+        companyId: 'company-1',
+        heartbeatRunId: 'run-1',
+      },
+      attributes: {
+        reflection: 'Some reflection',
+      },
+    });
+
+    const event = mapExportedSpanToEvent(testSpan);
+
+    assert.ok(event);
+    assert.equal(event.eventType, 'om_reflection', 'Span with reflection name should map to om_reflection');
+  });
+
+  it('detects OM observation by entityName', () => {
+    const testSpan = span({
+      type: 'processor_run' as any,
+      name: 'Process',
+      entityName: 'observational-memory-observation',
+      metadata: { 
+        companyId: 'company-1',
+        heartbeatRunId: 'run-1',
+      },
+    });
+
+    const event = mapExportedSpanToEvent(testSpan);
+
+    assert.ok(event);
+    assert.equal(event.eventType, 'om_observation');
+  });
+
+  it('detects OM reflection by metadata', () => {
+    const testSpan = span({
+      type: 'memory_operation' as any,
+      name: 'memory-op',
+      metadata: { 
+        companyId: 'company-1',
+        heartbeatRunId: 'run-1',
+        reflection: true,
+      },
+    });
+
+    const event = mapExportedSpanToEvent(testSpan);
+
+    assert.ok(event);
+    assert.equal(event.eventType, 'om_reflection');
+  });
+
+  it('does not mis-detect regular memory_operation as OM', () => {
+    const testSpan = span({
+      type: 'memory_operation' as any,
+      name: 'save-message',
+      metadata: { 
+        companyId: 'company-1',
+        heartbeatRunId: 'run-1',
+      },
+    });
+
+    const event = mapExportedSpanToEvent(testSpan);
+
+    assert.ok(event);
+    assert.equal(event.eventType, 'generic', 'Non-OM memory operations should remain generic');
+  });
+
+  it('extracts input/output tokens from OM observation span', () => {
+    const testSpan = span({
+      type: 'memory_operation' as any,
+      name: 'observation-step',
+      metadata: { 
+        companyId: 'company-1',
+        heartbeatRunId: 'run-1',
+      },
+      attributes: {
+        observation: true,
+        usage: {
+          promptTokens: 706,
+          completionTokens: 116,
+        },
+      },
+      output: {
+        observations: 'Compressed observations text',
+      },
+    });
+
+    const event = mapExportedSpanToEvent(testSpan);
+
+    assert.ok(event);
+    assert.equal(event.eventType, 'om_observation');
+    assert.equal(event.inputTokens, 706, 'Should extract promptTokens as inputTokens');
+    assert.equal(event.outputTokens, 116, 'Should extract completionTokens as outputTokens');
+    assert.ok(event.outputPreview?.includes('observations'), 'Should include output preview');
+  });
+
+  it('extracts input/output tokens from OM reflection span', () => {
+    const testSpan = span({
+      type: 'memory_operation' as any,
+      name: 'reflection-step',
+      metadata: { 
+        companyId: 'company-1',
+        heartbeatRunId: 'run-1',
+      },
+      attributes: {
+        reflection: true,
+        usage: {
+          promptTokens: 1200,
+          completionTokens: 639,
+        },
+      },
+    });
+
+    const event = mapExportedSpanToEvent(testSpan);
+
+    assert.ok(event);
+    assert.equal(event.eventType, 'om_reflection');
+    assert.equal(event.inputTokens, 1200);
+    assert.equal(event.outputTokens, 639);
+  });
+});

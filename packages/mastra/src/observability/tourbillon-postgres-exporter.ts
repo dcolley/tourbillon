@@ -80,6 +80,9 @@ export class TourbillonPostgresExporter extends BaseExporter {
   private buffer: ReturnType<typeof mapExportedSpanToEvent>[] = [];
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private flushing: Promise<void> | null = null;
+  
+  // Cache companyId by traceId to handle nested spans without companyId
+  private traceCompanyIdCache = new Map<string, string>();
 
   constructor() {
     super();
@@ -97,6 +100,42 @@ export class TourbillonPostgresExporter extends BaseExporter {
     // Enrich span.errorInfo with AI_APICallError fields before mapping
     // (Mastra only copies message/name/stack; we need statusCode/url/responseBody/data)
     enrichSpanErrorInfo(event.exportedSpan);
+    
+    const span = event.exportedSpan;
+    
+    // Try to get companyId from span or cache
+    let companyIdFromSpan: string | undefined;
+    const ctx = span.requestContext;
+    const meta = (span.metadata ?? {}) as Record<string, unknown>;
+    
+    if (ctx && typeof ctx === 'object') {
+      if ('get' in ctx && typeof (ctx as { get: unknown }).get === 'function') {
+        const id = (ctx as { get: (k: string) => unknown }).get('companyId');
+        if (typeof id === 'string' && id.length > 0) companyIdFromSpan = id;
+      }
+      if (!companyIdFromSpan) {
+        const id = (ctx as Record<string, unknown>).companyId;
+        if (typeof id === 'string' && id.length > 0) companyIdFromSpan = id;
+      }
+    }
+    if (!companyIdFromSpan && typeof meta.companyId === 'string' && meta.companyId.length > 0) {
+      companyIdFromSpan = meta.companyId;
+    }
+    
+    // Cache companyId for this trace
+    if (companyIdFromSpan && span.traceId) {
+      this.traceCompanyIdCache.set(span.traceId, companyIdFromSpan);
+    }
+    
+    // If span is missing companyId but we have it cached for this trace, inject it
+    if (!companyIdFromSpan && span.traceId) {
+      const cachedCompanyId = this.traceCompanyIdCache.get(span.traceId);
+      if (cachedCompanyId) {
+        // Inject companyId into span metadata so mapExportedSpanToEvent can find it
+        const metadata = (span.metadata ?? {}) as Record<string, unknown>;
+        span.metadata = { ...metadata, companyId: cachedCompanyId };
+      }
+    }
     
     const row = mapExportedSpanToEvent(event.exportedSpan);
     if (!row) return;
@@ -147,10 +186,21 @@ export class TourbillonPostgresExporter extends BaseExporter {
     })();
 
     await this.flushing;
+    
+    // Clean up trace cache if it gets too large (keep last 1000 traces)
+    if (this.traceCompanyIdCache.size > 1000) {
+      const entries = Array.from(this.traceCompanyIdCache.entries());
+      this.traceCompanyIdCache.clear();
+      // Keep last 500 entries
+      for (const [traceId, companyId] of entries.slice(-500)) {
+        this.traceCompanyIdCache.set(traceId, companyId);
+      }
+    }
   }
 
   async shutdown(): Promise<void> {
     await this.flush();
+    this.traceCompanyIdCache.clear();
     await super.shutdown();
   }
 }
