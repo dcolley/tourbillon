@@ -70,6 +70,7 @@ Open [http://localhost:3000](http://localhost:3000).
 ```
 apps/
   web/                  Next.js 14 App Router + shadcn/ui
+  mobile/               Expo React Native companion app (iOS/Android)
 packages/
   db/                   Drizzle ORM schema + migrations
   mastra/               Mastra agents, workflows, tools
