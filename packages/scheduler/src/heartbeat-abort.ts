@@ -112,8 +112,18 @@ export function resolveHeartbeatFailureError(
     return OPERATOR_FORCE_KILL_REASON;
   }
   
+  // Check for wall-clock timeout in abort reason
+  if (abortReason instanceof Error && abortReason.message.includes('wall-clock timeout')) {
+    return abortReason.message;
+  }
+  
   // Check for timeout message before abort-like errors (timeout is in isAbortLikeError)
   if (err instanceof Error && err.message === 'Heartbeat timeout') {
+    return err.message;
+  }
+  
+  // Check for wall-clock timeout in error itself
+  if (err instanceof Error && err.message.includes('wall-clock timeout')) {
     return err.message;
   }
   

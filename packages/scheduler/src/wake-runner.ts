@@ -442,6 +442,17 @@ async function runWake(
   // Register for operator force-kill
   runAbortControllers.set(runId, abortController);
 
+  // Wall-clock timeout (hard limit from agent config)
+  const runtimeConfig = agentRecord.runtimeConfig as AgentRuntimeConfig;
+  const timeoutSec = runtimeConfig.timeout?.heartbeatSec ?? 300;
+  let wallClockTimer: ReturnType<typeof setTimeout> | undefined;
+  if (timeoutSec > 0) {
+    wallClockTimer = setTimeout(() => {
+      abortController.abort(new Error(`Heartbeat exceeded wall-clock timeout of ${timeoutSec}s`));
+    }, timeoutSec * 1000);
+  }
+
+  // Staleness watchdog (resets on ping)
   let watchdog: ReturnType<typeof setTimeout> | undefined;
   const resetWatchdog = () => {
     if (watchdog) clearTimeout(watchdog);
@@ -582,6 +593,7 @@ async function runWake(
         return { runId, status: 'failed', errorText };
       } finally {
         if (watchdog) clearTimeout(watchdog);
+        if (wallClockTimer) clearTimeout(wallClockTimer);
         clearInterval(pingInterval);
         runAbortControllers.delete(runId);
       }
