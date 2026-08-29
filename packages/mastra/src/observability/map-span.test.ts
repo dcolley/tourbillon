@@ -23,17 +23,19 @@ describe('mapExportedSpanToEvent', () => {
           message: 'OpenAI stream failed before any output was generated',
           name: 'AI_APICallError',
           stack: 'Error: ...',
-          statusCode: 400,
-          url: 'http://192.168.10.199:1234/v1/chat/completions',
-          responseBody: '{"error":{"message":"Maximum context length exceeded"}}',
-          data: {
+        } as any,
+        requestContext: {
+          companyId: 'company-1',
+          __errorStatusCode: 400,
+          __errorUrl: 'http://192.168.10.199:1234/v1/chat/completions',
+          __errorResponseBody: '{"error":{"message":"Maximum context length exceeded"}}',
+          __errorData: {
             error: {
               message: 'Maximum context length exceeded',
               type: 'invalid_request_error',
             },
           },
-        } as any,
-        requestContext: { get: () => 'company-1' },
+        },
       })
     );
 
@@ -43,7 +45,7 @@ describe('mapExportedSpanToEvent', () => {
     const payload = event.payload as Record<string, unknown>;
     const errorInfo = payload.errorInfo as Record<string, unknown>;
 
-    // Verify all AI_APICallError fields are preserved
+    // Verify all AI_APICallError fields are preserved from requestContext
     assert.equal(errorInfo.message, 'OpenAI stream failed before any output was generated');
     assert.equal(errorInfo.name, 'AI_APICallError');
     assert.equal(errorInfo.statusCode, 400);
@@ -58,10 +60,12 @@ describe('mapExportedSpanToEvent', () => {
       span({
         errorInfo: {
           message: 'Error',
-          statusCode: 500,
-          responseBody: longBody,
         } as any,
-        requestContext: { get: () => 'company-1' },
+        requestContext: {
+          companyId: 'company-1',
+          __errorStatusCode: 500,
+          __errorResponseBody: longBody,
+        },
       })
     );
 
@@ -83,7 +87,7 @@ describe('mapExportedSpanToEvent', () => {
           name: 'Error',
           stack: 'Error: ...',
         } as any,
-        requestContext: { get: () => 'company-1' },
+        requestContext: { companyId: 'company-1' },
       })
     );
 

@@ -133,13 +133,16 @@ export function resolveSpanErrorText(span: AnyExportedSpan): string | undefined 
     | undefined;
 
   if (!errorInfo) return undefined;
+  
+  // Extract request key from span context
+  const requestKey = extractRequestKey(span);
 
   // Try AI_APICallError enriched extraction first
   if (errorInfo.statusCode !== undefined || errorInfo.url !== undefined || errorInfo.responseBody !== undefined) {
     const enriched = buildApiCallErrorText(errorInfo as Record<string, unknown>);
     if (enriched) {
       // Try to append first frame capture if available
-      const firstFrame = tryGetFirstFrameCapture();
+      const firstFrame = tryGetFirstFrameCapture(requestKey);
       if (firstFrame) {
         return `${enriched} | ${firstFrame}`;
       }
@@ -152,7 +155,7 @@ export function resolveSpanErrorText(span: AnyExportedSpan): string | undefined 
   if (message) {
     // Try to append first frame capture if this looks like a stream failure
     if (message.includes('stream') || message.includes('output')) {
-      const firstFrame = tryGetFirstFrameCapture();
+      const firstFrame = tryGetFirstFrameCapture(requestKey);
       if (firstFrame) {
         return `${message} | ${firstFrame}`;
       }
@@ -174,15 +177,29 @@ export function resolveSpanErrorText(span: AnyExportedSpan): string | undefined 
 }
 
 /**
- * Try to get first frame capture from the diagnostics module.
- * Returns undefined if the module is not available or no capture exists.
+ * Extract request key from span's requestContext.
  */
-function tryGetFirstFrameCapture(): string | undefined {
+function extractRequestKey(span: AnyExportedSpan): string | undefined {
+  const ctx = span.requestContext;
+  if (ctx && typeof ctx === 'object' && '__firstFrameRequestKey' in ctx) {
+    const key = (ctx as { __firstFrameRequestKey?: unknown }).__firstFrameRequestKey;
+    return typeof key === 'string' ? key : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Try to get first frame capture using request key.
+ * Returns undefined if the module is not available, no key, or no capture exists.
+ */
+function tryGetFirstFrameCapture(requestKey: string | undefined): string | undefined {
+  if (!requestKey) return undefined;
+  
   try {
     // Dynamic import to avoid circular dependencies
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { getRecentFirstFrameCapture, formatFirstFrameCapture } = require('../first-frame-capture') as typeof import('../first-frame-capture');
-    const capture = getRecentFirstFrameCapture();
+    const { getFirstFrameCapture, formatFirstFrameCapture } = require('../first-frame-capture') as typeof import('../first-frame-capture');
+    const capture = getFirstFrameCapture(requestKey);
     return capture ? formatFirstFrameCapture(capture) : undefined;
   } catch {
     return undefined;

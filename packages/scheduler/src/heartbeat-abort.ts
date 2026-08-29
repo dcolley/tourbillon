@@ -126,7 +126,7 @@ export function resolveHeartbeatFailureError(
   const apiErrorText = extractApiCallErrorText(err);
   if (apiErrorText) {
     // Try to append first frame capture if available
-    const firstFrame = tryGetFirstFrameCapture();
+    const firstFrame = tryGetFirstFrameCapture(err);
     if (firstFrame) {
       return `${apiErrorText} | ${firstFrame}`;
     }
@@ -137,7 +137,7 @@ export function resolveHeartbeatFailureError(
   
   // Try to append first frame capture if this looks like a stream failure
   if (baseMessage.includes('stream') || baseMessage.includes('output')) {
-    const firstFrame = tryGetFirstFrameCapture();
+    const firstFrame = tryGetFirstFrameCapture(err);
     if (firstFrame) {
       return `${baseMessage} | ${firstFrame}`;
     }
@@ -147,15 +147,26 @@ export function resolveHeartbeatFailureError(
 }
 
 /**
- * Try to get first frame capture from the diagnostics module.
- * Returns undefined if the module is not available or no capture exists.
+ * Extract first frame capture using request key from error object.
+ * Returns undefined if the module is not available, no key, or no capture exists.
  */
-function tryGetFirstFrameCapture(): string | undefined {
+function tryGetFirstFrameCapture(err: unknown): string | undefined {
   try {
+    // Extract request key from error object (attached by createFirstFrameCaptureFetch)
+    let requestKey: string | undefined;
+    if (err && typeof err === 'object' && '__firstFrameRequestKey' in err) {
+      const key = (err as { __firstFrameRequestKey?: unknown }).__firstFrameRequestKey;
+      requestKey = typeof key === 'string' ? key : undefined;
+    }
+    
+    if (!requestKey) {
+      return undefined;
+    }
+    
     // Dynamic import to avoid circular dependencies
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { getRecentFirstFrameCapture, formatFirstFrameCapture } = require('@tourbillon/mastra/first-frame-capture') as typeof import('@tourbillon/mastra/first-frame-capture');
-    const capture = getRecentFirstFrameCapture();
+    const { getFirstFrameCapture, formatFirstFrameCapture } = require('@tourbillon/mastra/first-frame-capture') as typeof import('@tourbillon/mastra/first-frame-capture');
+    const capture = getFirstFrameCapture(requestKey);
     return capture ? formatFirstFrameCapture(capture) : undefined;
   } catch {
     return undefined;

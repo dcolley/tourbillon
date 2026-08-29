@@ -84,6 +84,11 @@ function extractContext(span: AnyExportedSpan): {
   issueId?: string;
   projectId?: string;
   goalId?: string;
+  errorStatusCode?: number;
+  errorUrl?: string;
+  errorResponseBody?: string;
+  errorData?: unknown;
+  firstFrameRequestKey?: string;
 } {
   const ctx = span.requestContext;
   const meta = (span.metadata ?? {}) as Record<string, unknown>;
@@ -105,6 +110,16 @@ function extractContext(span: AnyExportedSpan): {
       asString(meta.taskId),
     projectId: readContextValue(ctx, 'projectId') ?? asString(meta.projectId),
     goalId: readContextValue(ctx, 'goalId') ?? asString(meta.goalId),
+    // Extract AI_APICallError fields from runtime context
+    errorStatusCode: typeof ctx === 'object' && ctx && '__errorStatusCode' in ctx 
+      ? (ctx as { __errorStatusCode?: number }).__errorStatusCode 
+      : undefined,
+    errorUrl: readContextValue(ctx, '__errorUrl'),
+    errorResponseBody: readContextValue(ctx, '__errorResponseBody'),
+    errorData: ctx && typeof ctx === 'object' && '__errorData' in ctx 
+      ? (ctx as { __errorData?: unknown }).__errorData 
+      : undefined,
+    firstFrameRequestKey: readContextValue(ctx, '__firstFrameRequestKey'),
   };
 }
 
@@ -143,9 +158,9 @@ function tokenUsage(span: AnyExportedSpan): { input?: number; output?: number } 
 /**
  * Enrich errorInfo with full AI_APICallError fields for diagnostics.
  * Ensures statusCode, url, responseBody, and data are preserved in the payload.
- * Mastra may only copy message/name/stack; we need the rest for diagnostics.
+ * Mastra may only copy message/name/stack; we extract the rest from runtime context.
  */
-function enrichErrorInfo(errorInfo: unknown): unknown {
+function enrichErrorInfo(errorInfo: unknown, context: ReturnType<typeof extractContext>): unknown {
   if (!errorInfo || typeof errorInfo !== 'object') return errorInfo;
   
   const err = errorInfo as Record<string, unknown>;
@@ -153,19 +168,34 @@ function enrichErrorInfo(errorInfo: unknown): unknown {
   // Create enriched object with all available fields
   const enriched: Record<string, unknown> = { ...err };
   
-  // Ensure AI_APICallError fields are preserved if present
+  // First, copy AI_APICallError fields from runtime context (highest priority)
+  if (context.errorStatusCode !== undefined) {
+    enriched.statusCode = context.errorStatusCode;
+  }
+  if (context.errorUrl !== undefined) {
+    enriched.url = context.errorUrl;
+  }
+  if (context.errorResponseBody !== undefined) {
+    enriched.responseBody = context.errorResponseBody;
+  }
+  if (context.errorData !== undefined) {
+    enriched.data = context.errorData;
+  }
+  
+  // Then ensure AI_APICallError fields are preserved if present on errorInfo itself (backward compat)
   const apiErrorFields = ['statusCode', 'url', 'responseBody', 'responseHeaders', 'data', 'isRetryable', 'cause', 'requestBodyValues'];
   
   let hasApiErrorFields = false;
   for (const field of apiErrorFields) {
-    if (field in err && err[field] !== undefined) {
+    // Only copy from errorInfo if not already set from context
+    if (field in err && err[field] !== undefined && enriched[field] === undefined) {
       enriched[field] = err[field];
       hasApiErrorFields = true;
     }
   }
   
   // If this looks like an API error, cap the responseBody to prevent huge payloads
-  if (hasApiErrorFields && typeof enriched.responseBody === 'string') {
+  if (typeof enriched.responseBody === 'string') {
     const body = enriched.responseBody as string;
     if (body.length > 2000) {
       enriched.responseBody = `${body.slice(0, 2000)}… [truncated, full length: ${body.length}]`;
@@ -230,7 +260,7 @@ export function mapExportedSpanToEvent(span: AnyExportedSpan): NewAgentObservabi
         output: span.output,
         attributes: span.attributes,
         metadata: span.metadata,
-        errorInfo: enrichErrorInfo(span.errorInfo),
+        errorInfo: enrichErrorInfo(span.errorInfo, context),
         tags: span.tags,
         entityType: span.entityType,
         entityId: span.entityId,

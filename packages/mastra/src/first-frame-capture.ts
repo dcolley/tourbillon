@@ -285,6 +285,14 @@ export function createFirstFrameCaptureFetch(baseFetch: typeof fetch): typeof fe
 
       return newResponse;
     } catch (err) {
+      // Attach request key to error so resolveHeartbeatFailureError can retrieve the first frame capture
+      if (err && typeof err === 'object' && !('__firstFrameRequestKey' in err)) {
+        Object.defineProperty(err, '__firstFrameRequestKey', {
+          value: requestKey,
+          enumerable: false,
+          writable: false,
+        });
+      }
       throw err;
     }
   };

@@ -801,6 +801,31 @@ async function runDurableAgentWake(params: {
   } catch (err) {
     streamResult?.cleanup();
     streamResult = undefined;
+    
+    // Extract AI_APICallError fields for observability before re-throwing
+    if (err && typeof err === 'object') {
+      const apiError = err as Record<string, unknown>;
+      
+      // Attach AI_APICallError fields to runtime context so they reach observability
+      if (apiError.statusCode !== undefined || apiError.url !== undefined) {
+        Object.assign(runtimeContext, {
+          __errorStatusCode: apiError.statusCode,
+          __errorUrl: apiError.url,
+          __errorResponseBody: typeof apiError.responseBody === 'string' 
+            ? apiError.responseBody.slice(0, 2000) 
+            : undefined,
+          __errorData: apiError.data,
+        });
+      }
+      
+      // Also store the first frame request key if present
+      if ('__firstFrameRequestKey' in apiError) {
+        Object.assign(runtimeContext, {
+          __firstFrameRequestKey: apiError.__firstFrameRequestKey,
+        });
+      }
+    }
+    
     if (abortSignal.aborted || isAbortLikeError(err)) {
       throw heartbeatAbortedError();
     }
