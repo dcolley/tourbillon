@@ -802,27 +802,25 @@ async function runDurableAgentWake(params: {
     streamResult?.cleanup();
     streamResult = undefined;
     
-    // Extract AI_APICallError fields for observability before re-throwing
+    // Store AI_APICallError fields in registry for exporter to enrich span.errorInfo
+    // (Mastra only copies message/name/stack; we need statusCode/url/responseBody/data)
     if (err && typeof err === 'object') {
       const apiError = err as Record<string, unknown>;
       
-      // Store AI_APICallError fields in RequestContext using set() so they reach observability
-      if (apiError.statusCode !== undefined) {
-        runtimeContext.set('__errorStatusCode', apiError.statusCode);
-      }
-      if (apiError.url !== undefined) {
-        runtimeContext.set('__errorUrl', apiError.url);
-      }
-      if (typeof apiError.responseBody === 'string') {
-        runtimeContext.set('__errorResponseBody', apiError.responseBody.slice(0, 2000));
-      }
-      if (apiError.data !== undefined) {
-        runtimeContext.set('__errorData', apiError.data);
-      }
-      
-      // Also store the first frame request key if present
-      if ('__firstFrameRequestKey' in apiError) {
-        runtimeContext.set('__firstFrameRequestKey', apiError.__firstFrameRequestKey);
+      if (apiError.statusCode !== undefined || apiError.url !== undefined || apiError.responseBody !== undefined) {
+        const { storeApiErrorDetails } = require('@tourbillon/mastra/observability') as typeof import('@tourbillon/mastra/observability');
+        
+        storeApiErrorDetails(runId, {
+          statusCode: typeof apiError.statusCode === 'number' ? apiError.statusCode : undefined,
+          url: typeof apiError.url === 'string' ? apiError.url : undefined,
+          responseBody: typeof apiError.responseBody === 'string' 
+            ? apiError.responseBody.slice(0, 2000) 
+            : undefined,
+          data: apiError.data,
+          firstFrameRequestKey: '__firstFrameRequestKey' in apiError 
+            ? (typeof apiError.__firstFrameRequestKey === 'string' ? apiError.__firstFrameRequestKey : undefined)
+            : undefined,
+        });
       }
     }
     

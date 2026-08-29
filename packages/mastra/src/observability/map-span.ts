@@ -76,21 +76,6 @@ function readContextValue(ctx: unknown, key: string): string | undefined {
   return undefined;
 }
 
-function readContextRawValue(ctx: unknown, key: string): unknown {
-  if (
-    ctx &&
-    typeof ctx === 'object' &&
-    'get' in ctx &&
-    typeof (ctx as { get: unknown }).get === 'function'
-  ) {
-    return (ctx as { get: (k: string) => unknown }).get(key);
-  }
-  if (ctx && typeof ctx === 'object') {
-    return (ctx as Record<string, unknown>)[key];
-  }
-  return undefined;
-}
-
 function extractContext(span: AnyExportedSpan): {
   companyId?: string;
   heartbeatRunId?: string;
@@ -99,11 +84,6 @@ function extractContext(span: AnyExportedSpan): {
   issueId?: string;
   projectId?: string;
   goalId?: string;
-  errorStatusCode?: number;
-  errorUrl?: string;
-  errorResponseBody?: string;
-  errorData?: unknown;
-  firstFrameRequestKey?: string;
 } {
   const ctx = span.requestContext;
   const meta = (span.metadata ?? {}) as Record<string, unknown>;
@@ -125,14 +105,6 @@ function extractContext(span: AnyExportedSpan): {
       asString(meta.taskId),
     projectId: readContextValue(ctx, 'projectId') ?? asString(meta.projectId),
     goalId: readContextValue(ctx, 'goalId') ?? asString(meta.goalId),
-    // Extract AI_APICallError fields from runtime context via get()
-    errorStatusCode: typeof readContextRawValue(ctx, '__errorStatusCode') === 'number' 
-      ? readContextRawValue(ctx, '__errorStatusCode') as number
-      : undefined,
-    errorUrl: readContextValue(ctx, '__errorUrl'),
-    errorResponseBody: readContextValue(ctx, '__errorResponseBody'),
-    errorData: readContextRawValue(ctx, '__errorData'),
-    firstFrameRequestKey: readContextValue(ctx, '__firstFrameRequestKey'),
   };
 }
 
@@ -171,43 +143,18 @@ function tokenUsage(span: AnyExportedSpan): { input?: number; output?: number } 
 /**
  * Enrich errorInfo with full AI_APICallError fields for diagnostics.
  * Ensures statusCode, url, responseBody, and data are preserved in the payload.
- * Mastra may only copy message/name/stack; we extract the rest from runtime context.
+ * Note: errorInfo is enriched by the exporter before this function is called.
  */
 function enrichErrorInfo(errorInfo: unknown, context: ReturnType<typeof extractContext>): unknown {
   if (!errorInfo || typeof errorInfo !== 'object') return errorInfo;
   
   const err = errorInfo as Record<string, unknown>;
   
-  // Create enriched object with all available fields
+  // errorInfo already has the enriched fields from the exporter
+  // We just need to cap responseBody if present
   const enriched: Record<string, unknown> = { ...err };
-  
-  // First, copy AI_APICallError fields from runtime context (highest priority)
-  if (context.errorStatusCode !== undefined) {
-    enriched.statusCode = context.errorStatusCode;
-  }
-  if (context.errorUrl !== undefined) {
-    enriched.url = context.errorUrl;
-  }
-  if (context.errorResponseBody !== undefined) {
-    enriched.responseBody = context.errorResponseBody;
-  }
-  if (context.errorData !== undefined) {
-    enriched.data = context.errorData;
-  }
-  
-  // Then ensure AI_APICallError fields are preserved if present on errorInfo itself (backward compat)
-  const apiErrorFields = ['statusCode', 'url', 'responseBody', 'responseHeaders', 'data', 'isRetryable', 'cause', 'requestBodyValues'];
-  
-  let hasApiErrorFields = false;
-  for (const field of apiErrorFields) {
-    // Only copy from errorInfo if not already set from context
-    if (field in err && err[field] !== undefined && enriched[field] === undefined) {
-      enriched[field] = err[field];
-      hasApiErrorFields = true;
-    }
-  }
-  
-  // If this looks like an API error, cap the responseBody to prevent huge payloads
+
+  // Cap responseBody to prevent huge payloads
   if (typeof enriched.responseBody === 'string') {
     const body = enriched.responseBody as string;
     if (body.length > 2000) {

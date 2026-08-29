@@ -1,15 +1,72 @@
 import {
   TracingEventType,
   type TracingEvent,
+  type AnyExportedSpan,
 } from '@mastra/core/observability';
 import { BaseExporter } from '@mastra/observability';
 import { db, agentObservabilityEvents } from '@tourbillon/db';
 import { isObservabilityEnabled } from '@tourbillon/shared';
 import { mapExportedSpanToEvent, shouldPersistTracingEvent } from './map-span';
 import { tripwireDetectorRegistry } from './tripwire-detector';
+import { consumeApiErrorDetails } from './error-details-registry';
 
 const DEFAULT_BATCH_SIZE = 50;
 const DEFAULT_FLUSH_MS = 2000;
+
+/**
+ * Extract heartbeat runId from span metadata or requestContext.
+ */
+function extractHeartbeatRunId(span: AnyExportedSpan): string | undefined {
+  const meta = span.metadata as Record<string, unknown> | undefined;
+  if (meta?.heartbeatRunId && typeof meta.heartbeatRunId === 'string') {
+    return meta.heartbeatRunId;
+  }
+  
+  const ctx = span.requestContext;
+  if (ctx && typeof ctx === 'object') {
+    if ('get' in ctx && typeof (ctx as { get: unknown }).get === 'function') {
+      const runId = (ctx as { get: (k: string) => unknown }).get('runId');
+      if (typeof runId === 'string') return runId;
+    }
+    const runId = (ctx as Record<string, unknown>).runId;
+    if (typeof runId === 'string') return runId;
+  }
+  
+  return undefined;
+}
+
+/**
+ * Enrich span.errorInfo with AI_APICallError fields from the error details registry.
+ * Mastra only copies message/name/stack; we need statusCode/url/responseBody/data for diagnostics.
+ */
+function enrichSpanErrorInfo(span: AnyExportedSpan): void {
+  if (!span.errorInfo) return;
+  
+  const runId = extractHeartbeatRunId(span);
+  if (!runId) return;
+  
+  const details = consumeApiErrorDetails(runId);
+  if (!details) return;
+  
+  // Mutate errorInfo to add the AI_APICallError fields
+  const errorInfo = span.errorInfo as unknown as Record<string, unknown>;
+  
+  if (details.statusCode !== undefined) {
+    errorInfo.statusCode = details.statusCode;
+  }
+  if (details.url !== undefined) {
+    errorInfo.url = details.url;
+  }
+  if (details.responseBody !== undefined) {
+    errorInfo.responseBody = details.responseBody;
+  }
+  if (details.data !== undefined) {
+    errorInfo.data = details.data;
+  }
+  if (details.firstFrameRequestKey !== undefined) {
+    errorInfo.__firstFrameRequestKey = details.firstFrameRequestKey;
+  }
+}
 
 export class TourbillonPostgresExporter extends BaseExporter {
   name = 'tourbillon-postgres-exporter';
@@ -30,6 +87,11 @@ export class TourbillonPostgresExporter extends BaseExporter {
     tripwireDetectorRegistry.onTracingEvent(event);
     
     if (!shouldPersistTracingEvent(event.type)) return;
+    
+    // Enrich span.errorInfo with AI_APICallError fields before mapping
+    // (Mastra only copies message/name/stack; we need statusCode/url/responseBody/data)
+    enrichSpanErrorInfo(event.exportedSpan);
+    
     const row = mapExportedSpanToEvent(event.exportedSpan);
     if (!row) return;
 
