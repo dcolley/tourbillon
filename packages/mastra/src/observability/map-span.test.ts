@@ -5,6 +5,7 @@ import { mapExportedSpanToEvent } from './map-span';
 import { resolveSpanErrorText } from './resolve-span-error-text';
 import { 
   storeApiErrorDetails,
+  storeApiErrorDetailsByRequestKey,
   clearAllApiErrorDetails,
   consumeApiErrorDetails 
 } from './error-details-registry';
@@ -98,6 +99,81 @@ describe('mapExportedSpanToEvent', () => {
     // Must NOT be just the SDK fallback
     assert.notEqual(event.errorText, 'OpenAI stream failed before any output was generated', 
       'errorText must be enriched, not just the SDK fallback');
+  });
+
+  it('store-by-pattern-then-export: 200 + reasoning_content first frame + SDK throw enriches errorText', () => {
+    // Nemotron case: HTTP 200, first frame is reasoning_content (non-error), SDK throws later
+    // Fetch wrapper stores by requestKey + pattern BEFORE SPAN_ENDED
+    // Exporter uses pattern-based lookup at SPAN_ENDED (before wake-runner catch transfers to runId)
+    
+    const companyId = 'company-123';
+    const agentId = 'agent-456';
+    const requestKey = 'req-reasoning-test';
+    
+    // 1. Fetch wrapper stores by requestKey + pattern when peek completes (200 + reasoning_content)
+    storeApiErrorDetailsByRequestKey(
+      requestKey,
+      {
+        statusCode: 200,
+        url: 'http://lmstudio:1234/v1/chat/completions',
+        responseBody: 'First frame: reasoning_content | {"choices":[{"delta":{"reasoning_content":"thinking..."}}]}',
+        data: { choices: [{ delta: { reasoning_content: 'thinking...' } }] },
+      },
+      companyId,
+      agentId
+    );
+    
+    // 2. SDK throws later, Mastra creates span with message/name/stack only (no __firstFrameRequestKey)
+    const testSpan = span({
+      errorInfo: {
+        message: 'OpenAI stream failed before any output was generated',
+        name: 'AI_APICallError',
+        stack: 'Error: OpenAI stream failed...',
+        // NO __firstFrameRequestKey - Mastra doesn't copy it
+      } as any,
+      metadata: {
+        companyId,
+        agentId,
+        heartbeatRunId: 'run-reasoning-test', // runId present but not yet linked to requestKey
+      },
+    });
+    
+    // 3. SPAN_ENDED fires - exporter enriches using pattern-based lookup (simulated)
+    const { consumeApiErrorDetailsByPattern } = require('./error-details-registry') as typeof import('./error-details-registry');
+    const details = consumeApiErrorDetailsByPattern(companyId, agentId);
+    assert.ok(details, 'Error details must be in registry via pattern lookup');
+    
+    const enrichedErrorInfo = testSpan.errorInfo as Record<string, unknown>;
+    if (details.statusCode !== undefined) enrichedErrorInfo.statusCode = details.statusCode;
+    if (details.url !== undefined) enrichedErrorInfo.url = details.url;
+    if (details.responseBody !== undefined) enrichedErrorInfo.responseBody = details.responseBody;
+    if (details.data !== undefined) enrichedErrorInfo.data = details.data;
+    if (details.firstFrameRequestKey !== undefined) enrichedErrorInfo.__firstFrameRequestKey = details.firstFrameRequestKey;
+    
+    // 4. Map the enriched span
+    const event = mapExportedSpanToEvent(testSpan);
+    
+    assert.ok(event);
+    assert.equal(event.status, 'error');
+
+    const payload = event.payload as Record<string, unknown>;
+    const errorInfo = payload.errorInfo as Record<string, unknown>;
+    
+    // Verify all AI_APICallError fields are in the payload
+    assert.equal(errorInfo.statusCode, 200);
+    assert.ok(errorInfo.url?.toString().includes('lmstudio'), 'payload errorInfo.url missing lmstudio');
+    assert.ok(errorInfo.responseBody?.toString().includes('reasoning_content'), 'payload errorInfo.responseBody missing reasoning_content');
+    
+    // CRITICAL: errorText must be enriched with HTTP status, URL, and first frame excerpt
+    assert.ok(event.errorText);
+    
+    // errorText must NOT be the SDK fallback
+    assert.notEqual(event.errorText, 'OpenAI stream failed before any output was generated');
+    
+    // errorText must include HTTP 200, URL, and first frame excerpt
+    assert.ok(event.errorText?.includes('200'), 'errorText missing status 200');
+    assert.ok(event.errorText?.includes('lmstudio'), 'errorText missing URL host');
+    assert.ok(event.errorText?.includes('reasoning_content'), 'errorText missing first frame kind');
   });
 
   it('no store: errorText is SDK fallback when error details NOT stored', () => {

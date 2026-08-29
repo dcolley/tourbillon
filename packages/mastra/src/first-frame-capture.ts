@@ -295,36 +295,40 @@ export function createFirstFrameCaptureFetch(baseFetch: typeof fetch): typeof fe
       const { capture, stream: newStream } = await peekFirstSseFrame(response.body);
       storeFirstFrameCapture(requestKey, capture);
       
-      // If first frame is an error event, store error details BEFORE returning
+      // Store error details for ALL peek paths (200 + any first frame kind)
+      // This covers: error events, reasoning_content (Nemotron), content, and other
+      // Store BEFORE returning so details are available at SPAN_ENDED
+      const { storeApiErrorDetailsByRequestKey } = require('./observability/error-details-registry') as typeof import('./observability/error-details-registry');
+      
+      let responseBody: string | undefined;
+      let data: unknown;
+      
+      // Extract error/response data based on first frame
       if (capture.kind === 'error' && capture.excerpt) {
-        const { storeApiErrorDetailsByRequestKey } = require('./observability/error-details-registry') as typeof import('./observability/error-details-registry');
-        
-        // Try to parse error from the excerpt
-        let responseBody = capture.excerpt;
-        let data: unknown;
-        
+        responseBody = capture.excerpt;
         try {
-          const parsed = JSON.parse(capture.excerpt);
-          data = parsed;
-          
-          // Extract error message if structured
-          if (parsed.error && typeof parsed.error === 'object') {
-            const error = parsed.error as Record<string, unknown>;
-            if (typeof error.message === 'string') {
-              responseBody = JSON.stringify(parsed);
-            }
-          }
+          data = JSON.parse(capture.excerpt);
         } catch {
-          // Keep excerpt as-is if not JSON
+          // Keep excerpt as-is
         }
-        
-        storeApiErrorDetailsByRequestKey(requestKey, {
+      } else if (capture.excerpt) {
+        // Non-error frames: include excerpt for diagnostics (reasoning_content, content, other)
+        responseBody = `First frame: ${capture.kind} | ${capture.excerpt}`;
+      }
+      
+      // Store by requestKey and error pattern for exporter correlation
+      // Pattern-based lookup works at SPAN_ENDED without wake-runner catch transfer
+      storeApiErrorDetailsByRequestKey(
+        requestKey,
+        {
           statusCode: response.status,
           url: urlString,
-          responseBody: responseBody.slice(0, 2000),
+          responseBody: responseBody ? responseBody.slice(0, 2000) : `HTTP ${response.status} stream (${capture.kind} first frame)`,
           data,
-        });
-      }
+        },
+        undefined, // companyId not available at fetch level
+        undefined  // agentId not available at fetch level
+      );
 
       // Create a new Response with the peeked stream (all content intact)
       const newResponse = new Response(newStream, {
