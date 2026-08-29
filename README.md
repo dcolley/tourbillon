@@ -63,7 +63,11 @@ pnpm dev
 pnpm workers:dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000).
+Open [http://localhost:3002](http://localhost:3002).
+
+### Mobile Companion App
+
+See [`apps/mobile/README.md`](apps/mobile/README.md) for instructions on running the iOS/Android companion app.
 
 ## Project Structure
 

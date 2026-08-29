@@ -41,10 +41,10 @@ export function CompanySelectScreen({ navigation }: Props) {
 
   const handleSelectCompany = async (company: Company) => {
     try {
-      await apiClient.selectCompany(company.id);
+      const selectedCompany = await apiClient.selectCompany(company.id);
       navigation.navigate('Agents', {
-        companyId: company.id,
-        companyName: company.name,
+        companyId: selectedCompany.id,
+        companyName: selectedCompany.name,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to select company';

@@ -46,7 +46,7 @@ export function IssuesScreen({ route }: Props) {
     try {
       setLoading(true);
       setError(null);
-      const data = await apiClient.listIssues(companyId);
+      const data = await apiClient.listIssues();
       setIssues(data);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to load issues';

@@ -39,7 +39,7 @@ export function AgentsScreen({ navigation, route }: Props) {
     try {
       setLoading(true);
       setError(null);
-      const data = await apiClient.listAgents(companyId);
+      const data = await apiClient.listAgents();
       setAgents(data);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to load agents';

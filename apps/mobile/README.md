@@ -115,15 +115,23 @@ To test on a real device connected to the same WiFi network:
 
 ## Authentication
 
-This first-cut app uses the same **cookie-based company selection** as the web app:
+The mobile app uses **JWT session tokens** for authentication:
 
-- No user accounts (Tourbillon is single-user/local by design)
-- Company selection sets an `active_company_id` cookie
-- All API calls require this cookie to be set
+1. User selects a company via `POST /api/mobile/companies`
+2. Backend returns a signed JWT containing the company ID
+3. Token is stored securely in `expo-secure-store`
+4. All subsequent API calls include `X-Company-Token` header
+5. Token is valid for 30 days
+
+This approach works because:
+- Tokens can be stored persistently on device (unlike httpOnly cookies)
+- No user accounts needed (Tourbillon is single-user/local by design)
+- Server validates token on each request and extracts company context
+- Compatible with existing API routes
 
 For a production deployment, you would add:
 - Multi-user authentication (e.g., better-auth session tokens)
-- API key authentication for mobile clients
+- Refresh token rotation
 - OAuth/SSO integration
 
 ## Project Structure
@@ -147,18 +155,18 @@ apps/mobile/
 └── README.md
 ```
 
-## API Endpoints (Backend)
+## API Endpoints
 
-The mobile app calls these new routes (added to `apps/web/app/api/mobile/`):
+The mobile app uses **existing Tourbillon API routes** with one addition for session management:
 
-| Method | Path | Purpose |
-|---|---|---|
-| `GET` | `/api/mobile/companies` | List all companies |
-| `POST` | `/api/mobile/companies/:id/select` | Set active company (cookie) |
-| `GET` | `/api/mobile/companies/:id/agents` | List agents |
-| `GET` | `/api/mobile/companies/:id/issues` | List issues |
+| Method | Path | Purpose | Notes |
+|---|---|---|---|
+| `GET` | `/api/mobile/companies` | List all companies | Mobile-only (no auth required) |
+| `POST` | `/api/mobile/companies` | Select company, get session token | Mobile-only (returns JWT) |
+| `GET` | `/api/chat/agents` | List agents | Existing route, accepts `X-Company-Token` |
+| `GET` | `/api/issues/list?filter=active` | List active issues | Existing route, accepts `X-Company-Token` |
 
-These routes reuse existing Tourbillon server-side logic and require the `active_company_id` cookie.
+**Design principle**: Reuse existing routes wherever possible. Only `/api/mobile/companies` is mobile-specific, for session token issuance (httpOnly cookies don't persist on mobile devices).
 
 ## Type Checking
 
@@ -170,11 +178,11 @@ This runs TypeScript in `--noEmit` mode to catch type errors before runtime.
 
 ## Known Limitations
 
-1. **No authentication** — Anyone who can reach your API can use it. Fine for local dev, not for production.
-2. **Cookies across domains** — If the API is on a different domain, you'll need CORS + `credentials: 'include'` (already done) and matching `sameSite` cookie settings.
-3. **No shared types package** — Types are duplicated in `src/types/index.ts`. In a real monorepo, you'd extract these to `@tourbillon/shared` or a new `@tourbillon/api-types` package.
-4. **No deep linking** — Can't open specific agents or issues via URL schemes.
-5. **No image optimization** — No `expo-image` or `react-native-fast-image`.
+1. **Minimal authentication** — Session tokens work for single-user scenarios. Multi-user production deployments need proper user auth.
+2. **No shared types package** — Types are duplicated in `src/types/index.ts`. In a real monorepo, you'd extract these to `@tourbillon/api-types`.
+3. **No deep linking** — Can't open specific agents or issues via URL schemes.
+4. **No image optimization** — No `expo-image` or `react-native-fast-image`.
+5. **Active issues only** — Issues screen shows `filter=active` (todo/in_progress/in_review/blocked). No UI to switch filters yet.
 
 ## Next Steps (Future PRs)
 
