@@ -8,7 +8,7 @@ import { db, agentObservabilityEvents } from '@tourbillon/db';
 import { isObservabilityEnabled } from '@tourbillon/shared';
 import { mapExportedSpanToEvent, shouldPersistTracingEvent } from './map-span';
 import { tripwireDetectorRegistry } from './tripwire-detector';
-import { consumeApiErrorDetails } from './error-details-registry';
+import { consumeApiErrorDetails, consumeApiErrorDetailsByRequestKey } from './error-details-registry';
 
 const DEFAULT_BATCH_SIZE = 50;
 const DEFAULT_FLUSH_MS = 2000;
@@ -36,16 +36,36 @@ function extractHeartbeatRunId(span: AnyExportedSpan): string | undefined {
 }
 
 /**
+ * Extract first frame request key from span.errorInfo.
+ */
+function extractRequestKeyFromError(span: AnyExportedSpan): string | undefined {
+  const errorInfo = span.errorInfo as { __firstFrameRequestKey?: unknown } | undefined;
+  if (errorInfo && typeof errorInfo.__firstFrameRequestKey === 'string') {
+    return errorInfo.__firstFrameRequestKey;
+  }
+  return undefined;
+}
+
+/**
  * Enrich span.errorInfo with AI_APICallError fields from the error details registry.
  * Mastra only copies message/name/stack; we need statusCode/url/responseBody/data for diagnostics.
+ * 
+ * Tries lookup by requestKey first (stored by fetch wrapper BEFORE SPAN_ENDED),
+ * then falls back to runId (if stored by wake-runner catch).
  */
 function enrichSpanErrorInfo(span: AnyExportedSpan): void {
   if (!span.errorInfo) return;
   
-  const runId = extractHeartbeatRunId(span);
-  if (!runId) return;
+  // Try requestKey first (the primary path - stored BEFORE SPAN_ENDED)
+  const requestKey = extractRequestKeyFromError(span);
+  let details = requestKey ? consumeApiErrorDetailsByRequestKey(requestKey) : undefined;
   
-  const details = consumeApiErrorDetails(runId);
+  // Fall back to runId lookup (legacy path)
+  if (!details) {
+    const runId = extractHeartbeatRunId(span);
+    details = runId ? consumeApiErrorDetails(runId) : undefined;
+  }
+  
   if (!details) return;
   
   // Mutate errorInfo to add the AI_APICallError fields

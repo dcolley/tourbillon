@@ -802,13 +802,13 @@ async function runDurableAgentWake(params: {
     streamResult?.cleanup();
     streamResult = undefined;
     
-    // Store AI_APICallError fields in registry for exporter to enrich span.errorInfo
-    // (Mastra only copies message/name/stack; we need statusCode/url/responseBody/data)
+    // Fallback: Store AI_APICallError fields in registry if fetch wrapper didn't store them
+    // (Fetch wrapper stores by requestKey BEFORE SPAN_ENDED; this is a backup by runId)
     if (err && typeof err === 'object') {
       const apiError = err as Record<string, unknown>;
       
       if (apiError.statusCode !== undefined || apiError.url !== undefined || apiError.responseBody !== undefined) {
-        const { storeApiErrorDetails } = require('@tourbillon/mastra/observability') as typeof import('@tourbillon/mastra/observability');
+        const { storeApiErrorDetails } = require('@tourbillon/mastra') as typeof import('@tourbillon/mastra');
         
         storeApiErrorDetails(runId, {
           statusCode: typeof apiError.statusCode === 'number' ? apiError.statusCode : undefined,

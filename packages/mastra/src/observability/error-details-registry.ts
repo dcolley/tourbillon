@@ -1,6 +1,6 @@
 /**
  * Registry for storing AI_APICallError details that Mastra doesn't copy into span.errorInfo.
- * Keyed by heartbeat runId so the exporter can enrich errorInfo before mapping.
+ * Supports lookup by both heartbeat runId and fetch requestKey.
  */
 
 export interface ApiErrorDetails {
@@ -12,19 +12,39 @@ export interface ApiErrorDetails {
   capturedAtMs: number;
 }
 
-const registry = new Map<string, ApiErrorDetails>();
+const registryByRunId = new Map<string, ApiErrorDetails>();
+const registryByRequestKey = new Map<string, ApiErrorDetails>();
 
 const MAX_AGE_MS = 5 * 60 * 1000; // 5 minutes
 
 /**
  * Store AI_APICallError details for a heartbeat run.
- * Call this immediately after catching an AI_APICallError.
+ * Call this from the wake-runner catch block if you have the runId.
  */
 export function storeApiErrorDetails(runId: string, details: Omit<ApiErrorDetails, 'capturedAtMs'>): void {
-  registry.set(runId, {
+  const entry = {
     ...details,
     capturedAtMs: Date.now(),
-  });
+  };
+  registryByRunId.set(runId, entry);
+  
+  // Also store by requestKey if present for cross-referencing
+  if (details.firstFrameRequestKey) {
+    registryByRequestKey.set(details.firstFrameRequestKey, entry);
+  }
+}
+
+/**
+ * Store AI_APICallError details by fetch requestKey.
+ * Call this from the fetch wrapper before the error bubbles to Mastra.
+ */
+export function storeApiErrorDetailsByRequestKey(requestKey: string, details: Omit<ApiErrorDetails, 'capturedAtMs' | 'firstFrameRequestKey'>): void {
+  const entry = {
+    ...details,
+    firstFrameRequestKey: requestKey,
+    capturedAtMs: Date.now(),
+  };
+  registryByRequestKey.set(requestKey, entry);
 }
 
 /**
@@ -32,12 +52,35 @@ export function storeApiErrorDetails(runId: string, details: Omit<ApiErrorDetail
  * Returns undefined if not found or expired.
  */
 export function consumeApiErrorDetails(runId: string): ApiErrorDetails | undefined {
-  const details = registry.get(runId);
+  const details = registryByRunId.get(runId);
   if (!details) return undefined;
 
-  registry.delete(runId);
+  registryByRunId.delete(runId);
+  
+  // Also clean up requestKey entry if present
+  if (details.firstFrameRequestKey) {
+    registryByRequestKey.delete(details.firstFrameRequestKey);
+  }
 
-  // Reject stale entries (shouldn't happen but fail safe)
+  // Reject stale entries
+  if (Date.now() - details.capturedAtMs > MAX_AGE_MS) {
+    return undefined;
+  }
+
+  return details;
+}
+
+/**
+ * Retrieve and remove stored API error details by fetch requestKey.
+ * Returns undefined if not found or expired.
+ */
+export function consumeApiErrorDetailsByRequestKey(requestKey: string): ApiErrorDetails | undefined {
+  const details = registryByRequestKey.get(requestKey);
+  if (!details) return undefined;
+
+  registryByRequestKey.delete(requestKey);
+
+  // Reject stale entries
   if (Date.now() - details.capturedAtMs > MAX_AGE_MS) {
     return undefined;
   }
@@ -50,7 +93,15 @@ export function consumeApiErrorDetails(runId: string): ApiErrorDetails | undefin
  * Used for testing.
  */
 export function peekApiErrorDetails(runId: string): ApiErrorDetails | undefined {
-  return registry.get(runId);
+  return registryByRunId.get(runId);
+}
+
+/**
+ * Peek at stored API error details by requestKey without removing them.
+ * Used for testing.
+ */
+export function peekApiErrorDetailsByRequestKey(requestKey: string): ApiErrorDetails | undefined {
+  return registryByRequestKey.get(requestKey);
 }
 
 /**
@@ -58,5 +109,6 @@ export function peekApiErrorDetails(runId: string): ApiErrorDetails | undefined 
  * Used for testing.
  */
 export function clearAllApiErrorDetails(): void {
-  registry.clear();
+  registryByRunId.clear();
+  registryByRequestKey.clear();
 }

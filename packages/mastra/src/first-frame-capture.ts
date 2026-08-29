@@ -285,6 +285,24 @@ export function createFirstFrameCaptureFetch(baseFetch: typeof fetch): typeof fe
 
       return newResponse;
     } catch (err) {
+      // Store AI_APICallError details BEFORE the error bubbles to Mastra (and SPAN_ENDED fires)
+      if (err && typeof err === 'object') {
+        const apiError = err as Record<string, unknown>;
+        
+        if (apiError.statusCode !== undefined || apiError.url !== undefined || apiError.responseBody !== undefined) {
+          const { storeApiErrorDetailsByRequestKey } = require('./observability/error-details-registry') as typeof import('./observability/error-details-registry');
+          
+          storeApiErrorDetailsByRequestKey(requestKey, {
+            statusCode: typeof apiError.statusCode === 'number' ? apiError.statusCode : undefined,
+            url: typeof apiError.url === 'string' ? apiError.url : undefined,
+            responseBody: typeof apiError.responseBody === 'string' 
+              ? apiError.responseBody.slice(0, 2000) 
+              : undefined,
+            data: apiError.data,
+          });
+        }
+      }
+      
       // Attach request key to error so resolveHeartbeatFailureError can retrieve the first frame capture
       if (err && typeof err === 'object' && !('__firstFrameRequestKey' in err)) {
         Object.defineProperty(err, '__firstFrameRequestKey', {
