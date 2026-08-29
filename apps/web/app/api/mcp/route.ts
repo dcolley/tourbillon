@@ -83,7 +83,7 @@ const MCP_TOOLS: McpTool[] = [
           type: 'number',
           description: 'Heartbeat interval in seconds (if enabled and using interval mode)',
         },
-        cron: {
+        cronExpression: {
           type: 'string',
           description: 'Cron schedule (if enabled and using cron mode)',
         },
@@ -169,7 +169,8 @@ async function handleListAgents(companyId: string) {
       active: a.status === 'active',
       heartbeatEnabled: heartbeat.enabled ?? false,
       heartbeatIntervalSec: heartbeat.intervalSec ?? null,
-      heartbeatCron: heartbeat.cron ?? null,
+      heartbeatCronExpression: heartbeat.cronExpression ?? null,
+      heartbeatScheduleMode: heartbeat.scheduleMode ?? null,
       observationalMemoryMode: observationalMemory.mode ?? 'inherit',
     };
   });
@@ -198,7 +199,7 @@ async function handleSetAgentActive(companyId: string, params: any) {
 }
 
 async function handleSetAgentHeartbeat(companyId: string, params: any) {
-  const { agentId, enabled, intervalSec, cron } = params;
+  const { agentId, enabled, intervalSec, cronExpression } = params;
   if (!agentId) {
     throw new Error('agentId is required');
   }
@@ -221,9 +222,11 @@ async function handleSetAgentHeartbeat(companyId: string, params: any) {
   }
   if (intervalSec !== undefined) {
     heartbeatPatch.intervalSec = intervalSec;
+    heartbeatPatch.scheduleMode = 'interval';
   }
-  if (cron !== undefined) {
-    heartbeatPatch.cron = cron;
+  if (cronExpression !== undefined) {
+    heartbeatPatch.cronExpression = cronExpression;
+    heartbeatPatch.scheduleMode = 'cron';
   }
 
   const updated = await updateAgentRuntimeConfig(agentId, {
@@ -237,7 +240,8 @@ async function handleSetAgentHeartbeat(companyId: string, params: any) {
     success: true,
     heartbeatEnabled: heartbeat.enabled ?? false,
     heartbeatIntervalSec: heartbeat.intervalSec ?? null,
-    heartbeatCron: heartbeat.cron ?? null,
+    heartbeatCronExpression: heartbeat.cronExpression ?? null,
+    heartbeatScheduleMode: heartbeat.scheduleMode ?? null,
   };
 }
 
@@ -447,13 +451,63 @@ export async function POST(req: NextRequest) {
 }
 
 export async function GET(req: NextRequest) {
+  const companyId = await verifyMobileToken(req);
+  
+  const acceptHeader = req.headers.get('accept') || '';
+  const wantsSSE = acceptHeader.includes('text/event-stream');
+
+  if (wantsSSE && companyId) {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        const sendEvent = (event: string, data: any) => {
+          const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+          controller.enqueue(encoder.encode(message));
+        };
+
+        sendEvent('message', {
+          jsonrpc: '2.0',
+          method: 'initialized',
+          params: {
+            protocolVersion: '2024-11-05',
+            capabilities: {
+              tools: {},
+            },
+            serverInfo: {
+              name: 'tourbillon-control-plane',
+              version: '0.1.0',
+            },
+          },
+        });
+
+        const interval = setInterval(() => {
+          sendEvent('ping', { timestamp: Date.now() });
+        }, 30000);
+
+        req.signal.addEventListener('abort', () => {
+          clearInterval(interval);
+          controller.close();
+        });
+      },
+    });
+
+    return new NextResponse(stream, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      },
+    });
+  }
+
   return NextResponse.json(
     {
       name: 'tourbillon-control-plane',
       version: '0.1.0',
       description: 'Tourbillon control-plane MCP server for managing agents and heartbeats',
       protocol: 'mcp/http',
-      transport: 'http',
+      transport: ['http', 'sse'],
       endpoint: '/api/mcp',
       authentication: {
         type: 'header',

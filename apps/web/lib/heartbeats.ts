@@ -63,10 +63,10 @@ function runStatusCondition(filter: HeartbeatListFilter) {
   }
 }
 
-async function attachAgents(runs: HeartbeatRun[]): Promise<HeartbeatRunWithAgent[]> {
+async function attachAgents(runs: HeartbeatRun[], companyId?: string): Promise<HeartbeatRunWithAgent[]> {
   if (runs.length === 0) return [];
 
-  const company = await getActiveCompany();
+  const finalCompanyId = companyId ?? (await getActiveCompany()).id;
   const agentIds = [...new Set(runs.map((r) => r.agentId))];
   const agentRows = await db
     .select({
@@ -79,7 +79,7 @@ async function attachAgents(runs: HeartbeatRun[]): Promise<HeartbeatRunWithAgent
     })
     .from(agents)
     .leftJoin(llmProviders, eq(agents.providerId, llmProviders.id))
-    .where(and(eq(agents.companyId, company.id), inArray(agents.id, agentIds)));
+    .where(and(eq(agents.companyId, finalCompanyId), inArray(agents.id, agentIds)));
 
   const agentById = new Map(
     agentRows.map((a) => [
@@ -205,7 +205,7 @@ export async function getHeartbeatList(opts: {
     countHeartbeatRuns(company.id, filter, opts.agentId),
   ]);
 
-  const withAgents = await attachAgents(runs);
+  const withAgents = await attachAgents(runs, company.id);
   const entries = withAgents.map((item) => entryFromRun(item));
 
   return { entries, total: dbTotal, page, pageSize, filter };

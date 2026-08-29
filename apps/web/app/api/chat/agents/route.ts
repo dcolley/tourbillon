@@ -51,7 +51,8 @@ export async function GET(req: NextRequest) {
           active: a.status === 'active',
           heartbeatEnabled: heartbeat.enabled ?? false,
           heartbeatIntervalSec: heartbeat.intervalSec ?? null,
-          heartbeatCron: heartbeat.cron ?? null,
+          heartbeatCronExpression: heartbeat.cronExpression ?? null,
+          heartbeatScheduleMode: heartbeat.scheduleMode ?? null,
           observationalMemoryMode: observationalMemory.mode ?? 'inherit',
         };
       }),

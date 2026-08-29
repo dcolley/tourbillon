@@ -142,9 +142,10 @@ describe('MCP Control Plane', () => {
       assert.ok(data.result);
 
       const agents = JSON.parse(data.result.content[0].text);
-      assert.strictEqual(agents.length, 1);
+      assert.strictEqual(agents.length, 1, 'Must have exactly 1 agent (empty list fails isolation)');
       assert.strictEqual(agents[0].name, 'Agent A1');
-      assert.strictEqual(agents[0].urlKey, 'agent-a1');
+      assert.ok(agents[0].urlKey.startsWith('agent-a1-'), `urlKey must start with agent-a1-, got ${agents[0].urlKey}`);
+      assert.strictEqual(agents[0].id, agentA1.id);
     });
 
     it('should list only company B agents when using token B', async () => {
@@ -277,6 +278,7 @@ describe('MCP Control Plane', () => {
       const result = JSON.parse(data.result.content[0].text);
       assert.strictEqual(result.heartbeatEnabled, true);
       assert.strictEqual(result.heartbeatIntervalSec, 7200);
+      assert.strictEqual(result.heartbeatScheduleMode, 'interval');
 
       const stored = await db.query.agents.findFirst({
         where: eq(agents.id, agentA1.id),
@@ -284,6 +286,7 @@ describe('MCP Control Plane', () => {
       const config = stored?.runtimeConfig as any;
       assert.strictEqual(config.heartbeat.enabled, true);
       assert.strictEqual(config.heartbeat.intervalSec, 7200);
+      assert.strictEqual(config.heartbeat.scheduleMode, 'interval');
     });
 
     it('should persist timer off (enabled=false)', async () => {
@@ -328,7 +331,7 @@ describe('MCP Control Plane', () => {
             arguments: {
               agentId: agentA1.id,
               enabled: true,
-              cron: '0 9 * * 1-5',
+              cronExpression: '0 9 * * 1-5',
             },
           },
         },
@@ -340,13 +343,15 @@ describe('MCP Control Plane', () => {
 
       assert.strictEqual(response.status, 200);
       const result = JSON.parse(data.result.content[0].text);
-      assert.strictEqual(result.heartbeatCron, '0 9 * * 1-5');
+      assert.strictEqual(result.heartbeatCronExpression, '0 9 * * 1-5');
+      assert.strictEqual(result.heartbeatScheduleMode, 'cron');
 
       const stored = await db.query.agents.findFirst({
         where: eq(agents.id, agentA1.id),
       });
       const config = stored?.runtimeConfig as any;
-      assert.strictEqual(config.heartbeat.cron, '0 9 * * 1-5');
+      assert.strictEqual(config.heartbeat.cronExpression, '0 9 * * 1-5');
+      assert.strictEqual(config.heartbeat.scheduleMode, 'cron');
     });
   });
 

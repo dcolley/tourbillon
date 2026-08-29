@@ -26,6 +26,12 @@ For local development:
 http://localhost:3002/api/mcp
 ```
 
+### Transport
+
+The MCP server supports both synchronous HTTP and streaming SSE:
+- **HTTP POST**: Send JSON-RPC requests, receive synchronous responses
+- **HTTP GET with Accept: text/event-stream**: Establish SSE stream for async messages
+
 ### Authentication
 
 The MCP server requires a company JWT token for authentication.
@@ -94,7 +100,8 @@ List all agents in the company with their configuration.
 - `active`: Boolean (true=active, false=paused)
 - `heartbeatEnabled`: Boolean
 - `heartbeatIntervalSec`: Interval in seconds (or null)
-- `heartbeatCron`: Cron schedule (or null)
+- `heartbeatCronExpression`: Cron schedule (or null)
+- `heartbeatScheduleMode`: 'interval' | 'cron' (or null)
 - `observationalMemoryMode`: 'inherit' | 'off' | 'on'
 
 ### 2. set_agent_active
@@ -112,8 +119,10 @@ Configure agent heartbeat timer.
 **Parameters:**
 - `agentId` (string, required): Agent UUID
 - `enabled` (boolean): Enable or disable heartbeat timer
-- `intervalSec` (number): Heartbeat interval in seconds
-- `cron` (string): Cron schedule (e.g., "0 9 * * 1-5")
+- `intervalSec` (number): Heartbeat interval in seconds (sets scheduleMode to 'interval')
+- `cronExpression` (string): Cron schedule (e.g., "0 9 * * 1-5", sets scheduleMode to 'cron')
+
+**Note**: Timer off is achieved by setting `enabled: false`.
 
 ### 4. set_agent_observational_memory
 
