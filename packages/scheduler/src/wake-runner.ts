@@ -15,6 +15,7 @@ import {
   buildHeartbeatTracingOptions,
   TripwireDetector,
   tripwireDetectorRegistry,
+  runWithHeartbeatContext,
 } from '@tourbillon/mastra';
 import type { HeartbeatJobData, AgentRuntimeConfig } from '@tourbillon/shared';
 import {
@@ -486,100 +487,106 @@ async function runWake(
   // Persist context budget snapshot early for diagnostics
   await persistContextBudgetSnapshot(runId, agentRecord, generationOptions, runTracer);
 
-  try {
-    if (isHarnessAdapter(agentRecord.adapterType)) {
-      const harnessResult = await runWithHarness(
-        agentRecord,
-        {
+  // Wrap agent execution in heartbeat context so fetch wrapper can access runId via AsyncLocalStorage
+  return await runWithHeartbeatContext(
+    { runId, companyId, agentId },
+    async () => {
+      try {
+        if (isHarnessAdapter(agentRecord.adapterType)) {
+          const harnessResult = await runWithHarness(
+            agentRecord,
+            {
+              wake,
+              runId,
+              apiKey,
+              goalId: issueForTask?.goalId ?? undefined,
+              projectId: issueForTask?.projectId ?? undefined,
+            },
+            {
+              allowedMcpServerIds: company.allowedMcpServerIds ?? [],
+              companySettings: parseCompanySettings(company.settings),
+              abortSignal: abortController.signal,
+            },
+          );
+
+          await logIssueStateAfterRun(runTracer, taskId);
+          await parkNoProgressIssue(runId, runTracer, agentRecord.id, companyId, taskId);
+          await recordHarnessResult(
+            runId,
+            agentRecord,
+            companyId,
+            providerConfig.provider,
+            harnessResult,
+          );
+
+          if (
+            harnessResult.finishReason === 'timeout' ||
+            harnessResult.finishReason === 'error' ||
+            harnessResult.finishReason === 'max_steps' ||
+            harnessResult.finishReason === 'repeated_tool_loop'
+          ) {
+            const { staleSec } = resolveHeartbeatLivenessConfig();
+            let errorText: string;
+            switch (harnessResult.finishReason) {
+              case 'timeout':
+                errorText = heartbeatStaleErrorText(staleSec);
+                break;
+              case 'max_steps':
+                errorText = 'Heartbeat exceeded maxSteps limit';
+                break;
+              case 'repeated_tool_loop':
+                errorText = 'Repeated tool loop detected';
+                break;
+              default:
+                errorText = 'Harness run failed';
+                break;
+            }
+            return { runId, status: 'failed', errorText };
+          }
+
+          runTracer.info('harness wake succeeded', {
+            finishReason: harnessResult.finishReason,
+            traceId: harnessResult.traceId,
+          });
+          return { runId, status: 'succeeded' };
+        }
+
+        await runDurableAgentWake({
+          agentRecord,
           wake,
           runId,
+          runTracer,
           apiKey,
-          goalId: issueForTask?.goalId ?? undefined,
-          projectId: issueForTask?.projectId ?? undefined,
-        },
-        {
-          allowedMcpServerIds: company.allowedMcpServerIds ?? [],
-          companySettings: parseCompanySettings(company.settings),
+          wakeMessage,
           abortSignal: abortController.signal,
-        },
-      );
-
-      await logIssueStateAfterRun(runTracer, taskId);
-      await parkNoProgressIssue(runId, runTracer, agentRecord.id, companyId, taskId);
-      await recordHarnessResult(
-        runId,
-        agentRecord,
-        companyId,
-        providerConfig.provider,
-        harnessResult,
-      );
-
-      if (
-        harnessResult.finishReason === 'timeout' ||
-        harnessResult.finishReason === 'error' ||
-        harnessResult.finishReason === 'max_steps' ||
-        harnessResult.finishReason === 'repeated_tool_loop'
-      ) {
-        const { staleSec } = resolveHeartbeatLivenessConfig();
-        let errorText: string;
-        switch (harnessResult.finishReason) {
-          case 'timeout':
-            errorText = heartbeatStaleErrorText(staleSec);
-            break;
-          case 'max_steps':
-            errorText = 'Heartbeat exceeded maxSteps limit';
-            break;
-          case 'repeated_tool_loop':
-            errorText = 'Repeated tool loop detected';
-            break;
-          default:
-            errorText = 'Harness run failed';
-            break;
-        }
+          taskId,
+          issueForTask,
+          providerConfig,
+          companyId,
+          generationOptions,
+        });
+        return { runId, status: 'succeeded' };
+      } catch (err) {
+        const errorText = resolveHeartbeatFailureError(
+          err,
+          abortController.signal.aborted,
+          abortController.signal.reason,
+        );
+        runTracer.error('wake run failed', {
+          error: errorText,
+          aborted: abortController.signal.aborted,
+          durationMs: Date.now() - runStartedMs,
+        });
+        await parkNoProgressIssue(runId, runTracer, agentId, companyId, taskId);
+        await recordHeartbeatFailure(runId, errorText, companyId, agentId);
         return { runId, status: 'failed', errorText };
+      } finally {
+        if (watchdog) clearTimeout(watchdog);
+        clearInterval(pingInterval);
+        runAbortControllers.delete(runId);
       }
-
-      runTracer.info('harness wake succeeded', {
-        finishReason: harnessResult.finishReason,
-        traceId: harnessResult.traceId,
-      });
-      return { runId, status: 'succeeded' };
     }
-
-    await runDurableAgentWake({
-      agentRecord,
-      wake,
-      runId,
-      runTracer,
-      apiKey,
-      wakeMessage,
-      abortSignal: abortController.signal,
-      taskId,
-      issueForTask,
-      providerConfig,
-      companyId,
-      generationOptions,
-    });
-    return { runId, status: 'succeeded' };
-  } catch (err) {
-    const errorText = resolveHeartbeatFailureError(
-      err,
-      abortController.signal.aborted,
-      abortController.signal.reason,
-    );
-    runTracer.error('wake run failed', {
-      error: errorText,
-      aborted: abortController.signal.aborted,
-      durationMs: Date.now() - runStartedMs,
-    });
-    await parkNoProgressIssue(runId, runTracer, agentId, companyId, taskId);
-    await recordHeartbeatFailure(runId, errorText, companyId, agentId);
-    return { runId, status: 'failed', errorText };
-  } finally {
-    if (watchdog) clearTimeout(watchdog);
-    clearInterval(pingInterval);
-    runAbortControllers.delete(runId);
-  }
+  );
 }
 
 async function recordHarnessResult(

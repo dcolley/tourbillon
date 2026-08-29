@@ -39,28 +39,19 @@ function extractHeartbeatRunId(span: AnyExportedSpan): string | undefined {
  * Enrich span.errorInfo with AI_APICallError fields from the error details registry.
  * Mastra only copies message/name/stack; we need statusCode/url/responseBody/data for diagnostics.
  * 
- * Tries pattern-based lookup first (for 200+non-error peek at SPAN_ENDED before wake-runner catch),
- * then runId-based lookup (for after wake-runner transfers requestKey→runId).
+ * Lookup is by runId from span metadata, which the fetch wrapper populates via AsyncLocalStorage.
  */
 function enrichSpanErrorInfo(span: AnyExportedSpan): void {
   if (!span.errorInfo) return;
   
-  const { consumeApiErrorDetails, consumeApiErrorDetailsByPattern } =
-    require('./error-details-registry') as typeof import('./error-details-registry');
+  const { consumeApiErrorDetails } = require('./error-details-registry') as typeof import('./error-details-registry');
 
-  // Extract context for pattern-based correlation
-  const companyId = (span.metadata as Record<string, unknown> | undefined)?.companyId as string | undefined;
-  const agentId = (span.metadata as Record<string, unknown> | undefined)?.agentId as string | undefined;
+  // Extract runId from span metadata (Mastra always includes this)
   const runId = extractHeartbeatRunId(span);
+  if (!runId) return;
 
-  // Try pattern-based lookup first (works at SPAN_ENDED without wake-runner catch)
-  let details = consumeApiErrorDetailsByPattern(companyId, agentId);
-  
-  // Fall back to runId-based lookup (works after wake-runner transfers)
-  if (!details && runId) {
-    details = consumeApiErrorDetails(runId);
-  }
-
+  // Consume error details stored by fetch wrapper using runId from AsyncLocalStorage
+  const details = consumeApiErrorDetails(runId);
   if (!details) return;
   
   // Mutate errorInfo to add the AI_APICallError fields

@@ -253,6 +253,11 @@ export function createFirstFrameCaptureFetch(baseFetch: typeof fetch): typeof fe
       if (!response.ok) {
         // Non-200 response - store error details before returning
         const { storeApiErrorDetailsByRequestKey } = require('./observability/error-details-registry') as typeof import('./observability/error-details-registry');
+        const { getCurrentHeartbeatContext } = require('./heartbeat-context') as typeof import('./heartbeat-context');
+        
+        // Get runId from AsyncLocalStorage
+        const heartbeatContext = getCurrentHeartbeatContext();
+        const runId = heartbeatContext?.runId;
         
         // Try to read response body for error details
         let responseBody: string | undefined;
@@ -271,12 +276,16 @@ export function createFirstFrameCaptureFetch(baseFetch: typeof fetch): typeof fe
           // Ignore parse errors
         }
         
-        storeApiErrorDetailsByRequestKey(requestKey, {
-          statusCode: response.status,
-          url: urlString,
-          responseBody,
-          data,
-        });
+        storeApiErrorDetailsByRequestKey(
+          requestKey,
+          {
+            statusCode: response.status,
+            url: urlString,
+            responseBody,
+            data,
+          },
+          runId
+        );
         
         return response;
       }
@@ -299,6 +308,11 @@ export function createFirstFrameCaptureFetch(baseFetch: typeof fetch): typeof fe
       // This covers: error events, reasoning_content (Nemotron), content, and other
       // Store BEFORE returning so details are available at SPAN_ENDED
       const { storeApiErrorDetailsByRequestKey } = require('./observability/error-details-registry') as typeof import('./observability/error-details-registry');
+      const { getCurrentHeartbeatContext } = require('./heartbeat-context') as typeof import('./heartbeat-context');
+      
+      // Get runId from AsyncLocalStorage for direct storage (exporter correlation)
+      const heartbeatContext = getCurrentHeartbeatContext();
+      const runId = heartbeatContext?.runId;
       
       let responseBody: string | undefined;
       let data: unknown;
@@ -316,8 +330,7 @@ export function createFirstFrameCaptureFetch(baseFetch: typeof fetch): typeof fe
         responseBody = `First frame: ${capture.kind} | ${capture.excerpt}`;
       }
       
-      // Store by requestKey and error pattern for exporter correlation
-      // Pattern-based lookup works at SPAN_ENDED without wake-runner catch transfer
+      // Store by requestKey and runId (if available) for exporter correlation at SPAN_ENDED
       storeApiErrorDetailsByRequestKey(
         requestKey,
         {
@@ -326,8 +339,7 @@ export function createFirstFrameCaptureFetch(baseFetch: typeof fetch): typeof fe
           responseBody: responseBody ? responseBody.slice(0, 2000) : `HTTP ${response.status} stream (${capture.kind} first frame)`,
           data,
         },
-        undefined, // companyId not available at fetch level
-        undefined  // agentId not available at fetch level
+        runId // Pass runId from AsyncLocalStorage - exporter will consume by this
       );
 
       // Create a new Response with the peeked stream (all content intact)
@@ -352,15 +364,24 @@ export function createFirstFrameCaptureFetch(baseFetch: typeof fetch): typeof fe
         
         if (apiError.statusCode !== undefined || apiError.url !== undefined || apiError.responseBody !== undefined) {
           const { storeApiErrorDetailsByRequestKey } = require('./observability/error-details-registry') as typeof import('./observability/error-details-registry');
+          const { getCurrentHeartbeatContext } = require('./heartbeat-context') as typeof import('./heartbeat-context');
           
-          storeApiErrorDetailsByRequestKey(requestKey, {
-            statusCode: typeof apiError.statusCode === 'number' ? apiError.statusCode : undefined,
-            url: typeof apiError.url === 'string' ? apiError.url : undefined,
-            responseBody: typeof apiError.responseBody === 'string' 
-              ? apiError.responseBody.slice(0, 2000) 
-              : undefined,
-            data: apiError.data,
-          });
+          // Get runId from AsyncLocalStorage
+          const heartbeatContext = getCurrentHeartbeatContext();
+          const runId = heartbeatContext?.runId;
+          
+          storeApiErrorDetailsByRequestKey(
+            requestKey,
+            {
+              statusCode: typeof apiError.statusCode === 'number' ? apiError.statusCode : undefined,
+              url: typeof apiError.url === 'string' ? apiError.url : undefined,
+              responseBody: typeof apiError.responseBody === 'string' 
+                ? apiError.responseBody.slice(0, 2000) 
+                : undefined,
+              data: apiError.data,
+            },
+            runId
+          );
         }
       }
       

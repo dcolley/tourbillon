@@ -103,14 +103,15 @@ describe('mapExportedSpanToEvent', () => {
 
   it('store-by-pattern-then-export: 200 + reasoning_content first frame + SDK throw enriches errorText', () => {
     // Nemotron case: HTTP 200, first frame is reasoning_content (non-error), SDK throws later
-    // Fetch wrapper stores by requestKey + pattern BEFORE SPAN_ENDED
-    // Exporter uses pattern-based lookup at SPAN_ENDED (before wake-runner catch transfers to runId)
+    // Fetch wrapper stores by requestKey + runId (from AsyncLocalStorage) BEFORE SPAN_ENDED
+    // Exporter uses runId-based lookup at SPAN_ENDED
     
-    const companyId = 'company-123';
-    const agentId = 'agent-456';
+    const runId = 'run-reasoning-test';
     const requestKey = 'req-reasoning-test';
     
-    // 1. Fetch wrapper stores by requestKey + pattern when peek completes (200 + reasoning_content)
+    // 1. Fetch wrapper stores by requestKey + runId when peek completes (200 + reasoning_content)
+    //    In production, companyId/agentId are NOT passed to storeApiErrorDetailsByRequestKey
+    //    Only runId is passed (from AsyncLocalStorage)
     storeApiErrorDetailsByRequestKey(
       requestKey,
       {
@@ -119,8 +120,7 @@ describe('mapExportedSpanToEvent', () => {
         responseBody: 'First frame: reasoning_content | {"choices":[{"delta":{"reasoning_content":"thinking..."}}]}',
         data: { choices: [{ delta: { reasoning_content: 'thinking...' } }] },
       },
-      companyId,
-      agentId
+      runId // Only runId is passed, matching production behavior
     );
     
     // 2. SDK throws later, Mastra creates span with message/name/stack only (no __firstFrameRequestKey)
@@ -132,16 +132,14 @@ describe('mapExportedSpanToEvent', () => {
         // NO __firstFrameRequestKey - Mastra doesn't copy it
       } as any,
       metadata: {
-        companyId,
-        agentId,
-        heartbeatRunId: 'run-reasoning-test', // runId present but not yet linked to requestKey
+        companyId: 'company-123', // Required for mapExportedSpanToEvent
+        heartbeatRunId: runId, // Exporter uses this to look up error details
       },
     });
     
-    // 3. SPAN_ENDED fires - exporter enriches using pattern-based lookup (simulated)
-    const { consumeApiErrorDetailsByPattern } = require('./error-details-registry') as typeof import('./error-details-registry');
-    const details = consumeApiErrorDetailsByPattern(companyId, agentId);
-    assert.ok(details, 'Error details must be in registry via pattern lookup');
+    // 3. SPAN_ENDED fires - exporter enriches using runId lookup (simulated)
+    const details = consumeApiErrorDetails(runId);
+    assert.ok(details, 'Error details must be in registry via runId lookup');
     
     const enrichedErrorInfo = testSpan.errorInfo as Record<string, unknown>;
     if (details.statusCode !== undefined) enrichedErrorInfo.statusCode = details.statusCode;

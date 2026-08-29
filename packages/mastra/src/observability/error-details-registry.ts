@@ -1,6 +1,6 @@
 /**
  * Registry for storing AI_APICallError details that Mastra doesn't copy into span.errorInfo.
- * Supports lookup by runId, requestKey, and error message for SPAN_ENDED correlation.
+ * Supports lookup by runId (for exporter at SPAN_ENDED) and requestKey (for transfer/debugging).
  */
 
 export interface ApiErrorDetails {
@@ -14,19 +14,8 @@ export interface ApiErrorDetails {
 
 const registryByRunId = new Map<string, ApiErrorDetails>();
 const registryByRequestKey = new Map<string, ApiErrorDetails>();
-// For SPAN_ENDED correlation when runId not yet transferred from requestKey
-const registryByErrorPattern = new Map<string, ApiErrorDetails>();
 
 const MAX_AGE_MS = 5 * 60 * 1000; // 5 minutes
-
-/**
- * Generate error pattern key for correlation when runId not available.
- * Uses error message substring + company/agent context + recency.
- */
-function makeErrorPatternKey(companyId?: string, agentId?: string): string {
-  // Use a stable key for SDK stream failures (matches Mastra's message)
-  return `stream-fail:${companyId || 'unknown'}:${agentId || 'unknown'}`;
-}
 
 /**
  * Store AI_APICallError details for a heartbeat run.
@@ -45,13 +34,12 @@ export function storeApiErrorDetails(runId: string, details: Omit<ApiErrorDetail
 
 /**
  * Store AI_APICallError details by fetch requestKey.
- * Also stores by error pattern for SPAN_ENDED correlation before wake-runner catch.
+ * If runId is provided, also stores by runId for direct exporter lookup.
  */
 export function storeApiErrorDetailsByRequestKey(
   requestKey: string, 
   details: Omit<ApiErrorDetails, 'capturedAtMs' | 'firstFrameRequestKey'>,
-  companyId?: string,
-  agentId?: string
+  runId?: string
 ): void {
   const entry = {
     ...details,
@@ -60,9 +48,10 @@ export function storeApiErrorDetailsByRequestKey(
   };
   registryByRequestKey.set(requestKey, entry);
   
-  // Also store by error pattern for exporter to find at SPAN_ENDED
-  const patternKey = makeErrorPatternKey(companyId, agentId);
-  registryByErrorPattern.set(patternKey, entry);
+  // If runId is available, also store by runId for direct exporter access
+  if (runId) {
+    registryByRunId.set(runId, entry);
+  }
 }
 
 /**
@@ -77,27 +66,6 @@ export function consumeApiErrorDetails(runId: string): ApiErrorDetails | undefin
   if (details.firstFrameRequestKey) {
     registryByRequestKey.delete(details.firstFrameRequestKey);
   }
-
-  if (Date.now() - details.capturedAtMs > MAX_AGE_MS) {
-    return undefined;
-  }
-
-  return details;
-}
-
-/**
- * Retrieve and remove stored API error details by error pattern.
- * Used by exporter at SPAN_ENDED when runId transfer hasn't happened yet.
- */
-export function consumeApiErrorDetailsByPattern(companyId?: string, agentId?: string): ApiErrorDetails | undefined {
-  const patternKey = makeErrorPatternKey(companyId, agentId);
-  const details = registryByErrorPattern.get(patternKey);
-  if (!details) return undefined;
-
-  registryByErrorPattern.delete(patternKey);
-  
-  // Keep in requestKey registry for potential wake-runner transfer
-  // (don't delete from registryByRequestKey yet)
 
   if (Date.now() - details.capturedAtMs > MAX_AGE_MS) {
     return undefined;
@@ -142,5 +110,4 @@ export function peekApiErrorDetailsByRequestKey(requestKey: string): ApiErrorDet
 export function clearAllApiErrorDetails(): void {
   registryByRunId.clear();
   registryByRequestKey.clear();
-  registryByErrorPattern.clear();
 }
