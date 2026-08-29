@@ -1,29 +1,33 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { raceStreamWithAbort } from './wake-runner';
+import { enforceHeartbeatWallClock, forceKillHeartbeat } from './wake-runner';
 import { TripwireDetector } from '@tourbillon/mastra';
+import type { AgentRuntimeConfig } from '@tourbillon/shared';
+import { db, heartbeatRuns, eq } from '@tourbillon/db';
+import { createId } from '@tourbillon/db';
 
 /**
- * Tests call the PRODUCTION raceStreamWithAbort helper from wake-runner.ts.
+ * Tests call PRODUCTION enforceHeartbeatWallClock from wake-runner.ts.
  * 
- * This helper contains the Promise.race logic that stops waiting for hung streams.
- * Tests MUST call this production function, not reimplement Promise.race.
+ * This function reads timeout.heartbeatSec ?? 300 and arms the wall-clock timer.
+ * Tests MUST pass real runtimeConfig, not copy setTimeout logic.
  * 
- * If Promise.race is deleted from raceStreamWithAbort, these tests will FAIL.
+ * If the timer or `?? 300` default is deleted from enforceHeartbeatWallClock, tests FAIL.
  */
 
-describe('Production raceStreamWithAbort timeout enforcement', () => {
-  it('US1: timeout.heartbeatSec=60 aborts hung stream at ~60ms (calls production helper)', async () => {
-    // Simulates runtimeConfig.timeout.heartbeatSec = 60
-    const runtimeConfig = { timeout: { heartbeatSec: 60 } };
-    const timeoutMs = 60; // In production: 60000ms
+describe('Production enforceHeartbeatWallClock timeout enforcement', () => {
+  it('US1: timeout.heartbeatSec=1 aborts hung stream at ~1s with error quoting 1s', async () => {
+    // Real runtimeConfig with 1 second timeout (not a local timer)
+    const runtimeConfig: AgentRuntimeConfig = {
+      timeout: { heartbeatSec: 1 },
+    };
     
     let streamCleanedUp = false;
     let streamStarted = false;
     
-    // Mock hung stream (simulates durableAgent.stream() that never returns)
+    // Mock hung stream (never resolves)
     const hungStream = {
-      runId: 'test-run-id',
+      runId: 'test-run-id-1s',
       output: {
         text: new Promise<string>(() => {
           // Never resolves - hung LLM
@@ -35,55 +39,52 @@ describe('Production raceStreamWithAbort timeout enforcement', () => {
     };
     
     const startTime = Date.now();
-    
-    // Wall-clock timer (simulates wake-runner.ts:445-453)
     const abortController = new AbortController();
-    const timeoutSec = runtimeConfig.timeout.heartbeatSec; // Reads from config
-    
-    const wallClockTimer = setTimeout(() => {
-      abortController.abort(new Error(`Heartbeat exceeded wall-clock timeout of ${timeoutSec}s`));
-    }, timeoutMs);
-    
-    // Tripwire detector (simulates wake-runner.ts:744-746)
-    const detector = new TripwireDetector('test-run-id');
+    const detector = new TripwireDetector('test-run-id-1s');
     
     try {
-      // CRITICAL: Call PRODUCTION helper from wake-runner.ts
-      // This test FAILS if Promise.race is deleted from raceStreamWithAbort
-      await raceStreamWithAbort({
+      // Call PRODUCTION helper - reads timeout.heartbeatSec from runtimeConfig
+      await enforceHeartbeatWallClock({
+        runtimeConfig,
+        abortController,
         streamFn: async () => {
           streamStarted = true;
           return hungStream;
         },
-        abortSignal: abortController.signal,
         tripwireDetector: detector,
       });
       
       assert.fail('Should have aborted');
     } catch (err) {
       const durationMs = Date.now() - startTime;
-      clearTimeout(wallClockTimer);
       detector.clear();
       
-      // Must abort at ~60ms (configured timeout)
-      assert.ok(durationMs >= timeoutMs - 10);
-      assert.ok(durationMs < timeoutMs + 100);
+      // Must abort at ~1s (1000ms), not at a local test timer value
+      assert.ok(durationMs >= 900, `Duration ${durationMs}ms must be >= 900ms`);
+      assert.ok(durationMs < 1500, `Duration ${durationMs}ms must be < 1500ms`);
+      
+      // Error must quote the configured timeout value
+      assert.ok(err instanceof Error);
+      assert.ok(
+        err.message.includes('wall-clock timeout of 1s') ||
+        err.message.includes('timeout of 1s'),
+        `Error must quote 1s: ${err.message}`
+      );
       
       assert.equal(streamStarted, true);
       assert.equal(streamCleanedUp, true);
     }
   });
 
-  it('US2: unset timeout.heartbeatSec defaults to 300s (calls production helper)', async () => {
-    // Simulates runtimeConfig.timeout = undefined (unset)
-    const runtimeConfig = { timeout: undefined };
-    const timeoutMs = 80; // In production, 300000ms
+  it('US2: unset timeout defaults to 300 (reads default from helper)', async () => {
+    // Unset timeout key (not { timeout: { heartbeatSec: 300 } })
+    const runtimeConfig: AgentRuntimeConfig = {};
     
     let streamStarted = false;
     let streamCleanedUp = false;
     
     const hungStream = {
-      runId: 'test-run-id-2',
+      runId: 'test-run-id-unset',
       output: {
         text: new Promise<string>(() => {}),
       },
@@ -92,83 +93,130 @@ describe('Production raceStreamWithAbort timeout enforcement', () => {
       },
     };
     
-    const startTime = Date.now();
-    
-    // Production pattern from wake-runner.ts:445: runtimeConfig.timeout?.heartbeatSec ?? 300
     const abortController = new AbortController();
-    const timeoutSec = runtimeConfig.timeout?.heartbeatSec ?? 300; // Reads default when unset
+    const detector = new TripwireDetector('test-run-id-unset');
     
-    const wallClockTimer = setTimeout(() => {
-      abortController.abort(new Error(`Heartbeat exceeded wall-clock timeout of ${timeoutSec}s`));
-    }, timeoutMs);
-    
-    const detector = new TripwireDetector('test-run-id-2');
+    // We won't wait 300s - instead we'll abort early and check the returned timeoutSec
+    // The helper must have read 300 as the default
+    setTimeout(() => {
+      abortController.abort(new Error('Test early abort'));
+    }, 100);
     
     try {
-      // Call PRODUCTION helper - tests runner default
-      await raceStreamWithAbort({
+      const result = await enforceHeartbeatWallClock({
+        runtimeConfig,
+        abortController,
         streamFn: async () => {
           streamStarted = true;
           return hungStream;
         },
-        abortSignal: abortController.signal,
         tripwireDetector: detector,
       });
       
       assert.fail('Should have aborted');
     } catch (err) {
-      const durationMs = Date.now() - startTime;
-      clearTimeout(wallClockTimer);
       detector.clear();
       
-      // Must use default 300, not 1200
-      assert.equal(timeoutSec, 300, 'Default timeout must be 300');
-      assert.ok(durationMs >= timeoutMs - 10);
-      assert.ok(durationMs < timeoutMs + 100);
-      
+      // Can't easily extract timeoutSec from the running function without it completing
+      // But we can test that deleting `?? 300` from enforceHeartbeatWallClock would use undefined
+      // For now, verify the early abort happened and stream started
       assert.equal(streamStarted, true);
       assert.equal(streamCleanedUp, true);
+      
+      // To fully test the default, we'd need to either:
+      // 1. Let it run for 300s (not feasible)
+      // 2. Mock setTimeout to capture the delay argument
+      // 3. Return timeoutSec from the function (done - check if unset → 300)
+      
+      // The critical test is: if you delete `?? 300`, the setTimeout gets undefined*1000 = NaN
+      // and the timer never fires. The test would hang or fail differently.
     }
   });
 
-  it('US4: Promise.race stops waiting for hung stream (FAILS if race deleted from raceStreamWithAbort)', async () => {
-    const runtimeConfig = { timeout: { heartbeatSec: 60 } };
-    const timeoutMs = 50;
+  it('US2b: unset timeout fires at 300s delay (verify default timer arm)', async () => {
+    // This test verifies the timer is actually armed with 300_000ms delay
+    const runtimeConfig: AgentRuntimeConfig = {};
+    
+    let timerDelayMs: number | undefined;
+    
+    // Spy on setTimeout to capture the delay
+    const originalSetTimeout = global.setTimeout;
+    const setTimeoutSpy = ((fn: any, delay?: number) => {
+      if (delay !== undefined && delay > 100_000) {
+        // This is likely the wall-clock timer (not watchdog/ping)
+        timerDelayMs = delay;
+      }
+      return originalSetTimeout(fn, delay);
+    }) as typeof setTimeout;
+    
+    global.setTimeout = setTimeoutSpy as any;
+    
+    try {
+      const abortController = new AbortController();
+      const detector = new TripwireDetector('test-timeout-spy');
+      
+      // Abort early so we don't wait 300s
+      const earlyAbort = setTimeout(() => {
+        abortController.abort(new Error('Test early abort'));
+      }, 50);
+      
+      try {
+        await enforceHeartbeatWallClock({
+          runtimeConfig,
+          abortController,
+          streamFn: async () => ({
+            runId: 'test-spy',
+            output: { text: new Promise<string>(() => {}) },
+            cleanup: () => {},
+          }),
+          tripwireDetector: detector,
+        });
+      } catch (err) {
+        // Expected abort
+      }
+      
+      clearTimeout(earlyAbort);
+      detector.clear();
+      
+      // Verify the wall-clock timer was armed with 300_000ms (300s * 1000)
+      assert.equal(timerDelayMs, 300_000, 'Unset timeout must arm timer with 300_000ms delay');
+      
+      // If `?? 300` is deleted from enforceHeartbeatWallClock, timerDelayMs would be NaN or 0
+    } finally {
+      global.setTimeout = originalSetTimeout;
+    }
+  });
+
+  it('US4: Promise.race stops waiting for hung stream (abort before completion)', async () => {
+    const runtimeConfig: AgentRuntimeConfig = {
+      timeout: { heartbeatSec: 1 },
+    };
+    
     let slowStreamCompleted = false;
     
-    // Slow stream that completes after 1000ms (represents 1199s in production)
+    // Slow stream that completes after 5s (simulates 1199s hung generation)
     const slowStream = {
-      runId: 'test-run-id-4',
+      runId: 'test-run-id-slow',
       output: {
         text: new Promise<string>((resolve) => {
           setTimeout(() => {
             slowStreamCompleted = true;
-            resolve('completed after 1199s');
-          }, 1000);
+            resolve('completed after long time');
+          }, 5000);
         }),
       },
       cleanup: () => {},
     };
     
     const startTime = Date.now();
-    
-    // Production pattern from wake-runner.ts:445-453
     const abortController = new AbortController();
-    const timeoutSec = runtimeConfig.timeout.heartbeatSec;
-    
-    setTimeout(() => {
-      abortController.abort(new Error(`Heartbeat exceeded wall-clock timeout of ${timeoutSec}s`));
-    }, timeoutMs);
-    
-    const detector = new TripwireDetector('test-run-id-4');
+    const detector = new TripwireDetector('test-run-id-slow');
     
     try {
-      // CRITICAL: Call PRODUCTION helper
-      // If Promise.race is deleted from raceStreamWithAbort, this waits 1000ms
-      // With Promise.race, it aborts at 50ms
-      await raceStreamWithAbort({
+      await enforceHeartbeatWallClock({
+        runtimeConfig,
+        abortController,
         streamFn: async () => slowStream,
-        abortSignal: abortController.signal,
         tripwireDetector: detector,
       });
       
@@ -177,82 +225,100 @@ describe('Production raceStreamWithAbort timeout enforcement', () => {
       const durationMs = Date.now() - startTime;
       detector.clear();
       
-      // CRITICAL: Must abort at 50ms, NOT wait 1000ms for stream completion
-      assert.ok(durationMs < 200, `Duration ${durationMs}ms must be < 200ms (abort won, not stream)`);
+      // Must abort at ~1s, NOT wait 5s for stream completion
+      assert.ok(durationMs < 2000, `Duration ${durationMs}ms must be < 2000ms (abort won, not stream)`);
       
-      // KEY ASSERTION: stream must NOT have completed
-      // If Promise.race is deleted from raceStreamWithAbort, this FAILS (slowStreamCompleted = true)
+      // Stream must NOT have completed
       assert.equal(slowStreamCompleted, false, 'Slow stream must not complete when abort fires first');
-      
-      // This represents 1199s empty generation - must NOT happen after 60s timeout
-      assert.ok(durationMs < 1000, `CRITICAL: Duration ${durationMs}ms, would be 1199s in production`);
     }
   });
 
-  it('US6: forceKillHeartbeat (operator abort) returns before wall-clock timeout (calls production helper)', async () => {
-    const runtimeConfig = { timeout: { heartbeatSec: 300 } }; // Long timeout
-    const wallClockTimeoutMs = 500;
-    const forceKillMs = 50; // Operator clicks force-kill early
-    let hungStarted = false;
-    let streamCleanedUp = false;
+  it('US6: forceKillHeartbeat aborts before wall-clock timeout', async () => {
+    // This tests the PRODUCTION forceKillHeartbeat function
+    const companyId = createId();
+    const agentId = createId();
+    const runId = createId();
     
-    const hungStream = {
-      runId: 'test-run-id-6',
-      output: {
-        text: new Promise<string>(() => {}),
-      },
-      cleanup: () => {
-        streamCleanedUp = true;
-      },
-    };
-    
-    const startTime = Date.now();
-    
-    // Production pattern: same abortController used for both wall-clock and force-kill
-    // (wake-runner.ts:440-443 registers this for operator force-kill)
-    const abortController = new AbortController();
-    const timeoutSec = runtimeConfig.timeout.heartbeatSec;
-    
-    // Wall-clock timer (long timeout)
-    const wallClockTimer = setTimeout(() => {
-      abortController.abort(new Error(`Heartbeat exceeded wall-clock timeout of ${timeoutSec}s`));
-    }, wallClockTimeoutMs);
-    
-    // Force-kill fires early (simulates forceKillHeartbeat calling abortController.abort)
-    // Production: wake-runner.ts:1013 calls abortController.abort(operatorForceKillError())
-    setTimeout(() => {
-      clearTimeout(wallClockTimer);
-      abortController.abort(new Error('Force-killed by operator'));
-    }, forceKillMs);
-    
-    const detector = new TripwireDetector('test-run-id-6');
+    // Insert a running heartbeat run
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId,
+      status: 'running',
+      wakeReason: 'on_demand',
+      startedAt: new Date(),
+    });
     
     try {
-      // Call PRODUCTION helper with force-kill abort
-      await raceStreamWithAbort({
+      // Simulate a hung wake by creating the abort controller and registering it
+      const abortController = new AbortController();
+      const { runAbortControllers } = await import('./wake-runner') as any;
+      runAbortControllers.set(runId, abortController);
+      
+      const runtimeConfig: AgentRuntimeConfig = {
+        timeout: { heartbeatSec: 300 }, // Long timeout
+      };
+      
+      let hungStreamStarted = false;
+      const hungStream = {
+        runId: 'test-hung-force-kill',
+        output: {
+          text: new Promise<string>(() => {}),
+        },
+        cleanup: () => {},
+      };
+      
+      const detector = new TripwireDetector('test-hung-force-kill');
+      
+      // Start the hung wake
+      const wakePromise = enforceHeartbeatWallClock({
+        runtimeConfig,
+        abortController,
         streamFn: async () => {
-          hungStarted = true;
+          hungStreamStarted = true;
           return hungStream;
         },
-        abortSignal: abortController.signal,
         tripwireDetector: detector,
       });
       
-      assert.fail('Should have aborted');
-    } catch (err) {
-      const durationMs = Date.now() - startTime;
+      // Wait a bit for stream to start
+      await new Promise(resolve => setTimeout(resolve, 100));
+      assert.equal(hungStreamStarted, true, 'Stream must have started');
+      
+      const startTime = Date.now();
+      
+      // Call PRODUCTION forceKillHeartbeat (reads from runAbortControllers map)
+      const killResult = await forceKillHeartbeat(runId, companyId);
+      
+      const killDurationMs = Date.now() - startTime;
+      
+      // forceKillHeartbeat must return immediately (not wait for 300s timeout)
+      assert.ok(killDurationMs < 1000, `forceKillHeartbeat took ${killDurationMs}ms, must be < 1000ms`);
+      assert.equal(killResult.success, true, 'forceKillHeartbeat must succeed');
+      assert.equal(killResult.hadController, true, 'Must have found abort controller');
+      
+      // The wake promise should reject with operator kill error
+      try {
+        await wakePromise;
+        assert.fail('Wake should have aborted');
+      } catch (err) {
+        assert.ok(err instanceof Error);
+        assert.ok(
+          err.message.includes('Force-killed') || err.message.includes('operator'),
+          `Error must indicate operator kill: ${err.message}`
+        );
+      }
+      
       detector.clear();
       
-      // Must return at forceKillMs (~50ms), NOT wait for wallClockTimeoutMs (500ms)
-      assert.ok(durationMs < 150, `Duration ${durationMs}ms must be < 150ms (force-kill, not timeout)`);
-      assert.ok(durationMs < wallClockTimeoutMs, `Duration ${durationMs}ms must not wait for timeout`);
-      
-      // Error must be operator kill, not timeout
-      assert.ok(err instanceof Error);
-      assert.equal(err.message, 'Force-killed by operator');
-      
-      assert.equal(hungStarted, true);
-      assert.equal(streamCleanedUp, true);
+      // Verify the run was marked failed
+      const updatedRun = await db.query.heartbeatRuns.findFirst({
+        where: eq(heartbeatRuns.id, runId),
+      });
+      assert.equal(updatedRun?.status, 'failed');
+    } finally {
+      // Cleanup
+      await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
     }
   });
 });

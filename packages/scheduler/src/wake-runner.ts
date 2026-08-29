@@ -442,15 +442,8 @@ async function runWake(
   // Register for operator force-kill
   runAbortControllers.set(runId, abortController);
 
-  // Wall-clock timeout (hard limit from agent config)
-  const runtimeConfig = agentRecord.runtimeConfig as AgentRuntimeConfig;
-  const timeoutSec = runtimeConfig.timeout?.heartbeatSec ?? 300;
-  let wallClockTimer: ReturnType<typeof setTimeout> | undefined;
-  if (timeoutSec > 0) {
-    wallClockTimer = setTimeout(() => {
-      abortController.abort(new Error(`Heartbeat exceeded wall-clock timeout of ${timeoutSec}s`));
-    }, timeoutSec * 1000);
-  }
+  // Wall-clock timeout enforcement moved to enforceHeartbeatWallClock (durable path)
+  // or harness driveSessionHeadless (harness path)
 
   // Staleness watchdog (resets on ping)
   let watchdog: ReturnType<typeof setTimeout> | undefined;
@@ -569,7 +562,7 @@ async function runWake(
           runTracer,
           apiKey,
           wakeMessage,
-          abortSignal: abortController.signal,
+          abortController,
           taskId,
           issueForTask,
           providerConfig,
@@ -593,12 +586,56 @@ async function runWake(
         return { runId, status: 'failed', errorText };
       } finally {
         if (watchdog) clearTimeout(watchdog);
-        if (wallClockTimer) clearTimeout(wallClockTimer);
         clearInterval(pingInterval);
         runAbortControllers.delete(runId);
       }
     }
   );
+}
+
+/**
+ * Enforce wall-clock timeout from agent config and race stream with abort.
+ * 
+ * This function:
+ * 1. Reads timeout.heartbeatSec from runtimeConfig (default 300)
+ * 2. Arms wall-clock timer that aborts with timeout error
+ * 3. Races stream with abort signal and tripwire
+ * 4. Clears timer in finally
+ * 
+ * Exported for testing. Tests MUST call this function to hang production timeout path.
+ * Deleting the timer or default 300 from this function WILL fail tests.
+ */
+export async function enforceHeartbeatWallClock<T extends { runId: string; output: { text: Promise<string> }; cleanup: () => void }>(params: {
+  runtimeConfig: AgentRuntimeConfig;
+  abortController: AbortController;
+  streamFn: () => Promise<T>;
+  tripwireDetector: TripwireDetector;
+  onStreamResult?: (stream: T) => void;
+}): Promise<{ runId: string; timeoutSec: number }> {
+  const { runtimeConfig, abortController, streamFn, tripwireDetector, onStreamResult } = params;
+  
+  // Read timeout from agent config (default 300s if unset)
+  const timeoutSec = runtimeConfig.timeout?.heartbeatSec ?? 300;
+  
+  // Arm wall-clock timer - aborts with timeout error when time expires
+  let wallClockTimer: ReturnType<typeof setTimeout> | undefined;
+  if (timeoutSec > 0) {
+    wallClockTimer = setTimeout(() => {
+      abortController.abort(new Error(`Heartbeat exceeded wall-clock timeout of ${timeoutSec}s`));
+    }, timeoutSec * 1000);
+  }
+  
+  try {
+    const result = await raceStreamWithAbort({
+      streamFn,
+      abortSignal: abortController.signal,
+      tripwireDetector,
+      onStreamResult,
+    });
+    return { ...result, timeoutSec };
+  } finally {
+    if (wallClockTimer) clearTimeout(wallClockTimer);
+  }
 }
 
 /**
@@ -746,7 +783,7 @@ export async function runDurableAgentWake(params: {
   runTracer: WakeTracer;
   apiKey: string;
   wakeMessage: string;
-  abortSignal: AbortSignal;
+  abortController: AbortController;
   taskId?: string;
   issueForTask: Awaited<ReturnType<typeof db.query.issues.findFirst>> | undefined;
   providerConfig: ReturnType<typeof resolveModelProviderConfig>;
@@ -760,7 +797,7 @@ export async function runDurableAgentWake(params: {
     runTracer,
     apiKey,
     wakeMessage,
-    abortSignal,
+    abortController,
     taskId,
     issueForTask,
     providerConfig,
@@ -845,8 +882,10 @@ export async function runDurableAgentWake(params: {
   });
 
   try {
-    // Call production helper that races stream with abort+tripwire
-    const result = await raceStreamWithAbort({
+    // Call production wall-clock enforcement (reads timeout.heartbeatSec ?? 300)
+    const result = await enforceHeartbeatWallClock({
+      runtimeConfig,
+      abortController,
       streamFn: async () => {
         return await durableAgent.stream(wakeMessage, {
           requestContext: runtimeContext,
@@ -858,7 +897,7 @@ export async function runDurableAgentWake(params: {
           },
           ...toMastraCallOptions(generationOptions ?? {}),
           ...(tracingOptions ? { tracingOptions } : {}),
-          abortSignal,
+          abortSignal: abortController.signal,
           onFinish: (result) => {
             const usage = (result.totalUsage ?? result.usage) as {
               inputTokens?: number;
@@ -871,7 +910,6 @@ export async function runDurableAgentWake(params: {
           },
         } as NonNullable<Parameters<typeof durableAgent.stream>[1]> & { abortSignal: AbortSignal });
       },
-      abortSignal,
       tripwireDetector: detector,
       onStreamResult: (streamed) => {
         streamResult = streamed;
@@ -880,6 +918,7 @@ export async function runDurableAgentWake(params: {
       },
     });
     
+    runTracer.info('wall-clock timeout enforced', { timeoutSec: result.timeoutSec });
     durableRunId = result.runId;
     traceId = result.runId;
   } catch (err) {
