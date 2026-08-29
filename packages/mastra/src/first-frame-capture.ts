@@ -251,7 +251,33 @@ export function createFirstFrameCaptureFetch(baseFetch: typeof fetch): typeof fe
       const response = await baseFetch(input, init);
       
       if (!response.ok) {
-        // Non-200 response — no SSE stream to inspect
+        // Non-200 response - store error details before returning
+        const { storeApiErrorDetailsByRequestKey } = require('./observability/error-details-registry') as typeof import('./observability/error-details-registry');
+        
+        // Try to read response body for error details
+        let responseBody: string | undefined;
+        let data: unknown;
+        
+        try {
+          const clonedResponse = response.clone();
+          const text = await clonedResponse.text();
+          responseBody = text.slice(0, 2000);
+          
+          // Try to parse as JSON for structured error
+          if (text.trim().startsWith('{')) {
+            data = JSON.parse(text);
+          }
+        } catch {
+          // Ignore parse errors
+        }
+        
+        storeApiErrorDetailsByRequestKey(requestKey, {
+          statusCode: response.status,
+          url: urlString,
+          responseBody,
+          data,
+        });
+        
         return response;
       }
       
@@ -268,6 +294,37 @@ export function createFirstFrameCaptureFetch(baseFetch: typeof fetch): typeof fe
       // Peek at the first frame without consuming the entire stream
       const { capture, stream: newStream } = await peekFirstSseFrame(response.body);
       storeFirstFrameCapture(requestKey, capture);
+      
+      // If first frame is an error event, store error details BEFORE returning
+      if (capture.kind === 'error' && capture.excerpt) {
+        const { storeApiErrorDetailsByRequestKey } = require('./observability/error-details-registry') as typeof import('./observability/error-details-registry');
+        
+        // Try to parse error from the excerpt
+        let responseBody = capture.excerpt;
+        let data: unknown;
+        
+        try {
+          const parsed = JSON.parse(capture.excerpt);
+          data = parsed;
+          
+          // Extract error message if structured
+          if (parsed.error && typeof parsed.error === 'object') {
+            const error = parsed.error as Record<string, unknown>;
+            if (typeof error.message === 'string') {
+              responseBody = JSON.stringify(parsed);
+            }
+          }
+        } catch {
+          // Keep excerpt as-is if not JSON
+        }
+        
+        storeApiErrorDetailsByRequestKey(requestKey, {
+          statusCode: response.status,
+          url: urlString,
+          responseBody: responseBody.slice(0, 2000),
+          data,
+        });
+      }
 
       // Create a new Response with the peeked stream (all content intact)
       const newResponse = new Response(newStream, {

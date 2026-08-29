@@ -802,12 +802,33 @@ async function runDurableAgentWake(params: {
     streamResult?.cleanup();
     streamResult = undefined;
     
-    // Fallback: Store AI_APICallError fields in registry if fetch wrapper didn't store them
-    // (Fetch wrapper stores by requestKey BEFORE SPAN_ENDED; this is a backup by runId)
+    // Transfer error details from requestKey to runId registry
+    // Fetch wrapper stores by requestKey (before SPAN_ENDED); we re-store by runId
+    // so exporter can find using span metadata (doesn't need __firstFrameRequestKey from errorInfo)
     if (err && typeof err === 'object') {
       const apiError = err as Record<string, unknown>;
       
-      if (apiError.statusCode !== undefined || apiError.url !== undefined || apiError.responseBody !== undefined) {
+      // Read requestKey from raw error object (not from errorInfo - Mastra doesn't copy it)
+      const requestKey = '__firstFrameRequestKey' in apiError 
+        ? (typeof apiError.__firstFrameRequestKey === 'string' ? apiError.__firstFrameRequestKey : undefined)
+        : undefined;
+      
+      if (requestKey) {
+        const { consumeApiErrorDetailsByRequestKey, storeApiErrorDetails } = require('@tourbillon/mastra') as typeof import('@tourbillon/mastra');
+        
+        // Look up by requestKey and re-store by runId
+        const details = consumeApiErrorDetailsByRequestKey(requestKey);
+        if (details) {
+          storeApiErrorDetails(runId, {
+            statusCode: details.statusCode,
+            url: details.url,
+            responseBody: details.responseBody,
+            data: details.data,
+            firstFrameRequestKey: requestKey,
+          });
+        }
+      } else if (apiError.statusCode !== undefined || apiError.url !== undefined || apiError.responseBody !== undefined) {
+        // Fallback: store directly from error object if no requestKey
         const { storeApiErrorDetails } = require('@tourbillon/mastra') as typeof import('@tourbillon/mastra');
         
         storeApiErrorDetails(runId, {
@@ -817,9 +838,7 @@ async function runDurableAgentWake(params: {
             ? apiError.responseBody.slice(0, 2000) 
             : undefined,
           data: apiError.data,
-          firstFrameRequestKey: '__firstFrameRequestKey' in apiError 
-            ? (typeof apiError.__firstFrameRequestKey === 'string' ? apiError.__firstFrameRequestKey : undefined)
-            : undefined,
+          firstFrameRequestKey: undefined,
         });
       }
     }

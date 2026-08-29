@@ -4,9 +4,9 @@ import type { AnyExportedSpan } from '@mastra/core/observability';
 import { mapExportedSpanToEvent } from './map-span';
 import { resolveSpanErrorText } from './resolve-span-error-text';
 import { 
-  storeApiErrorDetailsByRequestKey, 
+  storeApiErrorDetails,
   clearAllApiErrorDetails,
-  consumeApiErrorDetailsByRequestKey 
+  consumeApiErrorDetails 
 } from './error-details-registry';
 
 function span(partial: Partial<AnyExportedSpan>): AnyExportedSpan {
@@ -26,11 +26,11 @@ describe('mapExportedSpanToEvent', () => {
     clearAllApiErrorDetails();
   });
 
-  it('store-then-export: errorText is enriched when error details stored BEFORE SPAN_ENDED', () => {
-    const requestKey = 'test-request-key-123';
+  it('store-then-export: errorText enriched when stored by runId BEFORE SPAN_ENDED', () => {
+    const runId = 'run-123';
     
-    // 1. Fetch wrapper stores error details by requestKey (BEFORE SPAN_ENDED)
-    storeApiErrorDetailsByRequestKey(requestKey, {
+    // 1. Wake-runner stores error details by runId (after transferring from fetch wrapper)
+    storeApiErrorDetails(runId, {
       statusCode: 400,
       url: 'http://192.168.10.199:1234/v1/chat/completions',
       responseBody: '{"error":{"message":"Maximum context length exceeded"}}',
@@ -40,31 +40,34 @@ describe('mapExportedSpanToEvent', () => {
           type: 'invalid_request_error',
         },
       },
+      firstFrameRequestKey: 'test-request-key',
     });
     
-    // 2. Mastra creates span with only message/name/stack in errorInfo
+    // 2. Mastra creates span with ONLY message/name/stack in errorInfo (real Mastra behavior)
+    //    NO __firstFrameRequestKey - Mastra doesn't copy it
     const testSpan = span({
       errorInfo: {
         message: 'OpenAI stream failed before any output was generated',
         name: 'AI_APICallError',
         stack: 'Error: ...',
-        __firstFrameRequestKey: requestKey, // Attached by fetch wrapper
+        // NO __firstFrameRequestKey here - Mastra doesn't copy non-standard fields
       } as any,
       metadata: {
-        heartbeatRunId: 'run-123',
+        heartbeatRunId: runId,
         companyId: 'company-1',
       },
     });
 
-    // 3. Exporter enriches errorInfo (simulated by manually enriching like the exporter does)
-    const details = consumeApiErrorDetailsByRequestKey(requestKey);
-    assert.ok(details, 'Error details must be in registry before SPAN_ENDED');
+    // 3. Exporter enriches errorInfo by looking up runId (simulated)
+    const details = consumeApiErrorDetails(runId);
+    assert.ok(details, 'Error details must be in registry with runId');
     
     const enrichedErrorInfo = testSpan.errorInfo as Record<string, unknown>;
     if (details.statusCode !== undefined) enrichedErrorInfo.statusCode = details.statusCode;
     if (details.url !== undefined) enrichedErrorInfo.url = details.url;
     if (details.responseBody !== undefined) enrichedErrorInfo.responseBody = details.responseBody;
     if (details.data !== undefined) enrichedErrorInfo.data = details.data;
+    if (details.firstFrameRequestKey !== undefined) enrichedErrorInfo.__firstFrameRequestKey = details.firstFrameRequestKey;
 
     // 4. Map the enriched span
     const event = mapExportedSpanToEvent(testSpan);
@@ -100,7 +103,7 @@ describe('mapExportedSpanToEvent', () => {
   it('no store: errorText is SDK fallback when error details NOT stored', () => {
     // No store call - registry is empty
     
-    // Mastra creates span with only message/name/stack
+    // Mastra creates span with only message/name/stack (real Mastra shape)
     const testSpan = span({
       errorInfo: {
         message: 'OpenAI stream failed before any output was generated',
@@ -108,12 +111,14 @@ describe('mapExportedSpanToEvent', () => {
         stack: 'Error: ...',
       } as any,
       metadata: {
+        heartbeatRunId: 'run-456',
         companyId: 'company-1',
       },
     });
 
-    // Exporter tries to enrich but finds nothing (registry is empty)
-    // So errorInfo stays message-only
+    // Exporter tries to enrich but registry is empty (no lookup succeeds)
+    const details = consumeApiErrorDetails('run-456');
+    assert.equal(details, undefined, 'Registry should be empty');
     
     const event = mapExportedSpanToEvent(testSpan);
 
@@ -127,23 +132,28 @@ describe('mapExportedSpanToEvent', () => {
 
   it('caps very long responseBody in errorInfo', () => {
     const longBody = 'x'.repeat(3000);
-    const requestKey = 'test-long-body';
+    const runId = 'run-789';
     
-    storeApiErrorDetailsByRequestKey(requestKey, {
+    storeApiErrorDetails(runId, {
       statusCode: 500,
       responseBody: longBody,
+      url: undefined,
+      data: undefined,
+      firstFrameRequestKey: undefined,
     });
     
     const testSpan = span({
       errorInfo: {
         message: 'Error',
-        __firstFrameRequestKey: requestKey,
       } as any,
-      metadata: { companyId: 'company-1' },
+      metadata: { 
+        heartbeatRunId: runId,
+        companyId: 'company-1' 
+      },
     });
     
     // Enrich
-    const details = consumeApiErrorDetailsByRequestKey(requestKey);
+    const details = consumeApiErrorDetails(runId);
     if (details?.responseBody) {
       (testSpan.errorInfo as Record<string, unknown>).responseBody = details.responseBody;
     }
@@ -167,7 +177,10 @@ describe('mapExportedSpanToEvent', () => {
         name: 'Error',
         stack: 'Error: ...',
       } as any,
-      metadata: { companyId: 'company-1' },
+      metadata: { 
+        heartbeatRunId: 'run-generic',
+        companyId: 'company-1' 
+      },
     });
 
     const event = mapExportedSpanToEvent(testSpan);
