@@ -763,15 +763,23 @@ async function runDurableAgentWake(params: {
     });
   });
 
-  const onAbort = () => {
-    streamResult?.cleanup();
-  };
-  abortSignal.addEventListener('abort', onAbort);
+  // Race against abort signal so wall-clock timeout actually stops the stream
+  const abortPromise = new Promise<never>((_, reject) => {
+    if (abortSignal.aborted) {
+      reject(heartbeatAbortedError());
+      return;
+    }
+    const abortHandler = () => {
+      streamResult?.cleanup();
+      reject(heartbeatAbortedError());
+    };
+    abortSignal.addEventListener('abort', abortHandler, { once: true });
+  });
 
   try {
     // Product lock: never resume prior runs. All heartbeat wakes start with empty context.
     // Pass memory keys with a FRESH thread so OM can observe this wake only (no history loaded).
-    // Race the stream call with tripwire detection
+    // Race the stream call with tripwire detection and abort
     await Promise.race([
       (async () => {
         const streamed = await durableAgent.stream(wakeMessage, {
@@ -809,13 +817,18 @@ async function runDurableAgentWake(params: {
         // Set traceId for future events
         detector.setTraceId(streamed.runId);
         
-        // Race output.text with any late tripwires
-        await awaitWithAbort(streamed.output.text, abortSignal);
+        // Race output.text with any late tripwires and abort
+        await Promise.race([
+          streamed.output.text,
+          tripwirePromise,
+          abortPromise,
+        ]);
         
         streamed.cleanup();
         streamResult = undefined;
       })(),
       tripwirePromise,
+      abortPromise,
     ]);
   } catch (err) {
     streamResult?.cleanup();
@@ -867,7 +880,6 @@ async function runDurableAgentWake(params: {
     }
     throw err;
   } finally {
-    abortSignal.removeEventListener('abort', onAbort);
     tripwireDetectorRegistry.unregister(detector);
     detector.clear();
   }
