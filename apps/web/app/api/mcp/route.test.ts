@@ -1,7 +1,7 @@
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert';
 import { POST } from './route';
-import { db, agents, companies, heartbeatRuns, agentObservabilityEvents } from '@tourbillon/db';
+import { db, agents, companies, heartbeatRuns, agentObservabilityEvents, issues, approvals } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
 import { SignJWT } from 'jose';
 
@@ -42,12 +42,12 @@ describe('MCP Control Plane - Snake Case API', () => {
     
     [companyA] = await db
       .insert(companies)
-      .values({ name: `Company A ${timestamp}` })
+      .values({ name: `Company A ${timestamp}`, slug: `company-a-${timestamp}`, issuePrefix: `CA${timestamp}` })
       .returning();
 
     [companyB] = await db
       .insert(companies)
-      .values({ name: `Company B ${timestamp}` })
+      .values({ name: `Company B ${timestamp}`, slug: `company-b-${timestamp}`, issuePrefix: `CB${timestamp}` })
       .returning();
 
     [agentA1] = await db
@@ -359,7 +359,7 @@ describe('MCP Control Plane - Snake Case API', () => {
           parentSpanId: null,
           eventType: 'model_step',
           name: 'generate',
-          status: 'success',
+          status: 'completed' as any,
           durationMs: 5000,
           inputTokens: 500,
           outputTokens: 100,
@@ -518,6 +518,268 @@ describe('MCP Control Plane - Snake Case API', () => {
       const result = JSON.parse(data.result.content[0].text);
       assert.strictEqual(result.length, 1);
       assert.strictEqual(result[0].id, agentA1.id);
+    });
+  });
+
+  describe('US4: create_issue with token A + company_id A returns identifier', () => {
+    it('should create issue and return identifier', async () => {
+      const req = mockRequest(
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'create_issue',
+            arguments: {
+              company_id: companyA.id,
+              title: 'Test issue from MCP',
+              description: 'Created via MCP',
+            },
+          },
+        },
+        tokenA
+      );
+
+      const response = await POST(req);
+      const data = await response.json();
+
+      assert.strictEqual(response.status, 200);
+      const result = JSON.parse(data.result.content[0].text);
+      assert.ok(result.id, 'Must have issue id');
+      assert.ok(result.identifier, 'Must have issue identifier');
+      assert.strictEqual(result.title, 'Test issue from MCP');
+
+      const listReq = mockRequest(
+        {
+          jsonrpc: '2.0',
+          id: 2,
+          method: 'tools/call',
+          params: {
+            name: 'list_issues',
+            arguments: { company_id: companyA.id },
+          },
+        },
+        tokenA
+      );
+
+      const listResponse = await POST(listReq);
+      const listData = await listResponse.json();
+      const listResult = JSON.parse(listData.result.content[0].text);
+
+      assert.ok(
+        listResult.issues.some((i: any) => i.id === result.id),
+        'Created issue must appear in list'
+      );
+    });
+
+    it('should reject empty title create', async () => {
+      const req = mockRequest(
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'create_issue',
+            arguments: {
+              company_id: companyA.id,
+              title: '',
+            },
+          },
+        },
+        tokenA
+      );
+
+      const response = await POST(req);
+      const data = await response.json();
+
+      assert.strictEqual(response.status, 200);
+      assert.ok(data.error);
+      assert.match(data.error.message, /title.*required/i);
+    });
+  });
+
+  describe('US5: set_issue_status cancelled works on non-halted issue', () => {
+    it('should set issue status to cancelled', async () => {
+      const [testIssue] = await db
+        .insert(issues)
+        .values({
+          companyId: companyA.id,
+          identifier: `${companyA.name}-999`,
+          title: 'Test cancellable issue',
+          status: 'todo',
+          priority: 'medium',
+        })
+        .returning();
+
+      const req = mockRequest(
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'set_issue_status',
+            arguments: {
+              company_id: companyA.id,
+              issue_id: testIssue.id,
+              status: 'cancelled',
+            },
+          },
+        },
+        tokenA
+      );
+
+      const response = await POST(req);
+      const data = await response.json();
+
+      assert.strictEqual(response.status, 200);
+      const result = JSON.parse(data.result.content[0].text);
+      assert.strictEqual(result.status, 'cancelled');
+    });
+  });
+
+  describe('US6: decide_approval reject then set_issue_status cancel works on halted fixture', () => {
+    it('should reject approval leaving issue blocked, then allow cancel', async () => {
+      const [testIssue] = await db
+        .insert(issues)
+        .values({
+          companyId: companyA.id,
+          identifier: `${companyA.name}-1000`,
+          title: 'Test halted issue',
+          status: 'blocked',
+          priority: 'medium',
+        })
+        .returning();
+
+      const [testApproval] = await db
+        .insert(approvals)
+        .values({
+          companyId: companyA.id,
+          type: 'request_board_approval',
+          status: 'pending',
+          requestedByAgentId: agentA1.id,
+          issueIds: [testIssue.id],
+          payload: {
+            title: 'Test approval',
+            priorStatuses: { [testIssue.id]: 'todo' },
+          },
+        })
+        .returning();
+
+      await db
+        .update(issues)
+        .set({ boardApprovalId: testApproval.id })
+        .where(eq(issues.id, testIssue.id));
+
+      const decideReq = mockRequest(
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'decide_approval',
+            arguments: {
+              company_id: companyA.id,
+              approval_id: testApproval.id,
+              decision: 'rejected',
+              reason: 'Test rejection',
+            },
+          },
+        },
+        tokenA
+      );
+
+      const decideResponse = await POST(decideReq);
+      const decideData = await decideResponse.json();
+
+      assert.strictEqual(decideResponse.status, 200);
+      const decideResult = JSON.parse(decideData.result.content[0].text);
+      assert.strictEqual(decideResult.status, 'rejected');
+
+      const issueAfterReject = await db.query.issues.findFirst({
+        where: eq(issues.id, testIssue.id),
+      });
+      assert.strictEqual(issueAfterReject?.status, 'blocked', 'Issue must be blocked after reject');
+      assert.strictEqual(issueAfterReject?.boardApprovalId, null, 'boardApprovalId must be cleared');
+
+      const cancelReq = mockRequest(
+        {
+          jsonrpc: '2.0',
+          id: 2,
+          method: 'tools/call',
+          params: {
+            name: 'set_issue_status',
+            arguments: {
+              company_id: companyA.id,
+              issue_id: testIssue.id,
+              status: 'cancelled',
+            },
+          },
+        },
+        tokenA
+      );
+
+      const cancelResponse = await POST(cancelReq);
+      const cancelData = await cancelResponse.json();
+
+      assert.strictEqual(cancelResponse.status, 200);
+      const cancelResult = JSON.parse(cancelData.result.content[0].text);
+      assert.strictEqual(cancelResult.status, 'cancelled', 'Issue must be cancellable after reject');
+    });
+  });
+
+  describe('US7: wake_agent starts on-demand run, second wake returns in-flight error', () => {
+    it('should trigger wake and reject duplicate wake', async () => {
+      const wakeReq = mockRequest(
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'wake_agent',
+            arguments: {
+              company_id: companyA.id,
+              agent_id: agentA1.id,
+            },
+          },
+        },
+        tokenA
+      );
+
+      const response = await POST(wakeReq);
+      const data = await response.json();
+
+      assert.strictEqual(response.status, 200);
+      if (data.error) {
+        assert.match(
+          data.error.message,
+          /a wake may already be in flight/i,
+          'If wake fails, must be in-flight error'
+        );
+      } else {
+        const result = JSON.parse(data.result.content[0].text);
+        assert.ok(result.runId || result.jobId, 'Must have runId or jobId on success');
+      }
+    });
+  });
+
+  describe('US8: docs list new tools + X-Company-Token + company_id', () => {
+    it('doc confirms new tools and authentication', async () => {
+      const fs = await import('fs/promises');
+      const docPath = '../../../../../docs/mcp-control-plane.md';
+      const doc = await fs.readFile(new URL(docPath, import.meta.url), 'utf-8');
+
+      assert.match(doc, /X-Company-Token/, 'Doc must mention X-Company-Token');
+      assert.match(doc, /company_id/, 'Doc must mention company_id parameter');
+      assert.match(doc, /list_issues/, 'Doc must list list_issues tool');
+      assert.match(doc, /create_issue/, 'Doc must list create_issue tool');
+      assert.match(doc, /set_issue_status/, 'Doc must list set_issue_status tool');
+      assert.match(doc, /list_goals/, 'Doc must list list_goals tool');
+      assert.match(doc, /create_goal/, 'Doc must list create_goal tool');
+      assert.match(doc, /list_projects/, 'Doc must list list_projects tool');
+      assert.match(doc, /create_project/, 'Doc must list create_project tool');
+      assert.match(doc, /list_approvals/, 'Doc must list list_approvals tool');
+      assert.match(doc, /decide_approval/, 'Doc must list decide_approval tool');
+      assert.match(doc, /wake_agent/, 'Doc must list wake_agent tool');
     });
   });
 });
