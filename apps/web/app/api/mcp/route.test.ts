@@ -264,6 +264,56 @@ describe('MCP Control Plane - Snake Case API', () => {
       assert.ok(data.error);
       assert.match(data.error.message, /not found/i);
     });
+
+    it('should reject create_issue for company B with token A (mutating tool isolation)', async () => {
+      const req = mockRequest(
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'create_issue',
+            arguments: {
+              company_id: companyB.id,
+              title: 'Test issue',
+            },
+          },
+        },
+        tokenA
+      );
+
+      const response = await POST(req);
+      const data = await response.json();
+
+      assert.strictEqual(response.status, 200, 'Must return 200 with error in body');
+      assert.ok(data.error, 'Must have error object');
+      assert.match(data.error.message, /not found/i, 'Error message must say not found');
+    });
+
+    it('should reject wake_agent for company B agent with token A (mutating tool isolation)', async () => {
+      const req = mockRequest(
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'wake_agent',
+            arguments: {
+              company_id: companyB.id,
+              agent_id: agentB1.id,
+            },
+          },
+        },
+        tokenA
+      );
+
+      const response = await POST(req);
+      const data = await response.json();
+
+      assert.strictEqual(response.status, 200, 'Must return 200 with error in body');
+      assert.ok(data.error, 'Must have error object');
+      assert.match(data.error.message, /not found/i, 'Error message must say not found');
+    });
   });
 
   describe('US5: company_list returns only allowed companies', () => {
@@ -728,8 +778,8 @@ describe('MCP Control Plane - Snake Case API', () => {
   });
 
   describe('US7: wake_agent starts on-demand run, second wake returns in-flight error', () => {
-    it('should trigger wake and reject duplicate wake', async () => {
-      const wakeReq = mockRequest(
+    it('should start run on first call, return in-flight error on second', async () => {
+      const firstReq = mockRequest(
         {
           jsonrpc: '2.0',
           id: 1,
@@ -745,20 +795,40 @@ describe('MCP Control Plane - Snake Case API', () => {
         tokenA
       );
 
-      const response = await POST(wakeReq);
-      const data = await response.json();
+      const firstResponse = await POST(firstReq);
+      const firstData = await firstResponse.json();
 
-      assert.strictEqual(response.status, 200);
-      if (data.error) {
-        assert.match(
-          data.error.message,
-          /a wake may already be in flight/i,
-          'If wake fails, must be in-flight error'
-        );
-      } else {
-        const result = JSON.parse(data.result.content[0].text);
-        assert.ok(result.runId || result.jobId, 'Must have runId or jobId on success');
-      }
+      assert.strictEqual(firstResponse.status, 200, 'First wake must return 200');
+      assert.ok(!firstData.error, 'First wake must not have error');
+      const firstResult = JSON.parse(firstData.result.content[0].text);
+      assert.ok(firstResult.runId || firstResult.jobId, 'First wake must return runId or jobId');
+
+      const secondReq = mockRequest(
+        {
+          jsonrpc: '2.0',
+          id: 2,
+          method: 'tools/call',
+          params: {
+            name: 'wake_agent',
+            arguments: {
+              company_id: companyA.id,
+              agent_id: agentA1.id,
+            },
+          },
+        },
+        tokenA
+      );
+
+      const secondResponse = await POST(secondReq);
+      const secondData = await secondResponse.json();
+
+      assert.strictEqual(secondResponse.status, 200, 'Second wake must return 200');
+      assert.ok(secondData.error, 'Second wake must have error');
+      assert.match(
+        secondData.error.message,
+        /a wake may already be in flight/i,
+        'Second wake must return in-flight error message'
+      );
     });
   });
 
