@@ -476,8 +476,13 @@ describe('Mobile API Routes - New JWT endpoints', () => {
       assert.ok(data.agent);
       assert.strictEqual(data.agent.urlKey, 'alice');
       assert.strictEqual(data.agent.name, 'Alice');
-      // Ensure Charlie is not in the catalog peers
+      // Ensure catalog peers has Company A data and excludes Company B
       if (data.catalog?.peerAgents && Array.isArray(data.catalog.peerAgents)) {
+        // Must have Company A agents in catalog
+        assert.ok(data.catalog.peerAgents.length > 0, 'Catalog peerAgents must not be empty');
+        const hasAlice = data.catalog.peerAgents.some((a: any) => a.urlKey === 'alice');
+        assert.ok(hasAlice, 'Company A agent alice must appear in catalog');
+        // Must exclude Company B agent
         assert.ok(!data.catalog.peerAgents.some((a: any) => a.urlKey === 'charlie'), 
           'Company B agent charlie must not appear in Company A catalog');
       }
@@ -493,6 +498,10 @@ describe('Mobile API Routes - New JWT endpoints', () => {
 
       assert.strictEqual(response.status, 200);
       assert.ok(Array.isArray(data.approvals));
+      // Must have Company A data to be a valid test
+      const hasCompanyA = data.approvals.some((a: any) => a.id === 'approval-a1');
+      assert.ok(hasCompanyA, 'Company A approval must be present in results');
+      // Must exclude Company B data
       const hasCompanyB = data.approvals.some((a: any) => a.id === 'approval-b1');
       assert.ok(!hasCompanyB, 'Company B approval must not appear in Company A results');
     });
@@ -507,6 +516,10 @@ describe('Mobile API Routes - New JWT endpoints', () => {
 
       assert.strictEqual(response.status, 200);
       assert.ok(Array.isArray(data.projects));
+      // Must have Company A data to be a valid test
+      const hasCompanyA = data.projects.some((p: any) => p.id === 'project-a1');
+      assert.ok(hasCompanyA, 'Company A project must be present in results');
+      // Must exclude Company B data
       const hasCompanyB = data.projects.some((p: any) => p.id === 'project-b1');
       assert.ok(!hasCompanyB, 'Company B project must not appear in Company A results');
     });
@@ -521,6 +534,10 @@ describe('Mobile API Routes - New JWT endpoints', () => {
 
       assert.strictEqual(response.status, 200);
       assert.ok(Array.isArray(data.goals));
+      // Must have Company A data to be a valid test
+      const hasCompanyA = data.goals.some((g: any) => g.id === 'goal-a1');
+      assert.ok(hasCompanyA, 'Company A goal must be present in results');
+      // Must exclude Company B data
       const hasCompanyB = data.goals.some((g: any) => g.id === 'goal-b1');
       assert.ok(!hasCompanyB, 'Company B goal must not appear in Company A results');
     });
