@@ -22,6 +22,8 @@ export async function GET(req: NextRequest) {
       .select({
         id: agents.id,
         name: agents.name,
+        role: agents.role,
+        title: agents.title,
         urlKey: agents.urlKey,
         modelId: agents.modelId,
         adapterType: agents.adapterType,
@@ -44,6 +46,8 @@ export async function GET(req: NextRequest) {
         return {
           id: a.id,
           name: a.name,
+          role: a.role,
+          title: a.title,
           urlKey: a.urlKey,
           modelId: a.modelId ?? null,
           providerName: a.providerName ?? a.adapterType ?? null,
