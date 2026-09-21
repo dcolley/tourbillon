@@ -205,6 +205,7 @@ async function updateCodeExecution(
   }
 
   const isolation = (formData.get('codeExecutionIsolation') as string) || null;
+  const allowNetwork = formData.get('codeExecutionAllowNetwork') === 'on';
 
   try {
     await updateAgentCodeExecution(agentId, {
@@ -212,6 +213,7 @@ async function updateCodeExecution(
       codeExecutionEnabled,
       timeoutMs: timeoutRaw ? timeoutMs : undefined,
       isolation,
+      allowNetwork,
       clearCodeExecutionOverrides: formData.get('clearCodeExecutionOverrides') === 'on',
     });
   } catch (err) {
@@ -832,6 +834,7 @@ export default async function AgentDetailPage({
                   sandboxPathPreview={sandboxPathPreview}
                   timeoutOverride={runtime.codeExecution?.timeoutMs}
                   isolationOverride={runtime.codeExecution?.isolation}
+                  allowNetworkOverride={runtime.codeExecution?.allowNetwork}
                   updateCodeExecution={updateCodeExecution}
                 />
               </section>

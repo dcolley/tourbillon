@@ -16,6 +16,7 @@ interface AgentCodeExecutionFormProps {
   sandboxPathPreview: string;
   timeoutOverride?: number;
   isolationOverride?: SandboxIsolation;
+  allowNetworkOverride?: boolean;
   updateCodeExecution: (
     prev: ActionResult | null,
     formData: FormData,
@@ -31,6 +32,7 @@ export function AgentCodeExecutionForm({
   sandboxPathPreview,
   timeoutOverride,
   isolationOverride,
+  allowNetworkOverride,
   updateCodeExecution,
 }: AgentCodeExecutionFormProps) {
   const [state, formAction] = useActionState(updateCodeExecution, null);
@@ -167,7 +169,25 @@ export function AgentCodeExecutionForm({
               <option value="bwrap">bwrap (Linux)</option>
             </select>
           </div>
-          {(timeoutOverride !== undefined || isolationOverride !== undefined) && (
+          <div className="space-y-2">
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input
+                id="codeExecutionAllowNetwork"
+                name="codeExecutionAllowNetwork"
+                type="checkbox"
+                defaultChecked={allowNetworkOverride ?? false}
+                className="mt-0.5 rounded border-input"
+              />
+              <span>
+                <span className="text-sm font-medium">Allow network (sandbox)</span>
+                <span className="block text-xs text-muted-foreground">
+                  Dangerous: this lets the agent reach the internet from code execution. Only enable for
+                  testing agents with strict instructions.
+                </span>
+              </span>
+            </label>
+          </div>
+          {(timeoutOverride !== undefined || isolationOverride !== undefined || allowNetworkOverride !== undefined) && (
             <label className="flex items-center gap-2 text-xs text-muted-foreground">
               <input type="checkbox" name="clearCodeExecutionOverrides" className="rounded border-input" />
               Clear per-agent overrides
