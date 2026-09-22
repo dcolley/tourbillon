@@ -11,6 +11,9 @@ This directory contains the static documentation site for Tourbillon, hosted on 
 - `docs.html` — Documentation and quick start
 - `architecture.html` — System architecture (HTML version)
 - `architecture.md` — System architecture (Markdown source, linked from README)
+- `test-super-agent-setup.md` — TestSuper agent configuration guide
+- `stories-auth-smoke-tour-210.md` — Auth smoke testing user stories (TOUR-208/210)
+- `mcp-control-plane.md` — MCP control plane documentation
 - `style.css` — Shared styles
 - `README.md` — This file
 

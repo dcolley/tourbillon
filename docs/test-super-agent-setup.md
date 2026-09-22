@@ -26,8 +26,8 @@ smoke, and acceptance tests against authorized TEST environments.
 
 ## What You MAY Do
 - Run tests against the following allowed hosts:
+  - localhost and 127.0.0.1 (PREFERRED for smoke tests on tourbillon-test host)
   - tourbillon-test.metaspan.com
-  - localhost and 127.0.0.1 (for local services)
   - Any host explicitly named in TOURBILLON_TEST_HOSTS environment variable
 - Execute test scripts located in the `projects/` directory
 - POST/GET to allowed test hosts using credentials from environment variables
@@ -60,6 +60,8 @@ smoke, and acceptance tests against authorized TEST environments.
 
 ### Option 1: UI-Based Setup
 
+**IMPORTANT**: Do NOT hire TestSuper or enable `allowNetwork` until all prerequisites are ready (see **Hire Gate** section below).
+
 1. Navigate to `/dashboard/agent/new`
 2. Configure agent:
    - **Name**: `TestSuper`
@@ -71,13 +73,14 @@ smoke, and acceptance tests against authorized TEST environments.
    - Paste the strict persona above into **SOUL.md**
 5. **Capabilities tab**:
    - Enable `code-execution` toolset
+   - Assign `test-super` skill
 6. **Code & execution tab**:
    - Ensure code execution is enabled
    - Set isolation to `bwrap` (Linux) or `seatbelt` (macOS)
-   - **Check** "Allow network (sandbox)"
+   - **Check** "Allow network (sandbox)" — ONLY after PM/Test approval (see Hire Gate)
 7. **Heartbeats tab**:
-   - Start **paused** or set timer to inactive until DEMO hire is intentional
-   - Enable "Wake on assignment" if tests will be assigned via issues
+   - Start **paused** or set timer to inactive until smoke prerequisites complete
+   - Enable "Wake on assignment" after hire gate passed
 
 ### Option 2: Seed Script (Future)
 
@@ -107,41 +110,104 @@ await updateAgentCodeExecution(testSuper.id, {
 TestSuper requires the following environment variables for test credentials:
 
 ```bash
-# Required: Test environment base URL
-TOURBILLON_TEST_BASE_URL=https://tourbillon-test.metaspan.com
+# Preferred: Localhost for smoke tests on tourbillon-test host
+TEST_API_BASE=http://127.0.0.1:3002
+
+# Alternative: Remote TEST deployment
+# TEST_API_BASE=https://tourbillon-test.metaspan.com
 
 # Optional: Additional allowed hosts (comma-separated)
 TOURBILLON_TEST_HOSTS=tourbillon-test.metaspan.com,localhost,127.0.0.1
 
-# Board approval credentials (NEVER committed to repo)
+# Auth smoke test credentials (NEVER committed to repo)
+TEST_EMAIL=<from-ops>
+TEST_PASSWORD=<from-ops>
+
+# Legacy board approval credentials (if needed)
 TEST_BOARD_USERNAME=<from-ops>
 TEST_BOARD_PASSWORD=<from-ops>
-
-# Or use a token-based approach
-TEST_AUTH_TOKEN=<from-ops>
 ```
 
-**IMPORTANT**: Test credentials are managed by Ops and injected via environment or secrets management. They are **never** committed to the repository.
+**IMPORTANT**: Test credentials are managed by Ops and delivered via one of these methods:
+
+### Credential Delivery (Interim — Track A)
+
+**Preferred**: Mode-600 host file on tourbillon-test
+
+```bash
+# Path: ~/tourbillon/.env.test-auth
+# Permissions: chmod 600 ~/tourbillon/.env.test-auth
+TEST_EMAIL=testsuper@example.com
+TEST_PASSWORD=<random-from-ops>
+TEST_API_BASE=http://127.0.0.1:3002
+```
+
+TestSuper smoke scripts source this file:
+
+```bash
+set -a && source ~/tourbillon/.env.test-auth && set +a
+./projects/auth-smoke-tests.sh
+```
+
+**FORBIDDEN**: Credentials in agent SOUL.md, instructions, issue bodies, chat, or git.
+
+### Credential Delivery (Future — Track B)
+
+**Planned**: Per-agent secrets/variables (US-B1 in `docs/stories-auth-smoke-tour-210.md`)
+- Secrets scoped to TestSuper agent
+- Set via UI or API, not host files
+- Values injected at runtime, never visible in prompts or logs
+
+## Hire Gate (CRITICAL)
+
+**Do NOT hire TestSuper or enable `allowNetwork` until all of the following are ready:**
+
+### Prerequisites (Track A — P0 Stories)
+
+Reference: `docs/stories-auth-smoke-tour-210.md`
+
+- [ ] **US-A1**: Auth API endpoints (`POST /api/auth/login`, `GET /api/auth/session`) deployed to TEST (not 404)
+- [ ] **US-A2**: Postgres users/auth tables exist on TEST (persistent storage)
+- [ ] **US-A3**: Throwaway TEST user created (e.g., `testsuper@example.com`)
+- [ ] **US-A4**: Host file `~/tourbillon/.env.test-auth` created with mode 600, credentials populated
+- [ ] **US-A5**: `projects/auth-smoke-tests.sh` script exists and passes manual run
+- [ ] **US-A6**: PM and Test Lead approval to proceed
+
+### Gate Enforcement
+
+- **Before gate**: TestSuper remains paused (heartbeats disabled) OR not yet hired
+- **At gate**: Ops holds host file, PM/Test review readiness
+- **After gate**: Enable heartbeats, assign first smoke test issue (supervised)
+
+### First Run Supervision
+
+The first TestSuper wake with live auth smoke tests must be supervised by Ops or Test Lead:
+1. Observe heartbeat execution in `/jobs`
+2. Review issue comments for results
+3. Confirm credentials not leaked in prompts or logs
+4. Sign off on TOUR-208/TOUR-210 acceptance
 
 ## Usage
 
 ### Assigning Test Tasks
 
-Create an issue and assign it to TestSuper:
+After hire gate passed, create an issue and assign it to TestSuper:
 
 ```markdown
 **Title**: Run auth smoke tests for TOUR-208
 
 **Description**:
 Execute the auth smoke tests against TEST deployment:
-1. Run `projects/auth-smoke-tests.sh`
-2. Verify checks 1-2 can reach tourbillon-test.metaspan.com
-3. Report pass/fail and any EHOSTUNREACH errors
+1. Source credentials from `~/tourbillon/.env.test-auth`
+2. Run `projects/auth-smoke-tests.sh`
+3. Verify checks pass against http://127.0.0.1:3002 (preferred localhost)
+4. Report pass/fail and any errors
 
 **Acceptance Criteria**:
 - [ ] Script exits with 0 (all checks pass)
-- [ ] No EHOSTUNREACH errors logged
-- [ ] Test results posted as comment
+- [ ] Login succeeds, session returns authenticated user
+- [ ] Wrong password fails cleanly (401)
+- [ ] Test results posted as comment (no credential leaks)
 ```
 
 ### Expected Behavior
@@ -195,11 +261,12 @@ When woken, TestSuper will:
 
 ## Related Resources
 
+- **docs/stories-auth-smoke-tour-210.md**: User stories and acceptance criteria (Track A P0 + Track B P1)
 - **TOUR-210**: Board approval gate for TEST credentials
 - **TOUR-208**: Auth smoke test acceptance criteria
 - **Goal f486c37c**: Live auth smoke tests implementation goal
-- **Board Approval 7731439a**: TEST credential approval (out of scope for this PR)
-- **Execution Gate Addendum**: `resources/execution-gate-addendum-egress-2026-09-01.md` (if present)
+- **PR #43**: allowNetwork support + TestSuper agent setup (merged)
+- **packages/skills/test-super/SKILL.md**: TestSuper testing persona skill
 
 ## Security Notes
 
