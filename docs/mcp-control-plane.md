@@ -91,6 +91,8 @@ To add this MCP server to Grok Bot or other MCP clients that support HTTP transp
 
 **Note:** All tools except `company_list` require a `company_id` parameter. The token identifies the operator; `company_id` specifies which company to operate on. The token must grant access to the requested company.
 
+### Core Management Tools
+
 ### 1. company_list
 
 List companies this token can act as (returns the single company from the JWT).
@@ -256,6 +258,265 @@ Get live snapshot of a heartbeat run (status, timing, logs). Poll this endpoint 
 - `logs`: Array of log lines
 - `logCount`: Total log count
 
+### Issue Management Tools
+
+### 10. list_issues
+
+List issues in the company with optional filters.
+
+**Parameters:**
+- `company_id` (string, required): Company UUID
+- `status` (string): Filter by status (backlog, todo, in_progress, in_review, done, blocked, cancelled)
+- `assignee_agent_id` (string): Filter by assigned agent UUID
+- `page` (number): Page number (0-based, default 0)
+- `page_size` (number): Items per page (default 25)
+
+**Returns:**
+- `issues`: Array of issue objects
+  - `id`: Issue UUID
+  - `identifier`: Issue identifier (e.g., "PROJ-123")
+  - `title`: Issue title
+  - `description`: Issue description
+  - `status`: Issue status
+  - `priority`: Issue priority
+  - `assigneeAgentId`: Assigned agent UUID (or null)
+  - `goalId`: Goal UUID (or null)
+  - `projectId`: Project UUID (or null)
+  - `createdAt`: ISO timestamp
+  - `updatedAt`: ISO timestamp
+- `total`: Total issue count
+- `page`: Current page
+- `pageSize`: Page size
+
+### 11. get_issue
+
+Get detailed issue information.
+
+**Parameters:**
+- `company_id` (string, required): Company UUID
+- `issue_id` (string, required): Issue UUID
+
+**Returns:**
+- `id`: Issue UUID
+- `identifier`: Issue identifier
+- `title`: Issue title
+- `description`: Issue description
+- `status`: Issue status
+- `priority`: Issue priority
+- `assigneeAgentId`: Assigned agent UUID (or null)
+- `goalId`: Goal UUID (or null)
+- `projectId`: Project UUID (or null)
+- `assignee`: Agent object (or null)
+- `goal`: Goal object (or null)
+- `project`: Project object (or null)
+- `createdAt`: ISO timestamp
+- `updatedAt`: ISO timestamp
+
+### 12. create_issue
+
+Create a new issue. Empty creates are rejected.
+
+**Parameters:**
+- `company_id` (string, required): Company UUID
+- `title` (string, required): Issue title
+- `description` (string): Issue description
+- `assignee_agent_id` (string): Agent UUID to assign
+- `goal_id` (string): Goal UUID
+- `project_id` (string): Project UUID
+- `priority` (string): Issue priority (critical, high, medium, low; default: medium)
+
+**Returns:**
+- `id`: Issue UUID
+- `identifier`: Issue identifier
+- `title`: Issue title
+- `status`: Issue status
+- `priority`: Issue priority
+
+### 13. set_issue_status
+
+Set issue status. Halted issues (pending board approval) cannot change status until the board decides.
+
+**Parameters:**
+- `company_id` (string, required): Company UUID
+- `issue_id` (string, required): Issue UUID
+- `status` (string, required): New status (backlog, todo, in_progress, in_review, done, blocked, cancelled)
+
+**Returns:**
+- `id`: Issue UUID
+- `identifier`: Issue identifier
+- `status`: New status
+
+### 14. add_issue_comment
+
+Add a comment to an issue.
+
+**Parameters:**
+- `company_id` (string, required): Company UUID
+- `issue_id` (string, required): Issue UUID
+- `body` (string, required): Comment text
+
+**Returns:**
+- `id`: Comment UUID
+- `body`: Comment text
+- `createdAt`: ISO timestamp
+
+### Goal Management Tools
+
+### 15. list_goals
+
+List goals in the company.
+
+**Parameters:**
+- `company_id` (string, required): Company UUID
+- `status` (string): Filter by status (active, completed, archived, all; default: all)
+
+**Returns:**
+- `goals`: Array of goal objects
+  - `id`: Goal UUID
+  - `title`: Goal title
+  - `description`: Goal description
+  - `status`: Goal status
+  - `createdAt`: ISO timestamp
+  - `updatedAt`: ISO timestamp
+
+### 16. create_goal
+
+Create a new goal.
+
+**Parameters:**
+- `company_id` (string, required): Company UUID
+- `title` (string, required): Goal title
+- `description` (string): Goal description
+- `status` (string): Goal status (active, completed, archived; default: active)
+
+**Returns:**
+- `id`: Goal UUID
+- `title`: Goal title
+- `status`: Goal status
+
+### 17. set_goal_status
+
+Set goal status.
+
+**Parameters:**
+- `company_id` (string, required): Company UUID
+- `goal_id` (string, required): Goal UUID
+- `status` (string, required): New status (active, completed, archived)
+
+**Returns:**
+- `id`: Goal UUID
+- `title`: Goal title
+- `status`: New status
+
+### Project Management Tools
+
+### 18. list_projects
+
+List projects in the company.
+
+**Parameters:**
+- `company_id` (string, required): Company UUID
+- `status` (string): Filter by status (active, paused, completed, archived, all; default: all)
+- `goal_id` (string): Filter by goal UUID
+
+**Returns:**
+- `projects`: Array of project objects
+  - `id`: Project UUID
+  - `title`: Project title
+  - `description`: Project description
+  - `status`: Project status
+  - `goalId`: Goal UUID
+  - `goalTitle`: Goal title
+
+### 19. create_project
+
+Create a new project.
+
+**Parameters:**
+- `company_id` (string, required): Company UUID
+- `title` (string, required): Project title
+- `description` (string): Project description
+- `goal_id` (string, required): Goal UUID (required)
+- `status` (string): Project status (active, paused, completed, archived; default: active)
+
+**Returns:**
+- `id`: Project UUID
+- `title`: Project title
+- `status`: Project status
+- `goalId`: Goal UUID
+
+### 20. set_project_status
+
+Set project status.
+
+**Parameters:**
+- `company_id` (string, required): Company UUID
+- `project_id` (string, required): Project UUID
+- `status` (string, required): New status (active, paused, completed, archived)
+
+**Returns:**
+- `id`: Project UUID
+- `title`: Project title
+- `status`: New status
+
+### Approval Management Tools
+
+### 21. list_approvals
+
+List pending and recent board approvals.
+
+**Parameters:**
+- `company_id` (string, required): Company UUID
+- `status` (string): Filter by status (pending, approved, rejected, all; default: pending)
+- `limit` (number): Maximum results (default: 50)
+
+**Returns:**
+- `approvals`: Array of approval objects
+  - `id`: Approval UUID
+  - `type`: Approval type
+  - `status`: Approval status (pending, approved, rejected)
+  - `requestedByAgentId`: Requesting agent UUID
+  - `decidedByUserId`: Deciding user ID (or null)
+  - `issueIds`: Array of linked issue UUIDs
+  - `payload`: Approval payload object
+  - `note`: Decision note (or null)
+  - `decidedAt`: ISO timestamp (or null)
+  - `createdAt`: ISO timestamp
+
+### 22. decide_approval
+
+Decide a pending board approval. Approval restores prior issue status; rejection leaves issues blocked. Issues must be manually cancelled via `set_issue_status` if needed after rejection.
+
+**Parameters:**
+- `company_id` (string, required): Company UUID
+- `approval_id` (string, required): Approval UUID
+- `decision` (string, required): Decision (approved or rejected)
+- `reason` (string): Decision reason/note
+
+**Returns:**
+- `id`: Approval UUID
+- `status`: New status
+- `decision`: Decision (approved or rejected)
+- `decidedAt`: ISO timestamp
+
+### Agent Wake Tools
+
+### 23. wake_agent
+
+Trigger on-demand agent heartbeat. Returns error if a wake is already in flight for this agent.
+
+**Parameters:**
+- `company_id` (string, required): Company UUID
+- `agent_id` (string, required): Agent UUID
+
+**Returns:**
+- `runId`: Heartbeat run UUID (or null)
+- `jobId`: Job ID (or null)
+- `message`: Result message
+
+**Errors:**
+- Returns "a wake may already be in flight" if another wake is running
+
 ## Security
 
 - Each company token is scoped to a single company
@@ -268,10 +529,10 @@ Get live snapshot of a heartbeat run (status, timing, logs). Poll this endpoint 
 
 ## Out of Scope
 
-This MCP server is for ops tools only. The following features are NOT included:
+This MCP server is for ops and control-plane management. The following features are NOT included:
 - Chat / DM functionality
-- Wake / on-demand agent invocation
 - Hiring new agents
-- HITLy (Human-in-the-Loop) approvals
+- Agent skill/tool configuration
+- Runtime adapter changes
 
 For these features, use the web UI or other APIs.

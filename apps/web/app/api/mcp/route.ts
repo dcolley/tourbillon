@@ -6,11 +6,17 @@ import {
   updateAgentObservationalMemory,
   type UpdateAgentObservationalMemoryInput,
 } from '@/lib/agents';
-import { db, agents, llmProviders, companies } from '@tourbillon/db';
-import { eq } from 'drizzle-orm';
+import { db, agents, llmProviders, companies, issues, goals, projects, approvals } from '@tourbillon/db';
+import { and, eq, inArray, desc } from 'drizzle-orm';
 import { getHeartbeatList, getHeartbeatRun } from '@/lib/heartbeats';
 import { listObservabilityEvents } from '@/lib/observability';
 import { getJobLiveSnapshot } from '@/lib/jobs';
+import { createIssue, updateIssue, getIssueDetail, listIssues, type CreateIssueInput } from '@/lib/issues';
+import { createGoal, updateGoal, listGoalsForCompany, type CreateGoalInput, type UpdateGoalInput } from '@/lib/goals';
+import { createProject, updateProject, listProjectsForAgent, type CreateProjectInput, type UpdateProjectInput } from '@/lib/projects';
+import { addIssueComment } from '@/lib/issue-comments';
+import { triggerAgentHeartbeat } from '@/lib/heartbeat';
+import { enqueueApprovalWake } from '@/lib/wake-client';
 
 interface McpRequest {
   jsonrpc: '2.0';
@@ -228,6 +234,352 @@ const MCP_TOOLS: McpTool[] = [
         },
       },
       required: ['company_id', 'run_id'],
+    },
+  },
+  {
+    name: 'list_issues',
+    description: 'List issues in the company with optional status and assignee filters',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        company_id: {
+          type: 'string',
+          description: 'Company ID (UUID)',
+        },
+        status: {
+          type: 'string',
+          description: 'Filter by status (backlog, todo, in_progress, in_review, done, blocked, cancelled). Omit for all.',
+        },
+        assignee_agent_id: {
+          type: 'string',
+          description: 'Filter by assigned agent ID (UUID)',
+        },
+        page: {
+          type: 'number',
+          description: 'Page number (0-based, default 0)',
+        },
+        page_size: {
+          type: 'number',
+          description: 'Items per page (default 25)',
+        },
+      },
+      required: ['company_id'],
+    },
+  },
+  {
+    name: 'get_issue',
+    description: 'Get issue detail (title, description, status, priority, assignee, goal, project, comments)',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        company_id: {
+          type: 'string',
+          description: 'Company ID (UUID)',
+        },
+        issue_id: {
+          type: 'string',
+          description: 'Issue ID (UUID)',
+        },
+      },
+      required: ['company_id', 'issue_id'],
+    },
+  },
+  {
+    name: 'create_issue',
+    description: 'Create a new issue. Empty creates are rejected.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        company_id: {
+          type: 'string',
+          description: 'Company ID (UUID)',
+        },
+        title: {
+          type: 'string',
+          description: 'Issue title (required)',
+        },
+        description: {
+          type: 'string',
+          description: 'Issue description',
+        },
+        assignee_agent_id: {
+          type: 'string',
+          description: 'Agent ID to assign (UUID)',
+        },
+        goal_id: {
+          type: 'string',
+          description: 'Goal ID (UUID)',
+        },
+        project_id: {
+          type: 'string',
+          description: 'Project ID (UUID)',
+        },
+        priority: {
+          type: 'string',
+          enum: ['critical', 'high', 'medium', 'low'],
+          description: 'Issue priority (default: medium)',
+        },
+      },
+      required: ['company_id', 'title'],
+    },
+  },
+  {
+    name: 'set_issue_status',
+    description: 'Set issue status (backlog, todo, in_progress, in_review, done, blocked, cancelled). Halted issues cannot change until board decides.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        company_id: {
+          type: 'string',
+          description: 'Company ID (UUID)',
+        },
+        issue_id: {
+          type: 'string',
+          description: 'Issue ID (UUID)',
+        },
+        status: {
+          type: 'string',
+          enum: ['backlog', 'todo', 'in_progress', 'in_review', 'done', 'blocked', 'cancelled'],
+          description: 'New status',
+        },
+      },
+      required: ['company_id', 'issue_id', 'status'],
+    },
+  },
+  {
+    name: 'add_issue_comment',
+    description: 'Add a comment to an issue',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        company_id: {
+          type: 'string',
+          description: 'Company ID (UUID)',
+        },
+        issue_id: {
+          type: 'string',
+          description: 'Issue ID (UUID)',
+        },
+        body: {
+          type: 'string',
+          description: 'Comment text',
+        },
+      },
+      required: ['company_id', 'issue_id', 'body'],
+    },
+  },
+  {
+    name: 'list_goals',
+    description: 'List goals in the company',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        company_id: {
+          type: 'string',
+          description: 'Company ID (UUID)',
+        },
+        status: {
+          type: 'string',
+          enum: ['active', 'completed', 'archived', 'all'],
+          description: 'Filter by status (default: all)',
+        },
+      },
+      required: ['company_id'],
+    },
+  },
+  {
+    name: 'create_goal',
+    description: 'Create a new goal',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        company_id: {
+          type: 'string',
+          description: 'Company ID (UUID)',
+        },
+        title: {
+          type: 'string',
+          description: 'Goal title (required)',
+        },
+        description: {
+          type: 'string',
+          description: 'Goal description',
+        },
+        status: {
+          type: 'string',
+          enum: ['active', 'completed', 'archived'],
+          description: 'Goal status (default: active)',
+        },
+      },
+      required: ['company_id', 'title'],
+    },
+  },
+  {
+    name: 'set_goal_status',
+    description: 'Set goal status (active, completed, archived)',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        company_id: {
+          type: 'string',
+          description: 'Company ID (UUID)',
+        },
+        goal_id: {
+          type: 'string',
+          description: 'Goal ID (UUID)',
+        },
+        status: {
+          type: 'string',
+          enum: ['active', 'completed', 'archived'],
+          description: 'New status',
+        },
+      },
+      required: ['company_id', 'goal_id', 'status'],
+    },
+  },
+  {
+    name: 'list_projects',
+    description: 'List projects in the company',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        company_id: {
+          type: 'string',
+          description: 'Company ID (UUID)',
+        },
+        status: {
+          type: 'string',
+          enum: ['active', 'paused', 'completed', 'archived', 'all'],
+          description: 'Filter by status (default: all)',
+        },
+        goal_id: {
+          type: 'string',
+          description: 'Filter by goal ID (UUID)',
+        },
+      },
+      required: ['company_id'],
+    },
+  },
+  {
+    name: 'create_project',
+    description: 'Create a new project',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        company_id: {
+          type: 'string',
+          description: 'Company ID (UUID)',
+        },
+        title: {
+          type: 'string',
+          description: 'Project title (required)',
+        },
+        description: {
+          type: 'string',
+          description: 'Project description',
+        },
+        goal_id: {
+          type: 'string',
+          description: 'Goal ID (UUID, required)',
+        },
+        status: {
+          type: 'string',
+          enum: ['active', 'paused', 'completed', 'archived'],
+          description: 'Project status (default: active)',
+        },
+      },
+      required: ['company_id', 'title', 'goal_id'],
+    },
+  },
+  {
+    name: 'set_project_status',
+    description: 'Set project status (active, paused, completed, archived)',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        company_id: {
+          type: 'string',
+          description: 'Company ID (UUID)',
+        },
+        project_id: {
+          type: 'string',
+          description: 'Project ID (UUID)',
+        },
+        status: {
+          type: 'string',
+          enum: ['active', 'paused', 'completed', 'archived'],
+          description: 'New status',
+        },
+      },
+      required: ['company_id', 'project_id', 'status'],
+    },
+  },
+  {
+    name: 'list_approvals',
+    description: 'List pending and recent board approvals',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        company_id: {
+          type: 'string',
+          description: 'Company ID (UUID)',
+        },
+        status: {
+          type: 'string',
+          enum: ['pending', 'approved', 'rejected', 'all'],
+          description: 'Filter by status (default: pending)',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number of results (default: 50)',
+        },
+      },
+      required: ['company_id'],
+    },
+  },
+  {
+    name: 'decide_approval',
+    description: 'Decide a pending board approval (approve or reject). Reject restores blocked status; issues must be manually cancelled via set_issue_status if needed.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        company_id: {
+          type: 'string',
+          description: 'Company ID (UUID)',
+        },
+        approval_id: {
+          type: 'string',
+          description: 'Approval ID (UUID)',
+        },
+        decision: {
+          type: 'string',
+          enum: ['approved', 'rejected'],
+          description: 'Decision (approved or rejected)',
+        },
+        reason: {
+          type: 'string',
+          description: 'Decision reason/note',
+        },
+      },
+      required: ['company_id', 'approval_id', 'decision'],
+    },
+  },
+  {
+    name: 'wake_agent',
+    description: 'Trigger on-demand agent heartbeat. Returns in-flight error if a wake is already running.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        company_id: {
+          type: 'string',
+          description: 'Company ID (UUID)',
+        },
+        agent_id: {
+          type: 'string',
+          description: 'Agent ID (UUID)',
+        },
+      },
+      required: ['company_id', 'agent_id'],
     },
   },
 ];
@@ -594,6 +946,512 @@ async function handleLiveHeartbeat(tokenCompanyId: string, params: any) {
   };
 }
 
+async function handleListIssues(tokenCompanyId: string, params: any) {
+  const { company_id, status, assignee_agent_id, page = 0, page_size = 25 } = params;
+  if (!company_id) {
+    throw new Error('company_id is required');
+  }
+  validateCompanyAccess(tokenCompanyId, company_id);
+
+  const statuses = status ? [status] : ['backlog', 'todo', 'in_progress', 'in_review', 'blocked', 'done', 'cancelled'];
+  
+  const result = await listIssues({
+    statuses,
+    page,
+    pageSize: page_size,
+    companyIdOverride: company_id,
+  });
+
+  return {
+    issues: result.rows.map(r => ({
+      id: r.issue.id,
+      identifier: r.issue.identifier,
+      title: r.issue.title,
+      description: r.issue.description,
+      status: r.issue.status,
+      priority: r.issue.priority,
+      assigneeAgentId: r.issue.assigneeAgentId,
+      assigneeUserId: r.issue.assigneeUserId,
+      goalId: r.issue.goalId,
+      projectId: r.issue.projectId,
+      createdAt: r.issue.createdAt.toISOString(),
+      updatedAt: r.issue.updatedAt.toISOString(),
+    })),
+    total: result.total,
+    page: result.page,
+    pageSize: result.pageSize,
+  };
+}
+
+async function handleGetIssue(tokenCompanyId: string, params: any) {
+  const { company_id, issue_id } = params;
+  if (!company_id) {
+    throw new Error('company_id is required');
+  }
+  if (!issue_id) {
+    throw new Error('issue_id is required');
+  }
+  validateCompanyAccess(tokenCompanyId, company_id);
+
+  const detail = await getIssueDetail(issue_id);
+  if (!detail) {
+    throw new Error('Issue not found');
+  }
+  if (detail.issue.companyId !== company_id) {
+    throw new Error('Issue not found');
+  }
+
+  return {
+    id: detail.issue.id,
+    identifier: detail.issue.identifier,
+    title: detail.issue.title,
+    description: detail.issue.description,
+    status: detail.issue.status,
+    priority: detail.issue.priority,
+    assigneeAgentId: detail.issue.assigneeAgentId,
+    assigneeUserId: detail.issue.assigneeUserId,
+    goalId: detail.issue.goalId,
+    projectId: detail.issue.projectId,
+    assignee: detail.assignee,
+    goal: detail.goal,
+    project: detail.project,
+    createdAt: detail.issue.createdAt.toISOString(),
+    updatedAt: detail.issue.updatedAt.toISOString(),
+  };
+}
+
+async function handleCreateIssue(tokenCompanyId: string, params: any) {
+  const { company_id, title, description, assignee_agent_id, goal_id, project_id, priority } = params;
+  if (!company_id) {
+    throw new Error('company_id is required');
+  }
+  if (!title || !title.trim()) {
+    throw new Error('title is required');
+  }
+  validateCompanyAccess(tokenCompanyId, company_id);
+
+  const input: CreateIssueInput = {
+    title,
+    description,
+    assigneeAgentId: assignee_agent_id,
+    goalId: goal_id,
+    projectId: project_id,
+    priority,
+    companyId: company_id,
+    createdBy: { type: 'user', id: 'mcp', name: 'MCP' },
+  };
+
+  const created = await createIssue(input);
+  return {
+    id: created.id,
+    identifier: created.identifier,
+    title: created.title,
+    status: created.status,
+    priority: created.priority,
+  };
+}
+
+async function handleSetIssueStatus(tokenCompanyId: string, params: any) {
+  const { company_id, issue_id, status } = params;
+  if (!company_id) {
+    throw new Error('company_id is required');
+  }
+  if (!issue_id || !status) {
+    throw new Error('issue_id and status are required');
+  }
+  validateCompanyAccess(tokenCompanyId, company_id);
+
+  const issue = await db.query.issues.findFirst({
+    where: eq(issues.id, issue_id),
+  });
+
+  if (!issue) {
+    throw new Error('Issue not found');
+  }
+  if (issue.companyId !== company_id) {
+    throw new Error('Issue not found');
+  }
+
+  const updated = await updateIssue(issue_id, { status });
+  return {
+    id: updated.id,
+    identifier: updated.identifier,
+    status: updated.status,
+  };
+}
+
+async function handleAddIssueComment(tokenCompanyId: string, params: any) {
+  const { company_id, issue_id, body } = params;
+  if (!company_id) {
+    throw new Error('company_id is required');
+  }
+  if (!issue_id || !body) {
+    throw new Error('issue_id and body are required');
+  }
+  validateCompanyAccess(tokenCompanyId, company_id);
+
+  const issue = await db.query.issues.findFirst({
+    where: eq(issues.id, issue_id),
+  });
+
+  if (!issue) {
+    throw new Error('Issue not found');
+  }
+  if (issue.companyId !== company_id) {
+    throw new Error('Issue not found');
+  }
+
+  const comment = await addIssueComment(
+    issue_id,
+    company_id,
+    { type: 'user', id: 'mcp', name: 'MCP' },
+    body
+  );
+
+  return {
+    id: comment.id,
+    body: comment.body,
+    createdAt: comment.createdAt,
+  };
+}
+
+async function handleListGoals(tokenCompanyId: string, params: any) {
+  const { company_id, status = 'all' } = params;
+  if (!company_id) {
+    throw new Error('company_id is required');
+  }
+  validateCompanyAccess(tokenCompanyId, company_id);
+
+  const rows = await listGoalsForCompany(company_id, status);
+  return {
+    goals: rows.map(g => ({
+      id: g.id,
+      title: g.title,
+      description: g.description,
+      status: g.status,
+      createdAt: g.createdAt.toISOString(),
+      updatedAt: g.updatedAt.toISOString(),
+    })),
+  };
+}
+
+async function handleCreateGoal(tokenCompanyId: string, params: any) {
+  const { company_id, title, description, status } = params;
+  if (!company_id) {
+    throw new Error('company_id is required');
+  }
+  if (!title || !title.trim()) {
+    throw new Error('title is required');
+  }
+  validateCompanyAccess(tokenCompanyId, company_id);
+
+  const input: CreateGoalInput = {
+    title,
+    description,
+    status,
+    companyId: company_id,
+  };
+
+  const created = await createGoal(input);
+  return {
+    id: created.id,
+    title: created.title,
+    status: created.status,
+  };
+}
+
+async function handleSetGoalStatus(tokenCompanyId: string, params: any) {
+  const { company_id, goal_id, status } = params;
+  if (!company_id) {
+    throw new Error('company_id is required');
+  }
+  if (!goal_id || !status) {
+    throw new Error('goal_id and status are required');
+  }
+  validateCompanyAccess(tokenCompanyId, company_id);
+
+  const goal = await db.query.goals.findFirst({
+    where: eq(goals.id, goal_id),
+  });
+
+  if (!goal) {
+    throw new Error('Goal not found');
+  }
+  if (goal.companyId !== company_id) {
+    throw new Error('Goal not found');
+  }
+
+  const input: UpdateGoalInput = { status };
+  const updated = await updateGoal(goal_id, input, company_id);
+  return {
+    id: updated.id,
+    title: updated.title,
+    status: updated.status,
+  };
+}
+
+async function handleListProjects(tokenCompanyId: string, params: any) {
+  const { company_id, status = 'all', goal_id } = params;
+  if (!company_id) {
+    throw new Error('company_id is required');
+  }
+  validateCompanyAccess(tokenCompanyId, company_id);
+
+  const filters: any = {};
+  if (status && status !== 'all') {
+    filters.status = status;
+  }
+  if (goal_id) {
+    filters.goalId = goal_id;
+  }
+
+  const rows = await listProjectsForAgent(company_id, filters);
+  return {
+    projects: rows.map(p => ({
+      id: p.id,
+      title: p.title,
+      description: p.description,
+      status: p.status,
+      goalId: p.goalId,
+      goalTitle: p.goalTitle,
+    })),
+  };
+}
+
+async function handleCreateProject(tokenCompanyId: string, params: any) {
+  const { company_id, title, description, goal_id, status } = params;
+  if (!company_id) {
+    throw new Error('company_id is required');
+  }
+  if (!title || !title.trim()) {
+    throw new Error('title is required');
+  }
+  if (!goal_id) {
+    throw new Error('goal_id is required');
+  }
+  validateCompanyAccess(tokenCompanyId, company_id);
+
+  const input: CreateProjectInput = {
+    title,
+    description,
+    goalId: goal_id,
+    status,
+    companyId: company_id,
+  };
+
+  const created = await createProject(input);
+  return {
+    id: created.id,
+    title: created.title,
+    status: created.status,
+    goalId: created.goalId,
+  };
+}
+
+async function handleSetProjectStatus(tokenCompanyId: string, params: any) {
+  const { company_id, project_id, status } = params;
+  if (!company_id) {
+    throw new Error('company_id is required');
+  }
+  if (!project_id || !status) {
+    throw new Error('project_id and status are required');
+  }
+  validateCompanyAccess(tokenCompanyId, company_id);
+
+  const project = await db.query.projects.findFirst({
+    where: eq(projects.id, project_id),
+  });
+
+  if (!project) {
+    throw new Error('Project not found');
+  }
+  if (project.companyId !== company_id) {
+    throw new Error('Project not found');
+  }
+
+  const input: UpdateProjectInput = { status };
+  const updated = await updateProject(project_id, input);
+  return {
+    id: updated.id,
+    title: updated.title,
+    status: updated.status,
+  };
+}
+
+async function handleListApprovals(tokenCompanyId: string, params: any) {
+  const { company_id, status = 'pending', limit = 50 } = params;
+  if (!company_id) {
+    throw new Error('company_id is required');
+  }
+  validateCompanyAccess(tokenCompanyId, company_id);
+
+  const conditions = [eq(approvals.companyId, company_id)];
+  if (status && status !== 'all') {
+    conditions.push(eq(approvals.status, status));
+  }
+
+  const rows = await db
+    .select()
+    .from(approvals)
+    .where(and(...conditions))
+    .orderBy(desc(approvals.createdAt))
+    .limit(limit);
+
+  return {
+    approvals: rows.map(a => ({
+      id: a.id,
+      type: a.type,
+      status: a.status,
+      requestedByAgentId: a.requestedByAgentId,
+      decidedByUserId: a.decidedByUserId,
+      issueIds: a.issueIds,
+      payload: a.payload,
+      note: a.note,
+      decidedAt: a.decidedAt?.toISOString() ?? null,
+      createdAt: a.createdAt.toISOString(),
+    })),
+  };
+}
+
+async function handleDecideApproval(tokenCompanyId: string, params: any) {
+  const { company_id, approval_id, decision, reason } = params;
+  if (!company_id) {
+    throw new Error('company_id is required');
+  }
+  if (!approval_id || !decision) {
+    throw new Error('approval_id and decision are required');
+  }
+  if (!['approved', 'rejected'].includes(decision)) {
+    throw new Error('decision must be approved or rejected');
+  }
+  validateCompanyAccess(tokenCompanyId, company_id);
+
+  const approval = await db.query.approvals.findFirst({
+    where: eq(approvals.id, approval_id),
+  });
+
+  if (!approval) {
+    throw new Error('Approval not found');
+  }
+  if (approval.companyId !== company_id) {
+    throw new Error('Approval not found');
+  }
+  if (approval.status !== 'pending') {
+    throw new Error('Approval already decided');
+  }
+
+  const payload = (approval.payload ?? {}) as any;
+  const priorStatuses = payload.priorStatuses ?? {};
+  const issueIds = approval.issueIds ?? [];
+
+  const updated = await db.transaction(async (tx) => {
+    const [row] = await tx
+      .update(approvals)
+      .set({
+        status: decision,
+        note: reason,
+        decidedAt: new Date(),
+        decidedByUserId: 'mcp',
+        updatedAt: new Date(),
+      })
+      .where(eq(approvals.id, approval_id))
+      .returning();
+
+    if (issueIds.length > 0) {
+      const linked = await tx
+        .select({
+          id: issues.id,
+          status: issues.status,
+          boardApprovalId: issues.boardApprovalId,
+        })
+        .from(issues)
+        .where(and(eq(issues.companyId, company_id), inArray(issues.id, issueIds)));
+
+      const now = new Date();
+      for (const issue of linked) {
+        if (issue.boardApprovalId && issue.boardApprovalId !== approval_id) continue;
+
+        const restoreStatus =
+          decision === 'approved'
+            ? (priorStatuses[issue.id] ?? (issue.status === 'blocked' ? 'todo' : issue.status))
+            : 'blocked';
+
+        await tx
+          .update(issues)
+          .set({
+            status: restoreStatus,
+            boardApprovalId: null,
+            updatedAt: now,
+          })
+          .where(eq(issues.id, issue.id));
+      }
+    }
+
+    return row;
+  });
+
+  // Trigger approval wake
+  if (approval.requestedByAgentId) {
+    try {
+      await enqueueApprovalWake({
+        approvalId: approval_id,
+        agentId: approval.requestedByAgentId,
+        companyId: company_id,
+        status: decision,
+        note: reason,
+        linkedIssueIds: approval.issueIds,
+      });
+    } catch (err) {
+      console.error('[mcp decide_approval] failed to trigger approval wake:', err);
+    }
+  }
+
+  return {
+    id: updated.id,
+    status: updated.status,
+    decision,
+    decidedAt: updated.decidedAt?.toISOString() ?? null,
+  };
+}
+
+async function handleWakeAgent(tokenCompanyId: string, params: any) {
+  const { company_id, agent_id } = params;
+  if (!company_id) {
+    throw new Error('company_id is required');
+  }
+  if (!agent_id) {
+    throw new Error('agent_id is required');
+  }
+  validateCompanyAccess(tokenCompanyId, company_id);
+
+  const agent = await db.query.agents.findFirst({
+    where: eq(agents.id, agent_id),
+  });
+
+  if (!agent) {
+    throw new Error('Agent not found');
+  }
+  if (agent.companyId !== company_id) {
+    throw new Error('Agent not found');
+  }
+
+  try {
+    const result = await triggerAgentHeartbeat(agent_id, company_id);
+    return {
+      runId: result.runId,
+      jobId: result.jobId,
+      outcome: result.outcome,
+      skipReason: result.skipReason ?? null,
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Wake failed';
+    if (message.includes('a wake may already be in flight')) {
+      throw new Error('a wake may already be in flight');
+    }
+    throw err;
+  }
+}
+
 async function handleToolCall(tokenCompanyId: string, toolName: string, params: any) {
   switch (toolName) {
     case 'company_list':
@@ -614,6 +1472,34 @@ async function handleToolCall(tokenCompanyId: string, toolName: string, params: 
       return await handleListHeartbeatEvents(tokenCompanyId, params);
     case 'live_heartbeat':
       return await handleLiveHeartbeat(tokenCompanyId, params);
+    case 'list_issues':
+      return await handleListIssues(tokenCompanyId, params);
+    case 'get_issue':
+      return await handleGetIssue(tokenCompanyId, params);
+    case 'create_issue':
+      return await handleCreateIssue(tokenCompanyId, params);
+    case 'set_issue_status':
+      return await handleSetIssueStatus(tokenCompanyId, params);
+    case 'add_issue_comment':
+      return await handleAddIssueComment(tokenCompanyId, params);
+    case 'list_goals':
+      return await handleListGoals(tokenCompanyId, params);
+    case 'create_goal':
+      return await handleCreateGoal(tokenCompanyId, params);
+    case 'set_goal_status':
+      return await handleSetGoalStatus(tokenCompanyId, params);
+    case 'list_projects':
+      return await handleListProjects(tokenCompanyId, params);
+    case 'create_project':
+      return await handleCreateProject(tokenCompanyId, params);
+    case 'set_project_status':
+      return await handleSetProjectStatus(tokenCompanyId, params);
+    case 'list_approvals':
+      return await handleListApprovals(tokenCompanyId, params);
+    case 'decide_approval':
+      return await handleDecideApproval(tokenCompanyId, params);
+    case 'wake_agent':
+      return await handleWakeAgent(tokenCompanyId, params);
     default:
       throw new Error(`Unknown tool: ${toolName}`);
   }
