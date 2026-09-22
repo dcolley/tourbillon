@@ -14,17 +14,25 @@ import { auth } from '@/lib/auth';
 export async function GET(req: NextRequest) {
   try {
     // Create a Request object for better-auth session check
-    const authRequest = new Request(`${process.env.BETTER_AUTH_URL}/api/auth/session`, {
+    const authRequest = new Request(`${process.env.BETTER_AUTH_URL}/api/auth/get-session`, {
       method: 'GET',
       headers: req.headers,
     });
 
     // Get session from better-auth
     const authResponse = await auth.handler(authRequest);
-    const result = await authResponse.json();
+    
+    // Tolerate null body
+    let result;
+    try {
+      const text = await authResponse.text();
+      result = text ? JSON.parse(text) : null;
+    } catch {
+      result = null;
+    }
 
-    // Check if session is valid
-    if (authResponse.status === 200 && result.user && result.session) {
+    // Check if session is valid (HTTP 200 + user object)
+    if (authResponse.status === 200 && result?.user) {
       return NextResponse.json(
         {
           authenticated: true,
