@@ -338,6 +338,7 @@ async function updateProfile(
   try {
     updated = await updateAgentProfile(agentId, {
       name: formData.get('name') as string,
+      title: formData.get('title') as string,
       urlKey: formData.get('urlKey') as string,
       reportsToId: reportsToRaw || null,
     });
@@ -617,7 +618,7 @@ export default async function AgentDetailPage({
                 <section className="border rounded-lg p-4 space-y-4">
                   <div>
                     <h2 className="text-sm font-semibold">Profile</h2>
-                    <p className="text-xs text-muted-foreground mt-1">Name, URL slug, and reporting line.</p>
+                    <p className="text-xs text-muted-foreground mt-1">Name, title, URL slug, and reporting line.</p>
                   </div>
                   <ActionForm action={updateProfile} className="space-y-4">
                     <input type="hidden" name="agentId" value={agent.id} />
@@ -633,6 +634,19 @@ export default async function AgentDetailPage({
                           type="text"
                           required
                           defaultValue={agent.name}
+                          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <label htmlFor="agent-title" className="text-sm font-medium">
+                          Title
+                        </label>
+                        <input
+                          id="agent-title"
+                          name="title"
+                          type="text"
+                          required
+                          defaultValue={agent.title}
                           className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                         />
                       </div>
@@ -700,31 +714,28 @@ export default async function AgentDetailPage({
                       Changing role resets skills, toolsets, and assigned tools to that role&apos;s defaults.
                     </p>
                   </div>
-                  <div className="grid gap-4 sm:grid-cols-2">
-                    <ActionForm action={updateAgentRoleAction} className="space-y-4">
-                      <input type="hidden" name="agentId" value={agent.id} />
-                      <div className="space-y-1.5">
-                        <label htmlFor="agent-role" className="text-sm font-medium">
-                          Role
-                        </label>
-                        <select
-                          id="agent-role"
-                          name="role"
-                          required
-                          defaultValue={agent.role}
-                          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                        >
-                          {AGENT_ROLE_OPTIONS.map((role) => (
-                            <option key={role.value} value={role.value}>
-                              {role.label}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                      <ActionSubmitButton label="Save role" />
-                    </ActionForm>
-                    <DetailCard label="Title" value={agent.title} />
-                  </div>
+                  <ActionForm action={updateAgentRoleAction} className="space-y-4">
+                    <input type="hidden" name="agentId" value={agent.id} />
+                    <div className="space-y-1.5">
+                      <label htmlFor="agent-role" className="text-sm font-medium">
+                        Role
+                      </label>
+                      <select
+                        id="agent-role"
+                        name="role"
+                        required
+                        defaultValue={agent.role}
+                        className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                      >
+                        {AGENT_ROLE_OPTIONS.map((role) => (
+                          <option key={role.value} value={role.value}>
+                            {role.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <ActionSubmitButton label="Save role" />
+                  </ActionForm>
                 </section>
 
                 <section className="border rounded-lg p-4 space-y-4">
