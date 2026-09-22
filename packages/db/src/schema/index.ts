@@ -12,3 +12,4 @@ export * from './agent-observability-events';
 export * from './routines';
 export * from './skills';
 export * from './agent-mail';
+export * from './users';
