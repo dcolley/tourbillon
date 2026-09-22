@@ -140,6 +140,12 @@ export interface AgentRuntimeConfig {
     /** Override: Temperature for OM model calls. */
     temperature?: number;
   };
+  /**
+   * Per-agent secrets/environment variables (AC-B1.1).
+   * Injected into code-execution sandbox runtime as environment variables.
+   * Values are write-only after save (never redisplayed or logged).
+   */
+  secrets?: Record<string, string>;
 }
 
 /** Company Observational Memory compaction model (Observer + Reflector). */

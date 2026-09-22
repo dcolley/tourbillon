@@ -1033,3 +1033,107 @@ export async function updateAgentObservationalMemory(
 
   return updated;
 }
+
+/**
+ * AC-B1.3: Set or rotate agent secrets/environment variables.
+ * Values are write-only after save (never redisplayed).
+ * Changes take effect on next agent wake.
+ */
+export interface UpdateAgentSecretsInput {
+  /** Key-value pairs to set or update. */
+  secrets: Record<string, string>;
+  /** When true, replaces all secrets. When false, merges with existing. */
+  replace?: boolean;
+}
+
+export async function updateAgentSecrets(
+  agentId: string,
+  input: UpdateAgentSecretsInput,
+): Promise<Agent> {
+  const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+  if (!agent) throw new AgentValidationError('Agent not found.');
+
+  // Validate secrets format
+  for (const [key, value] of Object.entries(input.secrets)) {
+    if (typeof key !== 'string' || !key.trim()) {
+      throw new AgentValidationError('Secret keys must be non-empty strings.');
+    }
+    if (typeof value !== 'string') {
+      throw new AgentValidationError('Secret values must be strings.');
+    }
+    // Validate key format (standard env var naming)
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key.trim())) {
+      throw new AgentValidationError(
+        `Invalid secret key "${key}". Keys must start with a letter or underscore, and contain only letters, numbers, and underscores.`
+      );
+    }
+  }
+
+  const current = agent.runtimeConfig as AgentRuntimeConfig;
+  const existingSecrets = current.secrets ?? {};
+  
+  const secrets = input.replace
+    ? input.secrets
+    : { ...existingSecrets, ...input.secrets };
+
+  // Normalize secrets: trim keys, remove empty values
+  const normalizedSecrets: Record<string, string> = {};
+  for (const [key, value] of Object.entries(secrets)) {
+    const trimmedKey = key.trim();
+    const trimmedValue = value.trim();
+    if (trimmedKey && trimmedValue) {
+      normalizedSecrets[trimmedKey] = trimmedValue;
+    }
+  }
+
+  const runtimeConfig: AgentRuntimeConfig = {
+    ...current,
+    secrets: Object.keys(normalizedSecrets).length > 0 ? normalizedSecrets : undefined,
+  };
+
+  const [updated] = await db
+    .update(agents)
+    .set({
+      runtimeConfig,
+      updatedAt: new Date(),
+    })
+    .where(eq(agents.id, agentId))
+    .returning();
+
+  return updated;
+}
+
+/**
+ * AC-B1.3: Delete specific secret keys from an agent.
+ */
+export async function deleteAgentSecrets(
+  agentId: string,
+  keys: string[],
+): Promise<Agent> {
+  const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+  if (!agent) throw new AgentValidationError('Agent not found.');
+
+  const current = agent.runtimeConfig as AgentRuntimeConfig;
+  const existingSecrets = current.secrets ?? {};
+  
+  const secrets = { ...existingSecrets };
+  for (const key of keys) {
+    delete secrets[key.trim()];
+  }
+
+  const runtimeConfig: AgentRuntimeConfig = {
+    ...current,
+    secrets: Object.keys(secrets).length > 0 ? secrets : undefined,
+  };
+
+  const [updated] = await db
+    .update(agents)
+    .set({
+      runtimeConfig,
+      updatedAt: new Date(),
+    })
+    .where(eq(agents.id, agentId))
+    .returning();
+
+  return updated;
+}
