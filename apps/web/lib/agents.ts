@@ -712,6 +712,7 @@ export async function updateAgentInstructions(
 
 export interface UpdateAgentProfileInput {
   name: string;
+  title: string;
   urlKey: string;
   reportsToId?: string | null;
 }
@@ -725,6 +726,9 @@ export async function updateAgentProfile(
 
   const name = input.name?.trim();
   if (!name) throw new AgentValidationError('Name is required.');
+
+  const title = input.title?.trim();
+  if (!title) throw new AgentValidationError('Title is required.');
 
   const urlKey = slugifyUrlKey(input.urlKey?.trim() || '');
   if (!urlKey) throw new AgentValidationError('Agent ID is required.');
@@ -769,7 +773,7 @@ export async function updateAgentProfile(
 
   const [updated] = await db
     .update(agents)
-    .set({ name, urlKey, reportsToId, updatedAt: new Date() })
+    .set({ name, title, urlKey, reportsToId, updatedAt: new Date() })
     .where(eq(agents.id, agentId))
     .returning();
 
