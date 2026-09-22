@@ -24,9 +24,10 @@ Ops-verified facts on TEST main:
 1. **Auth endpoints missing**: `POST /api/auth/login` and `GET /api/auth/session` return **404**
    - These endpoints exist in workspace copies elsewhere but are not deployed to TEST main
 2. **No persistent user storage**: Postgres has no users/auth tables; old `/tmp/tourbillon_users.json` absent
-3. **Network access ready**: PR #43 merged; TestSuper configured with `allowNetwork` + bwrap + host network
-   - Host reaches `metaspan` and `127.0.0.1:3002`
-   - Prefer `localhost` or `127.0.0.1:3002` for smoke tests
+3. **Network capability available, not yet enabled**: PR #43 merged allowNetwork capability + TestSuper setup documentation
+   - Agent sandbox defaults to deny (LocalSandbox); Ops has **not** hired TestSuper or flipped allowNetwork yet
+   - Hire and allowNetwork flip deferred until US-A1–A5 ready + PM/Test approval (US-A6)
+   - Host already reaches `metaspan` and `127.0.0.1:3002`; prefer `localhost` for smoke tests
 4. **Security constraints in place**: Credentials MUST NOT appear in agent SOUL, instructions, issue bodies, chat, or git
 
 ### Desired Ops Sequence (Post-Product-Ship)
@@ -36,7 +37,7 @@ Derek's requested workflow after product implementation:
 1. Ship `/api/auth/login` + `/api/auth/session` to TEST
 2. Create a throwaway TEST user account
 3. Store email/password in a mode-600 host file on tourbillon-test (e.g., `~/tourbillon/.env.test-auth`) for TestSuper to source
-4. Enable TestSuper `allowNetwork` (already done via PR #43)
+4. Hire TestSuper and enable `allowNetwork` (after US-A6 gate approval)
 5. Run `projects/auth-smoke-tests.sh` with `TEST_API_BASE=http://127.0.0.1:3002`
 
 ---
