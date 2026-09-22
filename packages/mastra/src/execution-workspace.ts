@@ -8,6 +8,7 @@ import {
   ensureExecutionWorkspace,
   resolveSandboxIsolation,
   resolveSandboxTimeoutMs,
+  resolveSandboxAllowNetwork,
   type AgentRuntimeConfig,
 } from '@tourbillon/shared';
 import { mkdirSync } from 'node:fs';
@@ -34,10 +35,14 @@ export function buildCodeExecutionWorkspace(): Workspace {
       const taskId = requestContext.get('taskId') as string | undefined;
       const runtimeConfig = readCodeExecutionConfig(requestContext);
       const cwd = await ensureExecutionWorkspace(companyId, taskId);
+      const isolation = resolveSandboxIsolation(runtimeConfig) as IsolationBackend;
+      const allowNetwork = resolveSandboxAllowNetwork(runtimeConfig);
+      
       return new LocalSandbox({
         workingDirectory: cwd,
-        isolation: resolveSandboxIsolation(runtimeConfig) as IsolationBackend,
+        isolation,
         timeout: resolveSandboxTimeoutMs(runtimeConfig),
+        nativeSandbox: isolation !== 'none' ? { allowNetwork } : undefined,
       });
     },
     sandboxCacheKey: ({ requestContext }) => {
@@ -46,8 +51,9 @@ export function buildCodeExecutionWorkspace(): Workspace {
       const runtimeConfig = readCodeExecutionConfig(requestContext);
       const isolation = resolveSandboxIsolation(runtimeConfig);
       const timeoutMs = resolveSandboxTimeoutMs(runtimeConfig);
+      const allowNetwork = resolveSandboxAllowNetwork(runtimeConfig);
       return companyId
-        ? `${companyId}:${taskId ?? 'idle'}:${isolation}:${timeoutMs}`
+        ? `${companyId}:${taskId ?? 'idle'}:${isolation}:${timeoutMs}:${allowNetwork}`
         : undefined;
     },
   });

@@ -60,6 +60,10 @@ export function resolveSandboxTimeoutMs(runtimeConfig?: AgentRuntimeConfig | nul
   return getDefaultSandboxTimeoutMs();
 }
 
+export function resolveSandboxAllowNetwork(runtimeConfig?: AgentRuntimeConfig | null): boolean {
+  return runtimeConfig?.codeExecution?.allowNetwork ?? false;
+}
+
 export interface CodeExecutionAvailability {
   available: boolean;
   reason?: string;

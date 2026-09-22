@@ -599,6 +599,7 @@ export async function updateAgentCodeExecution(
     codeExecutionEnabled: boolean;
     timeoutMs?: number | null;
     isolation?: string | null;
+    allowNetwork?: boolean | null;
     clearCodeExecutionOverrides?: boolean;
   },
 ): Promise<Agent> {
@@ -648,8 +649,13 @@ export async function updateAgentCodeExecution(
     } else if (input.isolation && VALID_SANDBOX_ISOLATION.has(input.isolation as SandboxIsolation)) {
       codeExecution.isolation = input.isolation as SandboxIsolation;
     }
+    if (input.allowNetwork === null) {
+      delete codeExecution.allowNetwork;
+    } else if (typeof input.allowNetwork === 'boolean') {
+      codeExecution.allowNetwork = input.allowNetwork;
+    }
     runtimeConfig.codeExecution =
-      codeExecution.timeoutMs !== undefined || codeExecution.isolation !== undefined
+      codeExecution.timeoutMs !== undefined || codeExecution.isolation !== undefined || codeExecution.allowNetwork !== undefined
         ? codeExecution
         : undefined;
   }

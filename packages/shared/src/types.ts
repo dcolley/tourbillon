@@ -103,6 +103,7 @@ export interface AgentRuntimeConfig {
   codeExecution?: {
     timeoutMs?: number;
     isolation?: 'none' | 'seatbelt' | 'bwrap';
+    allowNetwork?: boolean;
   };
   /**
    * Knowledge-graph memory mounts (when `knowledge-graph` toolset is enabled).
