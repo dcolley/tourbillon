@@ -33,6 +33,7 @@ import { AgentQueryToast } from './agent-query-toast';
 import { AgentRoutineToggle } from './agent-routine-toggle';
 import { AgentCloneForm } from './agent-clone-form';
 import { AgentOmSettingsForm } from './agent-om-settings-form';
+import { AgentSecretsForm } from './agent-secrets-form';
 import { ChatPageContext } from '@/components/chat/chat-page-context';
 
 async function updateHeartbeatConfig(
@@ -525,6 +526,7 @@ export default async function AgentDetailPage({
   ]);
 
   const runtime = agent.runtimeConfig as AgentRuntimeConfig;
+  const existingSecretKeys = Object.keys(runtime.secrets ?? {});
   const budgetEnforced = isAgentBudgetEnforced(runtime);
   const budgetUsedPct = agent.budgetMonthlyTokens
     ? Math.round((agent.spentMonthlyTokens / agent.budgetMonthlyTokens) * 100)
@@ -925,6 +927,17 @@ export default async function AgentDetailPage({
                     </p>
                     <ActionSubmitButton label="Save DM settings" />
                   </ActionForm>
+                </section>
+              </>
+            }
+            secrets={
+              <>
+                <section className="border rounded-lg p-4 space-y-4">
+                  <AgentSecretsForm
+                    agentId={agent.id}
+                    urlKey={agent.urlKey}
+                    existingKeys={existingSecretKeys}
+                  />
                 </section>
               </>
             }

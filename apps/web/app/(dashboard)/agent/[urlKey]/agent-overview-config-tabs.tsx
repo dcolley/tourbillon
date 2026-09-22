@@ -4,7 +4,7 @@ import { useSearchParams, useRouter } from 'next/navigation';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import type { ReactNode } from 'react';
 
-type ConfigTab = 'profile' | 'model' | 'runtime' | 'heartbeats' | 'capabilities' | 'budget' | 'routines' | 'danger' | 'om';
+type ConfigTab = 'profile' | 'model' | 'runtime' | 'heartbeats' | 'capabilities' | 'secrets' | 'budget' | 'routines' | 'danger' | 'om';
 
 export function AgentOverviewConfigTabs({
   profile,
@@ -12,6 +12,7 @@ export function AgentOverviewConfigTabs({
   runtime,
   heartbeats,
   capabilities,
+  secrets,
   budget,
   routines,
   danger,
@@ -24,6 +25,7 @@ export function AgentOverviewConfigTabs({
   runtime: ReactNode;
   heartbeats: ReactNode;
   capabilities: ReactNode;
+  secrets: ReactNode;
   budget: ReactNode;
   routines: ReactNode | null;
   danger: ReactNode;
@@ -52,6 +54,7 @@ export function AgentOverviewConfigTabs({
           <TabsTrigger value="runtime">Runtime</TabsTrigger>
           <TabsTrigger value="heartbeats">Heartbeats</TabsTrigger>
           <TabsTrigger value="capabilities">Capabilities</TabsTrigger>
+          <TabsTrigger value="secrets">Secrets</TabsTrigger>
           <TabsTrigger value="budget">Budget</TabsTrigger>
           <TabsTrigger value="om">Observational Memory</TabsTrigger>
           {routines && <TabsTrigger value="routines">Routines</TabsTrigger>}
@@ -72,6 +75,9 @@ export function AgentOverviewConfigTabs({
         </TabsContent>
         <TabsContent value="capabilities" className="mt-6 space-y-6">
           {capabilities}
+        </TabsContent>
+        <TabsContent value="secrets" className="mt-6 space-y-6">
+          {secrets}
         </TabsContent>
         <TabsContent value="budget" className="mt-6 space-y-6">
           {budget}

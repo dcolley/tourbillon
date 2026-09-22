@@ -1,6 +1,6 @@
 #!/bin/bash
 ##
-## Auth Smoke Test Script — US-A5
+## Auth Smoke Test Script — US-A5 + US-B1
 ##
 ## Validates Tourbillon auth endpoints:
 ##   1. Login with valid credentials succeeds
@@ -16,8 +16,17 @@
 ##   TEST_PASSWORD      - Test user password (required)
 ##   TEST_API_BASE      - API base URL (default: http://127.0.0.1:3002)
 ##
-## Credentials source:
-##   Sources ~/tourbillon/.env.test-auth if present, otherwise requires env vars.
+## Credentials source (AC-B1.4 — prefer agent secrets, fallback to host file):
+##   1. Agent secrets (primary) — if TestSuper agent has secrets configured,
+##      they are injected as environment variables into code execution sandbox.
+##      No sourcing needed; TEST_EMAIL and TEST_PASSWORD are already set.
+##   2. Host file fallback — if agent secrets are not configured, sources
+##      ~/tourbillon/.env.test-auth (mode 600). This is backward-compatible
+##      with pre-B1 deployments.
+##
+## Example agent secrets fallback pattern (optional, for explicit sourcing):
+##   TEST_EMAIL="${TEST_EMAIL:-$(grep TEST_EMAIL ~/.env.test-auth | cut -d= -f2)}"
+##   TEST_PASSWORD="${TEST_PASSWORD:-$(grep TEST_PASSWORD ~/.env.test-auth | cut -d= -f2)}"
 ##
 ## Exit codes:
 ##   0 - All checks passed
@@ -26,10 +35,13 @@
 
 set -euo pipefail
 
-# Source credentials from host file if it exists
+# AC-B1.4: Prefer agent secrets (already in env), fallback to host file
+# If running inside agent code execution sandbox with secrets configured,
+# TEST_EMAIL and TEST_PASSWORD are already set. This fallback only activates
+# when secrets are not configured (backward compatibility).
 CREDS_FILE="${HOME}/tourbillon/.env.test-auth"
-if [[ -f "${CREDS_FILE}" ]]; then
-  echo "Loading credentials from ${CREDS_FILE}..."
+if [[ -z "${TEST_EMAIL:-}" || -z "${TEST_PASSWORD:-}" ]] && [[ -f "${CREDS_FILE}" ]]; then
+  echo "Loading credentials from ${CREDS_FILE} (agent secrets not configured)..."
   set -a
   # shellcheck disable=SC1090
   source "${CREDS_FILE}"
