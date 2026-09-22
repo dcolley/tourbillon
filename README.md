@@ -85,6 +85,7 @@ packages/
     plan-to-tasks/
     create-agent/
     para-memory/
+    tourbillon-operator/  # operator guide for running Tourbillon companies
 ```
 
 ## Architecture
