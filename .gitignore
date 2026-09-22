@@ -13,6 +13,7 @@ build/
 .env
 .env.local
 .env.production
+.env.test-auth
 
 # Local MCP server declarations (see mcp.json.example)
 mcp.json

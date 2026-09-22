@@ -54,7 +54,7 @@ tsx scripts/seed-test-user.ts
 - Use a **fake, non-deliverable email domain** (e.g., `@example.com`, `@test.local`)
 - Generate a **random password** — never use a production password
 - Store the generated password securely (see Step 3)
-- This script is **idempotent** — running it again updates the password
+- This script is **idempotent** — running it again will skip creation if the user already exists (password is NOT updated)
 
 **Manual alternative (SQL):**
 

@@ -50,22 +50,30 @@ export async function POST(req: NextRequest) {
     // Parse the response
     const result = await authResponse.json();
 
-    // Check if authentication succeeded
-    if (authResponse.status === 200 && result.user && result.session) {
+    // Check if authentication succeeded (HTTP 200 + user object)
+    if (authResponse.status === 200 && result.user) {
       // Create response with session cookie
       const response = NextResponse.json(
         {
           success: true,
-          sessionId: result.session.id,
+          sessionId: result.session?.id || result.token,
           userId: result.user.id,
         },
         { status: 200 }
       );
 
-      // Copy session cookies from auth response to our response
-      const cookies = authResponse.headers.get('set-cookie');
-      if (cookies) {
-        response.headers.set('set-cookie', cookies);
+      // Forward all auth cookies from the upstream response
+      const setCookieHeaders = authResponse.headers.getSetCookie?.() || [];
+      if (setCookieHeaders.length > 0) {
+        setCookieHeaders.forEach(cookie => {
+          response.headers.append('set-cookie', cookie);
+        });
+      } else {
+        // Fallback for environments without getSetCookie
+        const cookies = authResponse.headers.get('set-cookie');
+        if (cookies) {
+          response.headers.set('set-cookie', cookies);
+        }
       }
 
       return response;

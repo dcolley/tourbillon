@@ -17,14 +17,6 @@ import { user, account } from '@tourbillon/db';
 import { eq, and } from 'drizzle-orm';
 import crypto from 'crypto';
 
-async function hashPassword(password: string): Promise<string> {
-  // Use Node's built-in crypto for bcrypt-style password hashing
-  // This is a simplified version - better-auth uses proper bcrypt
-  const salt = crypto.randomBytes(16).toString('hex');
-  const hash = crypto.pbkdf2Sync(password, salt, 10000, 64, 'sha512').toString('hex');
-  return `${salt}:${hash}`;
-}
-
 function generateId(): string {
   return crypto.randomUUID();
 }
