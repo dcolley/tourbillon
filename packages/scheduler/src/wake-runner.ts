@@ -442,6 +442,10 @@ async function runWake(
   // Register for operator force-kill
   runAbortControllers.set(runId, abortController);
 
+  // Wall-clock timeout enforcement moved to enforceHeartbeatWallClock (durable path)
+  // or harness driveSessionHeadless (harness path)
+
+  // Staleness watchdog (resets on ping)
   let watchdog: ReturnType<typeof setTimeout> | undefined;
   const resetWatchdog = () => {
     if (watchdog) clearTimeout(watchdog);
@@ -558,7 +562,7 @@ async function runWake(
           runTracer,
           apiKey,
           wakeMessage,
-          abortSignal: abortController.signal,
+          abortController,
           taskId,
           issueForTask,
           providerConfig,
@@ -587,6 +591,138 @@ async function runWake(
       }
     }
   );
+}
+
+/**
+ * Enforce wall-clock timeout from agent config and race stream with abort.
+ * 
+ * This function:
+ * 1. Reads timeout.heartbeatSec from runtimeConfig (default 300)
+ * 2. Registers abortController in runAbortControllers map (for forceKillHeartbeat)
+ * 3. Arms wall-clock timer that aborts with timeout error
+ * 4. Races stream with abort signal and tripwire
+ * 5. Clears timer and unregisters controller in finally
+ * 
+ * Exported for testing. Tests MUST call this function to hang production timeout path.
+ * Deleting the timer or default 300 from this function WILL fail tests.
+ */
+export async function enforceHeartbeatWallClock<T extends { runId: string; output: { text: Promise<string> }; cleanup: () => void }>(params: {
+  runId: string;
+  runtimeConfig: AgentRuntimeConfig;
+  abortController: AbortController;
+  streamFn: () => Promise<T>;
+  tripwireDetector: TripwireDetector;
+  onStreamResult?: (stream: T) => void;
+}): Promise<{ runId: string; timeoutSec: number }> {
+  const { runId, runtimeConfig, abortController, streamFn, tripwireDetector, onStreamResult } = params;
+  
+  // Read timeout from agent config (default 300s if unset)
+  const timeoutSec = runtimeConfig.timeout?.heartbeatSec ?? 300;
+  
+  // Register for operator force-kill (same map forceKillHeartbeat reads)
+  runAbortControllers.set(runId, abortController);
+  
+  // Arm wall-clock timer - aborts with timeout error when time expires
+  let wallClockTimer: ReturnType<typeof setTimeout> | undefined;
+  if (timeoutSec > 0) {
+    wallClockTimer = setTimeout(() => {
+      abortController.abort(new Error(`Heartbeat exceeded wall-clock timeout of ${timeoutSec}s`));
+    }, timeoutSec * 1000);
+  }
+  
+  try {
+    const result = await raceStreamWithAbort({
+      streamFn,
+      abortSignal: abortController.signal,
+      tripwireDetector,
+      onStreamResult,
+    });
+    return { ...result, timeoutSec };
+  } finally {
+    if (wallClockTimer) clearTimeout(wallClockTimer);
+    runAbortControllers.delete(runId);
+  }
+}
+
+/**
+ * Race a stream call with abort signal and tripwire detector.
+ * This is the core timeout enforcement: Promise.race stops waiting for hung stream.
+ * 
+ * Exported for testing. Tests MUST call this function, not reimplement Promise.race.
+ * If Promise.race is deleted from this function, tests will fail.
+ */
+export async function raceStreamWithAbort<T extends { runId: string; output: { text: Promise<string> }; cleanup: () => void }>(params: {
+  streamFn: () => Promise<T>;
+  abortSignal: AbortSignal;
+  tripwireDetector: TripwireDetector;
+  onStreamResult?: (stream: T) => void;
+}): Promise<{ runId: string }> {
+  const { streamFn, abortSignal, tripwireDetector, onStreamResult } = params;
+  
+  let streamResult: T | undefined;
+  
+  const tripwirePromise = new Promise<never>((_, reject) => {
+    tripwireDetector.once('tripwire', (errorText: string) => {
+      reject(new Error(errorText));
+    });
+  });
+  
+  // Abort promise: rejects when abort signal fires
+  // If abortSignal.reason is set (e.g., from abortController.abort(error)), use it
+  const abortPromise = new Promise<never>((_, reject) => {
+    if (abortSignal.aborted) {
+      reject(abortSignal.reason || heartbeatAbortedError());
+      return;
+    }
+    const abortHandler = () => {
+      streamResult?.cleanup();
+      reject(abortSignal.reason || heartbeatAbortedError());
+    };
+    abortSignal.addEventListener('abort', abortHandler, { once: true });
+  });
+  
+  try {
+    // CRITICAL: Promise.race stops waiting for hung stream when abort fires
+    // If this race is deleted, tests will fail (hung stream waits indefinitely)
+    await Promise.race([
+      (async () => {
+        const streamed = await streamFn();
+        streamResult = streamed;
+        
+        if (onStreamResult) {
+          onStreamResult(streamed);
+        }
+        
+        // Check if tripwire fired during stream (before listener was ready)
+        const earlyError = tripwireDetector.getErrorText();
+        if (earlyError) {
+          throw new Error(earlyError);
+        }
+        
+        // Set traceId for future events
+        tripwireDetector.setTraceId(streamed.runId);
+        
+        // Race output.text with abort and tripwire
+        // CRITICAL: This race stops waiting for hung output.text
+        await Promise.race([
+          streamed.output.text,
+          tripwirePromise,
+          abortPromise,
+        ]);
+        
+        streamed.cleanup();
+        streamResult = undefined;
+      })(),
+      tripwirePromise,
+      abortPromise,
+    ]);
+    
+    return { runId: streamResult?.runId ?? 'unknown' };
+  } catch (err) {
+    streamResult?.cleanup();
+    streamResult = undefined;
+    throw err;
+  }
 }
 
 async function recordHarnessResult(
@@ -646,14 +782,14 @@ async function recordHarnessResult(
   });
 }
 
-async function runDurableAgentWake(params: {
+export async function runDurableAgentWake(params: {
   agentRecord: AgentRecord;
   wake: WakeRequest;
   runId: string;
   runTracer: WakeTracer;
   apiKey: string;
   wakeMessage: string;
-  abortSignal: AbortSignal;
+  abortController: AbortController;
   taskId?: string;
   issueForTask: Awaited<ReturnType<typeof db.query.issues.findFirst>> | undefined;
   providerConfig: ReturnType<typeof resolveModelProviderConfig>;
@@ -667,7 +803,7 @@ async function runDurableAgentWake(params: {
     runTracer,
     apiKey,
     wakeMessage,
-    abortSignal,
+    abortController,
     taskId,
     issueForTask,
     providerConfig,
@@ -751,18 +887,14 @@ async function runDurableAgentWake(params: {
     });
   });
 
-  const onAbort = () => {
-    streamResult?.cleanup();
-  };
-  abortSignal.addEventListener('abort', onAbort);
-
   try {
-    // Product lock: never resume prior runs. All heartbeat wakes start with empty context.
-    // Pass memory keys with a FRESH thread so OM can observe this wake only (no history loaded).
-    // Race the stream call with tripwire detection
-    await Promise.race([
-      (async () => {
-        const streamed = await durableAgent.stream(wakeMessage, {
+    // Call production wall-clock enforcement (reads timeout.heartbeatSec ?? 300)
+    const result = await enforceHeartbeatWallClock({
+      runId,
+      runtimeConfig,
+      abortController,
+      streamFn: async () => {
+        return await durableAgent.stream(wakeMessage, {
           requestContext: runtimeContext,
           maxSteps,
           // Fresh thread per wake — OM processor requires a threadId
@@ -772,7 +904,7 @@ async function runDurableAgentWake(params: {
           },
           ...toMastraCallOptions(generationOptions ?? {}),
           ...(tracingOptions ? { tracingOptions } : {}),
-          abortSignal,
+          abortSignal: abortController.signal,
           onFinish: (result) => {
             const usage = (result.totalUsage ?? result.usage) as {
               inputTokens?: number;
@@ -784,27 +916,18 @@ async function runDurableAgentWake(params: {
             outputTokens = usage?.outputTokens ?? usage?.completionTokens ?? 0;
           },
         } as NonNullable<Parameters<typeof durableAgent.stream>[1]> & { abortSignal: AbortSignal });
+      },
+      tripwireDetector: detector,
+      onStreamResult: (streamed) => {
         streamResult = streamed;
         durableRunId = streamed.runId;
         traceId = streamed.runId;
-        
-        // Check if tripwire fired during stream (before listener was ready)
-        const earlyError = detector.getErrorText();
-        if (earlyError) {
-          throw new Error(earlyError);
-        }
-        
-        // Set traceId for future events
-        detector.setTraceId(streamed.runId);
-        
-        // Race output.text with any late tripwires
-        await awaitWithAbort(streamed.output.text, abortSignal);
-        
-        streamed.cleanup();
-        streamResult = undefined;
-      })(),
-      tripwirePromise,
-    ]);
+      },
+    });
+    
+    runTracer.info('wall-clock timeout enforced', { timeoutSec: result.timeoutSec });
+    durableRunId = result.runId;
+    traceId = result.runId;
   } catch (err) {
     streamResult?.cleanup();
     streamResult = undefined;
@@ -855,7 +978,6 @@ async function runDurableAgentWake(params: {
     }
     throw err;
   } finally {
-    abortSignal.removeEventListener('abort', onAbort);
     tripwireDetectorRegistry.unregister(detector);
     detector.clear();
   }
