@@ -61,8 +61,8 @@ export async function GET(req: NextRequest) {
 
       const sessionData = sessionRecord[0];
 
-      // Check if session is expired
-      if (sessionData.sessionExpiresAt && new Date(sessionData.sessionExpiresAt) <= new Date()) {
+      // Fail closed: reject sessions without expiration or past expiration
+      if (!sessionData.sessionExpiresAt || new Date(sessionData.sessionExpiresAt) <= new Date()) {
         return NextResponse.json(
           { 
             authenticated: false,

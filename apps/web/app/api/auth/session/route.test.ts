@@ -1,8 +1,7 @@
 import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { GET } from './route';
 
-// Mock dependencies
+// Mock dependencies BEFORE importing the route
 const mockDb = {
   select: mock.fn(() => mockDb),
   from: mock.fn(() => mockDb),
@@ -30,8 +29,20 @@ mock.module('@/lib/auth', {
 });
 
 describe('GET /api/auth/session', () => {
-  beforeEach(() => {
-    mock.restoreAll();
+  let GET: any;
+
+  beforeEach(async () => {
+    // Dynamically import after mocks are set up
+    const routeModule = await import('./route');
+    GET = routeModule.GET;
+    
+    // Reset mock call counts but not the mock functions themselves
+    mockDb.select.mock.resetCalls();
+    mockDb.from.mock.resetCalls();
+    mockDb.innerJoin.mock.resetCalls();
+    mockDb.where.mock.resetCalls();
+    mockDb.limit.mock.resetCalls();
+    mockAuth.handler.mock.resetCalls();
   });
 
   it('returns 401 when no authorization header and no cookie', async () => {
@@ -205,5 +216,97 @@ describe('GET /api/auth/session', () => {
 
     assert.strictEqual(response.status, 200);
     assert.strictEqual(body.authenticated, true);
+  });
+
+  it('returns 401 when session expiresAt is null', async () => {
+    mockDb.limit = mock.fn(() =>
+      Promise.resolve([
+        {
+          sessionId: 'session-null',
+          sessionToken: 'token-null',
+          sessionExpiresAt: null,
+          userId: 'user-null',
+          userEmail: 'null@example.com',
+          userName: 'Null User',
+        },
+      ])
+    );
+
+    const req = new Request('http://localhost:3002/api/auth/session', {
+      method: 'GET',
+      headers: {
+        Authorization: 'Bearer token-null',
+      },
+    });
+
+    const response = await GET(req as any);
+    const body = await response.json();
+
+    assert.strictEqual(response.status, 401);
+    assert.strictEqual(body.authenticated, false);
+    assert.strictEqual(body.error, 'No active session');
+  });
+
+  it('returns 401 when session expiresAt is undefined', async () => {
+    mockDb.limit = mock.fn(() =>
+      Promise.resolve([
+        {
+          sessionId: 'session-undef',
+          sessionToken: 'token-undef',
+          sessionExpiresAt: undefined,
+          userId: 'user-undef',
+          userEmail: 'undef@example.com',
+          userName: 'Undef User',
+        },
+      ])
+    );
+
+    const req = new Request('http://localhost:3002/api/auth/session', {
+      method: 'GET',
+      headers: {
+        Authorization: 'Bearer token-undef',
+      },
+    });
+
+    const response = await GET(req as any);
+    const body = await response.json();
+
+    assert.strictEqual(response.status, 401);
+    assert.strictEqual(body.authenticated, false);
+    assert.strictEqual(body.error, 'No active session');
+  });
+
+  it('returns 200 with user data from cookie-based auth when no Bearer token', async () => {
+    // No Bearer header, so should fall back to better-auth cookie handler
+    mockAuth.handler = mock.fn(async () => 
+      new Response(
+        JSON.stringify({
+          user: {
+            id: 'cookie-user-123',
+            email: 'cookie@example.com',
+            name: 'Cookie User',
+          },
+        }),
+        { status: 200 }
+      )
+    );
+
+    const req = new Request('http://localhost:3002/api/auth/session', {
+      method: 'GET',
+      headers: {
+        Cookie: 'better-auth.session_token=some-cookie-value',
+      },
+    });
+
+    const response = await GET(req as any);
+    const body = await response.json();
+
+    assert.strictEqual(response.status, 200);
+    assert.strictEqual(body.authenticated, true);
+    assert.deepStrictEqual(body.user, {
+      id: 'cookie-user-123',
+      email: 'cookie@example.com',
+      name: 'Cookie User',
+    });
   });
 });
