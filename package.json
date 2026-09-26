@@ -10,6 +10,7 @@
     "db:migrate": "pnpm --filter @tourbillon/db migrate",
     "db:studio": "pnpm --filter @tourbillon/db studio",
     "db:strip": "bash scripts/dev-db-strip.sh",
+    "db:migrate-mcp": "pnpm --filter @tourbillon/db migrate-mcp",
     "workers:dev": "pnpm --filter @tourbillon/scheduler dev",
     "type-check": "pnpm -r type-check",
     "lint": "pnpm -r lint",

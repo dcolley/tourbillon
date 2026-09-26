@@ -9,7 +9,8 @@
     "migrate": "drizzle-kit migrate",
     "studio": "drizzle-kit studio",
     "push": "drizzle-kit push",
-    "test": "tsx --test src/**/*.test.ts"
+    "test": "tsx --test src/**/*.test.ts",
+    "migrate-mcp": "tsx scripts/migrate-mcp-to-vault.ts"
   },
   "dependencies": {
     "drizzle-orm": "catalog:",
