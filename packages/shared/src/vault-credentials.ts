@@ -15,7 +15,7 @@ export interface VaultCredentialContext {
   companySettings?: CompanySettings | null;
 }
 
-export async function resolvePluginCredential(
+export async function resolveVaultSecret(
   ctx: VaultCredentialContext
 ): Promise<string | OAuthTokens | null> {
   const conditions = [
@@ -146,11 +146,16 @@ export async function resolvePluginCredential(
     }
   }
 
-  return resolveMcpCredential({
+  // US-V5 Option A: Transition window dual-read fallback
+  // TODO: Remove after migration complete + verified (when settings.mcpCredentials cleared)
+  // This fallback is temporary to ensure zero downtime during vault rollout
+  const legacyCredential = resolveMcpCredential({
     serverId: ctx.serverId,
     agentRuntime: ctx.agentRuntime,
     companySettings: ctx.companySettings,
   });
+  
+  return legacyCredential;
 }
 
 async function refreshOAuthToken(
@@ -208,6 +213,12 @@ async function refreshOAuthToken(
     console.error('Failed to refresh OAuth token:', err);
     return null;
   }
+}
+
+export async function resolvePluginCredential(
+  ctx: VaultCredentialContext
+): Promise<string | OAuthTokens | null> {
+  return resolveVaultSecret(ctx);
 }
 
 export async function getVaultCredentialStatus(

@@ -2,6 +2,12 @@
 
 This document describes the implementation of Tourbillon's Plugin Vault feature for secure, scoped credential storage.
 
+## PM Decisions (Locked for P0)
+
+1. **API name**: `resolveVaultSecret` (primary); thin `resolvePluginCredential` alias for compat
+2. **US-V5 = Option A**: One-shot migrate + clear legacy field after verify (not long-term dual-read)
+3. **`company_user` scope**: Included in schema/API; no human user invite UI in P0
+
 ## Overview
 
 The Plugin Vault provides:
@@ -57,7 +63,9 @@ VAULT_ENCRYPTION_KEY=<64-char-hex-string>
 
 ### Resolution API
 
-**Function**: `resolvePluginCredential(ctx: VaultCredentialContext): Promise<string | OAuthTokens | null>`
+**Function**: `resolveVaultSecret(ctx: VaultCredentialContext): Promise<string | OAuthTokens | null>`
+
+**Alias**: `resolvePluginCredential()` — thin wrapper for backward compat
 
 **Resolution order** (AC-V2.1):
 
@@ -159,30 +167,58 @@ GITHUB_OAUTH_CLIENT_SECRET=abc123def456
 
 **Supported scopes**: `repo,user` (required for GitHub MCP tools)
 
-## Migration
+## Migration (US-V5 Option A)
 
 **Script**: `packages/db/scripts/migrate-mcp-to-vault.ts`
 
-**Usage**:
+**PM Decision**: One-shot migration with backup + dry-run. Clear legacy field after verification.
+
+### Usage
 
 ```bash
 # Set encryption key first
 export VAULT_ENCRYPTION_KEY=$(openssl rand -hex 32)
 
+# Dry-run (preview changes, no modifications)
+pnpm db:migrate-mcp --dry-run
+
 # Run migration (idempotent — safe to run multiple times)
 pnpm db:migrate-mcp
+
+# After verifying vault credentials work, clear legacy field
+pnpm db:migrate-mcp --clear-legacy
 ```
 
-**Behavior**:
+### Behavior
+
+**Phase 1: Migrate**
 
 - Reads all companies' `settings.mcpCredentials`
+- Creates automatic backup in `backups/mcp-credentials-backup-*.json`
 - For each server ID, creates a `company`-scoped vault entry
 - Skips if vault entry already exists (idempotent)
-- Does **not** delete legacy field (dual-read compat)
+- Does **not** automatically delete legacy field (requires explicit `--clear-legacy`)
 
-**Dual-read fallback** (US-V5 Option B):
+**Phase 2: Verify**
 
-The resolution API checks vault first, then falls back to `settings.mcpCredentials` and env vars. This ensures no credentials are lost during migration and allows a gradual rollout.
+- Test that MCP tools still work (e.g. Buffer)
+- Check vault status in UI shows "✓ Configured"
+- Verify agent wake + tool call succeeds
+
+**Phase 3: Cleanup**
+
+- Run with `--clear-legacy` to remove `settings.mcpCredentials` field
+- Resolution API will then use vault + env only (no fallback)
+
+### Transition Window Dual-Read
+
+During the transition (before `--clear-legacy`), `resolveVaultSecret()` checks:
+
+1. Vault (primary)
+2. Legacy `settings.mcpCredentials` (temporary fallback)
+3. Environment variables
+
+**After cleanup**: Only vault + env (legacy fallback removed).
 
 ## UI Components
 
