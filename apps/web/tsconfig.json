@@ -20,6 +20,9 @@
       "@tourbillon/db": [
         "../../packages/db/src/index.ts"
       ],
+      "@tourbillon/db/schema": [
+        "../../packages/db/src/schema/index.ts"
+      ],
       "@tourbillon/shared": [
         "../../packages/shared/src/index.ts"
       ],

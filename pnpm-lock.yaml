@@ -359,6 +359,9 @@ importers:
       croner:
         specifier: ^10.0.1
         version: 10.0.1
+      drizzle-orm:
+        specifier: 'catalog:'
+        version: 0.45.2(@libsql/client@0.17.4(bufferutil@4.1.0))(@opentelemetry/api@1.9.1)(kysely@0.29.2)(pg@8.22.0)(postgres@3.4.9)
       zod:
         specifier: 'catalog:'
         version: 4.4.3
