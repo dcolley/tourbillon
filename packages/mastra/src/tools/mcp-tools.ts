@@ -11,7 +11,8 @@ import {
   isSpecialMcpServerId,
   resolveAgentMcpServerIds,
 } from '@tourbillon/shared/mcp-registry';
-import { resolveMcpCredential, resolveMcpServerUrl } from '@tourbillon/shared/mcp-credentials';
+import { resolveMcpServerUrl } from '@tourbillon/shared/mcp-credentials';
+import { resolveVaultSecret } from '@tourbillon/shared/vault-credentials';
 import {
   ensureAgentMemoryDir,
   ensureCompanyMemoryDir,
@@ -214,13 +215,19 @@ export async function buildMCPTools(
 
     let apiKey: string | undefined;
     if (def.auth) {
-      const resolved = resolveMcpCredential({
+      const resolved = await resolveVaultSecret({
+        companyId: agentRecord.companyId,
         serverId,
+        agentId: agentRecord.id,
         agentRuntime: runtimeConfig,
         companySettings,
       });
       if (resolved === null) continue;
-      apiKey = resolved || undefined;
+      if (typeof resolved === 'string') {
+        apiKey = resolved;
+      } else {
+        apiKey = resolved.accessToken;
+      }
     }
 
     const client = await getMCPClient(serverId, {
@@ -309,8 +316,10 @@ export async function listMcpToolsForAgent(
 
     let apiKey: string | undefined;
     if (def.auth) {
-      const resolved = resolveMcpCredential({
+      const resolved = await resolveVaultSecret({
+        companyId: agentRecord.companyId,
         serverId,
+        agentId: agentRecord.id,
         agentRuntime: runtimeConfig,
         companySettings,
       });
@@ -321,7 +330,11 @@ export async function listMcpToolsForAgent(
         });
         continue;
       }
-      apiKey = resolved || undefined;
+      if (typeof resolved === 'string') {
+        apiKey = resolved;
+      } else {
+        apiKey = resolved.accessToken;
+      }
     }
 
     try {

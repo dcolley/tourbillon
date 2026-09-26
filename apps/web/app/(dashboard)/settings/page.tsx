@@ -6,6 +6,7 @@ import {
   updateCompanyObservationalMemory,
   updateCompanyHitlyGate,
 } from '@/lib/company';
+import { getVaultCredentialStatus } from '@/lib/vault';
 import {
   getExecutionWorkspaceRoot,
   getWorkspaceRoot,
@@ -195,7 +196,12 @@ export default async function SettingsPage() {
     },
   ];
 
-  const bufferConfigured = isConfigured(
+  const bufferVaultStatus = await getVaultCredentialStatus(
+    company.id,
+    'buffer-mcp',
+    'company'
+  );
+  const bufferConfigured = bufferVaultStatus.configured || isConfigured(
     integrationSettings.mcpCredentials?.['buffer-mcp'],
     process.env.BUFFER_API_KEY,
   );
@@ -214,10 +220,12 @@ export default async function SettingsPage() {
         company={<CompanyTab company={company} saveSettings={saveSettings} />}
         integrations={
           <IntegrationsTab
+            companyId={company.id}
             integrationSettings={integrationSettings}
             searxngConfigured={searxngConfigured}
             tavilyConfigured={tavilyConfigured}
             bufferConfigured={bufferConfigured}
+            bufferVaultStatus={bufferVaultStatus}
             saveIntegrations={saveIntegrations}
           />
         }
@@ -322,20 +330,25 @@ function CompanyTab({
 }
 
 function IntegrationsTab({
+  companyId,
   integrationSettings,
   searxngConfigured,
   tavilyConfigured,
   bufferConfigured,
+  bufferVaultStatus,
   saveIntegrations,
 }: {
+  companyId: string;
   integrationSettings: any;
   searxngConfigured: boolean;
   tavilyConfigured: boolean;
   bufferConfigured: boolean;
+  bufferVaultStatus: { configured: boolean; needsReauth: boolean; authType?: 'api_key' | 'oauth' };
   saveIntegrations: (prev: ActionResult | null, formData: FormData) => Promise<ActionResult>;
 }) {
   const ActionForm = require('@/components/action-form').ActionForm;
   const ActionSubmitButton = require('@/components/action-form').ActionSubmitButton;
+  const VaultCredentialInput = require('@/components/vault-credential-input').VaultCredentialInput;
 
   return (
     <section className="space-y-4">
@@ -415,34 +428,17 @@ function IntegrationsTab({
           </p>
         </div>
 
-        <div className="space-y-2">
-          <div className="flex items-center justify-between gap-2">
-            <label htmlFor="bufferApiKey" className="text-sm font-medium">
-              Buffer API key
-            </label>
-            <span
-              className={`text-xs rounded px-2 py-0.5 ${bufferConfigured ? 'bg-green-100 text-green-800' : 'bg-muted text-muted-foreground'}`}
-            >
-              {bufferConfigured ? 'Configured' : 'Not configured'}
-            </span>
-          </div>
-          <input
-            id="bufferApiKey"
-            name="bufferApiKey"
-            type="password"
-            placeholder={integrationSettings.mcpCredentials?.['buffer-mcp'] ? '••••••••' : 'BUFFER_API_KEY env'}
-            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-          />
-          {integrationSettings.mcpCredentials?.['buffer-mcp'] && (
-            <label className="flex items-center gap-2 text-xs text-muted-foreground">
-              <input type="checkbox" name="clearBufferApiKey" className="rounded border-input" />
-              Clear stored key
-            </label>
-          )}
-          <p className="text-xs text-muted-foreground">
-            Enables the Buffer toolset (drafts, queue, posts via MCP).
-          </p>
-        </div>
+        <VaultCredentialInput
+          serverId="buffer-mcp"
+          scope="company"
+          configured={bufferVaultStatus.configured}
+          needsReauth={bufferVaultStatus.needsReauth}
+          authType={bufferVaultStatus.authType}
+          label="Buffer API key"
+          placeholder="BUFFER_API_KEY env"
+          description="Enables the Buffer toolset (drafts, queue, posts via MCP)."
+          envFallback={process.env.BUFFER_API_KEY}
+        />
 
         <ActionSubmitButton label="Save integrations" />
       </ActionForm>

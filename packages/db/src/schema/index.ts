@@ -13,3 +13,4 @@ export * from './routines';
 export * from './skills';
 export * from './agent-mail';
 export * from './users';
+export * from './vault-secrets';
