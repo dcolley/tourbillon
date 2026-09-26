@@ -191,6 +191,9 @@ export async function updateCompanyIntegrations(
     patch.tavilyApiKey = input.tavilyApiKey.trim();
   }
 
+  // US-V5 Option A: Buffer credentials now stored in vault
+  // Legacy mcpCredentials field will be cleared after migration verify
+  // TODO: Remove bufferApiKey input handling after --clear-legacy deployed
   const mcpCredentials = { ...current.mcpCredentials };
   if (input.clearBufferApiKey) {
     delete mcpCredentials['buffer-mcp'];

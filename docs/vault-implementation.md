@@ -331,14 +331,14 @@ The `sanitizeForLogging` function redacts sensitive keys automatically. Observab
 | AC-V2.2 | Scope semantics enforced | ✅ Complete |
 | AC-V2.3 | OAuth token refresh on expiry | ✅ Complete |
 | AC-V3.1 | Company-scoped API key UI | ✅ Complete |
-| AC-V3.2 | Agent-scoped API key UI | ⚠️ Partial (component ready, not wired to agent page) |
+| AC-V3.2 | Agent-scoped API key UI | ⚠️ Deferred to P1 (component ready, API works, UI wiring deferred) |
 | AC-V3.3 | Write-only after save | ✅ Complete |
 | AC-V3.4 | Ciphertext never in responses/logs | ✅ Complete |
 | AC-V4.1 | OAuth connect flow | ✅ Complete (GitHub) |
 | AC-V4.2 | OAuth token storage | ✅ Complete |
 | AC-V4.3 | Automatic refresh | ✅ Complete |
 | AC-V4.4 | `needs_reauth` state + reconnect | ✅ Complete |
-| AC-V5.1 | Migration strategy | ✅ Complete (dual-read Option B) |
+| AC-V5.1 | Migration strategy | ✅ Complete (Option A: one-shot + cleanup) |
 | AC-V5.2 | No data loss | ✅ Complete (idempotent script) |
 | AC-V5.3 | Migration script | ✅ Complete |
 | AC-V6.1 | Integration status badges | ✅ Complete |
@@ -348,11 +348,14 @@ The `sanitizeForLogging` function redacts sensitive keys automatically. Observab
 
 ## Remaining Work (P1)
 
+**Deferred from P0 (component ready, wiring deferred)**:
+
+- **AC-V3.2 / AC-V6.4: Agent-scoped UI** — `VaultCredentialInput` component exists and can be imported at `/agent/{urlKey}` Capabilities tab. Agent-scoped credentials work via API (`POST /api/vault/credentials` with `scope=agent`, `agentId=...`). UI wiring deferred to P1 to prioritize company-scoped credential validation in production first.
+
 **Out of scope for P0 (per spec)**:
 
-- Agent-scoped UI (AC-V3.2) — component exists, needs wiring to agent detail page
-- User-scoped credentials — no human auth system in P0
-- Additional OAuth providers (Google, etc.)
+- User-scoped credentials UI — no human auth system in P0; `company_user` scope in schema/API only
+- Additional OAuth providers (Google, Slack, etc.)
 - Key rotation automation
 - Credential audit logs
 - Plugin catalog UI (P1 feature)

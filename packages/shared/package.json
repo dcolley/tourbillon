@@ -32,6 +32,8 @@
     "./mcp-types": "./src/mcp-types.ts",
     "./mcp-config": "./src/mcp-config.ts",
     "./mcp-credentials": "./src/mcp-credentials.ts",
+    "./vault-encryption": "./src/vault-encryption.ts",
+    "./vault-credentials": "./src/vault-credentials.ts",
     "./knowledge-graph": "./src/knowledge-graph.ts",
     "./knowledge-graph-config": "./src/knowledge-graph-config.ts"
   },

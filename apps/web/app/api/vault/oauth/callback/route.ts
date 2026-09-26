@@ -5,6 +5,15 @@ import { eq, and } from 'drizzle-orm';
 import { encryptCredential } from '@tourbillon/shared/vault-encryption';
 import { getActiveCompany } from '@/lib/company';
 import type { OAuthTokens } from '@tourbillon/db/schema';
+import { createHmac } from 'crypto';
+
+function verifyOAuthState(payload: string, signature: string): boolean {
+  const secret = process.env.BETTER_AUTH_SECRET || 'change-me-in-production';
+  const hmac = createHmac('sha256', secret);
+  hmac.update(payload);
+  const expected = hmac.digest('hex');
+  return signature === expected;
+}
 
 export async function GET(req: NextRequest) {
   try {
@@ -23,8 +32,18 @@ export async function GET(req: NextRequest) {
       return NextResponse.redirect('/settings?oauth_error=missing_parameters');
     }
     
-    const stateData = JSON.parse(Buffer.from(state, 'base64').toString('utf8'));
-    const { serverId, scope, userId, agentId } = stateData;
+    let stateData: { payload: string; signature: string };
+    try {
+      stateData = JSON.parse(Buffer.from(state, 'base64').toString('utf8'));
+    } catch {
+      return NextResponse.redirect('/settings?oauth_error=invalid_state');
+    }
+    
+    if (!verifyOAuthState(stateData.payload, stateData.signature)) {
+      return NextResponse.redirect('/settings?oauth_error=invalid_state_signature');
+    }
+    
+    const { serverId, scope, userId, agentId } = JSON.parse(stateData.payload);
     
     const company = await getActiveCompany();
     

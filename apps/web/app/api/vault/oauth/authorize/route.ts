@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
+import { createHmac } from 'crypto';
 
 const authorizeSchema = z.object({
   serverId: z.string().min(1),
@@ -7,6 +8,18 @@ const authorizeSchema = z.object({
   userId: z.string().optional(),
   agentId: z.string().optional(),
 });
+
+function signOAuthState(payload: string): string {
+  const secret = process.env.BETTER_AUTH_SECRET || 'change-me-in-production';
+  const hmac = createHmac('sha256', secret);
+  hmac.update(payload);
+  return hmac.digest('hex');
+}
+
+function verifyOAuthState(payload: string, signature: string): boolean {
+  const expected = signOAuthState(payload);
+  return signature === expected;
+}
 
 export async function GET(req: NextRequest) {
   try {
@@ -34,11 +47,16 @@ export async function GET(req: NextRequest) {
       const baseUrl = process.env.BETTER_AUTH_URL || 'http://localhost:3002';
       const redirectUri = `${baseUrl}/api/vault/oauth/callback`;
       
-      const state = Buffer.from(JSON.stringify({
+      const statePayload = JSON.stringify({
         serverId: validated.serverId,
         scope: validated.scope,
         userId: validated.userId,
         agentId: validated.agentId,
+      });
+      const signature = signOAuthState(statePayload);
+      const state = Buffer.from(JSON.stringify({
+        payload: statePayload,
+        signature,
       })).toString('base64');
       
       const githubAuthUrl = new URL('https://github.com/login/oauth/authorize');
