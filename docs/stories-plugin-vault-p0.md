@@ -20,6 +20,9 @@ This document defines the **P0 (Priority 0) slice** of Tourbillon's plugin archi
 
 ### Related Links
 
+- **Goal issue**: [#52](https://github.com/dcolley/tourbillon/issues/52) — Plugin Vault + MCP Credential Migration (P0)
+- **User story issues**: [#53](https://github.com/dcolley/tourbillon/issues/53) (US-V1), [#54](https://github.com/dcolley/tourbillon/issues/54) (US-V2), [#55](https://github.com/dcolley/tourbillon/issues/55) (US-V3), [#56](https://github.com/dcolley/tourbillon/issues/56) (US-V4), [#57](https://github.com/dcolley/tourbillon/issues/57) (US-V5), [#58](https://github.com/dcolley/tourbillon/issues/58) (US-V6), [#59](https://github.com/dcolley/tourbillon/issues/59) (US-V7)
+- **Draft PR**: [#51](https://github.com/dcolley/tourbillon/pull/51)
 - **Prior work**: Track B US-B1 (per-agent secrets) — merged and live in `runtimeConfig.secrets`
 - **Repository**: https://github.com/dcolley/tourbillon
 - **Related docs**: `docs/stories-auth-smoke-tour-210.md`, `AGENTS.md` (Tool Tiers)
