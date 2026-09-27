@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db, approvals, issues, activityLog, companies, type IssueStatus } from '@tourbillon/db';
-import { and, eq, inArray } from 'drizzle-orm';
+import { db, approvals, issues, activityLog, companies, agents, type IssueStatus } from '@tourbillon/db';
+import { and, eq, inArray, desc, gte, or, ilike, sql } from 'drizzle-orm';
 import { validateRunToken } from '@/lib/auth/run-token';
 import { parseCompanySettings, resolveHitlyGate, publicOriginFromRequest } from '@tourbillon/shared';
 import { ingestHitlyApproval, type HitlyIngestPayload } from '@/lib/hitly/client';
@@ -231,5 +231,128 @@ export async function POST(
       return NextResponse.json({ error: e.message }, { status: e.status });
     }
     throw err;
+  }
+}
+
+export async function GET(
+  req: NextRequest,
+  { params }: { params: Promise<{ companyId: string }> }
+) {
+  const { companyId } = await params;
+  const token = req.headers.get('authorization')?.replace('Bearer ', '');
+  if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const runCtx = validateRunToken(token);
+  if (!runCtx) return NextResponse.json({ error: 'Invalid token' }, { status: 401 });
+  if (runCtx.companyId !== companyId) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+
+  try {
+    const url = new URL(req.url);
+    
+    // Parse query parameters
+    const statusParam = url.searchParams.get('status') || 'all';
+    const typeParam = url.searchParams.get('type');
+    const qParam = url.searchParams.get('q');
+    const createdAfterParam = url.searchParams.get('createdAfter');
+    const decidedAfterParam = url.searchParams.get('decidedAfter');
+    const limitParam = parseInt(url.searchParams.get('limit') || '20', 10);
+    
+    // Validate and clamp limit
+    const limit = Math.min(Math.max(limitParam, 1), 50);
+
+    // Build WHERE conditions
+    const conditions = [eq(approvals.companyId, companyId)];
+
+    // Status filter
+    if (statusParam !== 'all') {
+      if (statusParam === 'pending' || statusParam === 'approved' || statusParam === 'rejected') {
+        conditions.push(eq(approvals.status, statusParam));
+      }
+    }
+
+    // Type filter (exact match)
+    if (typeParam) {
+      conditions.push(eq(approvals.type, typeParam));
+    }
+
+    // Free-text search (q param) - search in payload.title, payload.summary, and note
+    if (qParam) {
+      const searchPattern = `%${qParam}%`;
+      conditions.push(
+        or(
+          ilike(sql`${approvals.payload}->>'title'`, searchPattern),
+          ilike(sql`${approvals.payload}->>'summary'`, searchPattern),
+          ilike(approvals.note, searchPattern)
+        )!
+      );
+    }
+
+    // Date filters
+    if (createdAfterParam) {
+      const createdAfter = new Date(createdAfterParam);
+      if (!isNaN(createdAfter.getTime())) {
+        conditions.push(gte(approvals.createdAt, createdAfter));
+      }
+    }
+
+    if (decidedAfterParam) {
+      const decidedAfter = new Date(decidedAfterParam);
+      if (!isNaN(decidedAfter.getTime())) {
+        conditions.push(gte(approvals.decidedAt, decidedAfter));
+      }
+    }
+
+    // Execute query with joins
+    const rows = await db
+      .select({ approval: approvals, agent: agents })
+      .from(approvals)
+      .leftJoin(agents, eq(approvals.requestedByAgentId, agents.id))
+      .where(and(...conditions))
+      .orderBy(desc(approvals.createdAt))
+      .limit(limit);
+
+    // Fetch linked issues
+    const allIssueIds = [...new Set(rows.flatMap(({ approval }) => approval.issueIds ?? []))];
+    const linkedIssues =
+      allIssueIds.length > 0
+        ? await db
+            .select({
+              id: issues.id,
+              identifier: issues.identifier,
+              title: issues.title,
+              status: issues.status,
+              boardApprovalId: issues.boardApprovalId,
+            })
+            .from(issues)
+            .where(inArray(issues.id, allIssueIds))
+        : [];
+    const issuesById = new Map(linkedIssues.map((row) => [row.id, row]));
+
+    // Build response
+    const result = rows.map(({ approval, agent }) => ({
+      id: approval.id,
+      companyId: approval.companyId,
+      type: approval.type,
+      status: approval.status,
+      requestedByAgentId: approval.requestedByAgentId,
+      decidedByUserId: approval.decidedByUserId,
+      issueIds: approval.issueIds,
+      payload: approval.payload,
+      note: approval.note,
+      decidedAt: approval.decidedAt,
+      hitlyApprovalId: approval.hitlyApprovalId,
+      hitlyError: approval.hitlyError,
+      createdAt: approval.createdAt,
+      updatedAt: approval.updatedAt,
+      requester: agent ? { id: agent.id, name: agent.name, urlKey: agent.urlKey } : null,
+      linkedIssues: (approval.issueIds ?? [])
+        .map((id) => issuesById.get(id))
+        .filter((row): row is NonNullable<typeof row> => Boolean(row)),
+    }));
+
+    return NextResponse.json({ approvals: result });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Failed to list approvals';
+    console.error('[GET /approvals] error:', err);
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
