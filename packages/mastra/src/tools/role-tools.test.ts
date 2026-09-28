@@ -140,4 +140,70 @@ describe('createAgentTool', () => {
     });
     assert.ok(withNull.success, 'reportsToId can be null');
   });
+
+  it('accepts optional instructionsBundleSoulMd field', () => {
+    const rosterTools = ROLE_TOOLS['roster'] as Record<string, any>;
+    const createAgentTool = rosterTools.createAgentTool;
+    const schema = createAgentTool.inputSchema;
+
+    const withSoulMd = schema.safeParse({
+      name: 'Sarah Chen',
+      title: 'CFO',
+      role: 'custom',
+      instructionsBundleSoulMd: '# Soul\n\nBe methodical and detail-oriented.',
+    });
+    assert.ok(withSoulMd.success, 'instructionsBundleSoulMd is accepted');
+  });
+
+  it('accepts optional instructionsBundleAgentsMd field', () => {
+    const rosterTools = ROLE_TOOLS['roster'] as Record<string, any>;
+    const createAgentTool = rosterTools.createAgentTool;
+    const schema = createAgentTool.inputSchema;
+
+    const withAgentsMd = schema.safeParse({
+      name: 'Sarah Chen',
+      title: 'CFO',
+      role: 'custom',
+      instructionsBundleAgentsMd: '# Team\n\nReports to CEO.',
+    });
+    assert.ok(withAgentsMd.success, 'instructionsBundleAgentsMd is accepted');
+  });
+
+  it('accepts optional codeExecutionEnabled field', () => {
+    const rosterTools = ROLE_TOOLS['roster'] as Record<string, any>;
+    const createAgentTool = rosterTools.createAgentTool;
+    const schema = createAgentTool.inputSchema;
+
+    const withCodeExecutionTrue = schema.safeParse({
+      name: 'Sarah Chen',
+      title: 'CFO',
+      role: 'custom',
+      codeExecutionEnabled: true,
+    });
+    assert.ok(withCodeExecutionTrue.success, 'codeExecutionEnabled true is accepted');
+
+    const withCodeExecutionFalse = schema.safeParse({
+      name: 'Sarah Chen',
+      title: 'CFO',
+      role: 'custom',
+      codeExecutionEnabled: false,
+    });
+    assert.ok(withCodeExecutionFalse.success, 'codeExecutionEnabled false is accepted');
+  });
+
+  it('accepts all new optional fields together', () => {
+    const rosterTools = ROLE_TOOLS['roster'] as Record<string, any>;
+    const createAgentTool = rosterTools.createAgentTool;
+    const schema = createAgentTool.inputSchema;
+
+    const withAllNewFields = schema.safeParse({
+      name: 'Sarah Chen',
+      title: 'Chief Financial Officer',
+      role: 'custom',
+      instructionsBundleSoulMd: '# Soul\n\nBe methodical.',
+      instructionsBundleAgentsMd: '# Team\n\nReports to CEO.',
+      codeExecutionEnabled: false,
+    });
+    assert.ok(withAllNewFields.success, 'all new optional fields are accepted together');
+  });
 });
