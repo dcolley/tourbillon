@@ -200,6 +200,86 @@ When enforcement is on:
 
 ---
 
+## §6a — Board Governance & Approvals
+
+The `approvals` toolset provides three tools for board governance decisions:
+
+### Tools
+
+| Tool | Purpose | When to Use |
+|---|---|---|
+| **`listApprovals`** | Search and filter past/pending board approvals | Before filing, to check for duplicates |
+| **`getApproval`** | Read full detail of a single approval by ID | After list, to inspect prior decisions |
+| **`createApproval`** | Submit a new board governance request | Only if no equivalent approved/pending request exists |
+
+### Dedupe Protocol (Required Before Filing)
+
+**Before calling `createApproval`**, you **must** call `listApprovals` with **targeted filters** to check for an equivalent approval:
+
+1. **Use targeted filters** to find relevant prior decisions:
+   - `type` — exact approval type (e.g., `"hire_agent"`, `"request_board_approval"`)
+   - `q` — free-text search in title/summary/note (e.g., `"CFO"`, `"marketing spend"`)
+   - `status` — default `"all"` (checks both approved and pending); narrow to `"approved"` when only recent decisions matter
+   - `limit` — default `20` is sufficient for targeted queries
+
+2. **Evaluate equivalence**:
+   - Same `type` (e.g., both are `hire_agent`)
+   - Similar `payload.title` or `payload.summary` (same role, amount, or action)
+   - Status is `approved` (within last 30 days) **or** `pending` (any age)
+
+3. **Skip re-file** if an equivalent exists:
+   - For `approved` — comment on linked issue: `Board already approved [title] (approval ${approvalId}, decided ${decidedAt}). Proceeding with next steps.`
+   - For `pending` — comment: `Board approval pending for [title] (approval ${approvalId}). Awaiting decision before proceeding.`
+   - Do **not** call `createApproval` again
+
+4. **OK to file** if:
+   - No equivalent found (targeted list returned zero matches)
+   - All prior similar requests were `rejected` (board said no — reapply with changes)
+
+### Example: CEO Hiring a CFO
+
+**Scenario**: CEO agent evaluates goal "Hire a dedicated CFO"
+
+**Step 1 — Check for duplicates**:
+```javascript
+listApprovals({
+  type: "hire_agent",
+  q: "CFO",
+  status: "all",
+  limit: 20
+})
+```
+
+**Step 2a — Match found (approved)**:
+- Response includes approval `d817e537`, status `approved`, title "Hire Dedicated CFO", decided 2026-09-15
+- **Action**: Comment on issue: `Board already approved CFO hire (approval d817e537, decided 2026-09-15). Proceeding with seat provisioning.`
+- **Do not re-file**
+
+**Step 2b — Match found (pending)**:
+- Response includes approval `a1b2c3d4`, status `pending`, title "Hire Chief Financial Officer"
+- **Action**: Comment on issue: `Board approval pending for CFO hire (approval a1b2c3d4). Awaiting decision.`
+- **Do not re-file**
+
+**Step 2c — No match found**:
+- Response is empty or contains only rejected/unrelated approvals
+- **Action**: Proceed with `createApproval({ type: "hire_agent", payload: { title: "Hire Dedicated CFO", summary: "..." } })`
+
+### Why Targeted Filters (Not Raw List Paging)
+
+The single enhanced `listApprovals` tool replaces the need for separate "list" and "search" tools. Targeted server-side filters (`type + q`) narrow the result set **before** it reaches you — no need to page through raw last-50 lists or filter client-side.
+
+**Efficient**: `listApprovals(type: "hire_agent", q: "CFO")` returns ~1–3 relevant hires, not 50 mixed approvals.
+
+### Approval Types
+
+Common approval types (not exhaustive):
+- `hire_agent` — hiring a new agent (use for all hires; check `q` for role)
+- `request_board_approval` — general governance gate (large spend, irreversible action, policy decision)
+
+When filing, prefer specific types (`hire_agent`) over generic (`request_board_approval`) for better dedupe matching.
+
+---
+
 ## §7 — Critical Constraints
 
 - **Never modify files in this skills directory** — they are read-only
