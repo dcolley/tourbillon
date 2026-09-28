@@ -128,7 +128,32 @@ const listAgentsTool = createTool({
   },
 });
 
-const rosterTools = { listAgentsTool };
+const createAgentTool = createTool({
+  id: 'createAgent',
+  description: 'Create a new agent record in the company after board approval. Returns the created agent with id, urlKey, and default role settings.',
+  inputSchema: z.object({
+    name: z.string().describe('Agent display name (e.g., "Sarah Chen")'),
+    title: z.string().describe('Job title (e.g., "Chief Financial Officer")'),
+    role: z.enum(['ceo', 'cto', 'engineer', 'pm', 'qa', 'designer', 'custom']).describe('Agent role'),
+    urlKey: z.string().optional().describe('Short slug for URLs (e.g., "cfo"). Auto-slugified from name if omitted.'),
+    reportsToId: z.string().nullable().optional().describe('Agent ID this hire reports to in the org chart'),
+    runtimeType: z.enum(['agent', 'harness']).optional().describe('Runtime type: agent (default) or harness (multi-heartbeat coding)'),
+  }),
+  execute: async (inputData, { requestContext }) => {
+    const { companyId } = extractToolRuntimeContext(requestContext);
+    if (!companyId) {
+      return { error: 'missing_company', message: 'companyId not present in tool runtime context' };
+    }
+    const res = await tracedAgentFetch('createAgent', requestContext, `/api/companies/${companyId}/agents`, {
+      method: 'POST',
+      body: JSON.stringify(inputData),
+    });
+    if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
+    return res.json();
+  },
+});
+
+const rosterTools = { listAgentsTool, createAgentTool };
 
 export const ROLE_TOOLS: Record<string, Record<string, unknown>> = {
   roster: rosterTools,

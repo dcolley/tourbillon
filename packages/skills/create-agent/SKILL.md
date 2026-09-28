@@ -19,20 +19,60 @@ Call `createApproval` with type `hire_agent`. Link any planning issue via `issue
 
 ## §2 — Agent Creation Checklist
 
-Before calling the agents API:
+Before calling `createAgent`:
 
 - [ ] Board approval obtained (or confirmed not required by policy)
 - [ ] Role is well-defined and distinct from existing agents
-- [ ] Appropriate skills assigned from company skill library
-- [ ] Tool tiers configured (Tier 1 auto; Tier 2 by role; Tier 3 by capability need)
-- [ ] Model chosen (default: use `LM_STUDIO_DEFAULT_MODEL` env var)
-- [ ] `reportsToId` set correctly in the org chart
-- [ ] Budget allocated
-- [ ] Heartbeat schedule configured (or left disabled for on-demand only)
+- [ ] Tool call: `createAgent({ name, title, role, reportsToId?, runtimeType? })`
 
 ---
 
-## §3 — Skill Assignment by Role
+## §3 — Dedupe Check (When listApprovals Available)
+
+If `listApprovals` tool is available (story #62/#63):
+- Before creating agent, call `listApprovals({ type: "hire_agent", status: "approved" })`
+- Check if an approval for this hire already exists and was fulfilled
+- If agent already created, skip `createAgent` and comment on linked issue with existing agent ID
+
+If `listApprovals` is not available:
+- Skip dedupe check (acceptable risk of duplicate hires if approval re-runs)
+- Future: implement dedupe via board approval decision tracking
+
+---
+
+## §4 — Tool Usage
+
+Call `createAgent` with the following parameters:
+
+- `name` (required): Agent display name (e.g., "Sarah Chen")
+- `title` (required): Job title (e.g., "Chief Financial Officer")
+- `role` (required): One of: `ceo`, `cto`, `engineer`, `pm`, `qa`, `designer`, `custom`
+- `urlKey` (optional): Short slug for URLs (e.g., "cfo"). Auto-slugified from name if omitted.
+- `reportsToId` (optional): Agent ID this hire reports to in the org chart
+- `runtimeType` (optional): `"agent"` (default) or `"harness"` (multi-heartbeat coding)
+
+**Role defaults:**
+- Skills, toolsets, and granular tools are assigned automatically based on role
+- Default model uses company LLM provider registry
+- Budget defaults to zero (unlimited); set via dashboard after hire
+- Heartbeat disabled by default; enable via dashboard after hire
+
+**Example:**
+```
+createAgent({
+  name: "Sarah Chen",
+  title: "Chief Financial Officer",
+  role: "custom",
+  reportsToId: "<ceo-agent-id>",
+  runtimeType: "agent"
+})
+```
+
+The tool returns the created agent record with `id`, `urlKey`, and assigned defaults.
+
+---
+
+## §5 — Skill Assignment by Role
 
 | Role | Required Skills | Optional Skills |
 |---|---|---|
@@ -47,7 +87,7 @@ Before calling the agents API:
 
 ---
 
-## §4 — Tool Tier Assignment by Role
+## §6 — Tool Tier Assignment by Role
 
 | Role | Boolean toolsets | Granular tools (`runtimeConfig.assignedTools`) | Tier 3 MCP |
 |---|---|---|---|
@@ -64,9 +104,11 @@ Granular tools are configured per-tool on the agent detail page under Capabiliti
 
 ---
 
-## §5 — Post-Creation Steps
+## §7 — Post-Creation Steps
 
-After the agent record is created:
+After calling `createAgent`:
+
+0. Verify tool call succeeded (no error in response)
 1. Verify org chart integrity (reportsTo chain is not circular)
 2. Confirm `agents/{urlKey}/skills/` was seeded in the company workspace with toolset skill templates (e.g. `buffer-skills.md`). Customize per agent in the workspace as needed.
 3. Add a comment to the originating issue with the new agent ID and role
