@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db, agents } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
 import { validateRunToken } from '@/lib/auth/run-token';
-import { AgentValidationError, createAgent } from '@/lib/agents';
+import { AgentValidationError, createAgent, type CreateAgentInput } from '@/lib/agents';
 
 function unauthorized() {
   return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -42,14 +42,7 @@ export async function POST(
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
   }
 
-  const body = await req.json() as {
-    name: string;
-    title: string;
-    role: string;
-    urlKey?: string;
-    reportsToId?: string | null;
-    runtimeType?: 'agent' | 'harness';
-  };
+  const body = await req.json() as CreateAgentInput;
 
   try {
     const agent = await createAgent({

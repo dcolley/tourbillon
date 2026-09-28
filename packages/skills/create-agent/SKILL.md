@@ -50,6 +50,9 @@ Call `createAgent` with the following parameters:
 - `urlKey` (optional): Short slug for URLs (e.g., "cfo"). Auto-slugified from name if omitted.
 - `reportsToId` (optional): Agent ID this hire reports to in the org chart
 - `runtimeType` (optional): `"agent"` (default) or `"harness"` (multi-heartbeat coding)
+- `instructionsBundleSoulMd` (optional): Agent personality and values (SOUL.md markdown content)
+- `instructionsBundleAgentsMd` (optional): Agent team knowledge (AGENTS.md markdown content)
+- `codeExecutionEnabled` (optional): Override code-execution toolset assignment (true to add, false to remove)
 
 **Role defaults:**
 - Skills, toolsets, and granular tools are assigned automatically based on role
@@ -57,7 +60,7 @@ Call `createAgent` with the following parameters:
 - Budget defaults to zero (unlimited); set via dashboard after hire
 - Heartbeat disabled by default; enable via dashboard after hire
 
-**Example:**
+**Example (minimal):**
 ```
 createAgent({
   name: "Sarah Chen",
@@ -65,6 +68,19 @@ createAgent({
   role: "custom",
   reportsToId: "<ceo-agent-id>",
   runtimeType: "agent"
+})
+```
+
+**Example (with personality and code execution):**
+```
+createAgent({
+  name: "Sarah Chen",
+  title: "Chief Financial Officer",
+  role: "custom",
+  reportsToId: "<ceo-agent-id>",
+  instructionsBundleSoulMd: "# Soul\n\nBe methodical and detail-oriented. Always verify numbers twice.",
+  instructionsBundleAgentsMd: "# Team\n\nReports to CEO. Works closely with CTO on budget planning.",
+  codeExecutionEnabled: false
 })
 ```
 
