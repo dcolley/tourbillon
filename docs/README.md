@@ -15,6 +15,7 @@ This directory contains the static documentation site for Tourbillon, hosted on 
 - `stories-auth-smoke-tour-210.md` — Auth smoke testing user stories (TOUR-208/210)
 - `stories-edit-agent-title.md` — Editable agent title in edit mode user stories
 - `stories-agent-approvals-list-read.md` — Agent approvals list/read tools user stories (P0 dedupe)
+- `stories-create-agent-tool.md` — Create agent tool user stories (TOUR-246 / US-CA)
 - `mcp-control-plane.md` — MCP control plane documentation
 - `style.css` — Shared styles
 - `README.md` — This file
