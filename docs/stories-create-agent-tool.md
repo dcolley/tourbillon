@@ -1,8 +1,8 @@
 # Create Agent Tool Stories — TOUR-246
 
-**Document Version**: 1.0  
+**Document Version**: 1.1  
 **Last Updated**: 2026-09-28  
-**Status**: Draft — Pending Product Implementation & Test Acceptance
+**Status**: Draft — US-CA2 Promoted to REQUIRED (Follow-up to Merged #64/#65)
 
 ---
 
@@ -16,31 +16,17 @@ This document defines user stories and acceptance criteria for implementing the 
 
 **Current State:**
 1. CEO Capabilities → Skills shows **Create agent** checked (hiring procedure skill at `packages/skills/create-agent/SKILL.md`)
-2. Roster toolset exposes only `listAgents` in `packages/mastra/src/tools/role-tools.ts` (`rosterTools = { listAgentsTool }`; `agent-management` is a legacy alias). **No `createAgent` Mastra tool exists.**
-3. Backend `POST /api/companies/{companyId}/agents` exists and accepts agent run tokens (`apps/web/app/api/companies/[companyId]/agents/route.ts` → `createAgent` lib at `apps/web/lib/agents.ts`). Current body typed as:
-   - `name: string` (required)
-   - `title: string` (required)
-   - `role: string` (required, must be one of: `ceo | cto | engineer | pm | qa | designer | custom`)
-   - `urlKey?: string` (optional, auto-slugified from name if omitted)
-   - `reportsToId?: string | null` (optional, FK to existing agent in same company)
-   - `runtimeType?: 'agent' | 'harness'` (optional, defaults to `'agent'`)
-   - `instructionsBundleSoulMd?: string` (optional, personality/values)
-   - `instructionsBundleAgentsMd?: string` (optional, team knowledge)
-   - `codeExecutionEnabled?: boolean` (optional, adds/removes `code-execution` toolset)
-4. `createAgent` lib function (`apps/web/lib/agents.ts` L139-L226):
-   - Validates name, title, role, urlKey (slugified)
-   - Resolves company (from `input.companyId` or active session)
-   - Checks for urlKey collisions in company scope
-   - Validates `reportsToId` FK if provided
-   - Sets default LLM provider and model from system registry
-   - Resolves runtime adapter fields (`adapterType`, `adapterConfig`) based on `runtimeType`
-   - Assigns **default toolsets** from `ROLE_DEFAULT_TOOLSETS[role]` (L187) plus optional `code-execution` override
-   - Assigns **default skills** via `buildAssignedSkills(companyId, role)` (L199) — merges `ROLE_DEFAULT_SKILLS[role]` with company workspace skills discovered at hire time
-   - Assigns **default granular tools** via `ROLE_DEFAULT_ASSIGNED_TOOLS[role]` in `runtimeConfig.assignedTools`
-   - Sets status `'active'` and zero monthly token spend
-   - Seeds per-agent workspace skill templates via `seedAgentSkillsFromTemplates(companyId, urlKey)` (L224)
-5. Skill `packages/skills/create-agent/SKILL.md` tells agents to call "the agents API" after board approval, but there is **no callable tool** to do that.
-6. CEO correctly filed TOUR-246: "Platform Gap: CEO runtime lacks createAgent tool".
+2. Roster toolset exposes **`listAgents`** and **`createAgent`** in `packages/mastra/src/tools/role-tools.ts` (shipped in #65). CEO has both tools available at wake.
+3. Backend `POST /api/companies/{companyId}/agents` exists and accepts agent run tokens (`apps/web/app/api/companies/[companyId]/agents/route.ts` → `createAgent` lib at `apps/web/lib/agents.ts`). **Route body type is narrow** (name, title, role, urlKey?, reportsToId?, runtimeType?) — **missing** three optional fields that `createAgent` lib already supports:
+   - `instructionsBundleSoulMd?: string` (personality/values) — **not in route type**
+   - `instructionsBundleAgentsMd?: string` (team knowledge) — **not in route type**
+   - `codeExecutionEnabled?: boolean` (adds/removes `code-execution` toolset) — **not in route type**
+4. `createAgent` lib function (`apps/web/lib/agents.ts` L139-L226) **already handles** the three fields via `CreateAgentInput` interface (L120-L131):
+   - `normalizeInstructionField(input.instructionsBundleSoulMd)` (L219)
+   - `normalizeInstructionField(input.instructionsBundleAgentsMd)` (L220)
+   - `codeExecutionEnabled` logic (L187-L192)
+5. **Gap**: Route POST body type is narrower than `CreateAgentInput`; `createAgentTool` Zod schema matches narrow route type (shipped in #65). Agents cannot set soul/agents/codeExecution at hire time.
+6. Skill `packages/skills/create-agent/SKILL.md` documents `createAgent` tool (shipped in #65).
 
 ### Expected Outcome
 
@@ -172,6 +158,8 @@ export interface CreateAgentInput {
 
 ### US-CA1: Add `createAgent` Tool to Roster Toolset
 
+**Status**: ✅ **Shipped in #65**
+
 **As** a developer  
 **I want** a `createAgent` Mastra tool added to the roster toolset  
 **So that** agents with the roster toolset and create-agent skill can programmatically hire new agents after board approval
@@ -232,54 +220,113 @@ export interface CreateAgentInput {
 
 ---
 
-### US-CA2: Extend POST Endpoint for Agent-Initiated Hires (Optional)
+### US-CA2: Extend createAgent for Optional SOUL.md / AGENTS.md at Hire
+
+**Status**: ⚠️ **REQUIRED** (promoted from optional/skipped MVP)
 
 **As** a developer  
-**I want** the POST endpoint to accept optional fields for skills, toolsets, budget, heartbeat config  
-**So that** future enhancements can allow agents to customize hires beyond role defaults
+**I want** the POST endpoint and `createAgent` tool to accept optional fields for personality, team knowledge, and code execution  
+**So that** agents can set SOUL.md, AGENTS.md, and codeExecutionEnabled at hire time without requiring a second PATCH call
 
 #### Acceptance Criteria
 
-- [ ] **AC-CA2.1**: Endpoint accepts additional optional body fields
-  - `instructionsBundleSoulMd?: string` (personality/values markdown)
-  - `instructionsBundleAgentsMd?: string` (team knowledge markdown)
-  - `codeExecutionEnabled?: boolean` (adds/removes code-execution toolset)
-  - Fields are already handled by `createAgent` lib but not in current route type
+- [ ] **AC-CA2.1**: Route POST body typed as `CreateAgentInput` (or equivalent)
+  - `apps/web/app/api/companies/[companyId]/agents/route.ts` body type includes:
+    - `instructionsBundleSoulMd?: string` (personality/values markdown)
+    - `instructionsBundleAgentsMd?: string` (team knowledge markdown)
+    - `codeExecutionEnabled?: boolean` (adds/removes code-execution toolset)
+  - Route passes body directly to `createAgent(body)` (lib already handles these fields)
 
-- [ ] **AC-CA2.2**: Fields remain optional; minimal hire still works
-  - Body `{ name, title, role }` alone is valid and uses role defaults
-  - Omitted fields default to role-based behavior
+- [ ] **AC-CA2.2**: `createAgentTool` Zod schema widens to match route
+  - Tool `packages/mastra/src/tools/role-tools.ts` adds three optional fields to input schema
+  - Tool POSTs full `JSON.stringify(inputData)` (no field filtering)
 
-- [ ] **AC-CA2.3**: Validation errors are clear
-  - Invalid markdown or boolean types return 400 with descriptive message
+- [ ] **AC-CA2.3**: Minimal hire still succeeds (backward compatible)
+  - POST `{ name, title, role }` alone returns 201 + agent JSON
+  - Omitted `instructionsBundleSoulMd` / `instructionsBundleAgentsMd` remain `null` in DB
+  - Omitted `codeExecutionEnabled` applies role defaults
 
-- [ ] **AC-CA2.4**: Route type updated in `apps/web/app/api/companies/[companyId]/agents/route.ts`
-  - Body type matches `CreateAgentInput` from `apps/web/lib/agents.ts`
+- [ ] **AC-CA2.4**: POST with soul/agents md persists and returns
+  - POST `{ name, title, role, instructionsBundleSoulMd: "# Soul\nBe kind." }` returns 201
+  - GET the created agent confirms `instructionsBundleSoulMd` is persisted (not null)
+  - Strings are normalized via `normalizeInstructionField` (trim, null if empty)
+
+- [ ] **AC-CA2.5**: POST with `codeExecutionEnabled` overrides role defaults
+  - POST `{ name, title, role: "engineer", codeExecutionEnabled: false }` omits `code-execution` toolset
+  - POST `{ name, title, role: "custom", codeExecutionEnabled: true }` adds `code-execution` toolset
+
+- [ ] **AC-CA2.6**: Validation errors are clear
+  - Invalid `role` still returns 400 (baseline behavior preserved)
+  - Non-string soul/agents or non-boolean codeExecution handled gracefully (400 or ignored)
+
+- [ ] **AC-CA2.7**: SKILL.md Tool Usage (soft / optional)
+  - `packages/skills/create-agent/SKILL.md` § Tool Usage mentions the three optional fields
+  - Example snippet shows soul/agents/codeExecution usage
 
 #### Quality Gates (Test ACCEPT/HOLD)
 
 | Gate | Condition | Verifier |
 |------|-----------|----------|
-| **Type safety** | Route body type matches CreateAgentInput | Dev |
-| **Minimal hire** | POST with only name/title/role still succeeds | Test Lead |
-| **Optional fields** | POST with instructionsBundleSoulMd sets agent personality | Test Lead |
-| **Backward compat** | Existing hire API consumers unaffected | Test Lead |
+| **Route widens** | POST body typed as `CreateAgentInput` or includes three optional fields | Dev |
+| **Tool widens** | `createAgentTool` Zod includes three optional fields | Dev |
+| **Minimal hire** | POST with only name/title/role still succeeds (backward compat) | Test Lead |
+| **Soul/agents persist** | POST with instructionsBundleSoulMd sets agent personality | Test Lead |
+| **codeExecution override** | POST with `codeExecutionEnabled: false` omits code-execution toolset | Test Lead |
+| **Validation preserved** | Invalid role still returns 400; type errors handled gracefully | Test Lead |
 
 #### Implementation Notes
 
-**Decision point:** This story is **optional** for unblocking TOUR-246 / Demo CFO hire. The minimal hire path (name, title, role) is sufficient to create a functional agent with role defaults. Skills, toolsets, budget, and heartbeat can be edited post-hire via dashboard or dedicated tools.
+**Decision:** This story is **REQUIRED** as a follow-up to #65. While minimal hire (name, title, role) is sufficient for baseline agent creation, agents need to set custom SOUL.md, AGENTS.md, and code execution preferences at hire time for complete onboarding scenarios.
 
-**Recommendation:** Start with US-CA1 (minimal hire tool) to unblock CEO hiring workflow. Implement US-CA2 in a follow-up PR if agents need to customize hires at creation time (e.g., CEO setting custom SOUL.md for a new hire).
+**Changes required:**
+1. **Route type widen** (`apps/web/app/api/companies/[companyId]/agents/route.ts`):
+   ```typescript
+   import { CreateAgentInput, createAgent, AgentValidationError } from '@/lib/agents';
+   
+   const body = await req.json() as CreateAgentInput;
+   ```
+   Pass `body` directly to `createAgent(body)` (lib already supports these fields)
+
+2. **Tool schema widen** (`packages/mastra/src/tools/role-tools.ts`):
+   ```typescript
+   inputSchema: z.object({
+     name: z.string(),
+     title: z.string(),
+     role: z.string(),
+     urlKey: z.string().optional(),
+     reportsToId: z.string().optional(),
+     runtimeType: z.enum(['agent', 'harness']).optional(),
+     instructionsBundleSoulMd: z.string().optional(),
+     instructionsBundleAgentsMd: z.string().optional(),
+     codeExecutionEnabled: z.boolean().optional(),
+   }),
+   ```
+   Execute function: `JSON.stringify(inputData)` already POSTs full payload
+
+3. **SKILL.md update** (optional):
+   - Add § Tool Usage note for the three optional fields
+   - Example:
+     ```markdown
+     Optional at hire:
+     - `instructionsBundleSoulMd`: Agent personality/values (SOUL.md content)
+     - `instructionsBundleAgentsMd`: Agent team knowledge (AGENTS.md content)
+     - `codeExecutionEnabled`: Boolean to override role's default code-execution toolset
+     ```
+
+**Foundation:** `createAgent` lib function (L187-L192, L219-L220) already handles these fields. Only route type and tool schema need widening.
 
 #### Out of Scope
 
-- Setting `assignedSkills`, `assignedToolsets`, `mcpServerIds` arrays directly (prefer role defaults + post-hire edits)
+- Setting `assignedSkills`, `assignedToolsets`, `mcpServerIds`, `budgetMonthlyTokens` arrays directly at hire (complex validation; prefer role defaults + post-hire edits)
 - Budget enforcement or approval gates beyond board approval
-- Org chart validation beyond `reportsToId` FK check (circular reporting is validated by `createAgent` lib)
+- Org chart validation beyond `reportsToId` FK check
+- Dashboard hire form rewrite (separate UI work)
 
 ---
 
 ### US-CA3: Update `create-agent` Skill Documentation
+
+**Status**: ✅ **Shipped in #65** (baseline); AC-CA3.2 Tool Usage will mention US-CA2 fields when implemented
 
 **As** a developer  
 **I want** the `create-agent` skill to name the `createAgent` tool explicitly  
@@ -371,6 +418,8 @@ export interface CreateAgentInput {
 
 ### US-CA4: Integration Testing and Manual Demo CFO Hire
 
+**Status**: ✅ **AC-CA4.1 shipped in #65** (unit tests); AC-CA4.2/CA4.3/CA4.4 ongoing
+
 **As** a test lead  
 **I want** integration tests and a manual demo CFO hire scenario  
 **So that** we verify the end-to-end workflow from board approval to agent roster
@@ -451,8 +500,12 @@ export interface CreateAgentInput {
 | **US-CA1** | Tool binding | CEO has `createAgent` at wake | Tool not in agent tools |
 | **US-CA1** | Auth check | Valid token succeeds; invalid fails 401 | Auth bypass or always 401 |
 | **US-CA1** | Validation | Missing fields → 400; invalid role → 400 | Validation errors silent or wrong |
-| **US-CA2** | Type safety | Route type matches CreateAgentInput | Type mismatch or any usage |
-| **US-CA2** | Minimal hire | POST with name/title/role succeeds | Additional fields required |
+| **US-CA2** | Route widens | POST body typed as `CreateAgentInput` or includes three optional fields | Type still narrow |
+| **US-CA2** | Tool widens | `createAgentTool` Zod includes three optional fields | Schema missing fields |
+| **US-CA2** | Minimal hire | POST with name/title/role succeeds (backward compat) | Minimal hire now fails |
+| **US-CA2** | Soul/agents persist | POST with instructionsBundleSoulMd persists and returns | Fields ignored/cleared |
+| **US-CA2** | codeExecution override | POST with `codeExecutionEnabled: false` omits code-execution toolset | Override broken |
+| **US-CA2** | Validation preserved | Invalid role still 400; type errors handled gracefully | Validation broken or crashes |
 | **US-CA3** | Tool named | Skill says `createAgent`, not "API" | Vague or missing tool reference |
 | **US-CA3** | Dedupe guidance | Skill documents listApprovals check | Dedupe logic missing or wrong |
 | **US-CA4** | Unit tests | Tool schema tests pass | Tool not tested or tests fail |
@@ -683,37 +736,39 @@ If implementing US-CA2 (extended POST body):
 
 Before marking TOUR-246 as **done**, verify:
 
-- [ ] **US-CA1 complete:**
-  - [ ] `createAgentTool` defined in `role-tools.ts`
-  - [ ] Tool added to `rosterTools` export
-  - [ ] CEO agent sees tool at wake (check agent tools in observability or logs)
-  - [ ] Tool call with valid token succeeds (manual test or integration test)
-  - [ ] Tool call validation errors return 400 (manual test or integration test)
+- [x] **US-CA1 complete** (✅ shipped in #65):
+  - [x] `createAgentTool` defined in `role-tools.ts`
+  - [x] Tool added to `rosterTools` export
+  - [x] CEO agent sees tool at wake (check agent tools in observability or logs)
+  - [x] Tool call with valid token succeeds (manual test or integration test)
+  - [x] Tool call validation errors return 400 (manual test or integration test)
 
-- [ ] **US-CA2 complete (if implemented):**
-  - [ ] POST route type matches `CreateAgentInput`
-  - [ ] Optional fields (instructionsBundleSoulMd, codeExecutionEnabled) work
-  - [ ] Minimal hire (name/title/role only) still succeeds
+- [ ] **US-CA2 complete** (⚠️ REQUIRED — follow-up to #65):
+  - [ ] POST route type widens to `CreateAgentInput` (or includes three optional fields)
+  - [ ] `createAgentTool` Zod schema includes `instructionsBundleSoulMd`, `instructionsBundleAgentsMd`, `codeExecutionEnabled`
+  - [ ] Optional fields work (soul/agents persists, codeExecution overrides role defaults)
+  - [ ] Minimal hire (name/title/role only) still succeeds (backward compatible)
+  - [ ] Invalid role still returns 400; type errors handled gracefully
 
-- [ ] **US-CA3 complete:**
-  - [ ] Skill mentions `createAgent` tool explicitly
-  - [ ] Tool Usage section added with examples
-  - [ ] Dedupe Check section added (listApprovals guidance)
-  - [ ] Post-Creation Steps updated
+- [x] **US-CA3 complete** (✅ baseline shipped in #65; AC-CA3.2 Tool Usage will mention US-CA2 fields):
+  - [x] Skill mentions `createAgent` tool explicitly
+  - [x] Tool Usage section added with examples
+  - [x] Dedupe Check section added (listApprovals guidance)
+  - [x] Post-Creation Steps updated
 
-- [ ] **US-CA4 complete:**
-  - [ ] Unit tests for tool schema pass
+- [ ] **US-CA4 complete** (⚠️ AC-CA4.1 shipped in #65; integration/manual tests ongoing):
+  - [x] Unit tests for tool schema pass
   - [ ] Integration tests for POST endpoint pass
   - [ ] Manual Demo CFO hire scenario executed and passed
   - [ ] New agent visible on roster
   - [ ] Issue status updated to done
   - [ ] No errors or regressions
 
-- [ ] **Documentation updated:**
-  - [ ] This story linked from `docs/README.md`
-  - [ ] AGENTS.md unchanged (tool addition does not require AGENTS.md update)
+- [x] **Documentation updated**:
+  - [x] This story linked from `docs/README.md`
+  - [x] AGENTS.md unchanged (tool addition does not require AGENTS.md update)
 
-- [ ] **Deployment ready:**
+- [ ] **Deployment ready**:
   - [ ] Local dev smoke test passed
   - [ ] TEST environment ready (if applicable)
   - [ ] No breaking changes to existing hire workflows (dashboard form still works)
@@ -738,7 +793,8 @@ Before marking TOUR-246 as **done**, verify:
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
-| 1.0 | 2026-09-28 | Docs PR (TOUR-246) | Initial draft with US-CA1–CA4 stories |
+| 1.0 | 2026-09-28 | Docs PR #64 (TOUR-246) | Initial draft with US-CA1–CA4 stories |
+| 1.1 | 2026-09-28 | Docs PR #66 (TOUR-246 follow-up) | Promote US-CA2 from optional to REQUIRED; mark US-CA1/CA3/CA4.1 shipped in #65; update gates/checklist |
 
 ---
 
