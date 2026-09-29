@@ -138,6 +138,9 @@ const createAgentTool = createTool({
     urlKey: z.string().optional().describe('Short slug for URLs (e.g., "cfo"). Auto-slugified from name if omitted.'),
     reportsToId: z.string().nullable().optional().describe('Agent ID this hire reports to in the org chart'),
     runtimeType: z.enum(['agent', 'harness']).optional().describe('Runtime type: agent (default) or harness (multi-heartbeat coding)'),
+    instructionsBundleSoulMd: z.string().optional().describe('Agent personality and values (SOUL.md content)'),
+    instructionsBundleAgentsMd: z.string().optional().describe('Agent team knowledge (AGENTS.md content)'),
+    codeExecutionEnabled: z.boolean().optional().describe('Override code-execution toolset: true to add, false to remove'),
   }),
   execute: async (inputData, { requestContext }) => {
     const { companyId } = extractToolRuntimeContext(requestContext);
