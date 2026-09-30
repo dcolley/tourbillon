@@ -4,10 +4,12 @@ import {
   setAgentActive,
   updateAgentRuntimeConfig,
   updateAgentObservationalMemory,
+  updateAgentModel,
   type UpdateAgentObservationalMemoryInput,
 } from '@/lib/agents';
 import { db, agents, llmProviders, companies, issues, goals, projects, approvals } from '@tourbillon/db';
 import { and, eq, inArray, desc } from 'drizzle-orm';
+import { getLlmProviderRecordById } from '@/lib/llm-providers';
 import { getHeartbeatList, getHeartbeatRun } from '@/lib/heartbeats';
 import { listObservabilityEvents } from '@/lib/observability';
 import { getJobLiveSnapshot } from '@/lib/jobs';
@@ -150,6 +152,32 @@ const MCP_TOOLS: McpTool[] = [
         },
       },
       required: ['company_id', 'agent_id', 'mode'],
+    },
+  },
+  {
+    name: 'set_agent_model',
+    description: 'Set agent primary model and provider (durable, UI-visible)',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        company_id: {
+          type: 'string',
+          description: 'Company ID (UUID)',
+        },
+        agent_id: {
+          type: 'string',
+          description: 'Agent ID (UUID)',
+        },
+        model_id: {
+          type: 'string',
+          description: 'Model identifier (e.g., meta-llama/Llama-3.3-70B-Instruct)',
+        },
+        provider_id: {
+          type: 'string',
+          description: 'LLM provider ID (UUID). If omitted or null, uses default provider.',
+        },
+      },
+      required: ['company_id', 'agent_id', 'model_id'],
     },
   },
   {
@@ -766,6 +794,59 @@ async function handleSetOm(tokenCompanyId: string, params: any) {
   return {
     success: true,
     mode: observationalMemory.mode ?? 'inherit',
+  };
+}
+
+async function handleSetAgentModel(tokenCompanyId: string, params: any) {
+  const { company_id, agent_id, model_id, provider_id } = params;
+  if (!company_id) {
+    throw new Error('company_id is required');
+  }
+  if (!agent_id || !model_id) {
+    throw new Error('agent_id and model_id are required');
+  }
+  validateCompanyAccess(tokenCompanyId, company_id);
+
+  const agent = await db.query.agents.findFirst({
+    where: eq(agents.id, agent_id),
+  });
+
+  if (!agent) {
+    throw new Error('Agent not found');
+  }
+
+  if (agent.companyId !== company_id) {
+    throw new Error('Agent not found');
+  }
+
+  // Validate provider_id if provided
+  let resolvedProviderId: string | null = null;
+  if (provider_id !== undefined && provider_id !== null) {
+    const trimmedProviderId = typeof provider_id === 'string' ? provider_id.trim() : '';
+    if (trimmedProviderId) {
+      const provider = await getLlmProviderRecordById(trimmedProviderId);
+      if (!provider) {
+        throw new Error(`Provider not found: ${trimmedProviderId}`);
+      }
+      resolvedProviderId = trimmedProviderId;
+    }
+  }
+
+  const trimmedModelId = model_id.trim();
+  if (!trimmedModelId) {
+    throw new Error('model_id cannot be empty');
+  }
+
+  const updated = await updateAgentModel(agent_id, {
+    modelId: trimmedModelId,
+    providerId: resolvedProviderId,
+  });
+
+  return {
+    success: true,
+    agentId: updated.id,
+    modelId: updated.modelId,
+    providerId: updated.providerId,
   };
 }
 
@@ -1464,6 +1545,8 @@ async function handleToolCall(tokenCompanyId: string, toolName: string, params: 
       return await handleSetHeartbeat(tokenCompanyId, params);
     case 'set_om':
       return await handleSetOm(tokenCompanyId, params);
+    case 'set_agent_model':
+      return await handleSetAgentModel(tokenCompanyId, params);
     case 'list_failed_jobs':
       return await handleListFailedJobs(tokenCompanyId, params);
     case 'get_heartbeat':

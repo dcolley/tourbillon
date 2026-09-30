@@ -157,7 +157,66 @@ Set agent observational memory mode.
 - `provider_id` (string): LLM provider ID (if mode=on)
 - `model_id` (string): Model ID (if mode=on)
 
-### 6. list_failed_jobs
+### 6. set_agent_model
+
+Set agent primary model and provider. Changes are durable and visible in the UI agent settings.
+
+**Parameters:**
+- `company_id` (string, required): Company UUID
+- `agent_id` (string, required): Agent UUID
+- `model_id` (string, required): Model identifier (e.g., `meta-llama/Llama-3.3-70B-Instruct`)
+- `provider_id` (string): LLM provider ID (UUID). If omitted or null, uses default provider.
+
+**Returns:**
+- `success`: Boolean (true if successful)
+- `agentId`: Agent UUID
+- `modelId`: Updated model identifier
+- `providerId`: Updated provider ID (or null if using default)
+
+**Errors:**
+- `company_id is required` — Missing company_id parameter
+- `agent_id and model_id are required` — Missing required parameters
+- `Agent not found` — Invalid agent_id or agent not in specified company
+- `Provider not found: <id>` — provider_id does not exist in the system
+- `model_id cannot be empty` — Empty model_id string
+
+**Example:**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "set_agent_model",
+    "arguments": {
+      "company_id": "550e8400-e29b-41d4-a716-446655440000",
+      "agent_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      "model_id": "meta-llama/Llama-3.3-70B-Instruct",
+      "provider_id": "a1b2c3d4-e5f6-4321-8765-fedcba987654"
+    }
+  }
+}
+```
+
+**Response:**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"success\":true,\"agentId\":\"7c9e6679-7425-40de-944b-e07fc1f90ae7\",\"modelId\":\"meta-llama/Llama-3.3-70B-Instruct\",\"providerId\":\"a1b2c3d4-e5f6-4321-8765-fedcba987654\"}"
+      }
+    ]
+  }
+}
+```
+
+### 7. list_failed_jobs
 
 List recent failed heartbeat runs with error details.
 
@@ -182,7 +241,7 @@ List recent failed heartbeat runs with error details.
 - `page`: Current page
 - `pageSize`: Page size
 
-### 7. get_heartbeat
+### 8. get_heartbeat
 
 Get heartbeat run details including status, agent, model, provider, timing, and token usage.
 
@@ -206,7 +265,7 @@ Get heartbeat run details including status, agent, model, provider, timing, and 
 - `inputTokens`: Input token count (or null)
 - `outputTokens`: Output token count (or null)
 
-### 8. list_heartbeat_events
+### 9. list_heartbeat_events
 
 List observability events for a heartbeat run (model steps, tool calls, provider calls, etc.).
 
@@ -238,7 +297,7 @@ List observability events for a heartbeat run (model steps, tool calls, provider
 - `page`: Current page
 - `pageSize`: Page size
 
-### 9. live_heartbeat
+### 10. live_heartbeat
 
 Get live snapshot of a heartbeat run (status, timing, logs). Poll this endpoint to monitor run progress.
 
@@ -260,7 +319,7 @@ Get live snapshot of a heartbeat run (status, timing, logs). Poll this endpoint 
 
 ### Issue Management Tools
 
-### 10. list_issues
+### 11. list_issues
 
 List issues in the company with optional filters.
 
@@ -288,7 +347,7 @@ List issues in the company with optional filters.
 - `page`: Current page
 - `pageSize`: Page size
 
-### 11. get_issue
+### 12. get_issue
 
 Get detailed issue information.
 
@@ -312,7 +371,7 @@ Get detailed issue information.
 - `createdAt`: ISO timestamp
 - `updatedAt`: ISO timestamp
 
-### 12. create_issue
+### 13. create_issue
 
 Create a new issue. Empty creates are rejected.
 
@@ -332,7 +391,7 @@ Create a new issue. Empty creates are rejected.
 - `status`: Issue status
 - `priority`: Issue priority
 
-### 13. set_issue_status
+### 14. set_issue_status
 
 Set issue status. Halted issues (pending board approval) cannot change status until the board decides.
 
@@ -346,7 +405,7 @@ Set issue status. Halted issues (pending board approval) cannot change status un
 - `identifier`: Issue identifier
 - `status`: New status
 
-### 14. add_issue_comment
+### 15. add_issue_comment
 
 Add a comment to an issue.
 
@@ -362,7 +421,7 @@ Add a comment to an issue.
 
 ### Goal Management Tools
 
-### 15. list_goals
+### 16. list_goals
 
 List goals in the company.
 
@@ -379,7 +438,7 @@ List goals in the company.
   - `createdAt`: ISO timestamp
   - `updatedAt`: ISO timestamp
 
-### 16. create_goal
+### 17. create_goal
 
 Create a new goal.
 
@@ -394,7 +453,7 @@ Create a new goal.
 - `title`: Goal title
 - `status`: Goal status
 
-### 17. set_goal_status
+### 18. set_goal_status
 
 Set goal status.
 
@@ -410,7 +469,7 @@ Set goal status.
 
 ### Project Management Tools
 
-### 18. list_projects
+### 19. list_projects
 
 List projects in the company.
 
@@ -428,7 +487,7 @@ List projects in the company.
   - `goalId`: Goal UUID
   - `goalTitle`: Goal title
 
-### 19. create_project
+### 20. create_project
 
 Create a new project.
 
@@ -445,7 +504,7 @@ Create a new project.
 - `status`: Project status
 - `goalId`: Goal UUID
 
-### 20. set_project_status
+### 21. set_project_status
 
 Set project status.
 
@@ -461,7 +520,7 @@ Set project status.
 
 ### Approval Management Tools
 
-### 21. list_approvals
+### 22. list_approvals
 
 List pending and recent board approvals.
 
@@ -483,7 +542,7 @@ List pending and recent board approvals.
   - `decidedAt`: ISO timestamp (or null)
   - `createdAt`: ISO timestamp
 
-### 22. decide_approval
+### 23. decide_approval
 
 Decide a pending board approval. Approval restores prior issue status; rejection leaves issues blocked. Issues must be manually cancelled via `set_issue_status` if needed after rejection.
 
@@ -501,7 +560,7 @@ Decide a pending board approval. Approval restores prior issue status; rejection
 
 ### Agent Wake Tools
 
-### 23. wake_agent
+### 24. wake_agent
 
 Trigger on-demand agent heartbeat. Returns error if a wake is already in flight for this agent.
 
