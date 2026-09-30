@@ -13,7 +13,7 @@
 **Two-Gate Provisioning Model:**
 
 1. **Company-level gate:** Company config/settings determine whether a company computer host/VM is provisioned for that company. No company computer = no agent GUI sessions for any agent in that company.
-2. **Agent-level gate:** Agent config (`hasComputer` or `company-computer` toolset) determines whether `/home/{agentId}` workspace is created on the company computer for that specific agent. Agent without this gate cannot use `computer*` tools even if company computer exists.
+2. **Agent-level gate:** Agent config field `hasComputer` (boolean) determines whether `/home/{agentId}` workspace is created on the company computer for that specific agent. The `company-computer` toolset does **not** bypass this gate — home creation requires `hasComputer === true` regardless of toolset assignment. Agent without `hasComputer` enabled cannot use `computer*` tools even if company computer exists.
 
 **Failure mode:** If company computer is not provisioned but an agent has `hasComputer` enabled, agent tool calls return clear error (e.g., "Company Computer not provisioned. Ask Board to enable at /settings/company-computer."). Agents must **not** provision private hosts or fall back to per-agent VMs. The company computer is either centrally provisioned or unavailable.
 
@@ -41,13 +41,15 @@
 
 **Scope:** Determines whether a specific agent gets `/home/{agentId}` workspace on the company computer.
 
-**Control:** Agent config field (`agents.hasComputer` boolean or `assignedToolsets` includes `company-computer`).
+**Control:** Agent config field `agents.hasComputer` (boolean). The `company-computer` toolset does **not** bypass this gate — home creation strictly requires `hasComputer === true`.
 
 **Effect:**
-- **Enabled:** When agent first calls a `computer*` tool, system creates `/home/{agentId}` on company computer (after verifying company gate satisfied). Agent can use GUI tools, persist state.
-- **Disabled:** Agent cannot create GUI sessions even if company computer exists. Tool calls return error: "Agent does not have Computer access. Ask Board to enable hasComputer on agent detail page." Board UX hides Computer panel for this agent.
+- **Enabled (`hasComputer === true`):** When agent first calls a `computer*` tool, system creates `/home/{agentId}` on company computer (after verifying company gate satisfied). Agent can use GUI tools, persist state.
+- **Disabled (`hasComputer === false` or null):** Agent cannot create GUI sessions or home directory even if company computer exists and toolset is assigned. Tool calls return error: "Agent does not have Computer access. Ask Board to enable hasComputer on agent detail page." Board UX hides Computer panel for this agent.
 
-**Board action:** Board edits agent on agent detail page, enables "Computer Access" or "Company Computer" capability (checkbox or toggle). To revoke access, Board disables capability; system archives or deletes `/home/{agentId}` according to chosen teardown semantics (documented in implementation).
+**Board action:** Board edits agent on agent detail page, enables "Computer Access" or "hasComputer" capability (checkbox or toggle). To revoke access, Board disables capability; system archives or deletes `/home/{agentId}` according to chosen teardown semantics (documented in implementation).
+
+**Toolset relationship:** The `company-computer` toolset (if it exists as a Tier 2 boolean toolset) may control which Computer tools are available to the agent, but it does **not** create `/home/{agentId}` or bypass the `hasComputer` gate. Home provisioning is gated solely by `hasComputer` field.
 
 ### Ordering and Cascade
 
@@ -79,7 +81,9 @@ Agents with Company Computer access (agent has `hasComputer` enabled **and** com
 
 **Gating:** Both gates must be satisfied:
 1. **Company gate:** Company computer host/VM provisioned for the company (Board action at `/settings/company-computer`)
-2. **Agent gate:** Agent `hasComputer` enabled or `company-computer` toolset assigned (Board action on agent detail page)
+2. **Agent gate:** Agent `hasComputer === true` (Board action on agent detail page)
+
+The `company-computer` toolset (if implemented) does **not** bypass the agent gate — home creation and Computer access require `hasComputer === true` regardless of toolset assignment.
 
 If company computer is not provisioned, agent tool calls return error regardless of agent gate. Board must provision company computer first.
 
@@ -237,13 +241,13 @@ Board members connect to **any agent's session** via the web UI. The noVNC/Selki
 
 ### US-CC2: Agent Uses Browser (Agent-Level Gate)
 
-**As an** agent with `hasComputer` enabled (and company computer provisioned)  
+**As an** agent with `hasComputer === true` (and company computer provisioned)  
 **I want** to open a browser and search the web  
 **So that** I can research a task
 
 **Acceptance:**
 - **Precondition:** Company computer is provisioned (company-level gate satisfied)
-- **Precondition:** Agent `hasComputer` enabled or `company-computer` toolset assigned (agent-level gate satisfied)
+- **Precondition:** Agent `hasComputer === true` (agent-level gate satisfied; toolset assignment alone does not satisfy this gate)
 - Agent calls `computerOpenBrowser(url)` tool → spawns `firefox` on agent's display in `/home/{agentId}` workspace
 - Agent calls `computerScreenshot()` → returns base64 PNG of current desktop
 - Agent calls `computerClick(x, y)` → sends mouse click to agent's display
@@ -257,13 +261,13 @@ Board members connect to **any agent's session** via the web UI. The noVNC/Selki
 
 ### US-CC3: Agent Uses File Manager (Agent-Level Gate, Natural on A)
 
-**As an** agent with `hasComputer` enabled (and company computer provisioned)  
+**As an** agent with `hasComputer === true` (and company computer provisioned)  
 **I want** to open a file manager GUI  
 **So that** I can browse company workspace visually
 
 **Acceptance:**
 - **Precondition:** Company computer is provisioned (company-level gate satisfied)
-- **Precondition:** Agent `hasComputer` enabled or `company-computer` toolset assigned (agent-level gate satisfied)
+- **Precondition:** Agent `hasComputer === true` (agent-level gate satisfied; toolset assignment alone does not satisfy this gate)
 - Agent calls `computerOpenFileManager(path)` → spawns `thunar` or `nautilus` on agent's display
 - Agent sees directory tree, can navigate folders via clicks (company workspace `/company` and agent home `/home/{agentId}`)
 - Agent can drag/drop files (detectable via screenshots)
@@ -272,13 +276,13 @@ Board members connect to **any agent's session** via the web UI. The noVNC/Selki
 
 ### US-CC4: Agent Uses Shell in Desktop (Agent-Level Gate)
 
-**As an** agent with `hasComputer` enabled (and company computer provisioned)  
+**As an** agent with `hasComputer === true` (and company computer provisioned)  
 **I want** to open a terminal emulator in the desktop  
 **So that** I can run commands interactively
 
 **Acceptance:**
 - **Precondition:** Company computer is provisioned (company-level gate satisfied)
-- **Precondition:** Agent `hasComputer` enabled or `company-computer` toolset assigned (agent-level gate satisfied)
+- **Precondition:** Agent `hasComputer === true` (agent-level gate satisfied; toolset assignment alone does not satisfy this gate)
 - Agent calls `computerOpenTerminal()` → spawns `xfce4-terminal` on agent's display with CWD `/home/{agentId}`
 - Agent can type commands, see output via screenshots
 - Shell session persists (history in `/home/{agentId}/.bash_history`, environment variables) across heartbeats
@@ -300,16 +304,16 @@ This is **the destination for US-CC5 / Board live-view** for option A (noVNC/Sel
 1. **Default after agent exists = chat** (not Overview/config). When Board navigates to an agent, they land in chat view first.
 2. **Agent config** (Overview, settings, capabilities) = navigate / modal / popup off that chat default — **not the primary chrome**. Configuration is secondary to the conversation.
 3. **Computer panel** = optional layouts:
-   - **Hidden** — Computer tab not visible (company computer not provisioned **OR** agent `hasComputer` disabled **OR** Board closed it)
+   - **Hidden** — Computer tab not visible (company computer not provisioned **OR** agent `hasComputer !== true` **OR** Board closed it)
    - **Side-by-side with chat** — Computer panel alongside chat (Grok Bot–style split view; default when visible and both gates satisfied)
    - **Full screen** — Computer panel fills viewport (Board clicked "full screen" toggle; chat minimized or hidden)
 
 **Acceptance:**
 - **Gate behavior:** Computer tab is visible **only when both gates satisfied**:
   1. Company computer is provisioned (company-level gate)
-  2. Agent `hasComputer` enabled (agent-level gate)
+  2. Agent `hasComputer === true` (agent-level gate; toolset alone does not satisfy)
 - If company computer not provisioned, Computer tab is hidden regardless of agent config. Placeholder or warning: "Company Computer not provisioned. Enable at /settings/company-computer."
-- If agent `hasComputer` disabled, Computer tab is hidden regardless of company config. Placeholder or warning: "Agent does not have Computer access. Enable in agent settings."
+- If agent `hasComputer !== true`, Computer tab is hidden regardless of company config and toolset assignment. Placeholder or warning: "Agent does not have Computer access. Enable hasComputer in agent settings."
 - Board chatting with agent (both gates satisfied) sees **Computer** tab in right panel (alongside Details/Media/other tabs)
 - Tab labeled "{Agent name}'s screen" or similar
 - Tab embeds noVNC client connected to agent's display on company computer
@@ -334,10 +338,10 @@ This is **the destination for US-CC5 / Board live-view** for option A (noVNC/Sel
 
 ### Create Session
 
-Triggered when an agent with `hasComputer` enabled first calls a `computer*` tool:
+Triggered when an agent with `hasComputer === true` first calls a `computer*` tool:
 
 1. **Verify company gate:** Check if company computer is provisioned (company settings or `company_computers` table). If not provisioned, return error: "Company Computer not provisioned. Ask Board to enable at /settings/company-computer."
-2. **Verify agent gate:** Check if agent `hasComputer` enabled or `company-computer` toolset assigned. If not, return error: "Agent does not have Computer access. Ask Board to enable hasComputer on agent detail page."
+2. **Verify agent gate:** Check if agent `hasComputer === true`. If not (false or null), return error: "Agent does not have Computer access. Ask Board to enable hasComputer on agent detail page." Toolset assignment alone does not satisfy this gate.
 3. **Create agent home directory** (if not exists): `mkdir -p /home/{agentId}` with ownership `agent-{agentId}:agent-{agentId}` and permissions `0750`. Seed with `.bashrc`, `.bash_profile` templates.
 4. Check if agent already has a display session (DB: `company_computer_sessions` table with `agentId`, `displayNumber`, `vncPort`, `pid`)
 5. If no session, allocate next free display (`:10`, `:11`, …)
@@ -556,15 +560,17 @@ Board views Company Computer **from the Tourbillon web app while chatting to the
 
 ## 9. Agent Tools — New Tourbillon Toolset
 
-**Toolset name:** `company-computer`
+**Toolset name:** `company-computer` (optional, see note)
 
 **Gating (Two Gates):**
-1. **Agent gate:** `assignedToolsets` includes `company-computer` **or** agent `hasComputer` config enabled (opt-in per agent, like `code-execution`)
+1. **Agent gate:** Agent `hasComputer === true` (required for home directory and session creation). The `company-computer` toolset does **not** bypass this gate.
 2. **Company gate:** Company computer is provisioned (company settings or `company_computers` table row exists for `companyId`)
 
-**Both gates must be satisfied** for tool calls to succeed. If company gate not satisfied, tool calls return: "Company Computer not provisioned. Ask Board to enable at /settings/company-computer." If agent gate not satisfied, tool calls return: "Agent does not have Computer access. Ask Board to enable hasComputer on agent detail page."
+**Both gates must be satisfied** for tool calls to succeed. If company gate not satisfied, tool calls return: "Company Computer not provisioned. Ask Board to enable at /settings/company-computer." If agent gate not satisfied (hasComputer !== true), tool calls return: "Agent does not have Computer access. Ask Board to enable hasComputer on agent detail page."
 
-**Tools** (Tier 2 boolean toolset):
+**Toolset relationship (implementation choice):** If `company-computer` is implemented as a Tier 2 boolean toolset, it may control which Computer tools are available to the agent (e.g., browser vs terminal vs file manager), but it does **not** create `/home/{agentId}` or bypass the `hasComputer` gate. Home provisioning and Computer access are gated solely by `hasComputer === true`. Alternatively, implementation may skip the toolset entirely and gate all Computer tools directly via `hasComputer` field (simpler model).
+
+**Tools** (Computer capabilities):
 
 | Tool | Parameters | Returns | Description |
 |---|---|---|---|
@@ -687,8 +693,8 @@ None of these are MVP. Defer GPU until post-MVP.
 
 - [ ] New package: `packages/company-computer/` (session manager, VNC proxy, cgroup setup, home directory management)
 - [ ] DB migration: `company_computers` table (company-level provisioning state) + `company_computer_sessions` table (agent sessions)
-- [ ] DB migration: `agents.hasComputer` field (agent-level gate) or extend `assignedToolsets` usage
-- [ ] New toolset: `company-computer` in `role-tools.ts` with two-gate verification (company provisioned + agent `hasComputer`)
+- [ ] DB migration: `agents.hasComputer` field (agent-level gate, required for home creation; toolset does not bypass)
+- [ ] Computer tools: Implement in `role-tools.ts` or control-plane with two-gate verification (company provisioned + agent `hasComputer === true`). Toolset (if used) may control tool availability but does not bypass `hasComputer` gate.
 - [ ] API routes: `/api/internal/company-computer/*` (all routes verify both gates before proceeding)
 - [ ] API routes: `/api/settings/company-computer` (provision, deprovision, status check)
 - [ ] Skill file: `company-computer-skills.md` (documents two-gate model and error messages)
@@ -704,8 +710,8 @@ None of these are MVP. Defer GPU until post-MVP.
 - [ ] Create test company "Demo Corp"
 - [ ] **Gate Test 1 (Company Gate):** Verify company computer not provisioned → agent tool calls fail with clear error
 - [ ] **Gate Test 2 (Company Provision):** Provision company computer for Demo Corp via `/settings/company-computer`
-- [ ] Create test agent "TestBot" with `company-computer` toolset or `hasComputer` enabled
-- [ ] **Gate Test 3 (Agent Gate):** Create second agent "TestBot2" with `hasComputer` disabled → verify tool calls fail with clear error, Computer tab hidden
+- [ ] Create test agent "TestBot" with `hasComputer === true` enabled
+- [ ] **Gate Test 3 (Agent Gate):** Create second agent "TestBot2" with `hasComputer` disabled (false or null) → verify tool calls fail with clear error, Computer tab hidden (even if toolset assigned)
 - [ ] **Gate Test 4 (Both Gates Satisfied):** TestBot (hasComputer enabled, company provisioned) assigns issue: "Research Tourbillon competitors via Google"
 - [ ] TestBot calls `computerOpenBrowser`, searches, screenshots results, posts to issue
 - [ ] Verify `/home/testbot` directory exists on company computer with correct permissions
@@ -808,11 +814,11 @@ OnFailure=notify-board-session-oom@%n.service
 
 - **Existing code execution:** See `packages/mastra/src/execution-workspace.ts` and `packages/mastra/src/skills/code-execution-skills.md` for LocalSandbox / bwrap implementation. Company Computer is a **sibling feature**, not a replacement. Both coexist:
   - **LocalSandbox (code-execution toolset):** Ephemeral per-issue shell command execution, no GUI, bwrap/seatbelt isolation.
-  - **Company Computer (company-computer toolset):** Durable per-company GUI environment, agent display sessions, X11/VNC.
+  - **Company Computer (`hasComputer` field):** Durable per-company GUI environment, agent display sessions, X11/VNC. Home creation gated by `hasComputer` field (not toolset).
 
 - **Tourbillon architecture:** See `docs/architecture.md` for system overview, tool tiers, agent identity, wake loop.
 
-- **Agent toolsets:** See AGENTS.md § Tool Tiers for how `assignedToolsets` gates Tier 2 boolean toolsets like `code-execution`, `web-search`, `comments`. `company-computer` follows same pattern.
+- **Agent toolsets:** See AGENTS.md § Tool Tiers for how `assignedToolsets` gates Tier 2 boolean toolsets like `code-execution`, `web-search`, `comments`. If `company-computer` is implemented as a toolset, it may control tool availability but does **not** gate home creation — that requires `hasComputer === true`.
 
 ---
 
