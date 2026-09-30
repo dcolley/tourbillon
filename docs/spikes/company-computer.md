@@ -1,7 +1,8 @@
 # Company Computer Spike
 
 **Status:** DRAFT — Option A locked (2026-09-30 Derek/PM)  
-**Gating:** ACCEPT/HOLD draft only; HOLD per-agent VMs / shared display / bwrap-as-desktop
+**Gating:** ACCEPT/HOLD draft only; HOLD per-agent VMs / shared display / bwrap-as-desktop  
+**Product Lock:** Two-gate model (2026-09-30 Derek/PM) — company config gates host provision; agent config gates agent home
 
 ---
 
@@ -9,7 +10,59 @@
 
 **Company Computer** provides a durable, shared Linux desktop environment per company where Tourbillon agents can drive GUI applications (browser, file manager, shell) and the Board can watch/help in real-time. This is **option A: full desktop remote** — a single Linux host/VM per company running a lightweight desktop environment (XFCE/GNOME lite) with noVNC / Kasm / Selkies web-based access.
 
+**Two-Gate Provisioning Model:**
+
+1. **Company-level gate:** Company config/settings determine whether a company computer host/VM is provisioned for that company. No company computer = no agent GUI sessions for any agent in that company.
+2. **Agent-level gate:** Agent config (`hasComputer` or `company-computer` toolset) determines whether `/home/{agentId}` workspace is created on the company computer for that specific agent. Agent without this gate cannot use `computer*` tools even if company computer exists.
+
+**Failure mode:** If company computer is not provisioned but an agent has `hasComputer` enabled, agent tool calls return clear error (e.g., "Company Computer not provisioned. Ask Board to enable at /settings/company-computer."). Agents must **not** provision private hosts or fall back to per-agent VMs. The company computer is either centrally provisioned or unavailable.
+
 **Outcome:** Agents gain persistent GUI capability for tasks requiring visual interfaces (web research, admin dashboards, file browsing), while Board members can observe agent actions live and intervene when needed. The company computer complements the existing **LocalSandbox / bwrap code execution** — it does not replace it. Code execution remains per-issue ephemeral; Company Computer provides a shared, durable GUI environment.
+
+---
+
+## 0. Two-Gate Provisioning Model (Product Lock 2026-09-30)
+
+### Gate 1: Company-Level Provisioning
+
+**Scope:** Determines whether a company computer host/VM exists for the entire company.
+
+**Control:** Company settings (e.g., `/settings/company-computer` page) or DB field (`companies.computerEnabled` or `company_computers` table row).
+
+**Effect:**
+- **Enabled:** Company computer host/VM is provisioned. Agents with `hasComputer` can create GUI sessions.
+- **Disabled:** No company computer host exists. All agent `computer*` tool calls return error regardless of agent-level config. Board UX hides Computer panel on all agent detail pages.
+
+**Board action:** Board visits `/settings/company-computer` and clicks "Provision" (or "Enable Company Computer"). System provisions Linux host/VM (or marks metaspan TEST as company's host). Board can also deprovision (destroys host and archives/deletes all agent homes with confirmation dialog).
+
+**Failure mode:** If company computer not provisioned, agents with `hasComputer` enabled receive clear error message. Agents must **not** provision private VMs or fall back to per-agent hosts. The company computer is either centrally provisioned or unavailable.
+
+### Gate 2: Agent-Level Home Directory
+
+**Scope:** Determines whether a specific agent gets `/home/{agentId}` workspace on the company computer.
+
+**Control:** Agent config field (`agents.hasComputer` boolean or `assignedToolsets` includes `company-computer`).
+
+**Effect:**
+- **Enabled:** When agent first calls a `computer*` tool, system creates `/home/{agentId}` on company computer (after verifying company gate satisfied). Agent can use GUI tools, persist state.
+- **Disabled:** Agent cannot create GUI sessions even if company computer exists. Tool calls return error: "Agent does not have Computer access. Ask Board to enable hasComputer on agent detail page." Board UX hides Computer panel for this agent.
+
+**Board action:** Board edits agent on agent detail page, enables "Computer Access" or "Company Computer" capability (checkbox or toggle). To revoke access, Board disables capability; system archives or deletes `/home/{agentId}` according to chosen teardown semantics (documented in implementation).
+
+### Ordering and Cascade
+
+**Ordering constraint:** Company provisioning precedes agent home creation. Implementation flow:
+
+1. **Company provisioning** (Board at `/settings/company-computer` → Provision)
+2. **Agent home creation** (agent with `hasComputer` calls `computer*` tool → system creates `/home/{agentId}` on provisioned host)
+
+**Cascade on company deprovision:** Deprovisioning company computer destroys all agent sessions and archives/deletes all `/home/{agentId}` directories. Board must confirm data loss before proceeding. Activity log entry records cascade.
+
+**Cascade on agent disable:** Disabling agent `hasComputer` destroys that agent's session and archives/deletes `/home/{agentId}`. Does **not** provision private VM for that agent (no orphan agent hosts).
+
+### Test Gate (MVP-0 Implement Blocker)
+
+**Gate for Test acceptance:** Implement PRs that provision company computer **without** checking company-level config, or create agent homes **without** checking agent `hasComputer`, will be **HELD by Test**. Spike and US-CC stories document these gates as acceptance criteria. Implementers must verify both gates in code before allowing provision/session-create operations.
 
 ---
 
@@ -17,12 +70,18 @@
 
 ### Agent Capabilities
 
-Agents with Company Computer access can:
+Agents with Company Computer access (agent has `hasComputer` enabled **and** company computer is provisioned) can:
 - Browse the web (research, form filling, admin dashboards)
 - Navigate the company filesystem via GUI file manager
 - Run interactive shell sessions with persistent state
 - Use visual tools (text editors, image viewers, diff tools)
 - Leave work in progress across heartbeats (browser tabs, file manager state)
+
+**Gating:** Both gates must be satisfied:
+1. **Company gate:** Company computer host/VM provisioned for the company (Board action at `/settings/company-computer`)
+2. **Agent gate:** Agent `hasComputer` enabled or `company-computer` toolset assigned (Board action on agent detail page)
+
+If company computer is not provisioned, agent tool calls return error regardless of agent gate. Board must provision company computer first.
 
 ### Board Capabilities
 
@@ -51,23 +110,41 @@ Both coexist. Agents use LocalSandbox for fast ephemeral scripting and Company C
 
 ### Per-Company Compute + Disk
 
-One Linux host/VM per company:
+One Linux host/VM per company (when company computer is provisioned):
 - Shared CPU, RAM, disk
 - Shared company workspace filesystem (`/company`)
 - Shared browser profile storage (bookmarks, history — unless explicitly private)
 - Shared `/tmp` by default (per-agent subdirs optional)
 
+**Provisioning order:** Company computer host must be provisioned (via Board action at `/settings/company-computer`) before any per-agent homes are created. Agents with `hasComputer` enabled on a company without provisioned computer cannot create GUI sessions or private hosts.
+
+### Per-Agent Home Directory
+
+Each agent with `hasComputer` enabled gets a home directory on the company computer:
+- Location: `/home/{agentId}` (or `/company/agents/{agentUrlKey}/` — implementation choice)
+- Created when agent first calls a `computer*` tool (after verifying company computer exists)
+- Persists across heartbeats and agent sessions
+- Contains agent-private config (`.bashrc`, `.mozilla/`, `.cache/`)
+- File permissions: agent user owns directory; other agents cannot read/write without explicit ACLs
+
+**Agent-level teardown:** When `hasComputer` is disabled for an agent:
+- **Safe option (recommended):** Archive `/home/{agentId}` to `/archive/{agentId}-{timestamp}.tar.gz` and remove from active filesystem. Board can restore if needed.
+- **Destructive option:** Delete `/home/{agentId}` entirely (data loss; acceptable if explicitly documented in UI).
+- **No orphan VMs:** Disabling `hasComputer` does **not** provision a private VM for that agent. Agent loses GUI access; must re-enable `hasComputer` or use non-GUI tools only.
+
 ### Per-Agent GUI Session
 
-Each agent gets an isolated display session:
+Each agent with `hasComputer` gets an isolated display session (when company computer is provisioned):
 - Unique `DISPLAY` (`:10`, `:11`, …) or Wayland socket
 - Separate window manager state (agent A's windows are invisible to agent B)
 - Separate browser session (cookies, localStorage) unless explicitly shared
 - Separate clipboard (no cross-agent paste unless Board intervenes)
 
-### Optional Agent-Private Directories
+### Optional Agent-Private Directories (Legacy)
 
 Per-agent private directories under `/company/agents/{agentUrlKey}/private/` for secrets or drafts not meant for other agents. Controlled by file permissions (agent user can read/write; other agent users cannot).
+
+**Note:** This is superseded by `/home/{agentId}` model above. Implementation may consolidate to `/home/{agentId}` only.
 
 ### Board Access
 
@@ -142,57 +219,73 @@ Board members connect to **any agent's session** via the web UI. The noVNC/Selki
 
 ## 4. Thin Vertical Slice — MVP-0 User Stories
 
-### US-CC1: Provision Company Computer
+### US-CC1: Provision Company Computer (Company-Level Gate)
 
 **As a** Board member  
-**I want** to provision a Company Computer for my company  
-**So that** agents can access GUI tools
+**I want** to provision a Company Computer host/VM for my company  
+**So that** agents with `hasComputer` can access GUI tools
 
 **Acceptance:**
 - Board visits `/settings/company-computer` and clicks "Provision"
 - System provisions a Linux VM/container (or marks metaspan TEST as company's host)
 - Displays company computer status: "Ready" + resource limits (RAM, CPU caps)
 - No auto-provision — Board must explicitly enable
+- **Gate behavior:** Until provisioned, no agent can create GUI sessions even if agent `hasComputer` is enabled. Agent tool calls return error: "Company Computer not provisioned. Ask Board to enable at /settings/company-computer."
+- **Idempotent provision:** If already provisioned, "Provision" button shows "Already Provisioned" or "Re-provision" (recreate host). Existing agent homes are preserved or explicitly warned about data loss.
 
-### US-CC2: Agent Uses Browser
+**Test Gate (MVP-0 Implement):** Implement PRs that provision a company computer **without** checking company-level config/flag will be HELD. The provision flow must verify company settings allow provisioning. Spike/US-CC must document this gate so implementers inherit the constraint.
 
-**As an** agent with `company-computer` toolset enabled  
+### US-CC2: Agent Uses Browser (Agent-Level Gate)
+
+**As an** agent with `hasComputer` enabled (and company computer provisioned)  
 **I want** to open a browser and search the web  
 **So that** I can research a task
 
 **Acceptance:**
-- Agent calls `computerOpenBrowser(url)` tool → spawns `firefox` on agent's display
+- **Precondition:** Company computer is provisioned (company-level gate satisfied)
+- **Precondition:** Agent `hasComputer` enabled or `company-computer` toolset assigned (agent-level gate satisfied)
+- Agent calls `computerOpenBrowser(url)` tool → spawns `firefox` on agent's display in `/home/{agentId}` workspace
 - Agent calls `computerScreenshot()` → returns base64 PNG of current desktop
 - Agent calls `computerClick(x, y)` → sends mouse click to agent's display
 - Agent calls `computerTypeText(text)` → sends keyboard input to agent's display
 - Agent can navigate browser, read rendered content via screenshots
-- Browser state persists across heartbeats (tabs remain open)
+- Browser state persists across heartbeats (tabs remain open in `/home/{agentId}/.mozilla/`)
+- **Gate failure:** If company computer not provisioned, tool returns error: "Company Computer not provisioned. Ask Board to enable at /settings/company-computer." Agent cannot proceed.
+- **Gate failure:** If agent `hasComputer` disabled, tool returns error: "Agent does not have Computer access. Ask Board to enable hasComputer on agent detail page." Agent cannot proceed.
 
-### US-CC3: Agent Uses File Manager (Natural on A)
+**Test Gate (MVP-0 Implement):** Implement PRs that create agent homes (`/home/{agentId}`) or GUI sessions **without** checking agent `hasComputer` config will be HELD. The agent tool flow must verify agent settings allow computer access. Spike/US-CC must document this gate so implementers inherit the constraint.
 
-**As an** agent with `company-computer` toolset enabled  
+### US-CC3: Agent Uses File Manager (Agent-Level Gate, Natural on A)
+
+**As an** agent with `hasComputer` enabled (and company computer provisioned)  
 **I want** to open a file manager GUI  
 **So that** I can browse company workspace visually
 
 **Acceptance:**
+- **Precondition:** Company computer is provisioned (company-level gate satisfied)
+- **Precondition:** Agent `hasComputer` enabled or `company-computer` toolset assigned (agent-level gate satisfied)
 - Agent calls `computerOpenFileManager(path)` → spawns `thunar` or `nautilus` on agent's display
-- Agent sees directory tree, can navigate folders via clicks
+- Agent sees directory tree, can navigate folders via clicks (company workspace `/company` and agent home `/home/{agentId}`)
 - Agent can drag/drop files (detectable via screenshots)
-- File manager state persists (last visited directory remembered)
+- File manager state persists (last visited directory remembered in `/home/{agentId}/.config/`)
+- **Gate failure:** If company computer not provisioned or agent `hasComputer` disabled, tool returns same errors as US-CC2
 
-### US-CC4: Agent Uses Shell in Desktop
+### US-CC4: Agent Uses Shell in Desktop (Agent-Level Gate)
 
-**As an** agent with `company-computer` toolset enabled  
+**As an** agent with `hasComputer` enabled (and company computer provisioned)  
 **I want** to open a terminal emulator in the desktop  
 **So that** I can run commands interactively
 
 **Acceptance:**
-- Agent calls `computerOpenTerminal()` → spawns `xfce4-terminal` on agent's display
+- **Precondition:** Company computer is provisioned (company-level gate satisfied)
+- **Precondition:** Agent `hasComputer` enabled or `company-computer` toolset assigned (agent-level gate satisfied)
+- Agent calls `computerOpenTerminal()` → spawns `xfce4-terminal` on agent's display with CWD `/home/{agentId}`
 - Agent can type commands, see output via screenshots
-- Shell session persists (history, environment variables) across heartbeats
+- Shell session persists (history in `/home/{agentId}/.bash_history`, environment variables) across heartbeats
 - Agent can run long-running processes (tail, watch) that survive heartbeat completion
+- **Gate failure:** If company computer not provisioned or agent `hasComputer` disabled, tool returns same errors as US-CC2
 
-### US-CC5: Board Live View (Natural on A)
+### US-CC5: Board Live View (Two-Gate UX, Natural on A)
 
 **As a** Board member  
 **I want** to watch an agent's desktop in real-time while chatting with the agent  
@@ -207,21 +300,33 @@ This is **the destination for US-CC5 / Board live-view** for option A (noVNC/Sel
 1. **Default after agent exists = chat** (not Overview/config). When Board navigates to an agent, they land in chat view first.
 2. **Agent config** (Overview, settings, capabilities) = navigate / modal / popup off that chat default — **not the primary chrome**. Configuration is secondary to the conversation.
 3. **Computer panel** = optional layouts:
-   - **Hidden** — Computer tab not visible (agent has no `company-computer` toolset, or Board closed it)
-   - **Side-by-side with chat** — Computer panel alongside chat (Grok Bot–style split view; default when visible)
+   - **Hidden** — Computer tab not visible (company computer not provisioned **OR** agent `hasComputer` disabled **OR** Board closed it)
+   - **Side-by-side with chat** — Computer panel alongside chat (Grok Bot–style split view; default when visible and both gates satisfied)
    - **Full screen** — Computer panel fills viewport (Board clicked "full screen" toggle; chat minimized or hidden)
 
 **Acceptance:**
-- Board chatting with agent sees **Computer** tab in right panel (alongside Details/Media/other tabs)
+- **Gate behavior:** Computer tab is visible **only when both gates satisfied**:
+  1. Company computer is provisioned (company-level gate)
+  2. Agent `hasComputer` enabled (agent-level gate)
+- If company computer not provisioned, Computer tab is hidden regardless of agent config. Placeholder or warning: "Company Computer not provisioned. Enable at /settings/company-computer."
+- If agent `hasComputer` disabled, Computer tab is hidden regardless of company config. Placeholder or warning: "Agent does not have Computer access. Enable in agent settings."
+- Board chatting with agent (both gates satisfied) sees **Computer** tab in right panel (alongside Details/Media/other tabs)
 - Tab labeled "{Agent name}'s screen" or similar
-- Tab embeds noVNC client connected to agent's display
+- Tab embeds noVNC client connected to agent's display on company computer
 - Board sees agent's screen update in real-time (1-2 sec latency acceptable)
 - Board can optionally click "Take Control" to send input (shared mouse/keyboard)
 - Computer panel is contextual — shows the agent currently being chatted with
-- Computer panel supports three layout modes: hidden, side-by-side (default), full screen
+- Computer panel supports three layout modes: hidden (gates not satisfied or Board closed), side-by-side (default when visible), full screen
 - Agent config (Overview, settings) is accessible but not the default landing view
 
-**"Done" for MVP-0:** CC1 provision → CC2 browser → CC4 shell working on Demo/TEST metaspan. CC3 file manager and CC5 Board live view are natural on option A but not strict MVP-0 blockers.
+**Test Gate (MVP-0 Implement):** Implement PRs that display Computer panel without verifying both gates (company provisioned AND agent hasComputer) will be HELD. The UI must check both conditions before showing noVNC embed. Spike/US-CC must document this gate so implementers inherit the constraint.
+
+**"Done" for MVP-0:** 
+- CC1 company provision (company-level gate) working on Demo/TEST metaspan
+- CC2 browser (agent-level gate) → agent with `hasComputer` on provisioned company computer can open browser
+- CC4 shell (agent-level gate) → agent with `hasComputer` can open terminal in `/home/{agentId}`
+- Both gates enforced in code: company provision check + agent `hasComputer` check before allowing tool calls or UI display
+- CC3 file manager and CC5 Board live view are natural on option A but not strict MVP-0 blockers (can be thinner/deferred)
 
 ---
 
@@ -229,14 +334,19 @@ This is **the destination for US-CC5 / Board live-view** for option A (noVNC/Sel
 
 ### Create Session
 
-Triggered when an agent with `company-computer` toolset first calls a `computer*` tool:
+Triggered when an agent with `hasComputer` enabled first calls a `computer*` tool:
 
-1. Check if agent already has a display session (DB: `company_computer_sessions` table with `agentId`, `displayNumber`, `vncPort`, `pid`)
-2. If no session, allocate next free display (`:10`, `:11`, …)
-3. Start X server: `Xvnc :10 -geometry 1920x1080 -depth 24 -rfbport 5910 -SecurityTypes None -AlwaysShared`
-4. Start window manager: `DISPLAY=:10 xfce4-session &`
-5. Record session in DB: `{ agentId, displayNumber: 10, vncPort: 5910, pid, createdAt }`
-6. Return session handle to agent tool
+1. **Verify company gate:** Check if company computer is provisioned (company settings or `company_computers` table). If not provisioned, return error: "Company Computer not provisioned. Ask Board to enable at /settings/company-computer."
+2. **Verify agent gate:** Check if agent `hasComputer` enabled or `company-computer` toolset assigned. If not, return error: "Agent does not have Computer access. Ask Board to enable hasComputer on agent detail page."
+3. **Create agent home directory** (if not exists): `mkdir -p /home/{agentId}` with ownership `agent-{agentId}:agent-{agentId}` and permissions `0750`. Seed with `.bashrc`, `.bash_profile` templates.
+4. Check if agent already has a display session (DB: `company_computer_sessions` table with `agentId`, `displayNumber`, `vncPort`, `pid`)
+5. If no session, allocate next free display (`:10`, `:11`, …)
+6. Start X server: `Xvnc :10 -geometry 1920x1080 -depth 24 -rfbport 5910 -SecurityTypes None -AlwaysShared` (runs as `agent-{agentId}` user, `HOME=/home/{agentId}`)
+7. Start window manager: `DISPLAY=:10 HOME=/home/{agentId} xfce4-session &`
+8. Record session in DB: `{ agentId, displayNumber: 10, vncPort: 5910, pid, homeDirectory: '/home/{agentId}', createdAt }`
+9. Return session handle to agent tool
+
+**Ordering constraint:** Company computer must be provisioned (step 1) before any agent homes are created (step 3). Implementation must enforce this ordering in code.
 
 ### Resume Session
 
@@ -249,12 +359,22 @@ When agent calls `computer*` tool and session exists:
 
 ### Destroy Session
 
-Triggered by Board action or agent calls `computerCloseSession()`:
+Triggered by Board action, agent calls `computerCloseSession()`, or agent `hasComputer` disabled:
 
 1. Kill VNC server process (`kill $pid`)
 2. Kill window manager and all child processes (`pkill -TERM -s $sessionId`)
 3. Clean up `/tmp/.X10-lock` and display socket
 4. Delete session row from DB
+
+**Agent home directory teardown** (when agent `hasComputer` is disabled):
+- **Safe option (recommended):** Archive `/home/{agentId}` to `/archive/{agentId}-{timestamp}.tar.gz` on company computer or S3. Remove from active filesystem. Board can restore if needed.
+- **Destructive option:** Delete `/home/{agentId}` entirely (data loss; acceptable if explicitly documented in UI with confirmation dialog).
+- **Implementation choice:** Document chosen semantics in `packages/company-computer/` README and UI warning text.
+
+**Company computer deprovision cascade:**
+- When company computer is deprovisioned (Board action at `/settings/company-computer`), all agent sessions are destroyed and all `/home/{agentId}` directories are archived or deleted according to chosen teardown semantics.
+- Board must confirm: "Deprovisioning will archive/delete all agent homes. Proceed?" before executing.
+- Activity log entry: "Company Computer deprovisioned. N agent homes archived to /archive/company-{companyId}-{timestamp}.tar.gz."
 
 ### Idle Hibernate (Post-MVP)
 
@@ -438,7 +558,11 @@ Board views Company Computer **from the Tourbillon web app while chatting to the
 
 **Toolset name:** `company-computer`
 
-**Gating:** `assignedToolsets` includes `company-computer` (opt-in per agent, like `code-execution`)
+**Gating (Two Gates):**
+1. **Agent gate:** `assignedToolsets` includes `company-computer` **or** agent `hasComputer` config enabled (opt-in per agent, like `code-execution`)
+2. **Company gate:** Company computer is provisioned (company settings or `company_computers` table row exists for `companyId`)
+
+**Both gates must be satisfied** for tool calls to succeed. If company gate not satisfied, tool calls return: "Company Computer not provisioned. Ask Board to enable at /settings/company-computer." If agent gate not satisfied, tool calls return: "Agent does not have Computer access. Ask Board to enable hasComputer on agent detail page."
 
 **Tools** (Tier 2 boolean toolset):
 
@@ -550,33 +674,46 @@ None of these are MVP. Defer GPU until post-MVP.
 
 ### Phase 2: Proof-of-Concept (Separate Branch)
 
-- [ ] Provision single Ubuntu VM on metaspan TEST with XFCE + x11vnc
-- [ ] Implement `computerOpenBrowser` + `computerScreenshot` tools
-- [ ] Test: Agent calls `computerOpenBrowser('https://example.com')`, takes screenshot, includes in issue comment
+- [ ] Implement company-level provisioning gate (company settings + DB schema for `company_computers` or `companies.computerEnabled`)
+- [ ] Provision single Ubuntu VM on metaspan TEST with XFCE + x11vnc (company-level provision flow)
+- [ ] Implement agent-level home creation gate (agent `hasComputer` config + `/home/{agentId}` creation on first tool call)
+- [ ] Implement `computerOpenBrowser` + `computerScreenshot` tools with two-gate verification
+- [ ] Test: Company provisioned → agent with `hasComputer` calls `computerOpenBrowser('https://example.com')`, takes screenshot, includes in issue comment
+- [ ] Test: Company not provisioned → agent with `hasComputer` calls tool → receives "Company Computer not provisioned" error
+- [ ] Test: Agent `hasComputer` disabled → agent calls tool → receives "Agent does not have Computer access" error
 - [ ] Validate cgroup RAM/CPU caps work (manually stress-test with 5 concurrent agent sessions)
 
 ### Phase 3: MVP Implementation (POST This PR)
 
-- [ ] New package: `packages/company-computer/` (session manager, VNC proxy, cgroup setup)
-- [ ] DB migration: `company_computer_sessions` table
-- [ ] New toolset: `company-computer` in `role-tools.ts`
-- [ ] API routes: `/api/internal/company-computer/*`
-- [ ] Skill file: `company-computer-skills.md`
-- [ ] UI: `/agent/{urlKey}/computer` tab with noVNC embed
-- [ ] UI: `/settings/company-computer` dashboard (provision, session list, resource usage)
-- [ ] Ops: Terraform/Ansible to provision company VMs with cgroups + quotas
-- [ ] Docs: Update AGENTS.md with Company Computer toolset and architecture
+- [ ] New package: `packages/company-computer/` (session manager, VNC proxy, cgroup setup, home directory management)
+- [ ] DB migration: `company_computers` table (company-level provisioning state) + `company_computer_sessions` table (agent sessions)
+- [ ] DB migration: `agents.hasComputer` field (agent-level gate) or extend `assignedToolsets` usage
+- [ ] New toolset: `company-computer` in `role-tools.ts` with two-gate verification (company provisioned + agent `hasComputer`)
+- [ ] API routes: `/api/internal/company-computer/*` (all routes verify both gates before proceeding)
+- [ ] API routes: `/api/settings/company-computer` (provision, deprovision, status check)
+- [ ] Skill file: `company-computer-skills.md` (documents two-gate model and error messages)
+- [ ] UI: Computer tab on agent detail page (chat-adjacent, hidden when gates not satisfied, shows noVNC embed when gates satisfied)
+- [ ] UI: `/settings/company-computer` dashboard (provision/deprovision with confirmation, session list, resource usage, agent home status)
+- [ ] UI: Agent detail page — "Computer Access" checkbox or toggle (agent-level gate) with warning about data loss on disable
+- [ ] Ops: Terraform/Ansible to provision company VMs with cgroups + quotas + agent home directory structure
+- [ ] Docs: Update AGENTS.md with Company Computer toolset, two-gate model, and architecture
 
 ### Phase 4: TEST Validation (HOLD Until Derek Approval)
 
 - [ ] Deploy to tourbillon-test.example.com
 - [ ] Create test company "Demo Corp"
-- [ ] Provision company computer for Demo Corp
-- [ ] Create test agent "TestBot" with `company-computer` toolset
-- [ ] Assign issue: "Research Tourbillon competitors via Google"
+- [ ] **Gate Test 1 (Company Gate):** Verify company computer not provisioned → agent tool calls fail with clear error
+- [ ] **Gate Test 2 (Company Provision):** Provision company computer for Demo Corp via `/settings/company-computer`
+- [ ] Create test agent "TestBot" with `company-computer` toolset or `hasComputer` enabled
+- [ ] **Gate Test 3 (Agent Gate):** Create second agent "TestBot2" with `hasComputer` disabled → verify tool calls fail with clear error, Computer tab hidden
+- [ ] **Gate Test 4 (Both Gates Satisfied):** TestBot (hasComputer enabled, company provisioned) assigns issue: "Research Tourbillon competitors via Google"
 - [ ] TestBot calls `computerOpenBrowser`, searches, screenshots results, posts to issue
-- [ ] Board watches TestBot's desktop via noVNC live view
-- [ ] Validate cgroup limits (create 10 agents, stress-test RAM/CPU)
+- [ ] Verify `/home/testbot` directory exists on company computer with correct permissions
+- [ ] Board watches TestBot's desktop via noVNC live view (Computer tab visible in chat UI)
+- [ ] **Gate Test 5 (Cascade):** Disable TestBot `hasComputer` → verify session destroyed, `/home/testbot` archived/deleted
+- [ ] **Gate Test 6 (Cascade):** Deprovision company computer → verify all sessions destroyed, all agent homes archived
+- [ ] Validate cgroup limits (create 10 agents with `hasComputer`, stress-test RAM/CPU)
+- [ ] Validate idempotent provision (re-provision company computer, verify existing agent homes preserved or warned about)
 
 ---
 
