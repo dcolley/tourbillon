@@ -195,14 +195,21 @@ Board members connect to **any agent's session** via the web UI. The noVNC/Selki
 ### US-CC5: Board Live View (Natural on A)
 
 **As a** Board member  
-**I want** to watch an agent's desktop in real-time  
-**So that** I can see what the agent is doing
+**I want** to watch an agent's desktop in real-time while chatting with the agent  
+**So that** I can see what the agent is doing and collaborate
+
+**UX Lock (Derek/PM 2026-09-30):**  
+Board views Company Computer **from the Tourbillon web app while chatting to the agent**. Right-hand (or equivalent) **Computer** tab next to chat, showing that agent's GUI session (browser + file manager + shell), labeled e.g. "**\<Agent\>'s screen**". Same feel as Grok Bot Details/Media/Computer.
+
+This is **the destination for US-CC5 / Board live-view** for option A (noVNC/Selkies embed of the agent's display). MVP-0 can be a thinner watch mode, but product intent is **chat-adjacent Computer panel**, not a separate desktop-only page.
 
 **Acceptance:**
-- Board visits `/agent/{urlKey}/computer` tab
-- Page embeds noVNC client connected to agent's display
+- Board chatting with agent sees **Computer** tab in right panel (alongside Details/Media/other tabs)
+- Tab labeled "{Agent name}'s screen" or similar
+- Tab embeds noVNC client connected to agent's display
 - Board sees agent's screen update in real-time (1-2 sec latency acceptable)
 - Board can optionally click "Take Control" to send input (shared mouse/keyboard)
+- Computer panel is contextual — shows the agent currently being chatted with
 
 **"Done" for MVP-0:** CC1 provision → CC2 browser → CC4 shell working on Demo/TEST metaspan. CC3 file manager and CC5 Board live view are natural on option A but not strict MVP-0 blockers.
 
@@ -359,14 +366,24 @@ Company Computer inherits company-scoped egress policy (`settings.egressPolicy`)
 
 ### UI Integration
 
-**Location:** New "Computer" tab on agent detail page (`/agent/{urlKey}/computer`)
+**UX Lock (Derek/PM 2026-09-30):**  
+Board views Company Computer **from the Tourbillon web app while chatting to the agent**. Right-hand (or equivalent) **Computer** tab next to chat (alongside Details/Media/other tabs), showing that agent's GUI session (browser + file manager + shell), labeled e.g. "**{Agent name}'s screen**". Same feel as Grok Bot Details/Media/Computer. This is the **chat-adjacent Computer panel** for option A (noVNC/Selkies embed).
+
+**Location:** **Computer** tab in right panel when chatting with agent (contextual to current agent conversation)
+
+**NOT:** Separate standalone page at `/agent/{urlKey}/computer`. The Computer view is embedded in the chat UI, not a separate navigation destination.
+
+**Label:** "{Agent name}'s screen" or "{Agent urlKey}'s desktop" — makes it clear whose GUI session is being viewed.
 
 **Embed:** iframe or native noVNC client JavaScript:
 
 ```html
 <!-- Simplified example -->
-<div id="vnc-container">
-  <canvas id="vnc-canvas"></canvas>
+<div id="computer-panel" class="chat-adjacent-tab">
+  <h3>CEO's screen</h3>
+  <div id="vnc-container">
+    <canvas id="vnc-canvas"></canvas>
+  </div>
 </div>
 <script src="/novnc/core/rfb.js"></script>
 <script>
@@ -379,6 +396,8 @@ Company Computer inherits company-scoped egress policy (`settings.egressPolicy`)
 ```
 
 **WebSocket proxy:** Tourbillon web app (`apps/web`) proxies `wss://tourbillon.example.com/vnc/{agentId}` to the agent's VNC port on the company VM (`ws://company-vm:5910`). Uses existing Better Auth session for authorization (Board member must be logged in and belong to the company).
+
+**MVP-0 thinner version:** Computer tab may initially be "screenshot refresh" mode (Board clicks Refresh → agent's latest `computerScreenshot()` displayed as static image) rather than full noVNC live stream. Full live-stream with noVNC is the product goal, but MVP-0 can ship with simpler "screenshot preview" if noVNC WebSocket proxy is not ready.
 
 ### Watch vs Take Control
 
@@ -434,6 +453,7 @@ Company Computer inherits company-scoped egress policy (`settings.egressPolicy`)
 - **Per-agent VMs:** One VM per company, not per agent. Agents share compute but have isolated display sessions. Per-agent VMs may be post-MVP for high-security companies (too expensive for MVP).
 - **Bwrap-as-desktop:** Do not repurpose LocalSandbox bwrap for GUI isolation. Bwrap is for ephemeral process sandboxing; Company Computer is for durable GUI sessions. Architecture mismatch.
 - **Managed desktop SaaS:** Do not bind to third-party SaaS (Windows 365, Amazon WorkSpaces, etc.) in MVP. Self-hosted Linux VM only. SaaS may be post-MVP for compliance-heavy customers.
+- **Separate desktop-only page:** Computer view is **not** a standalone page at `/agent/{urlKey}/computer`. It is a **chat-adjacent tab** (right panel) visible while chatting with the agent. Product intent: Board watches agent's screen in the same UI where they chat, not a separate navigation destination.
 - **TEST auto-deploy:** This spike/PR does **not** enable Company Computer on tourbillon-test.example.com. No runtime changes that pull to TEST without explicit Derek approval. This is docs-only.
 - **Session recording:** No built-in session replay (à la Kasm) in MVP. Board can manually screen-record via browser if needed. Audit logs are post-MVP compliance feature.
 - **GPU acceleration:** No GPU passthrough or Selkies in MVP. noVNC software rendering sufficient for CC1-CC4 stories. GPU is post-MVP for media-heavy tasks.
