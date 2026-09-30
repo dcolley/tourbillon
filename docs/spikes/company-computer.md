@@ -1,7 +1,8 @@
 # Company Computer Spike
 
 **Status:** DRAFT — Option A locked (2026-09-30 Derek/PM)  
-**Gating:** ACCEPT/HOLD draft only; HOLD per-agent VMs / shared display / bwrap-as-desktop
+**Gating:** ACCEPT/HOLD draft only; HOLD per-agent VMs / bwrap-as-desktop  
+**PoC Lock (2026-09-30 Derek):** One `kasmweb/desktop` container per agent on localhost Docker (TEST). Shared company files via host bind-mounts. Multi-seat / one-container-many-agents = non-goal.
 
 ---
 
@@ -49,29 +50,36 @@ Both coexist. Agents use LocalSandbox for fast ephemeral scripting and Company C
 
 ## 2. Isolation Model
 
-### Per-Company Compute + Disk
+### PoC Container Model (Derek Lock 2026-09-30)
 
-One Linux host/VM per company:
-- Shared CPU, RAM, disk
-- Shared company workspace filesystem (`/company`)
-- Shared browser profile storage (bookmarks, history — unless explicitly private)
-- Shared `/tmp` by default (per-agent subdirs optional)
+**One `kasmweb/desktop` container per agent** on the company Docker host (localhost TEST MVP):
+- Each agent gets a dedicated container with its own desktop environment
+- Containers share company files via **host bind-mounts** (`/data` and `/home` persist on TEST VM host filesystem)
+- Each container exposes its own KasmVNC port (`:6901`, `:6902`, …) for Board access
+- **Multi-seat / one-container-for-many-agents is a non-goal** — stock Kasmweb single-container multi-display not used
 
-### Per-Agent GUI Session
+**Persistence:** Company data survives container recreate via bind-mounts:
+- Host `/opt/tourbillon-company-{companyId}/data/` → container `/data/` (shared workspace, repos, documents)
+- Host `/opt/tourbillon-company-{companyId}/home/{agentUrlKey}/` → container `/home/kasm-user/` (per-agent home, browser profile, config)
 
-Each agent gets an isolated display session:
-- Unique `DISPLAY` (`:10`, `:11`, …) or Wayland socket
-- Separate window manager state (agent A's windows are invisible to agent B)
-- Separate browser session (cookies, localStorage) unless explicitly shared
-- Separate clipboard (no cross-agent paste unless Board intervenes)
+### Per-Agent Container Resources
 
-### Optional Agent-Private Directories
+Each agent container:
+- Dedicated CPU/RAM via Docker resource limits (`--memory=512m --cpus=0.5`)
+- Isolated desktop session (XFCE + Firefox + terminal)
+- Separate browser profile under container `/home/kasm-user/.mozilla/` (backed by host bind-mount for durability)
+- Unique KasmVNC listen port mapped to host
 
-Per-agent private directories under `/company/agents/{agentUrlKey}/private/` for secrets or drafts not meant for other agents. Controlled by file permissions (agent user can read/write; other agent users cannot).
+### Shared Company Filesystem
+
+Via bind-mounts, all agent containers see:
+- `/data/workspace/` — company Git repos, shared documents
+- `/data/agents/{agentUrlKey}/` — per-agent work directories (visible to other agents for collaboration)
+- `/data/agents/{agentUrlKey}/private/` — optional private directories (not enforced in PoC; file permissions in future)
 
 ### Board Access
 
-Board members connect to **any agent's session** via the web UI. The noVNC/Selkies URL targets that agent's display. Board sees exactly what that agent sees and can take shared control.
+Board members connect to **any agent's container** via the web UI. The live proxy targets that agent's KasmVNC port (`:6901` for first agent, `:6902` for second, etc.). Board sees exactly what that agent sees and can optionally take shared control (PoC: watch-only; control TBD).
 
 ---
 
@@ -94,7 +102,7 @@ Board members connect to **any agent's session** via the web UI. The noVNC/Selki
 - Moderate latency for interactive web browsing
 - Limited clipboard sync (requires helper daemon)
 
-**Default for Demo/TEST:** noVNC + XFCE4 on metaspan TEST. Rationale: lowest Ops risk, no GPU required, sufficient for MVP user stories (US-CC1 → CC2 → CC4).
+**Default for PoC/TEST (Derek Lock 2026-09-30):** `kasmweb/desktop:1.15.0` (Ubuntu 22.04 + XFCE + KasmVNC + Firefox) on localhost Docker (TEST VM). One container per agent. Company files persist via host bind-mounts (`/data`, `/home`). Rationale: proven desktop stack, persistence across container recreate, sufficient for MVP user stories (US-CC1 → CC2 → CC4).
 
 ### Option A2: Selkies (GPU-Capable)
 
@@ -134,9 +142,9 @@ Board members connect to **any agent's session** via the web UI. The noVNC/Selki
 
 **When to use:** Post-MVP if Board needs compliance features (session replay, SOC2 audit logs). Not required for thin vertical slice.
 
-### Recommended MVP Stack (metaspan TEST)
+### PoC Stack (metaspan TEST)
 
-**noVNC + XFCE4 + x11vnc** with per-agent display sessions (`:10`, `:11`, …). Embedded noVNC client served by Tourbillon web app at `/agent/{urlKey}/computer`.
+**`kasmweb/desktop` containers (one per agent)** with KasmVNC web UI. Tourbillon web app proxies agent's KasmVNC port via authenticated iframe/embed in Computer tab. Host bind-mounts for `/data` and `/home` persistence.
 
 ---
 
@@ -148,11 +156,11 @@ Board members connect to **any agent's session** via the web UI. The noVNC/Selki
 **I want** to provision a Company Computer for my company  
 **So that** agents can access GUI tools
 
-**Acceptance:**
+**Acceptance (PoC):**
 - Board visits `/settings/company-computer` and clicks "Provision"
-- System provisions a Linux VM/container (or marks metaspan TEST as company's host)
-- Displays company computer status: "Ready" + resource limits (RAM, CPU caps)
-- No auto-provision — Board must explicitly enable
+- System provisions bind-mount directories on TEST VM: `/opt/tourbillon-company-{companyId}/data/` and `/opt/tourbillon-company-{companyId}/home/`
+- Displays company computer status: "Ready" + resource limits
+- Board must explicitly enable (no auto-provision)
 
 ### US-CC2: Agent Uses Browser
 
@@ -201,7 +209,7 @@ Board members connect to **any agent's session** via the web UI. The noVNC/Selki
 **UX Lock (Derek/PM 2026-09-30):**  
 Board views Company Computer **from the Tourbillon web app while chatting to the agent**. Right-hand (or equivalent) **Computer** tab next to chat, showing that agent's GUI session (browser + file manager + shell), labeled e.g. "**\<Agent\>'s screen**". Same feel as Grok Bot Details/Media/Computer.
 
-This is **the destination for US-CC5 / Board live-view** for option A (noVNC/Selkies embed of the agent's display). MVP-0 can be a thinner watch mode, but product intent is **chat-adjacent Computer panel**, not a separate desktop-only page.
+This is **the destination for US-CC5 / Board live-view** for option A (**live KasmVNC embed/proxy** of the agent's container desktop, not screenshot refresh). Product intent is **chat-adjacent Computer panel**, not a separate desktop-only page.
 
 **Agent Detail Screen Layout (Derek/PM 2026-09-30):**
 1. **Default after agent exists = chat** (not Overview/config). When Board navigates to an agent, they land in chat view first.
@@ -211,12 +219,12 @@ This is **the destination for US-CC5 / Board live-view** for option A (noVNC/Sel
    - **Side-by-side with chat** — Computer panel alongside chat (Grok Bot–style split view; default when visible)
    - **Full screen** — Computer panel fills viewport (Board clicked "full screen" toggle; chat minimized or hidden)
 
-**Acceptance:**
+**Acceptance (PoC):**
 - Board chatting with agent sees **Computer** tab in right panel (alongside Details/Media/other tabs)
 - Tab labeled "{Agent name}'s screen" or similar
-- Tab embeds noVNC client connected to agent's display
-- Board sees agent's screen update in real-time (1-2 sec latency acceptable)
-- Board can optionally click "Take Control" to send input (shared mouse/keyboard)
+- Tab embeds **live KasmVNC iframe/proxy** connected to agent's container (Tourbillon auth proxy to `localhost:6901` etc.)
+- Board sees agent's screen update in real-time (sub-second latency via WebSocket/WebRTC)
+- Board can optionally click "Take Control" to send input (shared mouse/keyboard; PoC may be watch-only)
 - Computer panel is contextual — shows the agent currently being chatted with
 - Computer panel supports three layout modes: hidden, side-by-side (default), full screen
 - Agent config (Overview, settings) is accessible but not the default landing view
@@ -225,133 +233,145 @@ This is **the destination for US-CC5 / Board live-view** for option A (noVNC/Sel
 
 ---
 
-## 5. Session Lifecycle
+## 5. Session Lifecycle (PoC Container Model)
 
-### Create Session
+### Create Container
 
 Triggered when an agent with `company-computer` toolset first calls a `computer*` tool:
 
-1. Check if agent already has a display session (DB: `company_computer_sessions` table with `agentId`, `displayNumber`, `vncPort`, `pid`)
-2. If no session, allocate next free display (`:10`, `:11`, …)
-3. Start X server: `Xvnc :10 -geometry 1920x1080 -depth 24 -rfbport 5910 -SecurityTypes None -AlwaysShared`
-4. Start window manager: `DISPLAY=:10 xfce4-session &`
-5. Record session in DB: `{ agentId, displayNumber: 10, vncPort: 5910, pid, createdAt }`
+1. Check if agent already has a container (DB: `company_computer_sessions` table with `agentId`, `containerId`, `vncPort`, `status`)
+2. If no container, allocate next free KasmVNC port (`:6901`, `:6902`, …)
+3. Create bind-mount directories: `/opt/tourbillon-company-{companyId}/home/{agentUrlKey}/`
+4. Start `kasmweb/desktop` container:
+   ```bash
+   docker run -d \
+     --name tourbillon-agent-{agentId} \
+     --memory=512m --cpus=0.5 \
+     -p 6901:6901 \
+     -v /opt/tourbillon-company-{companyId}/data:/data \
+     -v /opt/tourbillon-company-{companyId}/home/{agentUrlKey}:/home/kasm-user \
+     kasmweb/desktop:1.15.0
+   ```
+5. Record session in DB: `{ agentId, containerId, vncPort: 6901, status: 'active', createdAt }`
 6. Return session handle to agent tool
 
-### Resume Session
+### Resume Container
 
-When agent calls `computer*` tool and session exists:
+When agent calls `computer*` tool and container exists:
 
 1. Look up session from DB by `agentId`
-2. Verify VNC process still running (check `pid`)
-3. If dead, clean up stale DB row and create new session
-4. If alive, return existing session handle
+2. Verify container running: `docker inspect tourbillon-agent-{agentId}`
+3. If stopped, restart: `docker start tourbillon-agent-{agentId}` (home dir persists via bind-mount)
+4. If missing, clean up stale DB row and create new container
+5. If running, return existing session handle
 
-### Destroy Session
+### Destroy Container
 
 Triggered by Board action or agent calls `computerCloseSession()`:
 
-1. Kill VNC server process (`kill $pid`)
-2. Kill window manager and all child processes (`pkill -TERM -s $sessionId`)
-3. Clean up `/tmp/.X10-lock` and display socket
-4. Delete session row from DB
+1. Stop container: `docker stop tourbillon-agent-{agentId}`
+2. Remove container: `docker rm tourbillon-agent-{agentId}`
+3. Home directory persists on host (can recreate container later with same files)
+4. Mark session `status: 'destroyed'` in DB (or delete row)
 
-### Idle Hibernate (Post-MVP)
+### Idle Stop (Post-MVP)
 
-**Problem:** N idle agent sessions consume RAM (200-500MB each) even when unused.
+**Problem:** N idle agent containers consume RAM (200-500MB each) even when unused.
 
-**Solution:** After 30min idle (no tool calls, no Board view), hibernate session:
-1. Screenshot final desktop state → store in S3/disk
-2. Serialize window manager state (window positions, open apps) → JSON
-3. Kill VNC server and WM
-4. Mark session `status: hibernated` in DB
+**Solution:** After 30min idle (no tool calls, no Board view), stop container:
+1. `docker stop tourbillon-agent-{agentId}` (home dir persists via bind-mount)
+2. Mark session `status: 'stopped'` in DB
 
 On next tool call:
-1. Restore X server and WM
-2. Relaunch apps from saved state
-3. Mark session `status: active`
+1. `docker start tourbillon-agent-{agentId}` — desktop state resumes (XFCE session, browser tabs restored from home dir)
+2. Mark session `status: 'active'`
 
-**MVP-0:** No hibernate. All sessions stay active. Board must manually destroy unused sessions.
+**PoC:** No auto-stop. Containers stay running. Board must manually stop/remove unused containers.
 
-### Multi-Agent Concurrency
+### Multi-Agent Concurrency (PoC)
 
-**One host, N agent sessions:**
-- Display `:10` for agent A (urlKey `ceo`)
-- Display `:11` for agent B (urlKey `cto`)
-- Display `:12` for agent C (urlKey `eng-001`)
+**One Docker host, N agent containers:**
+- Container `tourbillon-agent-{ceoId}` on port `:6901` for CEO agent
+- Container `tourbillon-agent-{ctoId}` on port `:6902` for CTO agent
+- Container `tourbillon-agent-{engId}` on port `:6903` for engineer agent
 
-Each display is isolated (separate framebuffer, input queue, window list). Agents cannot see each other's screens unless they screenshot the host's `/tmp/.X11-unix/` sockets (which is intentionally blocked by filesystem permissions).
+Each container is isolated (separate filesystem namespace, network, desktop session). Agents see shared `/data/` but cannot see each other's screens. Each has private `/home/kasm-user/` (backed by separate host bind-mount).
 
-**Concurrency limit:** Start with N=10 max sessions per company (metaspan TEST limit). After 10 agents have active sessions, 11th agent tool call returns error: "Company Computer capacity exceeded. Ask Board to destroy idle sessions."
+**Concurrency limit (PoC):** Start with N=5 max containers per company (TEST VM resource limit: 16GB RAM / 8 vCPU). After 5 agents have active containers, 6th agent tool call returns error: "Company Computer capacity exceeded. Ask Board to stop idle containers."
 
 ---
 
-## 6. Ops Risks — Required Mitigation Plan
+## 6. Ops Risks — Required Mitigation Plan (PoC)
 
-### Risk 1: RAM Pressure from N Desktop Environments
+### Risk 1: RAM Pressure from N Desktop Containers
 
-**Scenario:** 10 agents × 300MB per XFCE session = 3GB RAM for desktops alone, plus browser tabs (500MB each).
+**Scenario (PoC):** 5 agents × 512MB per container = 2.5GB RAM for desktops, plus browser tabs inside containers.
 
-**Mitigation:**
-- **Cgroup memory caps:** Each agent session in a cgroup with `memory.max = 512MB` (XFCE + Firefox). OOM killer terminates session if exceeded; agent tool returns error; agent can retry or comment "desktop OOM'd, need Board to increase limit."
-- **Swap:** Configure 4GB zram swap on company VM to handle burst usage without disk I/O.
-- **Board visibility:** `/settings/company-computer` dashboard shows per-agent RAM usage + total. Board can destroy idle sessions.
+**Mitigation (PoC):**
+- **Docker memory limits:** Each container started with `--memory=512m --memory-swap=768m`. Docker kills container if exceeded; agent tool returns error.
+- **Swap:** Configure 4GB zram swap on TEST VM to handle burst usage.
+- **Board visibility:** `/settings/company-computer` dashboard shows per-container RAM usage (`docker stats`). Board can stop/remove idle containers.
 
 ### Risk 2: CPU Saturation from Browser Rendering
 
-**Scenario:** Agent opens 20 tabs with auto-play videos → 100% CPU → other agents starved.
+**Scenario (PoC):** Agent opens 20 tabs with auto-play videos → 100% CPU → other containers starved.
 
-**Mitigation:**
-- **Cgroup CPU caps:** Each agent session in a cgroup with `cpu.max = 50000 100000` (50% of one core). Agent can use one core but cannot monopolize host.
-- **Browser config:** Pre-configure Firefox with `media.autoplay.enabled = false`, `javascript.options.wasm = false` (reduce attack surface and CPU usage).
-- **Watchdog:** If agent session uses >80% CPU for >5min, pause session and notify Board via activity log.
+**Mitigation (PoC):**
+- **Docker CPU limits:** Each container started with `--cpus=0.5` (50% of one core max). Agent cannot monopolize TEST VM CPU.
+- **Browser config:** Pre-configure Firefox in Kasmweb image with `media.autoplay.enabled = false` (reduce CPU usage).
+- **Watchdog (post-PoC):** If container uses >80% allocated CPU for >5min, stop container and notify Board.
 
-### Risk 3: Idle Sessions Never Reclaimed
+### Risk 3: Idle Containers Never Reclaimed
 
-**Scenario:** Agent finishes task, never calls `computerCloseSession()`, session stays alive forever.
+**Scenario (PoC):** Agent finishes task, never calls `computerCloseSession()`, container stays running forever.
 
-**Mitigation:**
-- **Session GC:** Nightly cron job (`02:00 UTC`) scans DB for sessions with `lastActivityAt > 7 days ago` and no open issues assigned to that agent. Auto-destroy those sessions; post activity log entry.
-- **Board override:** Board can manually destroy any session from `/settings/company-computer` regardless of idle time.
+**Mitigation (PoC):**
+- **Container GC (post-PoC):** Nightly cron scans DB for containers with `lastActivityAt > 7 days ago` and no open issues. Auto-stop those containers; post activity log entry.
+- **Board override:** Board can manually stop/remove any container from `/settings/company-computer` regardless of idle time.
 - **Agent reminder:** Control-plane SKILL.md updated with "If you opened a Company Computer session and finished work, call `computerCloseSession()` to release resources."
 
 ### Risk 4: Disk Growth from Browser Profiles
 
-**Scenario:** Each agent's Firefox profile under `/company/agents/{urlKey}/.mozilla/` grows to 2GB (cache, history, downloads).
+**Scenario (PoC):** Each agent's Firefox profile under `/opt/tourbillon-company-{companyId}/home/{agentUrlKey}/.mozilla/` grows to 2GB (cache, history, downloads).
 
-**Mitigation:**
-- **Disk quotas:** XFS project quotas per agent directory (`xfs_quota -x -c 'limit -p bsoft=1G bhard=2G {agentId}' /company`). Firefox cache writes fail when quota hit; agent must clean up or ask Board to increase quota.
-- **Profile cleanup:** Firefox configured with `browser.cache.disk.capacity = 51200` (50MB cache max), `places.history.expiration.max_pages = 1000` (limit history DB size).
-- **GC task:** Weekly cleanup deletes `/company/agents/*/Downloads/*` and `~/.cache/*` older than 30 days.
+**Mitigation (PoC):**
+- **Disk quotas (post-PoC):** XFS project quotas per agent home dir. For PoC, manual Board monitoring.
+- **Profile cleanup:** Firefox configured in Kasmweb image with reduced cache limits.
+- **GC task (post-PoC):** Weekly cleanup deletes old downloads and caches from bind-mounted home dirs.
 
-### Risk 5: Display Server Limits (X11)
+### Risk 5: Docker Port Exhaustion
 
-**Scenario:** X11 allows displays `:0` to `:99` by default. After 100 sessions created (even if destroyed), display allocation fails.
+**Scenario (PoC):** Docker port range exhausted after many container creates/destroys.
 
-**Mitigation:**
-- **Display reuse:** When destroying a session on display `:10`, mark `:10` as free in DB. Next `createSession()` reuses `:10` instead of incrementing to `:100`.
-- **Display range:** Reserve `:10` to `:50` for agent sessions (40 slots). Company with >40 active agents must provision second company VM (not MVP).
+**Mitigation (PoC):**
+- **Port reuse:** When removing container, mark its KasmVNC port (`:6901`, etc.) as free in DB. Next container create reuses lowest free port.
+- **Port range:** Reserve `:6901` to `:6910` for agent containers (10 slots max; PoC limit is 5 concurrent).
 
-### Concrete Plan for metaspan TEST
+### Concrete Plan for metaspan TEST (PoC)
 
-**Host:** Ubuntu 22.04 VM with 16GB RAM, 8 vCPU, 100GB disk.
+**Host:** Ubuntu 22.04 VM with 16GB RAM, 8 vCPU, 100GB disk, Docker 24+.
 
-**Cgroup hierarchy:**
+**Docker resource limits:**
+```bash
+docker run -d \
+  --name tourbillon-agent-{agentId} \
+  --memory=512m --memory-swap=768m \
+  --cpus=0.5 \
+  --restart=unless-stopped \
+  -p {vncPort}:6901 \
+  -v /opt/tourbillon-company-{companyId}/data:/data \
+  -v /opt/tourbillon-company-{companyId}/home/{agentUrlKey}:/home/kasm-user \
+  kasmweb/desktop:1.15.0
 ```
-/sys/fs/cgroup/tourbillon-company-{companyId}/
-  ├── agent-{agentId}-session/
-  │   ├── memory.max = 512M
-  │   ├── cpu.max = 50000 100000
-```
 
-**Systemd integration:**
-- Each agent session is a transient systemd scope unit (`systemd-run --scope --slice=tourbillon-company-{companyId}.slice`)
-- Automatic cgroup application + cleanup on exit
+**Bind-mount persistence:**
+- `/opt/tourbillon-company-{companyId}/data/` — shared workspace (rwx for all agent containers)
+- `/opt/tourbillon-company-{companyId}/home/{agentUrlKey}/` — per-agent home (rwx for that container only)
 
-**Monitoring:**
-- Prometheus exporter scrapes `/sys/fs/cgroup/tourbillon-company-*/` metrics
-- Grafana dashboard: per-agent RAM/CPU usage, total company usage
-- Alert if total company RAM >12GB or any agent >400MB sustained 10min
+**Monitoring (post-PoC):**
+- `docker stats` → Prometheus exporter → Grafana dashboard
+- Per-container RAM/CPU usage, total company usage
+- Alert if total RAM >12GB or any container >400MB sustained 10min
 
 ---
 
@@ -372,12 +392,12 @@ Company Computer inherits company-scoped egress policy (`settings.egressPolicy`)
 
 ---
 
-## 8. Board Live View
+## 8. Board Live View (PoC)
 
 ### UI Integration
 
 **UX Lock (Derek/PM 2026-09-30):**  
-Board views Company Computer **from the Tourbillon web app while chatting to the agent**. Right-hand (or equivalent) **Computer** tab next to chat (alongside Details/Media/other tabs), showing that agent's GUI session (browser + file manager + shell), labeled e.g. "**{Agent name}'s screen**". Same feel as Grok Bot Details/Media/Computer. This is the **chat-adjacent Computer panel** for option A (noVNC/Selkies embed).
+Board views Company Computer **from the Tourbillon web app while chatting to the agent**. Right-hand (or equivalent) **Computer** tab next to chat (alongside Details/Media/other tabs), showing that agent's GUI session (browser + file manager + shell), labeled e.g. "**{Agent name}'s screen**". Same feel as Grok Bot Details/Media/Computer. This is the **chat-adjacent Computer panel** for option A (**live KasmVNC proxy/embed**, not screenshot refresh).
 
 **Agent Detail Screen Defaults (Derek/PM 2026-09-30):**
 1. **Default view = chat** — When Board navigates to an agent, they land in chat view first (not Overview/config)
@@ -393,44 +413,37 @@ Board views Company Computer **from the Tourbillon web app while chatting to the
 
 **Label:** "{Agent name}'s screen" or "{Agent urlKey}'s desktop" — makes it clear whose GUI session is being viewed.
 
-**Embed:** iframe or native noVNC client JavaScript:
+**PoC Embed:** Tourbillon auth proxy to agent's KasmVNC port, embedded as iframe or direct WebSocket:
 
 ```html
-<!-- Simplified example -->
+<!-- PoC example: authenticated proxy to localhost KasmVNC -->
 <div id="computer-panel" class="chat-adjacent-tab">
   <h3>CEO's screen</h3>
-  <div id="vnc-container">
-    <canvas id="vnc-canvas"></canvas>
-  </div>
+  <iframe 
+    src="/internal/company-computer/agent/{agentId}/vnc" 
+    width="100%" 
+    height="100%">
+  </iframe>
 </div>
-<script src="/novnc/core/rfb.js"></script>
-<script>
-  const rfb = new RFB(
-    document.getElementById('vnc-canvas'),
-    'wss://tourbillon.example.com/vnc/{agentId}',
-    { credentials: { password: '' } } // No VNC password; auth via Tourbillon session
-  );
-</script>
 ```
 
-**WebSocket proxy:** Tourbillon web app (`apps/web`) proxies `wss://tourbillon.example.com/vnc/{agentId}` to the agent's VNC port on the company VM (`ws://company-vm:5910`). Uses existing Better Auth session for authorization (Board member must be logged in and belong to the company).
+**Tourbillon auth proxy (PoC):** `apps/web` proxies `/internal/company-computer/agent/{agentId}/vnc` to `http://localhost:{vncPort}/` (KasmVNC web UI on TEST VM). Uses existing Better Auth session for authorization (Board member must be logged in and belong to the company). Route looks up agent's `vncPort` from DB (`company_computer_sessions` table), validates Board access, proxies to container.
 
-**MVP-0 thinner version:** Computer tab may initially be "screenshot refresh" mode (Board clicks Refresh → agent's latest `computerScreenshot()` displayed as static image) rather than full noVNC live stream. Full live-stream with noVNC is the product goal, but MVP-0 can ship with simpler "screenshot preview" if noVNC WebSocket proxy is not ready.
+**Product Lock:** Live proxy/embed of KasmVNC for PoC. No screenshot refresh fallback — full live-stream is the PoC implementation path.
 
-### Watch vs Take Control
+### Watch vs Take Control (PoC)
 
-**Watch mode (default):**
-- Board sees agent's screen in real-time
-- Board cannot send input (mouse/keyboard)
-- Agent is unaware Board is watching
+**Watch mode (PoC default):**
+- Board sees agent's screen in real-time via KasmVNC iframe
+- Board can send input (KasmVNC allows input by default; read-only mode TBD for post-PoC)
+- Agent unaware Board is watching (no notification in PoC; post-PoC feature)
 
-**Take Control mode (opt-in):**
-- Board clicks "Take Control" button → sends input to agent's display
-- Agent desktop shows notification: "Board member {name} is now controlling this session"
-- Both agent (via tools) and Board (via noVNC) can send input simultaneously (last input wins)
-- Board clicks "Release Control" → back to watch mode
+**Take Control mode (post-PoC):**
+- Explicit "Take Control" button with agent notification
+- Shared input coordination (agent tools + Board UI)
+- Session ownership handoff
 
-**Implementation:** noVNC RFB connection with `viewOnly: true` for watch mode, `viewOnly: false` for control mode. WebSocket proxy enforces mode based on Board's action.
+**PoC Implementation:** Direct KasmVNC iframe proxy with default input enabled. Watch-only gating and notifications are post-PoC enhancements.
 
 ---
 
@@ -444,21 +457,21 @@ Board views Company Computer **from the Tourbillon web app while chatting to the
 
 | Tool | Parameters | Returns | Description |
 |---|---|---|---|
-| `computerOpenBrowser` | `url?: string` | `{ sessionId, displayNumber }` | Open Firefox on agent's display. If `url` provided, navigate to it. If session doesn't exist, create it. |
-| `computerOpenFileManager` | `path?: string` | `{ sessionId, displayNumber }` | Open file manager (Thunar) on agent's display. If `path` provided, navigate to it. |
-| `computerOpenTerminal` | `cwd?: string` | `{ sessionId, displayNumber }` | Open terminal emulator (xfce4-terminal) on agent's display. If `cwd` provided, set working directory. |
-| `computerScreenshot` | — | `{ imageBase64: string, width, height }` | Capture current desktop as PNG. Returns base64-encoded image. Agent can analyze with vision model or save to issue comment. |
-| `computerClick` | `x: number, y: number, button?: 'left'\|'right'\|'middle'` | `{ success: boolean }` | Send mouse click to (x, y) on agent's display. Coordinates are absolute pixels (0,0 = top-left). |
-| `computerTypeText` | `text: string` | `{ success: boolean }` | Send keyboard input to agent's display (focused window receives text). |
-| `computerPressKey` | `key: string, modifiers?: string[]` | `{ success: boolean }` | Send special key (e.g. `Enter`, `Tab`, `Escape`) with optional modifiers (`Ctrl`, `Shift`, `Alt`). |
-| `computerMouseMove` | `x: number, y: number` | `{ success: boolean }` | Move mouse to (x, y) without clicking. |
-| `computerScroll` | `direction: 'up'\|'down', amount?: number` | `{ success: boolean }` | Scroll focused window. `amount` is scroll wheel ticks (default 3). |
-| `computerCloseSession` | — | `{ success: boolean }` | Destroy agent's display session (kill VNC server, WM, apps). Frees resources. |
-| `computerGetSessionInfo` | — | `{ sessionId, displayNumber, vncPort, active, createdAt, lastActivityAt, ramMB, cpuPercent }` | Get current session status and resource usage. |
+| `computerOpenBrowser` | `url?: string` | `{ sessionId, containerId, vncPort }` | Open Firefox on agent's container desktop. If `url` provided, navigate to it. If container doesn't exist, create it. |
+| `computerOpenFileManager` | `path?: string` | `{ sessionId, containerId, vncPort }` | Open file manager (Thunar) on agent's container desktop. If `path` provided, navigate to it. |
+| `computerOpenTerminal` | `cwd?: string` | `{ sessionId, containerId, vncPort }` | Open terminal emulator (xfce4-terminal) on agent's container desktop. If `cwd` provided, set working directory. |
+| `computerScreenshot` | — | `{ imageBase64: string, width, height }` | Capture current desktop as PNG via KasmVNC API. Returns base64-encoded image. Agent can analyze with vision model or save to issue comment. |
+| `computerClick` | `x: number, y: number, button?: 'left'\|'right'\|'middle'` | `{ success: boolean }` | Send mouse click to (x, y) on agent's container desktop. Coordinates are absolute pixels (0,0 = top-left). Via KasmVNC API or X11 automation. |
+| `computerTypeText` | `text: string` | `{ success: boolean }` | Send keyboard input to agent's container desktop (focused window receives text). Via KasmVNC API or X11 automation. |
+| `computerPressKey` | `key: string, modifiers?: string[]` | `{ success: boolean }` | Send special key (e.g. `Enter`, `Tab`, `Escape`) with optional modifiers (`Ctrl`, `Shift`, `Alt`). Via KasmVNC API. |
+| `computerMouseMove` | `x: number, y: number` | `{ success: boolean }` | Move mouse to (x, y) without clicking. Via KasmVNC API. |
+| `computerScroll` | `direction: 'up'\|'down', amount?: number` | `{ success: boolean }` | Scroll focused window. `amount` is scroll wheel ticks (default 3). Via X11 automation inside container. |
+| `computerCloseSession` | — | `{ success: boolean }` | Stop/remove agent's container. Home dir persists on host for next session. Frees RAM/CPU. |
+| `computerGetSessionInfo` | — | `{ sessionId, containerId, vncPort, active, createdAt, lastActivityAt, ramMB, cpuPercent }` | Get current container status and resource usage (via `docker inspect` / `docker stats`). |
 
-**Tool pattern:** Mirrors Cursor `computerUse` pattern (screenshot + input) but operates over remote desktop session, not local host. These are **Tourbillon-internal tools** — not Cursor-specific tooling.
+**Tool pattern:** Mirrors Cursor `computerUse` pattern (screenshot + input) but operates over Docker container desktop (KasmVNC), not local host. These are **Tourbillon-internal tools** — not Cursor-specific tooling.
 
-**API routes:** All tools hit new routes under `/api/internal/company-computer/*`. Routes authenticate via run-scoped Bearer token (same as existing control-plane tools). Route implementations call into `packages/company-computer/` library (new package).
+**API routes (PoC):** All tools hit new routes under `/api/internal/company-computer/*`. Routes authenticate via run-scoped Bearer token (same as existing control-plane tools). Route implementations call Docker CLI / KasmVNC API. Post-PoC: refactor to `packages/company-computer/` library.
 
 **Skill file:** `packages/mastra/src/skills/company-computer-skills.md` teaches agents when to use GUI vs shell, screenshot frequency, resource cleanup.
 
@@ -468,14 +481,15 @@ Board views Company Computer **from the Tourbillon web app while chatting to the
 
 ### Not in MVP-0
 
-- **Per-agent VMs:** One VM per company, not per agent. Agents share compute but have isolated display sessions. Per-agent VMs may be post-MVP for high-security companies (too expensive for MVP).
+- **Per-agent VMs:** PoC uses one Docker host (TEST VM) with N containers (one per agent), not separate VMs per agent. Per-agent VMs may be post-MVP for high-security companies (too expensive for PoC).
+- **Multi-seat / one-container-many-agents (Derek Lock 2026-09-30):** Stock Kasmweb single-container multi-display is a **non-goal**. PoC runs **one `kasmweb/desktop` container per agent** on the company Docker host with per-agent KasmVNC ports.
 - **Bwrap-as-desktop:** Do not repurpose LocalSandbox bwrap for GUI isolation. Bwrap is for ephemeral process sandboxing; Company Computer is for durable GUI sessions. Architecture mismatch.
-- **Managed desktop SaaS:** Do not bind to third-party SaaS (Windows 365, Amazon WorkSpaces, etc.) in MVP. Self-hosted Linux VM only. SaaS may be post-MVP for compliance-heavy customers.
+- **Managed desktop SaaS:** Do not bind to third-party SaaS (Windows 365, Amazon WorkSpaces, etc.) in PoC. Self-hosted Docker containers only. SaaS may be post-MVP for compliance-heavy customers.
 - **Separate desktop-only page:** Computer view is **not** a standalone page at `/agent/{urlKey}/computer`. It is a **chat-adjacent tab** (right panel) visible while chatting with the agent. Product intent: Board watches agent's screen in the same UI where they chat, not a separate navigation destination.
 - **TEST auto-deploy:** This spike/PR does **not** enable Company Computer on tourbillon-test.example.com. No runtime changes that pull to TEST without explicit Derek approval. This is docs-only.
-- **Session recording:** No built-in session replay (à la Kasm) in MVP. Board can manually screen-record via browser if needed. Audit logs are post-MVP compliance feature.
-- **GPU acceleration:** No GPU passthrough or Selkies in MVP. noVNC software rendering sufficient for CC1-CC4 stories. GPU is post-MVP for media-heavy tasks.
-- **Mobile Board view:** noVNC embed works on desktop only. Mobile browser support is post-MVP (touch → mouse translation is poor UX without native app).
+- **Session recording:** No built-in session replay in PoC. Board can manually screen-record via browser if needed. Audit logs are post-MVP compliance feature.
+- **GPU acceleration:** No GPU passthrough in PoC. Kasmweb software rendering sufficient for CC1-CC4 stories. GPU is post-MVP for media-heavy tasks.
+- **Mobile Board view:** KasmVNC embed works on desktop only. Mobile browser support is post-MVP (touch → mouse translation is poor UX without native app).
 
 ---
 
@@ -550,33 +564,34 @@ None of these are MVP. Defer GPU until post-MVP.
 
 ### Phase 2: Proof-of-Concept (Separate Branch)
 
-- [ ] Provision single Ubuntu VM on metaspan TEST with XFCE + x11vnc
-- [ ] Implement `computerOpenBrowser` + `computerScreenshot` tools
+- [ ] Provision bind-mount directories on TEST VM: `/opt/tourbillon-company-{companyId}/data/` and `/opt/tourbillon-company-{companyId}/home/`
+- [ ] Pull `kasmweb/desktop:1.15.0` image
+- [ ] Implement `computerOpenBrowser` + `computerScreenshot` tools (Docker + KasmVNC API)
 - [ ] Test: Agent calls `computerOpenBrowser('https://example.com')`, takes screenshot, includes in issue comment
-- [ ] Validate cgroup RAM/CPU caps work (manually stress-test with 5 concurrent agent sessions)
+- [ ] Validate Docker resource limits work (manually stress-test with 3 concurrent agent containers)
 
-### Phase 3: MVP Implementation (POST This PR)
+### Phase 3: PoC Implementation (POST This PR)
 
-- [ ] New package: `packages/company-computer/` (session manager, VNC proxy, cgroup setup)
-- [ ] DB migration: `company_computer_sessions` table
+- [ ] New package (post-PoC): `packages/company-computer/` (container manager, KasmVNC proxy)
+- [ ] DB migration: `company_computer_sessions` table (agentId, containerId, vncPort, status, timestamps)
 - [ ] New toolset: `company-computer` in `role-tools.ts`
-- [ ] API routes: `/api/internal/company-computer/*`
+- [ ] API routes: `/api/internal/company-computer/*` (container CRUD, screenshot, input automation)
 - [ ] Skill file: `company-computer-skills.md`
-- [ ] UI: `/agent/{urlKey}/computer` tab with noVNC embed
-- [ ] UI: `/settings/company-computer` dashboard (provision, session list, resource usage)
-- [ ] Ops: Terraform/Ansible to provision company VMs with cgroups + quotas
+- [ ] UI: **Computer** tab (chat-adjacent) with KasmVNC iframe/proxy embed
+- [ ] UI: `/settings/company-computer` dashboard (provision bind-mounts, container list, resource usage via `docker stats`)
+- [ ] Ops: Docker Compose / systemd units for TEST VM container orchestration
 - [ ] Docs: Update AGENTS.md with Company Computer toolset and architecture
 
 ### Phase 4: TEST Validation (HOLD Until Derek Approval)
 
 - [ ] Deploy to tourbillon-test.example.com
 - [ ] Create test company "Demo Corp"
-- [ ] Provision company computer for Demo Corp
+- [ ] Provision company computer bind-mounts for Demo Corp
 - [ ] Create test agent "TestBot" with `company-computer` toolset
 - [ ] Assign issue: "Research Tourbillon competitors via Google"
 - [ ] TestBot calls `computerOpenBrowser`, searches, screenshots results, posts to issue
-- [ ] Board watches TestBot's desktop via noVNC live view
-- [ ] Validate cgroup limits (create 10 agents, stress-test RAM/CPU)
+- [ ] Board watches TestBot's desktop via live KasmVNC proxy embed
+- [ ] Validate Docker resource limits (create 5 agents, stress-test RAM/CPU per container)
 
 ---
 
@@ -584,9 +599,11 @@ None of these are MVP. Defer GPU until post-MVP.
 
 ### Option B: Per-Agent VMs
 
-**Why rejected:** Too expensive. N agents × 1GB RAM per VM = unsustainable for companies with 10+ agents. Overkill isolation (agents are cooperative, not adversarial). Provisioning time too slow (30sec per VM vs instant display allocation).
+**Why rejected (PoC):** Too expensive. N agents × 1GB RAM per VM = unsustainable for companies with 10+ agents. Overkill isolation (agents are cooperative, not adversarial). Provisioning time too slow (30sec per VM vs 2sec per container).
 
 **When to revisit:** Post-MVP for enterprise customers requiring strict agent isolation (financial services, healthcare). Gated behind company setting `isolationMode: perAgentVM`.
+
+**PoC uses Docker containers instead:** One `kasmweb/desktop` container per agent. Lighter weight, faster provisioning, sufficient isolation for cooperative agents.
 
 ### Option C: Managed Desktop SaaS (Windows 365 / WorkSpaces)
 
@@ -596,9 +613,11 @@ None of these are MVP. Defer GPU until post-MVP.
 
 ### Option D: Bwrap-as-Desktop
 
-**Why rejected:** Architectural mismatch. Bwrap is for ephemeral process isolation (run script → exit). Company Computer needs durable GUI sessions (survive heartbeats, persist state). Bwrap cannot isolate X11 displays (all processes in bwrap share same `DISPLAY`). No window manager support (bwrap is CLI-only sandbox).
+**Why rejected (HOLD):** Architectural mismatch. Bwrap is for ephemeral process isolation (run script → exit). Company Computer needs durable GUI sessions (survive heartbeats, persist state). Bwrap cannot isolate X11 displays (all processes in bwrap share same `DISPLAY`). No window manager support (bwrap is CLI-only sandbox).
 
 **Confusion risk:** Developers might try to "upgrade" bwrap to support GUI, bloating LocalSandbox codebase with unrelated features. Keep concerns separate: LocalSandbox = ephemeral code execution; Company Computer = durable GUI environment.
+
+**PoC Lock (Derek 2026-09-30):** HOLD bwrap-as-desktop. PoC uses Docker containers with KasmVNC instead.
 
 ---
 
@@ -628,41 +647,42 @@ None of these are MVP. Defer GPU until post-MVP.
 - **Pros:** Enterprise features (recording, audit, SSO), multi-tenancy
 - **Cons:** Heavy (Docker overhead), commercial upsell pressure, overkill for MVP
 
-### x11vnc vs TigerVNC
+### x11vnc vs TigerVNC vs KasmVNC
 
 - **x11vnc:** Attaches to existing X server (e.g. `:0`). Good for screen sharing. Not ideal for headless sessions.
-- **TigerVNC (Xvnc):** Standalone X server with built-in VNC. Runs headless (no physical display needed). **Recommended for MVP.**
+- **TigerVNC (Xvnc):** Standalone X server with built-in VNC. Runs headless (no physical display needed).
+- **KasmVNC (PoC choice):** TigerVNC fork with modern web UI, authentication, H.264 video encoding, better performance. Used by `kasmweb/desktop` images. **Recommended for PoC** — proven stack, container-ready, good web UX.
 
 ---
 
-## Appendix C: Cgroup v2 Reference
+## Appendix C: Docker Resource Limits (PoC)
 
-**Example systemd transient scope unit:**
+**Example Docker container with limits:**
 
 ```bash
-systemd-run \
-  --scope \
-  --slice=tourbillon-company-acme.slice \
-  --unit=agent-ceo-session \
-  --property=MemoryMax=512M \
-  --property=CPUQuota=50% \
-  Xvnc :10 -geometry 1920x1080 -depth 24 -rfbport 5910 -SecurityTypes None
+docker run -d \
+  --name tourbillon-agent-ceo-abc123 \
+  --memory=512m \
+  --memory-swap=768m \
+  --cpus=0.5 \
+  --restart=unless-stopped \
+  -p 6901:6901 \
+  -v /opt/tourbillon-company-acme/data:/data \
+  -v /opt/tourbillon-company-acme/home/ceo:/home/kasm-user \
+  kasmweb/desktop:1.15.0
 ```
 
 **Check resource usage:**
 
 ```bash
-systemctl status agent-ceo-session
-cat /sys/fs/cgroup/tourbillon-company-acme.slice/agent-ceo-session.scope/memory.current
-cat /sys/fs/cgroup/tourbillon-company-acme.slice/agent-ceo-session.scope/cpu.stat
+docker stats tourbillon-agent-ceo-abc123
+docker inspect tourbillon-agent-ceo-abc123 | jq '.[0].State'
 ```
 
-**Alert when memory pressure:**
+**Alert when memory pressure (post-PoC):**
 
 ```bash
-# /etc/systemd/system/agent-ceo-session.scope.d/override.conf
-[Unit]
-OnFailure=notify-board-session-oom@%n.service
+# Monitor docker stats → Prometheus → Grafana alert when container RAM >400MB sustained
 ```
 
 ---
@@ -671,7 +691,7 @@ OnFailure=notify-board-session-oom@%n.service
 
 - **Existing code execution:** See `packages/mastra/src/execution-workspace.ts` and `packages/mastra/src/skills/code-execution-skills.md` for LocalSandbox / bwrap implementation. Company Computer is a **sibling feature**, not a replacement. Both coexist:
   - **LocalSandbox (code-execution toolset):** Ephemeral per-issue shell command execution, no GUI, bwrap/seatbelt isolation.
-  - **Company Computer (company-computer toolset):** Durable per-company GUI environment, agent display sessions, X11/VNC.
+  - **Company Computer (company-computer toolset, PoC):** Durable per-agent GUI environment, Docker containers with KasmVNC, persistent home dirs via bind-mounts.
 
 - **Tourbillon architecture:** See `docs/architecture.md` for system overview, tool tiers, agent identity, wake loop.
 
