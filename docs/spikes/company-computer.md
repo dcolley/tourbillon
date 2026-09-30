@@ -210,80 +210,144 @@ Provisioning backends are orthogonal to the `hasComputer` gate — the backend d
 
 ---
 
-#### Option 2: Docker Desktop Container (webtop / linuxserver.io)
+#### Option 2: Kasmweb Docker Images (Standalone) — **MVP Recommended**
 
 **Stack:**
-- Docker with `linuxserver/webtop` or `kasmweb/desktop` image
-- One container per company (or per agent if multi-DISPLAY model fails)
-- KasmVNC or noVNC embedded in container
-- Host machine runs Docker daemon; Tourbillon spawns containers via Docker API
+- Docker Engine API on company host (no Kasm Admin UI required)
+- Kasmweb Docker images: `kasmweb/chrome`, `kasmweb/desktop`, `kasmweb/ubuntu-jammy-desktop`
+- One container per company; agents with `hasComputer` get `/home/{agentId}` mounts
+- KasmVNC embedded in container (noVNC on port 6901 by default)
+- Tourbillon proxies HTTPS iframe/embed; VNC password rotated per provision
 
 **Provision flow:**
-1. Board enables company computer → `POST /api/settings/company-computer/enable`
-2. Tourbillon backend calls Docker API: `docker run -d --name=company-{companyId} -p 6080:6080 linuxserver/webtop:ubuntu-xfce`
-3. Container boots XFCE + VNC in ~5-10 seconds
-4. Backend health-checks `http://localhost:6080` (noVNC endpoint)
-5. Record `company_computers` row: `{ companyId, containerId, vncPort: 6080, status: 'ready' }`
-6. Return success; agents with `hasComputer` create homes inside container filesystem
+1. Board enables company computer at `/settings/company-computer` → selects image from allowlist (`kasmweb/desktop`, `kasmweb/chrome`, etc.)
+2. Tourbillon backend calls Docker API:
+   ```bash
+   docker run -d \
+     --name=tourbillon-company-{companyId} \
+     --shm-size=512m \
+     -e VNC_PW={rotated-password} \
+     -p 6901:6901 \
+     -v tourbillon-company-{companyId}:/home/kasm-user \
+     kasmweb/ubuntu-jammy-desktop:1.15.0
+   ```
+3. Container boots desktop + KasmVNC in ~5-10 seconds
+4. Backend health-checks `https://localhost:6901` (KasmVNC endpoint)
+5. Record `company_computers` row: `{ companyId, containerId, imageId, vncUrl, vncPassword, status: 'ready' }`
+6. Agents with `hasComputer === true` create `/home/{agentId}` subdirs inside container volume
+7. Return success; Board sees VNC embed in Computer tab
+
+**Images:**
+- **`kasmweb/chrome`** — Browser-only (Chromium). Good for web research, form filling. **Not** full computer toolset (no terminal, no file manager).
+- **`kasmweb/desktop`** or **`kasmweb/ubuntu-jammy-desktop`** — Full XFCE desktop with terminal, file manager, browser. **Recommended for full computer toolset** (terminal + files + browser).
+- **Core + apps** — Install additional tools via `docker exec` or custom Dockerfile if needed.
+
+**Company config (align with two-gate model):**
+- Company: `hasComputer` (boolean, enables company computer) + `imageId` (string, selected from allowlist: `kasmweb/desktop`, `kasmweb/chrome`, `kasmweb/ubuntu-jammy-desktop`)
+- Agent: `hasComputer` (boolean, gates `/home/{agentId}` creation)
+- Board UI: Company settings page shows toggle + image picker (dropdown or radio buttons)
 
 **Pros:**
 - Fast provision (5-10 seconds vs 30-90 seconds for VM)
-- Low cost (containers share host resources; ~1-2GB RAM per company vs full VM)
-- Simple ops (no cloud provider; runs on Tourbillon host or dedicated Docker host)
-- Good for PoC and TEST (rapid iteration, no cloud API setup)
+- Low cost (containers share host resources; ~1-2GB RAM per company)
+- **No Kasm Admin UI required for MVP** (Tourbillon uses Docker API directly)
+- Simple ops (Docker Engine on company host or dedicated Docker host; no cloud provider)
+- KasmVNC built-in (better browser compatibility than plain VNC; audio/clipboard support)
+- Good for PoC and TEST (rapid iteration, no Kasm licensing or admin setup)
 - Easy teardown (docker stop + docker rm)
+- Image flexibility (Board selects browser-only vs full desktop per company)
 
 **Cons:**
-- Weaker isolation than VMs (containers share kernel; one container escape affects host)
-- Multi-agent DISPLAY model inside single container is complex (webtop images default to single-user desktop)
-- Port allocation required (6080, 6081, 6082… for N companies or dynamic port mapping)
-- Persistent storage requires Docker volumes (home directories must survive container restart)
-- Not suitable for high-security multi-tenant SaaS (container escape risk)
+- Weaker isolation than VMs (containers share kernel; container escape affects host)
+- Multi-agent DISPLAY inside single container requires `/home/{agentId}` subdirs (not separate X displays per agent — all agents share one desktop session per company)
+- Port allocation required (6901, 6902, 6903… for N companies or dynamic port mapping; Tourbillon proxy handles routing)
+- Persistent storage requires Docker volumes (`/home/kasm-user` mounted per company)
+- Not suitable for high-security multi-tenant SaaS (container escape risk; prefer VM per company for production)
 
 **Tradeoffs:**
-- **Best for PoC and TEST environment** (fast iteration, low cost, no cloud setup)
+- **Best for MVP PoC and TEST** (fast iteration, low cost, no Kasm Admin setup, validates two-gate model quickly)
 - Suitable for single-company self-hosted Tourbillon (one container for one company's agents)
-- Not recommended for production multi-tenant SaaS (security/isolation concerns)
+- **Chrome-only image (`kasmweb/chrome`) is fine for browser-only PoC** but does **not** support full computer toolset (no terminal/file manager)
+- **For full computer toolset (browser + terminal + files), use `kasmweb/desktop` or `ubuntu-jammy-desktop`**
+- Not recommended for production multi-tenant SaaS (security/isolation concerns; migrate to VM per company or full Kasm Workspaces)
 
-**Recommendation:** **Use for MVP PoC and TEST** to validate the two-gate model and agent home workflows quickly. Consider migrating to Option 1 (VM per company) for production SaaS.
+**Recommendation:** **Use for MVP PoC** (Path A: Standalone Docker). Start with `kasmweb/ubuntu-jammy-desktop` for full computer toolset validation. Consider migrating to Option 2B (Full Kasm Workspaces) for multi-tenant production if audit/compliance features are needed, or Option 1 (VM per company) for stronger isolation.
 
 ---
 
-#### Option 3: Kasm Workspaces or Selkies (Self-Hosted Desktop SaaS)
+#### Option 2B: Kasmweb Full Workspaces (Multi-Tenant Later)
 
 **Stack:**
-- Kasm Workspaces self-hosted edition (Docker-based) or Selkies GStreamer
-- Built-in multi-tenancy (Kasm manages users, sessions, workspaces)
-- Pre-built browser isolation and desktop images
-- Tourbillon integrates via Kasm API or direct Selkies launch
+- Kasm Workspaces self-hosted edition (includes Admin UI + Developer API)
+- Admin UI manages Images, API keys, Users/Groups, Workspaces, session recording
+- Developer API: `request_kasm`, `get_kasm_status`, `destroy_kasm`, `get_images`, `exec_command_kasm`, `set_session_permissions` (view-only share)
+- Tourbillon integrates via Kasm Developer API (not Docker API directly)
 
-**Provision flow (Kasm):**
-1. Board enables company computer → `POST /api/settings/company-computer/enable`
-2. Tourbillon backend calls Kasm API: `create_workspace(company_id, image="xfce_desktop", users=[agents_with_hasComputer])`
-3. Kasm provisions Docker container per session or shared workspace
-4. Tourbillon records Kasm workspace ID and noVNC URL
-5. Agents with `hasComputer` use Kasm session URLs (Kasm handles multi-agent DISPLAY)
-6. Return success; Board sees Kasm-managed desktop in UI
+**Provision flow:**
+1. Board enables company computer → Tourbillon calls Kasm API: `POST /api/public/request_kasm { image_id, user_id, ... }`
+2. Kasm Workspaces provisions Docker container per company or per agent session
+3. Kasm returns Kasm ID and session URL (noVNC endpoint managed by Kasm)
+4. Tourbillon records Kasm ID and embeds session URL in Computer tab
+5. Agents with `hasComputer` use `exec_command_kasm` API to create `/home/{agentId}` or run tools
+6. Board uses `set_session_permissions` API for takeover (view-only share vs full control)
 
 **Pros:**
-- Enterprise features out-of-box (session recording, audit logs, user management)
-- Pre-built multi-tenancy (Kasm already solves per-agent DISPLAY and isolation)
-- GPU acceleration available (Selkies) for media-heavy tasks
-- Turnkey desktop SaaS (less custom VNC/XFCE plumbing)
+- Enterprise features out-of-box (session recording, audit logs, user management, SSO)
+- Pre-built multi-tenancy (Kasm manages users, groups, workspaces; Tourbillon delegates provisioning)
+- GPU acceleration available (Selkies backend) for media-heavy tasks
+- Admin UI for Ops (image management, session monitoring, resource quotas)
+- Turnkey desktop SaaS (less custom VNC/XFCE plumbing; Kasm handles it)
+- API-driven takeover via `set_session_permissions` (aligns with watch/takeover protocol)
 
 **Cons:**
-- Additional dependency (Kasm Workspaces or Selkies stack, not just Docker)
-- Commercial licensing for Kasm advanced features (free tier may suffice)
-- Overkill for MVP (many features unused: SSO, compliance, session replay)
-- Higher resource usage than plain Docker webtop (Kasm orchestration overhead)
-- Learning curve and integration complexity (Kasm API + auth)
+- Additional dependency (Kasm Workspaces stack, not just Docker Engine)
+- Commercial licensing for advanced features (free tier may suffice for MVP; paid for enterprise)
+- Heavier ops setup (Kasm Admin UI + API keys + user/group management)
+- Higher resource usage than standalone Docker (Kasm orchestration overhead)
+- Learning curve (Kasm API + auth + admin concepts)
+- Overkill for MVP PoC (many features unused in early validation)
 
 **Tradeoffs:**
-- Best for enterprise customers requiring compliance features (SOC2, audit logs, session replay)
-- Suitable for high-security multi-tenant SaaS (Kasm isolation > raw Docker)
-- Not recommended for MVP PoC (too heavy; delays validation of core gate model)
+- Best for **multi-tenant production SaaS** requiring compliance features (SOC2, audit logs, session replay)
+- Suitable for **high-security SaaS** (Kasm isolation + enterprise features > raw Docker)
+- Not recommended for **MVP PoC** (too heavy; delays validation of core two-gate model)
+- Consider **after** Option 2 (Standalone Docker) validates product-market fit and customers demand audit/compliance
 
-**Recommendation:** **Defer to post-MVP** unless enterprise compliance is a hard requirement. Use Option 2 (Docker webtop) for PoC; migrate to Kasm if customers demand audit/compliance.
+**Recommendation:** **Defer to post-MVP** unless enterprise compliance is a hard requirement from day one. Use Option 2 (Standalone Docker) for PoC; migrate to Option 2B (Full Kasm Workspaces) if customers demand session recording, audit logs, or SSO integration.
+
+---
+
+#### Option 3: Selkies GStreamer (GPU-Accelerated)
+
+**Stack:**
+- Selkies GStreamer WebRTC streamer (GPU-accelerated H.264 encoding)
+- Standalone desktop environment (GNOME or KDE Plasma)
+- WebRTC instead of VNC (lower latency, better for media-heavy tasks)
+- Tourbillon integrates via Selkies launch script or Docker image
+
+**Provision flow:**
+1. Board enables company computer → Tourbillon backend launches Selkies container or VM
+2. Selkies starts X server + window manager + WebRTC streamer with GPU encoding (NVENC/VAAPI)
+3. Backend health-checks WebRTC endpoint
+4. Record company computer with WebRTC URL
+5. Agents with `hasComputer` create homes; Board embeds WebRTC stream in Computer tab
+
+**Pros:**
+- GPU-accelerated rendering and video encoding (better for media playback, 3D, image editing)
+- Lower latency than VNC (WebRTC vs VNC protocol)
+- Good for tasks requiring GPU (e.g., Chrome with WebGL, video editing, Blender)
+
+**Cons:**
+- Requires GPU on host (NVIDIA preferred, Intel integrated possible)
+- More complex setup (GStreamer plugins, NVENC/VAAPI drivers)
+- Higher memory per session (~500MB vs ~200MB for VNC)
+- Not needed for MVP (browser + terminal + file manager do not require GPU)
+
+**Tradeoffs:**
+- Best for post-MVP if agents need GPU-heavy GUI apps (media editing, 3D tools, WebGL)
+- Not recommended for MVP PoC (GPU overhead; VNC sufficient for browser/terminal/files)
+
+**Recommendation:** **Defer to post-MVP** unless GPU tasks are a hard requirement. Use Option 2 (Kasmweb Standalone Docker) for PoC; migrate to Selkies if customers need GPU acceleration.
 
 ---
 
@@ -327,62 +391,86 @@ Provisioning backends are orthogonal to the `hasComputer` gate — the backend d
 
 ### Recommended MVP PoC Backend
 
-**Option 2: Docker Desktop Container (linuxserver/webtop)** for the following reasons:
+**Option 2: Kasmweb Standalone Docker** for the following reasons:
 
 1. **Fast provision** (5-10 seconds) enables rapid PoC iteration and TEST validation
 2. **Low cost** (containers share host; no per-company VM bill)
-3. **Simple setup** (Docker API, no cloud provider or third-party service)
-4. **Good enough isolation** for TEST and single-company self-hosted (not production multi-tenant SaaS)
-5. **Easy teardown** (docker stop/rm) for PoC experimentation
+3. **Simple setup** (Docker API only; no Kasm Admin UI or cloud provider)
+4. **KasmVNC built-in** (better browser compatibility than plain VNC; audio/clipboard support)
+5. **Image flexibility** (Board selects `kasmweb/desktop` for full toolset or `kasmweb/chrome` for browser-only)
+6. **Good enough isolation** for TEST and single-company self-hosted (not production multi-tenant SaaS)
+7. **Easy teardown** (docker stop/rm) for PoC experimentation
 
 **Migration path for production:**
 - **Self-hosted multi-tenant SaaS → Option 1** (VM per company) for stronger isolation and standard cloud ops
-- **Enterprise customers → Option 3** (Kasm) if compliance/audit features become hard requirements
+- **Enterprise customers → Option 2B** (Full Kasm Workspaces) if compliance/audit features become hard requirements
+- **GPU tasks → Option 3** (Selkies) if agents need GPU acceleration for media/3D
 - **Zero-Ops SaaS startup → Option 4** (E2B/Daytona) if provider pricing is acceptable and API is mature
 
 **Implementation sketch (Option 2 PoC):**
 
 ```typescript
-// packages/company-computer/src/backends/docker-webtop.ts
+// packages/company-computer/src/backends/kasmweb-standalone.ts
 import Docker from 'dockerode';
+import { generatePassword } from './utils';
 
-export async function provisionCompanyComputer(companyId: string): Promise<CompanyComputerHost> {
+export async function provisionCompanyComputer(
+  companyId: string,
+  imageId: string, // 'kasmweb/desktop' or 'kasmweb/chrome'
+): Promise<CompanyComputerHost> {
   const docker = new Docker();
   
+  // Validate imageId against allowlist
+  const ALLOWED_IMAGES = [
+    'kasmweb/ubuntu-jammy-desktop:1.15.0',
+    'kasmweb/desktop:1.15.0',
+    'kasmweb/chrome:1.15.0',
+  ];
+  if (!ALLOWED_IMAGES.includes(imageId)) {
+    throw new Error(`Image ${imageId} not in allowlist`);
+  }
+  
   // Pull image if not present
-  await docker.pull('linuxserver/webtop:ubuntu-xfce');
+  await docker.pull(imageId);
+  
+  // Rotate VNC password per provision
+  const vncPassword = generatePassword(16);
   
   // Create container with persistent volume for /home
   const container = await docker.createContainer({
     name: `tourbillon-company-${companyId}`,
-    Image: 'linuxserver/webtop:ubuntu-xfce',
-    ExposedPorts: { '3000/tcp': {} }, // webtop noVNC port
+    Image: imageId,
+    Env: [`VNC_PW=${vncPassword}`],
+    ExposedPorts: { '6901/tcp': {} }, // KasmVNC HTTPS port
     HostConfig: {
-      PortBindings: { '3000/tcp': [{ HostPort: '0' }] }, // dynamic host port
+      PortBindings: { '6901/tcp': [{ HostPort: '0' }] }, // dynamic host port
+      ShmSize: 512 * 1024 * 1024, // 512MB shared memory for browser
       Memory: 4 * 1024 * 1024 * 1024, // 4GB RAM limit
       NanoCpus: 2 * 1e9, // 2 CPU cores
       Mounts: [{
         Type: 'volume',
         Source: `tourbillon-company-${companyId}-home`,
-        Target: '/config', // webtop home directory
+        Target: '/home/kasm-user', // Kasmweb home directory
       }],
     },
   });
   
   await container.start();
   
-  // Wait for noVNC endpoint to be ready
+  // Wait for KasmVNC endpoint to be ready
   const info = await container.inspect();
-  const hostPort = info.NetworkSettings.Ports['3000/tcp'][0].HostPort;
-  const vncUrl = `http://localhost:${hostPort}`;
+  const hostPort = info.NetworkSettings.Ports['6901/tcp'][0].HostPort;
+  const vncUrl = `https://localhost:${hostPort}`; // KasmVNC serves HTTPS
   
-  await waitForHealthy(vncUrl); // poll until 200 OK
+  await waitForHealthy(vncUrl); // poll until 200 OK (may take 5-10 sec)
   
   return {
     companyId,
-    backend: 'docker-webtop',
+    backend: 'kasmweb-standalone',
     containerId: container.id,
+    imageId,
     vncUrl,
+    vncPassword, // store encrypted in DB
     status: 'ready',
     provisionedAt: new Date(),
   };
@@ -393,10 +481,11 @@ export async function provisionCompanyComputer(companyId: string): Promise<Compa
 
 ```typescript
 // apps/web/app/api/settings/company-computer/enable/route.ts
-import { provisionCompanyComputer } from '@tourbillon/company-computer/backends/docker-webtop';
+import { provisionCompanyComputer } from '@tourbillon/company-computer/backends/kasmweb-standalone';
 
 export async function POST(req: Request) {
-  const { companyId } = await extractAdminContext(req); // Board auth
+  const { companyId, imageId } = await req.json(); // Board selects image from allowlist
+  const { userId } = await extractAdminContext(req); // Board auth
   
   // Check if already provisioned
   const existing = await db.query.companyComputers.findFirst({
@@ -404,18 +493,28 @@ export async function POST(req: Request) {
   });
   if (existing) return NextResponse.json({ error: 'Already provisioned' }, { status: 409 });
   
-  // Trigger automated provision
-  const host = await provisionCompanyComputer(companyId);
+  // Trigger automated provision with selected image
+  const host = await provisionCompanyComputer(companyId, imageId);
   
-  // Record in DB
+  // Record in DB (encrypt vncPassword before storing)
   await db.insert(companyComputers).values({
     id: createId(),
     companyId,
     backend: host.backend,
     containerId: host.containerId,
+    imageId: host.imageId,
     vncUrl: host.vncUrl,
+    vncPassword: await encrypt(host.vncPassword), // encrypt before store
     status: host.status,
     provisionedAt: host.provisionedAt,
+  });
+  
+  // Activity log
+  await createActivityLogEntry({
+    companyId,
+    userId,
+    action: 'company_computer_provisioned',
+    details: { imageId, backend: host.backend },
   });
   
   return NextResponse.json({ success: true, host });
@@ -546,10 +645,12 @@ Backend selection via company settings or global env var (`COMPANY_COMPUTER_BACK
 **So that** agents with `hasComputer` can access GUI tools
 
 **Acceptance:**
-- Board visits `/settings/company-computer` and clicks "Provision"
-- System provisions a Linux VM/container (or marks metaspan TEST as company's host)
-- Displays company computer status: "Ready" + resource limits (RAM, CPU caps)
-- No auto-provision — Board must explicitly enable
+- Board visits `/settings/company-computer` and clicks "Provision" (or "Enable Company Computer")
+- Board selects image from allowlist (`kasmweb/ubuntu-jammy-desktop`, `kasmweb/chrome`, etc.) via dropdown or radio buttons
+- System triggers **automated provision** of Docker container (or VM for production) with selected image
+- Backend creates container, rotates VNC password, mounts persistent volume, health-checks endpoint
+- Displays company computer status: "Ready" + image name + resource limits (RAM, CPU caps)
+- **Automated provision:** Board action triggers provision; no manual VM spin-up by Derek/Ops required
 - **Gate behavior:** Until provisioned, no agent can create GUI sessions even if agent `hasComputer` is enabled. Agent tool calls return error: "Company Computer not provisioned. Ask Board to enable at /settings/company-computer."
 - **Idempotent provision:** If already provisioned, "Provision" button shows "Already Provisioned" or "Re-provision" (recreate host). Existing agent homes are preserved or explicitly warned about data loss.
 
@@ -711,7 +812,7 @@ On next tool call:
 2. Relaunch apps from saved state
 3. Mark session `status: active`
 
-**MVP-0:** No hibernate. All sessions stay active. Board must manually destroy unused sessions.
+**MVP-0:** No hibernate. All sessions stay active. Board can destroy unused sessions via `/settings/company-computer` dashboard.
 
 ### Multi-Agent Concurrency
 
@@ -752,7 +853,7 @@ Each display is isolated (separate framebuffer, input queue, window list). Agent
 
 **Mitigation:**
 - **Session GC:** Nightly cron job (`02:00 UTC`) scans DB for sessions with `lastActivityAt > 7 days ago` and no open issues assigned to that agent. Auto-destroy those sessions; post activity log entry.
-- **Board override:** Board can manually destroy any session from `/settings/company-computer` regardless of idle time.
+- **Board override:** Board can destroy any session from `/settings/company-computer` regardless of idle time.
 - **Agent reminder:** Control-plane SKILL.md updated with "If you opened a Company Computer session and finished work, call `computerCloseSession()` to release resources."
 
 ### Risk 4: Disk Growth from Browser Profiles
@@ -823,7 +924,7 @@ Board views Company Computer **from the Tourbillon web app while chatting to the
 1. **Default view = chat** — When Board navigates to an agent, they land in chat view first (not Overview/config)
 2. **Agent config is secondary** — Overview, settings, capabilities accessible via navigate/modal/popup off chat default (not primary chrome)
 3. **Computer panel layout options:**
-   - **Hidden** — No Computer tab visible (agent lacks `company-computer` toolset, or Board manually closed it)
+   - **Hidden** — Computer tab not visible when **either gate fails** (company computer not provisioned **OR** agent `hasComputer !== true`) or Board manually closed it
    - **Side-by-side with chat** (default when visible) — Computer panel in right area alongside chat (Grok Bot–style split; both visible)
    - **Full screen** — Computer panel fills viewport (Board toggled full screen; chat minimized/hidden)
 
@@ -857,20 +958,103 @@ Board views Company Computer **from the Tourbillon web app while chatting to the
 
 **MVP-0 thinner version:** Computer tab may initially be "screenshot refresh" mode (Board clicks Refresh → agent's latest `computerScreenshot()` displayed as static image) rather than full noVNC live stream. Full live-stream with noVNC is the product goal, but MVP-0 can ship with simpler "screenshot preview" if noVNC WebSocket proxy is not ready.
 
-### Watch vs Take Control
+### Watch, Takeover, and Concurrent Access (Product Lock 2026-09-30)
+
+#### 1. Default: Watch-Only (Non-Blocking)
 
 **Watch mode (default):**
-- Board sees agent's screen in real-time
-- Board cannot send input (mouse/keyboard)
-- Agent is unaware Board is watching
+- Board sees agent's screen in real-time via noVNC embed in Computer tab
+- Board **cannot** send input (mouse/keyboard blocked at VNC client or proxy)
+- Agent is unaware Board is watching (no notification, no performance impact)
+- **Watch-only never blocks the agent** — agent `computer*` tools continue executing regardless of Board viewers
 
-**Take Control mode (opt-in):**
-- Board clicks "Take Control" button → sends input to agent's display
-- Agent desktop shows notification: "Board member {name} is now controlling this session"
-- Both agent (via tools) and Board (via noVNC) can send input simultaneously (last input wins)
-- Board clicks "Release Control" → back to watch mode
+**Multiple concurrent viewers:**
+- Multiple Board members can watch the same agent's DISPLAY simultaneously (one-to-many VNC)
+- Each viewer sees the same screen (agent's DISPLAY `:10`, `:11`, etc.)
+- Viewers are **not** shared across agents (Board watching agent A does not see agent B's screen)
 
-**Implementation:** noVNC RFB connection with `viewOnly: true` for watch mode, `viewOnly: false` for control mode. WebSocket proxy enforces mode based on Board's action.
+**Agent-side behavior:**
+- Agent heartbeat continues normally
+- Computer tools (`computerClick`, `computerTypeText`, etc.) execute immediately
+- No waiting for Board approval or viewer presence
+
+#### 2. Takeover Protocol (Teach-by-Showing / 2FA)
+
+**Takeover flow:**
+1. Board clicks **"Take Over"** button in Computer tab → sends `take_over` command to backend
+2. Backend pauses **computer tools only** for that agent (agent's `computer*` tool calls return `{ paused: true, message: "Board has taken over. Waiting for hand-back..." }`)
+3. Agent **heartbeat and non-computer tools continue** (e.g., `getInbox`, `updateIssue`, `addComment` still work; only computer tools block)
+4. Board VNC client switches to input-enabled mode (`viewOnly: false`)
+5. Agent desktop shows notification: **"Board member {name} is controlling. Waiting for hand-back."**
+6. Board performs task (e.g., 2FA login, demonstrate workflow, fix stuck UI)
+7. Board clicks **"Hand Back"** button → sends `hand_back` command
+8. Backend unpauses computer tools for that agent
+9. Agent desktop notification clears; agent tools resume
+
+**Dual-drive constraint:**
+- **No free dual-control in MVP** — Board input is off by default until takeover
+- During takeover, agent tool calls to `computerClick` / `computerTypeText` are paused (return `paused: true`)
+- If agent heartbeat is waiting on a computer tool result (e.g., "click OK button then read response"), the heartbeat blocks until hand-back
+- If agent heartbeat is not waiting on computer tools (e.g., planning next step, reading comments), it continues normally
+
+**Takeover timeout:**
+- Timeout measured as **idle since last Board keypress or mouse move/click** on the authenticated VNC client (not wall-clock since takeover)
+- Ignore VNC viewer heartbeats / cursor-sync noise (only real user input resets idle timer)
+- Soft warning before auto hand-back: "Idle for 2 minutes. Handing back in 30 seconds unless you interact."
+- Auto hand-back after idle timeout → same as Board clicking "Hand Back" (unpauses agent tools)
+
+**Use cases:**
+- **2FA / login secrets:** Board takes over, types credentials on live view, hands back. Agent never sees credentials in transcript or chat.
+- **Teach-by-showing:** Board demonstrates workflow (e.g., navigate admin dashboard, fill form), agent observes and learns.
+- **Unstick agent:** Agent clicks wrong button or gets stuck in modal; Board takes over, fixes, hands back.
+
+#### 3. Tools and Protocol
+
+**Computer toolset additions for takeover:**
+
+| Tool | Parameters | Returns | Description |
+|---|---|---|---|
+| `screenView` | — | `{ vncUrl, status: 'watching' \| 'taken_over' }` | Get current VNC URL and takeover status. Agent can check if Board has control before attempting computer tool. |
+| `takeOver` | `reason?: string` | `{ success: boolean }` | **Board-only tool** (not agent). Pauses agent computer tools, enables Board input. Reason logged to activity log. |
+| `handBack` | — | `{ success: boolean }` | **Board-only tool** (not agent). Unpauses agent computer tools, disables Board input. |
+
+**Screenshot tool behavior:**
+- `computerScreenshot()` is **not paused** during takeover (agent can still screenshot to observe what Board is doing)
+- Agent can call `screenView()` to check takeover status before attempting other computer tools
+
+**Protocol state machine:**
+
+```
+Initial state: watching (Board sees screen, agent drives)
+ → Board clicks "Take Over" → taken_over (Board drives, agent computer tools paused)
+ → Board clicks "Hand Back" or idle timeout → watching
+```
+
+**Implementation notes:**
+- noVNC RFB connection with `viewOnly: true` (watching) or `viewOnly: false` (taken_over)
+- WebSocket proxy enforces mode based on takeover state stored in `company_computer_sessions` table (`takeoverStatus`, `takeoverBoardUserId`, `takeoverIdleSince`)
+- Agent tool calls check `takeoverStatus` before executing; return `{ paused: true }` if taken over
+- Backend resets idle timer on VNC input events (keypress, mouse move/click) from authenticated Board session
+
+#### 4. Secrets and Credential Handling
+
+**Never type credentials through agent chat/transcript:**
+- Board must **not** instruct agent to type passwords, API keys, 2FA codes in chat
+- Board must **not** paste secrets into issue comments or agent instructions
+- **Correct flow:** Board takes over, types credentials directly on live VNC view, hands back
+- Agent transcript remains clean (no secret leakage in observability, logs, or comments)
+
+**Use case: 2FA login**
+1. Agent opens browser to login page, enters username, sees 2FA prompt
+2. Agent calls `screenView()` → returns `{ status: 'watching' }` (no takeover yet)
+3. Agent comments: "Login requires 2FA. Board, please take over to complete."
+4. Agent waits (heartbeat can continue with other tasks or polls `screenView()` status)
+5. Board sees comment, clicks "Take Over" in Computer tab
+6. Board types 2FA code, completes login, clicks "Hand Back"
+7. Agent calls `screenView()` → returns `{ status: 'watching' }` (takeover released)
+8. Agent continues workflow (scrapes data, fills form, etc.)
+
+---
 
 ---
 
@@ -919,7 +1103,7 @@ Board views Company Computer **from the Tourbillon web app while chatting to the
 - **Managed desktop SaaS:** Do not bind to third-party SaaS (Windows 365, Amazon WorkSpaces, etc.) in MVP. Self-hosted Linux VM only. SaaS may be post-MVP for compliance-heavy customers.
 - **Separate desktop-only page:** Computer view is **not** a standalone page at `/agent/{urlKey}/computer`. It is a **chat-adjacent tab** (right panel) visible while chatting with the agent. Product intent: Board watches agent's screen in the same UI where they chat, not a separate navigation destination.
 - **TEST auto-deploy:** This spike/PR does **not** enable Company Computer on tourbillon-test.example.com. No runtime changes that pull to TEST without explicit Derek approval. This is docs-only.
-- **Session recording:** No built-in session replay (à la Kasm) in MVP. Board can manually screen-record via browser if needed. Audit logs are post-MVP compliance feature.
+- **Session recording:** No built-in session replay (à la Kasm) in MVP. Board can screen-record via browser if needed. Audit logs are post-MVP compliance feature.
 - **GPU acceleration:** No GPU passthrough or Selkies in MVP. noVNC software rendering sufficient for CC1-CC4 stories. GPU is post-MVP for media-heavy tasks.
 - **Mobile Board view:** noVNC embed works on desktop only. Mobile browser support is post-MVP (touch → mouse translation is poor UX without native app).
 
