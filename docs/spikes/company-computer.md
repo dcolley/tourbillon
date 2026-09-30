@@ -1,8 +1,9 @@
 # Company Computer Spike
 
-**Status:** DRAFT — Option A locked (2026-09-30 Derek/PM)  
+**Status:** DRAFT — Option A locked (2026-09-30 Derek/PM); Test HOLD (2026-09-30 #71 @ 3d4d030)  
 **Gating:** ACCEPT/HOLD draft only; HOLD per-agent VMs / bwrap-as-desktop  
-**PoC Lock (2026-09-30 Derek):** One `kasmweb/desktop` container per agent on localhost Docker (TEST). Shared company files via host bind-mounts. Multi-seat / one-container-many-agents = non-goal.
+**PoC Lock (2026-09-30 Derek):** One `kasmweb/desktop` container per agent on localhost Docker (TEST). Shared company files via host bind-mounts. Multi-seat / one-container-many-agents = non-goal.  
+**Test Lock (2026-09-30):** Auto-provision on enable (company config `hasComputer` + allowlist image picker). `hasComputer === true` required for toolset (ban toolset OR-bypass). Board input only in takeover mode (`take_over` / `hand_back` tools + idle timeout auto-release).
 
 ---
 
@@ -157,10 +158,12 @@ Board members connect to **any agent's container** via the web UI. The live prox
 **So that** agents can access GUI tools
 
 **Acceptance (PoC):**
-- Board visits `/settings/company-computer` and clicks "Provision"
-- System provisions bind-mount directories on TEST VM: `/opt/tourbillon-company-{companyId}/data/` and `/opt/tourbillon-company-{companyId}/home/`
-- Displays company computer status: "Ready" + resource limits
-- Board must explicitly enable (no auto-provision)
+- Board visits `/settings/company-computer` and toggles "Enable Company Computer"
+- Board selects desktop image from allowlist (PoC: `kasmweb/desktop:1.15.0` default; future: version picker)
+- **Auto-provision on enable:** System immediately provisions bind-mount directories on TEST VM: `/opt/tourbillon-company-{companyId}/data/` and `/opt/tourbillon-company-{companyId}/home/`
+- Sets company config `hasComputer: true` in DB
+- Displays company computer status: "Ready" + resource limits + selected image
+- **Gating:** `hasComputer === true` required before any agent can call `company-computer` toolset tools (toolset alone cannot create homes/containers)
 
 ### US-CC2: Agent Uses Browser
 
@@ -215,16 +218,17 @@ This is **the destination for US-CC5 / Board live-view** for option A (**live Ka
 1. **Default after agent exists = chat** (not Overview/config). When Board navigates to an agent, they land in chat view first.
 2. **Agent config** (Overview, settings, capabilities) = navigate / modal / popup off that chat default — **not the primary chrome**. Configuration is secondary to the conversation.
 3. **Computer panel** = optional layouts:
-   - **Hidden** — Computer tab not visible (agent has no `company-computer` toolset, or Board closed it)
+   - **Hidden** — Computer tab not visible (company `hasComputer === false`, or agent lacks `company-computer` toolset, or Board closed it)
    - **Side-by-side with chat** — Computer panel alongside chat (Grok Bot–style split view; default when visible)
    - **Full screen** — Computer panel fills viewport (Board clicked "full screen" toggle; chat minimized or hidden)
 
 **Acceptance (PoC):**
-- Board chatting with agent sees **Computer** tab in right panel (alongside Details/Media/other tabs)
+- Board chatting with agent sees **Computer** tab in right panel (alongside Details/Media/other tabs) — **only if** `hasComputer === true` and agent has `company-computer` toolset
 - Tab labeled "{Agent name}'s screen" or similar
 - Tab embeds **live KasmVNC iframe/proxy** connected to agent's container (Tourbillon auth proxy to `localhost:6901` etc.)
 - Board sees agent's screen update in real-time (sub-second latency via WebSocket/WebRTC)
-- Board can optionally click "Take Control" to send input (shared mouse/keyboard; PoC may be watch-only)
+- **Watch mode by default:** Board cannot send input until clicking "Take Control" (read-only KasmVNC proxy)
+- **Takeover mode:** Board clicks "Take Control" → input enabled, auto hand-back after 5min idle, Board can click "Hand Back" to release
 - Computer panel is contextual — shows the agent currently being chatted with
 - Computer panel supports three layout modes: hidden, side-by-side (default), full screen
 - Agent config (Overview, settings) is accessible but not the default landing view
@@ -239,10 +243,11 @@ This is **the destination for US-CC5 / Board live-view** for option A (**live Ka
 
 Triggered when an agent with `company-computer` toolset first calls a `computer*` tool:
 
-1. Check if agent already has a container (DB: `company_computer_sessions` table with `agentId`, `containerId`, `vncPort`, `status`)
-2. If no container, allocate next free KasmVNC port (`:6901`, `:6902`, …)
-3. Create bind-mount directories: `/opt/tourbillon-company-{companyId}/home/{agentUrlKey}/`
-4. Start `kasmweb/desktop` container:
+1. **Gate:** Check company config `hasComputer === true`. If false, return error: "Company Computer not enabled. Ask Board to enable at /settings/company-computer." **Toolset alone cannot bypass this gate.**
+2. Check if agent already has a container (DB: `company_computer_sessions` table with `agentId`, `containerId`, `vncPort`, `status`)
+3. If no container, allocate next free KasmVNC port (`:6901`, `:6902`, …)
+4. Create per-agent bind-mount directory: `/opt/tourbillon-company-{companyId}/home/{agentUrlKey}/` (company `/data/` already provisioned at US-CC1 enable)
+5. Start `kasmweb/desktop` container:
    ```bash
    docker run -d \
      --name tourbillon-agent-{agentId} \
@@ -252,8 +257,8 @@ Triggered when an agent with `company-computer` toolset first calls a `computer*
      -v /opt/tourbillon-company-{companyId}/home/{agentUrlKey}:/home/kasm-user \
      kasmweb/desktop:1.15.0
    ```
-5. Record session in DB: `{ agentId, containerId, vncPort: 6901, status: 'active', createdAt }`
-6. Return session handle to agent tool
+6. Record session in DB: `{ agentId, containerId, vncPort: 6901, status: 'active', createdAt, takenOverBy: null }`
+7. Return session handle to agent tool
 
 ### Resume Container
 
@@ -286,7 +291,7 @@ On next tool call:
 1. `docker start tourbillon-agent-{agentId}` — desktop state resumes (XFCE session, browser tabs restored from home dir)
 2. Mark session `status: 'active'`
 
-**PoC:** No auto-stop. Containers stay running. Board must manually stop/remove unused containers.
+**PoC:** No auto-stop. Containers stay running until Board manually stops/removes them from `/settings/company-computer`.
 
 ### Multi-Agent Concurrency (PoC)
 
@@ -403,7 +408,7 @@ Board views Company Computer **from the Tourbillon web app while chatting to the
 1. **Default view = chat** — When Board navigates to an agent, they land in chat view first (not Overview/config)
 2. **Agent config is secondary** — Overview, settings, capabilities accessible via navigate/modal/popup off chat default (not primary chrome)
 3. **Computer panel layout options:**
-   - **Hidden** — No Computer tab visible (agent lacks `company-computer` toolset, or Board manually closed it)
+   - **Hidden** — No Computer tab visible (company `hasComputer === false`, or agent lacks `company-computer` toolset, or Board manually closed it)
    - **Side-by-side with chat** (default when visible) — Computer panel in right area alongside chat (Grok Bot–style split; both visible)
    - **Full screen** — Computer panel fills viewport (Board toggled full screen; chat minimized/hidden)
 
@@ -431,19 +436,35 @@ Board views Company Computer **from the Tourbillon web app while chatting to the
 
 **Product Lock:** Live proxy/embed of KasmVNC for PoC. No screenshot refresh fallback — full live-stream is the PoC implementation path.
 
-### Watch vs Take Control (PoC)
+### Watch vs Take Control (Test Lock 2026-09-30)
 
-**Watch mode (PoC default):**
+**Watch mode (default):**
 - Board sees agent's screen in real-time via KasmVNC iframe
-- Board can send input (KasmVNC allows input by default; read-only mode TBD for post-PoC)
+- **Board cannot send input** — KasmVNC proxy enforces read-only mode (pointer hidden, keyboard/mouse events dropped)
 - Agent unaware Board is watching (no notification in PoC; post-PoC feature)
 
-**Take Control mode (post-PoC):**
-- Explicit "Take Control" button with agent notification
-- Shared input coordination (agent tools + Board UI)
-- Session ownership handoff
+**Take Control mode (explicit handoff):**
+- Board clicks **"Take Control"** button in Computer tab
+- Agent tools call `take_over()` returns session lock (or Board UI calls internal API)
+- KasmVNC proxy switches to input-enabled mode for Board
+- DB: `company_computer_sessions.takenOverBy = {boardUserId}` + `takenOverAt` timestamp
+- Agent desktop shows notification: "Board member {name} is now controlling this session" (post-PoC; PoC may skip)
+- **Idle timeout:** If no Board input for 5min, auto-call `hand_back()` → switch back to watch mode + soft warning to Board: "Control released due to inactivity"
+- Board clicks **"Hand Back"** button (or agent calls `hand_back()`) → back to watch mode, clear `takenOverBy`
 
-**PoC Implementation:** Direct KasmVNC iframe proxy with default input enabled. Watch-only gating and notifications are post-PoC enhancements.
+**PoC Risk:** If Board input defaults to enabled without takeover gating, or if no idle timeout, sessions can hang with Board "ghost control" forever. Must implement:
+1. Watch mode = read-only by default (KasmVNC proxy enforces)
+2. Takeover = explicit Board action + DB session lock
+3. Idle timeout → auto hand back + soft warning
+
+**Agent Tools (added to computer toolset):**
+- `take_over()` — Agent explicitly requests Board to take control (e.g. "Board, please help with this form")
+- `hand_back()` — Agent reclaims control from Board (e.g. "Thanks, I'll continue from here")
+
+**Board UI:**
+- "Take Control" button (visible when `takenOverBy === null`)
+- "Hand Back" button (visible when `takenOverBy === currentUserId`)
+- Idle timer display: "Control will release in 3:42" (countdown from last input)
 
 ---
 
@@ -451,13 +472,15 @@ Board views Company Computer **from the Tourbillon web app while chatting to the
 
 **Toolset name:** `company-computer`
 
-**Gating:** `assignedToolsets` includes `company-computer` (opt-in per agent, like `code-execution`)
+**Gating:** 
+1. `assignedToolsets` includes `company-computer` (opt-in per agent, like `code-execution`)
+2. **Company config `hasComputer === true` required** — toolset alone cannot create homes/containers. All tools return error if `hasComputer === false`: "Company Computer not enabled. Ask Board to enable at /settings/company-computer."
 
 **Tools** (Tier 2 boolean toolset):
 
 | Tool | Parameters | Returns | Description |
 |---|---|---|---|
-| `computerOpenBrowser` | `url?: string` | `{ sessionId, containerId, vncPort }` | Open Firefox on agent's container desktop. If `url` provided, navigate to it. If container doesn't exist, create it. |
+| `computerOpenBrowser` | `url?: string` | `{ sessionId, containerId, vncPort }` | Open Firefox on agent's container desktop. If `url` provided, navigate to it. If container doesn't exist, create it (gated by `hasComputer`). |
 | `computerOpenFileManager` | `path?: string` | `{ sessionId, containerId, vncPort }` | Open file manager (Thunar) on agent's container desktop. If `path` provided, navigate to it. |
 | `computerOpenTerminal` | `cwd?: string` | `{ sessionId, containerId, vncPort }` | Open terminal emulator (xfce4-terminal) on agent's container desktop. If `cwd` provided, set working directory. |
 | `computerScreenshot` | — | `{ imageBase64: string, width, height }` | Capture current desktop as PNG via KasmVNC API. Returns base64-encoded image. Agent can analyze with vision model or save to issue comment. |
@@ -467,7 +490,9 @@ Board views Company Computer **from the Tourbillon web app while chatting to the
 | `computerMouseMove` | `x: number, y: number` | `{ success: boolean }` | Move mouse to (x, y) without clicking. Via KasmVNC API. |
 | `computerScroll` | `direction: 'up'\|'down', amount?: number` | `{ success: boolean }` | Scroll focused window. `amount` is scroll wheel ticks (default 3). Via X11 automation inside container. |
 | `computerCloseSession` | — | `{ success: boolean }` | Stop/remove agent's container. Home dir persists on host for next session. Frees RAM/CPU. |
-| `computerGetSessionInfo` | — | `{ sessionId, containerId, vncPort, active, createdAt, lastActivityAt, ramMB, cpuPercent }` | Get current container status and resource usage (via `docker inspect` / `docker stats`). |
+| `computerGetSessionInfo` | — | `{ sessionId, containerId, vncPort, active, createdAt, lastActivityAt, ramMB, cpuPercent, takenOverBy }` | Get current container status and resource usage (via `docker inspect` / `docker stats`). Includes Board takeover state. |
+| `take_over` | — | `{ success: boolean, message: string }` | Agent explicitly requests Board to take control. Sets flag for Board UI to show "Agent requests help" notification. Does not grant control — Board must still click "Take Control". |
+| `hand_back` | — | `{ success: boolean }` | Agent reclaims control from Board. Clears `takenOverBy`, switches Board iframe back to watch mode. Returns error if Board not currently in control. |
 
 **Tool pattern:** Mirrors Cursor `computerUse` pattern (screenshot + input) but operates over Docker container desktop (KasmVNC), not local host. These are **Tourbillon-internal tools** — not Cursor-specific tooling.
 
@@ -573,12 +598,18 @@ None of these are MVP. Defer GPU until post-MVP.
 ### Phase 3: PoC Implementation (POST This PR)
 
 - [ ] New package (post-PoC): `packages/company-computer/` (container manager, KasmVNC proxy)
-- [ ] DB migration: `company_computer_sessions` table (agentId, containerId, vncPort, status, timestamps)
-- [ ] New toolset: `company-computer` in `role-tools.ts`
-- [ ] API routes: `/api/internal/company-computer/*` (container CRUD, screenshot, input automation)
+- [ ] DB migrations:
+  - [ ] `companies` table: add `hasComputer: boolean` (default `false`), `computerImageTag: string` (e.g. `kasmweb/desktop:1.15.0`)
+  - [ ] `company_computer_sessions` table: `agentId`, `containerId`, `vncPort`, `status`, `takenOverBy: userId | null`, `takenOverAt: timestamp | null`, `lastBoardInputAt: timestamp | null`, `createdAt`, `lastActivityAt`
+- [ ] New toolset: `company-computer` in `role-tools.ts` (includes `take_over` / `hand_back` tools)
+- [ ] API routes: `/api/internal/company-computer/*` (container CRUD, screenshot, input automation, takeover state management)
 - [ ] Skill file: `company-computer-skills.md`
-- [ ] UI: **Computer** tab (chat-adjacent) with KasmVNC iframe/proxy embed
-- [ ] UI: `/settings/company-computer` dashboard (provision bind-mounts, container list, resource usage via `docker stats`)
+- [ ] UI: **Computer** tab (chat-adjacent) with KasmVNC iframe/proxy embed (read-only by default, "Take Control" button for input)
+- [ ] UI: `/settings/company-computer` dashboard:
+  - [ ] Enable toggle + allowlist image picker (auto-provisions bind-mounts on enable)
+  - [ ] Container list + resource usage via `docker stats`
+  - [ ] Per-container stop/remove actions
+- [ ] KasmVNC proxy: read-only mode enforcement, takeover switching, idle timeout (5min → auto hand-back)
 - [ ] Ops: Docker Compose / systemd units for TEST VM container orchestration
 - [ ] Docs: Update AGENTS.md with Company Computer toolset and architecture
 
@@ -586,12 +617,16 @@ None of these are MVP. Defer GPU until post-MVP.
 
 - [ ] Deploy to tourbillon-test.example.com
 - [ ] Create test company "Demo Corp"
-- [ ] Provision company computer bind-mounts for Demo Corp
+- [ ] Board enables Company Computer at `/settings/company-computer` (auto-provisions bind-mounts: `/opt/tourbillon-company-democorp/data/` and `/opt/tourbillon-company-democorp/home/`)
+- [ ] Verify `companies.hasComputer === true` in DB
 - [ ] Create test agent "TestBot" with `company-computer` toolset
 - [ ] Assign issue: "Research Tourbillon competitors via Google"
 - [ ] TestBot calls `computerOpenBrowser`, searches, screenshots results, posts to issue
-- [ ] Board watches TestBot's desktop via live KasmVNC proxy embed
-- [ ] Validate Docker resource limits (create 5 agents, stress-test RAM/CPU per container)
+- [ ] Board watches TestBot's desktop via live KasmVNC proxy embed (watch mode: read-only, no Board input)
+- [ ] Board clicks "Take Control" → input enabled, Board helps TestBot, clicks "Hand Back" after done
+- [ ] Verify idle timeout: Board takes control, waits 5min without input → auto hand-back + soft warning
+- [ ] Validate Docker resource limits (create 5 agents with `company-computer` toolset, stress-test RAM/CPU per container)
+- [ ] Verify toolset gate: try calling `computerOpenBrowser` from agent in company with `hasComputer === false` → returns error
 
 ---
 
