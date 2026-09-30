@@ -213,9 +213,9 @@ Provisioning backends are orthogonal to the `hasComputer` gate — the backend d
 #### Option 2: Kasmweb Docker Images (Standalone) — **MVP Recommended**
 
 **Stack:**
-- Docker Engine API on company host (no Kasm Admin UI required)
+- Docker Engine API on **localhost** (same host as Tourbillon; no Kasm Admin UI required)
 - Kasmweb Docker images: `kasmweb/chrome`, `kasmweb/desktop`, `kasmweb/ubuntu-jammy-desktop`
-- One container per company; agents with `hasComputer` get `/home/{agentId}` mounts
+- One container per company on localhost; agents with `hasComputer` get `/home/{agentId}` mounts
 - KasmVNC embedded in container (noVNC on port 6901 by default)
 - Tourbillon proxies HTTPS iframe/embed; VNC password rotated per provision
 
@@ -238,29 +238,30 @@ Provisioning backends are orthogonal to the `hasComputer` gate — the backend d
 7. Return success; Board sees VNC embed in Computer tab
 
 **Images:**
+- **`kasmweb/desktop`** or **`kasmweb/ubuntu-jammy-desktop`** — **Default/preferred (Derek 2026-09-30).** Full XFCE desktop with terminal, file manager, browser. **Recommended for full computer toolset** (terminal + files + browser).
 - **`kasmweb/chrome`** — Browser-only (Chromium). Good for web research, form filling. **Not** full computer toolset (no terminal, no file manager).
-- **`kasmweb/desktop`** or **`kasmweb/ubuntu-jammy-desktop`** — Full XFCE desktop with terminal, file manager, browser. **Recommended for full computer toolset** (terminal + files + browser).
 - **Core + apps** — Install additional tools via `docker exec` or custom Dockerfile if needed.
 
 **Company config (align with two-gate model):**
-- Company: `hasComputer` (boolean, enables company computer) + `imageId` (string, selected from allowlist: `kasmweb/desktop`, `kasmweb/chrome`, `kasmweb/ubuntu-jammy-desktop`)
+- Company: `hasComputer` (boolean, enables company computer) + `imageId` (string, selected from allowlist; **default: `kasmweb/ubuntu-jammy-desktop`**)
 - Agent: `hasComputer` (boolean, gates `/home/{agentId}` creation)
-- Board UI: Company settings page shows toggle + image picker (dropdown or radio buttons)
+- Board UI: Company settings page shows toggle + image picker (dropdown or radio buttons with `kasmweb/ubuntu-jammy-desktop` as default selection)
 
 **Pros:**
 - Fast provision (5-10 seconds vs 30-90 seconds for VM)
-- Low cost (containers share host resources; ~1-2GB RAM per company)
-- **No Kasm Admin UI required for MVP** (Tourbillon uses Docker API directly)
-- Simple ops (Docker Engine on company host or dedicated Docker host; no cloud provider)
+- Low cost (containers share localhost resources; ~1-2GB RAM per company)
+- **No Kasm Admin UI required for MVP** (Tourbillon uses Docker API directly via unix socket)
+- Simple ops (Docker Engine on **localhost only**; no cloud provider, no remote DOCKER_HOST)
 - KasmVNC built-in (better browser compatibility than plain VNC; audio/clipboard support)
 - Good for PoC and TEST (rapid iteration, no Kasm licensing or admin setup)
 - Easy teardown (docker stop + docker rm)
 - Image flexibility (Board selects browser-only vs full desktop per company)
 
 **Cons:**
+- **Localhost-only for MVP** (all containers run on same host as Tourbillon; remote DOCKER_HOST is post-MVP)
 - Weaker isolation than VMs (containers share kernel; container escape affects host)
 - Multi-agent DISPLAY inside single container requires `/home/{agentId}` subdirs (not separate X displays per agent — all agents share one desktop session per company)
-- Port allocation required (6901, 6902, 6903… for N companies or dynamic port mapping; Tourbillon proxy handles routing)
+- Port allocation required (6901, 6902, 6903… for N companies or dynamic port mapping on localhost; Tourbillon proxy handles routing)
 - Persistent storage requires Docker volumes (`/home/kasm-user` mounted per company)
 - Not suitable for high-security multi-tenant SaaS (container escape risk; prefer VM per company for production)
 
@@ -391,23 +392,34 @@ Provisioning backends are orthogonal to the `hasComputer` gate — the backend d
 
 ### Recommended MVP PoC Backend
 
-**Option 2: Kasmweb Standalone Docker** for the following reasons:
+**Option 2: Kasmweb Standalone Docker (localhost)** — Derek product lock 2026-09-30
+
+**MVP architecture:**
+- **Standalone Docker on localhost** (same host as Tourbillon web app and scheduler)
+- Tourbillon-test is a Proxmox VM → Docker runs on **that same VM** (unix socket / local Engine API)
+- **One Docker daemon on localhost runs N company containers** (one per company)
+- **Remote DOCKER_HOST is post-MVP** (not recommended for MVP; adds network complexity and failure modes)
+- **Default/preferred image:** `kasmweb/desktop` (full toolset: browser + terminal + file manager) or `kasmweb/ubuntu-jammy-desktop`
+
+**Rationale:**
 
 1. **Fast provision** (5-10 seconds) enables rapid PoC iteration and TEST validation
-2. **Low cost** (containers share host; no per-company VM bill)
-3. **Simple setup** (Docker API only; no Kasm Admin UI or cloud provider)
+2. **Low cost** (containers share localhost resources; no per-company VM bill or network overhead)
+3. **Simple setup** (local Docker socket; no remote DOCKER_HOST, no Kasm Admin UI, no cloud provider)
 4. **KasmVNC built-in** (better browser compatibility than plain VNC; audio/clipboard support)
 5. **Image flexibility** (Board selects `kasmweb/desktop` for full toolset or `kasmweb/chrome` for browser-only)
 6. **Good enough isolation** for TEST and single-company self-hosted (not production multi-tenant SaaS)
 7. **Easy teardown** (docker stop/rm) for PoC experimentation
+8. **Localhost simplicity** (no network routing, no firewall rules, no remote host provisioning; unix socket only)
 
 **Migration path for production:**
 - **Self-hosted multi-tenant SaaS → Option 1** (VM per company) for stronger isolation and standard cloud ops
+- **Remote Docker hosts → post-MVP** if localhost resource exhaustion becomes an issue (requires DOCKER_HOST routing and failure handling)
 - **Enterprise customers → Option 2B** (Full Kasm Workspaces) if compliance/audit features become hard requirements
 - **GPU tasks → Option 3** (Selkies) if agents need GPU acceleration for media/3D
 - **Zero-Ops SaaS startup → Option 4** (E2B/Daytona) if provider pricing is acceptable and API is mature
 
-**Implementation sketch (Option 2 PoC):**
+**Implementation sketch (MVP: localhost Docker):**
 
 ```typescript
 // packages/company-computer/src/backends/kasmweb-standalone.ts
@@ -416,34 +428,35 @@ import { generatePassword } from './utils';
 
 export async function provisionCompanyComputer(
   companyId: string,
-  imageId: string, // 'kasmweb/desktop' or 'kasmweb/chrome'
+  imageId: string, // Default: 'kasmweb/desktop' or 'kasmweb/ubuntu-jammy-desktop'
 ): Promise<CompanyComputerHost> {
-  const docker = new Docker();
+  // Connect to local Docker daemon via unix socket (MVP: localhost only)
+  const docker = new Docker({ socketPath: '/var/run/docker.sock' });
   
   // Validate imageId against allowlist
   const ALLOWED_IMAGES = [
-    'kasmweb/ubuntu-jammy-desktop:1.15.0',
-    'kasmweb/desktop:1.15.0',
-    'kasmweb/chrome:1.15.0',
+    'kasmweb/ubuntu-jammy-desktop:1.15.0', // Preferred default (full toolset)
+    'kasmweb/desktop:1.15.0',              // Alternative full desktop
+    'kasmweb/chrome:1.15.0',               // Browser-only (not full toolset)
   ];
   if (!ALLOWED_IMAGES.includes(imageId)) {
     throw new Error(`Image ${imageId} not in allowlist`);
   }
   
-  // Pull image if not present
+  // Pull image if not present on localhost
   await docker.pull(imageId);
   
   // Rotate VNC password per provision
   const vncPassword = generatePassword(16);
   
-  // Create container with persistent volume for /home
+  // Create container on localhost with persistent volume for /home
   const container = await docker.createContainer({
     name: `tourbillon-company-${companyId}`,
     Image: imageId,
     Env: [`VNC_PW=${vncPassword}`],
     ExposedPorts: { '6901/tcp': {} }, // KasmVNC HTTPS port
     HostConfig: {
-      PortBindings: { '6901/tcp': [{ HostPort: '0' }] }, // dynamic host port
+      PortBindings: { '6901/tcp': [{ HostPort: '0' }] }, // dynamic localhost port
       ShmSize: 512 * 1024 * 1024, // 512MB shared memory for browser
       Memory: 4 * 1024 * 1024 * 1024, // 4GB RAM limit
       NanoCpus: 2 * 1e9, // 2 CPU cores
@@ -457,25 +470,32 @@ export async function provisionCompanyComputer(
   
   await container.start();
   
-  // Wait for KasmVNC endpoint to be ready
+  // Wait for KasmVNC endpoint to be ready on localhost
   const info = await container.inspect();
   const hostPort = info.NetworkSettings.Ports['6901/tcp'][0].HostPort;
-  const vncUrl = `https://localhost:${hostPort}`; // KasmVNC serves HTTPS
+  const vncUrl = `https://localhost:${hostPort}`; // KasmVNC serves HTTPS on localhost
   
   await waitForHealthy(vncUrl); // poll until 200 OK (may take 5-10 sec)
   
   return {
     companyId,
-    backend: 'kasmweb-standalone',
+    backend: 'kasmweb-standalone-localhost', // MVP: localhost only
     containerId: container.id,
     imageId,
-    vncUrl,
+    vncUrl, // localhost URL; Tourbillon proxies to Board via wss://
     vncPassword, // store encrypted in DB
     status: 'ready',
     provisionedAt: new Date(),
   };
 }
 ```
+
+**MVP constraints:**
+- Docker daemon runs on **localhost** (same host as Tourbillon web app)
+- Tourbillon-test Proxmox VM → Docker on that same VM (no remote DOCKER_HOST)
+- All containers bind to localhost ports (dynamic port allocation)
+- Tourbillon web app proxies VNC via WebSocket (`wss://tourbillon.example.com/vnc/{agentId}` → `ws://localhost:{hostPort}`)
+- **Remote DOCKER_HOST is post-MVP** (requires network routing, firewall rules, remote host provisioning)
 
 **Control-plane hook:**
 
