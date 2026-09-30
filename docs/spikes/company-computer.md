@@ -203,6 +203,14 @@ Board views Company Computer **from the Tourbillon web app while chatting to the
 
 This is **the destination for US-CC5 / Board live-view** for option A (noVNC/Selkies embed of the agent's display). MVP-0 can be a thinner watch mode, but product intent is **chat-adjacent Computer panel**, not a separate desktop-only page.
 
+**Agent Detail Screen Layout (Derek/PM 2026-09-30):**
+1. **Default after agent exists = chat** (not Overview/config). When Board navigates to an agent, they land in chat view first.
+2. **Agent config** (Overview, settings, capabilities) = navigate / modal / popup off that chat default — **not the primary chrome**. Configuration is secondary to the conversation.
+3. **Computer panel** = optional layouts:
+   - **Hidden** — Computer tab not visible (agent has no `company-computer` toolset, or Board closed it)
+   - **Side-by-side with chat** — Computer panel alongside chat (Grok Bot–style split view; default when visible)
+   - **Full screen** — Computer panel fills viewport (Board clicked "full screen" toggle; chat minimized or hidden)
+
 **Acceptance:**
 - Board chatting with agent sees **Computer** tab in right panel (alongside Details/Media/other tabs)
 - Tab labeled "{Agent name}'s screen" or similar
@@ -210,6 +218,8 @@ This is **the destination for US-CC5 / Board live-view** for option A (noVNC/Sel
 - Board sees agent's screen update in real-time (1-2 sec latency acceptable)
 - Board can optionally click "Take Control" to send input (shared mouse/keyboard)
 - Computer panel is contextual — shows the agent currently being chatted with
+- Computer panel supports three layout modes: hidden, side-by-side (default), full screen
+- Agent config (Overview, settings) is accessible but not the default landing view
 
 **"Done" for MVP-0:** CC1 provision → CC2 browser → CC4 shell working on Demo/TEST metaspan. CC3 file manager and CC5 Board live view are natural on option A but not strict MVP-0 blockers.
 
@@ -368,6 +378,14 @@ Company Computer inherits company-scoped egress policy (`settings.egressPolicy`)
 
 **UX Lock (Derek/PM 2026-09-30):**  
 Board views Company Computer **from the Tourbillon web app while chatting to the agent**. Right-hand (or equivalent) **Computer** tab next to chat (alongside Details/Media/other tabs), showing that agent's GUI session (browser + file manager + shell), labeled e.g. "**{Agent name}'s screen**". Same feel as Grok Bot Details/Media/Computer. This is the **chat-adjacent Computer panel** for option A (noVNC/Selkies embed).
+
+**Agent Detail Screen Defaults (Derek/PM 2026-09-30):**
+1. **Default view = chat** — When Board navigates to an agent, they land in chat view first (not Overview/config)
+2. **Agent config is secondary** — Overview, settings, capabilities accessible via navigate/modal/popup off chat default (not primary chrome)
+3. **Computer panel layout options:**
+   - **Hidden** — No Computer tab visible (agent lacks `company-computer` toolset, or Board manually closed it)
+   - **Side-by-side with chat** (default when visible) — Computer panel in right area alongside chat (Grok Bot–style split; both visible)
+   - **Full screen** — Computer panel fills viewport (Board toggled full screen; chat minimized/hidden)
 
 **Location:** **Computer** tab in right panel when chatting with agent (contextual to current agent conversation)
 
