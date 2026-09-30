@@ -156,7 +156,323 @@ Board members connect to **any agent's session** via the web UI. The noVNC/Selki
 
 ---
 
-## 3. MVP Path A — Recommended Stack
+## 3. Provisioning Backends
+
+### Product Constraint (Derek/PM 2026-09-30)
+
+**Not feasible for Board/Derek to spin up computers manually** when a company is created or company computer is enabled. Enabling company computer in company config (`/settings/company-computer` → Provision) must trigger **automated provision** of the host/VM.
+
+**Control-plane hook:** Company config enable → provisioner backend → host ready → agents with `hasComputer` can create `/home/{agentId}` homes.
+
+**Gate preservation:** The two-gate model remains intact:
+1. **Gate 1 (Company):** Enabling company computer in config triggers automated provision of host
+2. **Gate 2 (Agent):** `hasComputer === true` triggers creation of `/home/{agentId}` on the provisioned host
+
+Provisioning backends are orthogonal to the `hasComputer` gate — the backend determines **how** the company computer host is created, not whether agent homes are created.
+
+### Backend Options
+
+#### Option 1: One VM per Company (Cloud Provider API)
+
+**Stack:**
+- Cloud provider API (AWS EC2, GCP Compute Engine, DigitalOcean, Hetzner Cloud)
+- Terraform or cloud SDK (boto3, google-cloud-compute, etc.)
+- Cloud-init or golden AMI/image with XFCE + VNC pre-installed
+- Single Linux VM per company (shared by all agents with `hasComputer`)
+
+**Provision flow:**
+1. Board enables company computer in config → `POST /api/settings/company-computer/enable`
+2. Tourbillon backend calls cloud API: `create_instance(name="company-{companyId}", image="golden-xfce-vnc", size="2cpu-4gb")`
+3. Cloud-init script or golden image boots XFCE + VNC, creates `/home` directory structure
+4. Backend polls instance until SSH/VNC reachable (health check)
+5. Record `company_computers` row: `{ companyId, hostIp, vncPort, status: 'ready', provisionedAt }`
+6. Return success to Board; agents with `hasComputer` can now create homes
+
+**Pros:**
+- Clean isolation per company (one VM = one company; no cross-company risk)
+- Standard cloud ops (SSH access, monitoring, backups via cloud provider snapshots)
+- Matches current MVP Option A design (§ 4 noVNC + XFCE)
+- Easy to scale resources per company (Board can resize VM via API if needed)
+- Well-understood failure modes (VM crashes → reprovision; agent homes persist if EBS/persistent disk)
+
+**Cons:**
+- Higher cost per company (~$20-50/mo per VM depending on size and provider)
+- Slower provision time (30-90 seconds to boot VM + cloud-init)
+- Requires cloud provider credentials and API integration
+- Ops overhead: patch management, monitoring, VM lifecycle (stop/start/terminate)
+
+**Tradeoffs:**
+- Best for production multi-tenant SaaS (each company pays for their VM)
+- Overkill for single-company self-hosted Tourbillon (one VM for one company = no multi-tenancy benefit)
+- Suitable for metaspan TEST (can provision one VM per test company)
+
+**Recommendation:** **Use for production multi-tenant SaaS** where companies are billed per seat or per resource usage. Not recommended for MVP PoC (too slow for rapid iteration).
+
+---
+
+#### Option 2: Docker Desktop Container (webtop / linuxserver.io)
+
+**Stack:**
+- Docker with `linuxserver/webtop` or `kasmweb/desktop` image
+- One container per company (or per agent if multi-DISPLAY model fails)
+- KasmVNC or noVNC embedded in container
+- Host machine runs Docker daemon; Tourbillon spawns containers via Docker API
+
+**Provision flow:**
+1. Board enables company computer → `POST /api/settings/company-computer/enable`
+2. Tourbillon backend calls Docker API: `docker run -d --name=company-{companyId} -p 6080:6080 linuxserver/webtop:ubuntu-xfce`
+3. Container boots XFCE + VNC in ~5-10 seconds
+4. Backend health-checks `http://localhost:6080` (noVNC endpoint)
+5. Record `company_computers` row: `{ companyId, containerId, vncPort: 6080, status: 'ready' }`
+6. Return success; agents with `hasComputer` create homes inside container filesystem
+
+**Pros:**
+- Fast provision (5-10 seconds vs 30-90 seconds for VM)
+- Low cost (containers share host resources; ~1-2GB RAM per company vs full VM)
+- Simple ops (no cloud provider; runs on Tourbillon host or dedicated Docker host)
+- Good for PoC and TEST (rapid iteration, no cloud API setup)
+- Easy teardown (docker stop + docker rm)
+
+**Cons:**
+- Weaker isolation than VMs (containers share kernel; one container escape affects host)
+- Multi-agent DISPLAY model inside single container is complex (webtop images default to single-user desktop)
+- Port allocation required (6080, 6081, 6082… for N companies or dynamic port mapping)
+- Persistent storage requires Docker volumes (home directories must survive container restart)
+- Not suitable for high-security multi-tenant SaaS (container escape risk)
+
+**Tradeoffs:**
+- **Best for PoC and TEST environment** (fast iteration, low cost, no cloud setup)
+- Suitable for single-company self-hosted Tourbillon (one container for one company's agents)
+- Not recommended for production multi-tenant SaaS (security/isolation concerns)
+
+**Recommendation:** **Use for MVP PoC and TEST** to validate the two-gate model and agent home workflows quickly. Consider migrating to Option 1 (VM per company) for production SaaS.
+
+---
+
+#### Option 3: Kasm Workspaces or Selkies (Self-Hosted Desktop SaaS)
+
+**Stack:**
+- Kasm Workspaces self-hosted edition (Docker-based) or Selkies GStreamer
+- Built-in multi-tenancy (Kasm manages users, sessions, workspaces)
+- Pre-built browser isolation and desktop images
+- Tourbillon integrates via Kasm API or direct Selkies launch
+
+**Provision flow (Kasm):**
+1. Board enables company computer → `POST /api/settings/company-computer/enable`
+2. Tourbillon backend calls Kasm API: `create_workspace(company_id, image="xfce_desktop", users=[agents_with_hasComputer])`
+3. Kasm provisions Docker container per session or shared workspace
+4. Tourbillon records Kasm workspace ID and noVNC URL
+5. Agents with `hasComputer` use Kasm session URLs (Kasm handles multi-agent DISPLAY)
+6. Return success; Board sees Kasm-managed desktop in UI
+
+**Pros:**
+- Enterprise features out-of-box (session recording, audit logs, user management)
+- Pre-built multi-tenancy (Kasm already solves per-agent DISPLAY and isolation)
+- GPU acceleration available (Selkies) for media-heavy tasks
+- Turnkey desktop SaaS (less custom VNC/XFCE plumbing)
+
+**Cons:**
+- Additional dependency (Kasm Workspaces or Selkies stack, not just Docker)
+- Commercial licensing for Kasm advanced features (free tier may suffice)
+- Overkill for MVP (many features unused: SSO, compliance, session replay)
+- Higher resource usage than plain Docker webtop (Kasm orchestration overhead)
+- Learning curve and integration complexity (Kasm API + auth)
+
+**Tradeoffs:**
+- Best for enterprise customers requiring compliance features (SOC2, audit logs, session replay)
+- Suitable for high-security multi-tenant SaaS (Kasm isolation > raw Docker)
+- Not recommended for MVP PoC (too heavy; delays validation of core gate model)
+
+**Recommendation:** **Defer to post-MVP** unless enterprise compliance is a hard requirement. Use Option 2 (Docker webtop) for PoC; migrate to Kasm if customers demand audit/compliance.
+
+---
+
+#### Option 4: E2B Desktop / Daytona / Mastra SandboxComputer Adapter
+
+**Stack:**
+- Third-party desktop sandbox API (E2B Desktop, Daytona Workspaces, or hypothetical Mastra SandboxComputer)
+- Tourbillon backend calls sandbox API: `create_desktop_sandbox(company_id)`
+- Sandbox provider manages VM/container lifecycle, VNC endpoint, storage
+- Tourbillon records sandbox ID and connects agents via provider's noVNC URL
+
+**Provision flow:**
+1. Board enables company computer → `POST /api/settings/company-computer/enable`
+2. Tourbillon backend calls E2B/Daytona API: `POST /sandboxes { type: "desktop", duration: "persistent" }`
+3. Sandbox provider returns VNC URL and sandbox ID in ~5-20 seconds
+4. Tourbillon records `company_computers` row: `{ companyId, sandboxId, vncUrl, status: 'ready' }`
+5. Agents with `hasComputer` create homes via sandbox provider's filesystem API or SSH
+6. Return success; Board embeds provider's noVNC URL in UI
+
+**Pros:**
+- Zero Ops for Tourbillon (sandbox provider handles VM lifecycle, monitoring, storage)
+- Fast provision (provider optimizes boot time with warm pools)
+- Scalable (provider handles multi-tenancy and resource limits)
+- Pay-per-use (no idle VM cost if provider bills per active session)
+
+**Cons:**
+- External dependency and vendor lock-in (E2B/Daytona downtime affects Tourbillon)
+- Cost uncertainty (provider pricing may be higher than self-hosted VM)
+- Limited customization (cannot install custom XFCE config or system packages)
+- Data residency concerns (agent homes stored on provider's infrastructure)
+- API integration effort (provider SDK + auth + lifecycle hooks)
+
+**Tradeoffs:**
+- Best for SaaS startups wanting to **avoid Ops entirely** (trade cost for simplicity)
+- Suitable for MVP PoC if E2B Desktop or Daytona API is mature and documented
+- Not suitable if data residency or air-gapped deployment is required
+
+**Recommendation:** **Evaluate for MVP PoC if E2B Desktop API is available** (fast iteration, zero Ops). Fall back to Option 2 (Docker webtop) if provider integration is too complex or pricing is unclear. Consider for production if Ops team is small and cost is acceptable.
+
+---
+
+### Recommended MVP PoC Backend
+
+**Option 2: Docker Desktop Container (linuxserver/webtop)** for the following reasons:
+
+1. **Fast provision** (5-10 seconds) enables rapid PoC iteration and TEST validation
+2. **Low cost** (containers share host; no per-company VM bill)
+3. **Simple setup** (Docker API, no cloud provider or third-party service)
+4. **Good enough isolation** for TEST and single-company self-hosted (not production multi-tenant SaaS)
+5. **Easy teardown** (docker stop/rm) for PoC experimentation
+
+**Migration path for production:**
+- **Self-hosted multi-tenant SaaS → Option 1** (VM per company) for stronger isolation and standard cloud ops
+- **Enterprise customers → Option 3** (Kasm) if compliance/audit features become hard requirements
+- **Zero-Ops SaaS startup → Option 4** (E2B/Daytona) if provider pricing is acceptable and API is mature
+
+**Implementation sketch (Option 2 PoC):**
+
+```typescript
+// packages/company-computer/src/backends/docker-webtop.ts
+import Docker from 'dockerode';
+
+export async function provisionCompanyComputer(companyId: string): Promise<CompanyComputerHost> {
+  const docker = new Docker();
+  
+  // Pull image if not present
+  await docker.pull('linuxserver/webtop:ubuntu-xfce');
+  
+  // Create container with persistent volume for /home
+  const container = await docker.createContainer({
+    name: `tourbillon-company-${companyId}`,
+    Image: 'linuxserver/webtop:ubuntu-xfce',
+    ExposedPorts: { '3000/tcp': {} }, // webtop noVNC port
+    HostConfig: {
+      PortBindings: { '3000/tcp': [{ HostPort: '0' }] }, // dynamic host port
+      Memory: 4 * 1024 * 1024 * 1024, // 4GB RAM limit
+      NanoCpus: 2 * 1e9, // 2 CPU cores
+      Mounts: [{
+        Type: 'volume',
+        Source: `tourbillon-company-${companyId}-home`,
+        Target: '/config', // webtop home directory
+      }],
+    },
+  });
+  
+  await container.start();
+  
+  // Wait for noVNC endpoint to be ready
+  const info = await container.inspect();
+  const hostPort = info.NetworkSettings.Ports['3000/tcp'][0].HostPort;
+  const vncUrl = `http://localhost:${hostPort}`;
+  
+  await waitForHealthy(vncUrl); // poll until 200 OK
+  
+  return {
+    companyId,
+    backend: 'docker-webtop',
+    containerId: container.id,
+    vncUrl,
+    status: 'ready',
+    provisionedAt: new Date(),
+  };
+}
+```
+
+**Control-plane hook:**
+
+```typescript
+// apps/web/app/api/settings/company-computer/enable/route.ts
+import { provisionCompanyComputer } from '@tourbillon/company-computer/backends/docker-webtop';
+
+export async function POST(req: Request) {
+  const { companyId } = await extractAdminContext(req); // Board auth
+  
+  // Check if already provisioned
+  const existing = await db.query.companyComputers.findFirst({
+    where: eq(companyComputers.companyId, companyId),
+  });
+  if (existing) return NextResponse.json({ error: 'Already provisioned' }, { status: 409 });
+  
+  // Trigger automated provision
+  const host = await provisionCompanyComputer(companyId);
+  
+  // Record in DB
+  await db.insert(companyComputers).values({
+    id: createId(),
+    companyId,
+    backend: host.backend,
+    containerId: host.containerId,
+    vncUrl: host.vncUrl,
+    status: host.status,
+    provisionedAt: host.provisionedAt,
+  });
+  
+  return NextResponse.json({ success: true, host });
+}
+```
+
+**Deprovision cascade:**
+
+```typescript
+export async function deprovisionCompanyComputer(companyId: string): Promise<void> {
+  const host = await db.query.companyComputers.findFirst({
+    where: eq(companyComputers.companyId, companyId),
+  });
+  if (!host) throw new Error('Company computer not provisioned');
+  
+  const docker = new Docker();
+  const container = docker.getContainer(host.containerId);
+  
+  // Archive agent homes from container volume (optional)
+  // ... exec tar -czf /archive/company-{companyId}-{timestamp}.tar.gz /config ...
+  
+  // Stop and remove container
+  await container.stop();
+  await container.remove({ v: true }); // remove volumes
+  
+  // Delete DB row
+  await db.delete(companyComputers).where(eq(companyComputers.id, host.id));
+}
+```
+
+---
+
+### Backend Abstraction (Future)
+
+To support multiple backends (VM, Docker, Kasm, E2B), implement a `CompanyComputerBackend` interface:
+
+```typescript
+// packages/company-computer/src/backends/interface.ts
+export interface CompanyComputerBackend {
+  provision(companyId: string): Promise<CompanyComputerHost>;
+  deprovision(companyId: string): Promise<void>;
+  healthCheck(host: CompanyComputerHost): Promise<boolean>;
+  createAgentHome(host: CompanyComputerHost, agentId: string): Promise<string>; // returns /home/{agentId} path
+}
+
+// Implementations:
+// - DockerWebtopBackend (Option 2, MVP PoC)
+// - CloudVMBackend (Option 1, production SaaS)
+// - KasmBackend (Option 3, enterprise)
+// - E2BDesktopBackend (Option 4, zero-Ops)
+```
+
+Backend selection via company settings or global env var (`COMPANY_COMPUTER_BACKEND=docker-webtop`).
+
+---
+
+## 4. MVP Path A — Recommended Stack
 
 ### Option A1: noVNC (Simplest)
 
@@ -221,7 +537,7 @@ Board members connect to **any agent's session** via the web UI. The noVNC/Selki
 
 ---
 
-## 4. Thin Vertical Slice — MVP-0 User Stories
+## 5. Thin Vertical Slice — MVP-0 User Stories
 
 ### US-CC1: Provision Company Computer (Company-Level Gate)
 
@@ -334,7 +650,7 @@ This is **the destination for US-CC5 / Board live-view** for option A (noVNC/Sel
 
 ---
 
-## 5. Session Lifecycle
+## 6. Session Lifecycle
 
 ### Create Session
 
@@ -410,7 +726,7 @@ Each display is isolated (separate framebuffer, input queue, window list). Agent
 
 ---
 
-## 6. Ops Risks — Required Mitigation Plan
+## 7. Ops Risks — Required Mitigation Plan
 
 ### Risk 1: RAM Pressure from N Desktop Environments
 
@@ -479,7 +795,7 @@ Each display is isolated (separate framebuffer, input queue, window list). Agent
 
 ---
 
-## 7. Egress
+## 8. Egress
 
 Company Computer inherits company-scoped egress policy (`settings.egressPolicy`):
 - `allowAll: true` → no restrictions (MVP default)
@@ -496,7 +812,7 @@ Company Computer inherits company-scoped egress policy (`settings.egressPolicy`)
 
 ---
 
-## 8. Board Live View
+## 9. Board Live View
 
 ### UI Integration
 
@@ -558,7 +874,7 @@ Board views Company Computer **from the Tourbillon web app while chatting to the
 
 ---
 
-## 9. Agent Tools — New Tourbillon Toolset
+## 10. Agent Tools — New Tourbillon Toolset
 
 **Toolset name:** `company-computer` (optional, see note)
 
@@ -594,7 +910,7 @@ Board views Company Computer **from the Tourbillon web app while chatting to the
 
 ---
 
-## 10. Non-Goals
+## 11. Non-Goals
 
 ### Not in MVP-0
 
@@ -609,7 +925,7 @@ Board views Company Computer **from the Tourbillon web app while chatting to the
 
 ---
 
-## 11. Open Questions for Ops/Derek
+## 12. Open Questions for Ops/Derek
 
 ### Q1: VM Image Choice
 
@@ -669,13 +985,13 @@ None of these are MVP. Defer GPU until post-MVP.
 
 ---
 
-## 12. Next Steps
+## 13. Next Steps
 
 ### Phase 1: Spike Review (This PR)
 
 - [ ] Derek/PM reviews this spike doc
-- [ ] Ops reviews Risks §6 and Open Questions §11
-- [ ] Board/agent team reviews user stories §4
+- [ ] Ops reviews Risks §7 and Open Questions §12
+- [ ] Board/agent team reviews user stories §5
 - [ ] Lock MVP scope: CC1 provision → CC2 browser → CC4 shell only
 
 ### Phase 2: Proof-of-Concept (Separate Branch)
