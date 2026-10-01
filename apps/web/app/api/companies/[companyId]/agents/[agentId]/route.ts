@@ -33,6 +33,49 @@ function badRequest(message: string) {
 }
 
 /**
+ * Check if the capability update grants privileges the calling agent does not hold.
+ * Privilege grants: code-execution toolset, new MCP servers, or any toolset the caller lacks.
+ */
+async function checkPrivilegeGrant(
+  callerAgentId: string,
+  companyId: string,
+  patch: { assignedToolsets?: string[]; mcpServerIds?: string[] }
+): Promise<boolean> {
+  const caller = await db.query.agents.findFirst({
+    where: and(eq(agents.id, callerAgentId), eq(agents.companyId, companyId)),
+  });
+  if (!caller) return false;
+
+  const callerToolsets = new Set(caller.assignedToolsets ?? []);
+  const callerMcpServers = new Set(caller.mcpServerIds ?? []);
+
+  // Check if granting code-execution toolset (always privileged)
+  if (patch.assignedToolsets?.includes('code-execution') && !callerToolsets.has('code-execution')) {
+    return true;
+  }
+
+  // Check if granting any toolset the caller doesn't have
+  if (patch.assignedToolsets) {
+    for (const toolset of patch.assignedToolsets) {
+      if (!callerToolsets.has(toolset)) {
+        return true;
+      }
+    }
+  }
+
+  // Check if granting new MCP servers
+  if (patch.mcpServerIds) {
+    for (const serverId of patch.mcpServerIds) {
+      if (!callerMcpServers.has(serverId)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+/**
  * Strip sensitive fields from agent record before returning to agent tools.
  * Preserve presence flags for UI/tool decision-making.
  */
@@ -115,8 +158,9 @@ export async function PATCH(
 
       // Safety: forbid self-pause/archive
       if (runCtx.agentId === agentId && (status === 'paused' || status === 'archived')) {
-        return badRequest(
-          'Cannot pause or archive yourself. Use the Board UI or create an approval request.'
+        return NextResponse.json(
+          { error: 'self_pause_forbidden', message: 'Cannot pause or archive yourself. Use the Board UI or create an approval request.' },
+          { status: 400 }
         );
       }
 
@@ -130,9 +174,9 @@ export async function PATCH(
       // Validate schedule if provided
       if (heartbeatPatch.cronExpression || heartbeatPatch.intervalSec) {
         const normalized = normalizeHeartbeatConfig(heartbeatPatch);
-        const validation = validateHeartbeatSchedule(normalized);
-        if (!validation.valid) {
-          return badRequest(`Invalid heartbeat configuration: ${validation.error}`);
+        const validationError = validateHeartbeatSchedule(normalized);
+        if (validationError) {
+          return badRequest(`Invalid heartbeat configuration: ${validationError}`);
         }
       }
 
@@ -144,19 +188,21 @@ export async function PATCH(
       const { name, title, urlKey, reportsToId, instructionsBundleSoulMd, instructionsBundleAgentsMd } =
         body.profile;
 
-      if (name || title || urlKey || reportsToId !== undefined) {
+      // Must-fix #1: Partial profile PATCH — load existing agent and merge required fields
+      if (name !== undefined || title !== undefined || urlKey !== undefined || reportsToId !== undefined) {
         updated = await updateAgentProfile(agentId, {
-          ...(name && { name }),
-          ...(title && { title }),
-          ...(urlKey && { urlKey }),
-          ...(reportsToId !== undefined && { reportsToId }),
+          name: name ?? updated.name,
+          title: title ?? updated.title,
+          urlKey: urlKey ?? updated.urlKey,
+          reportsToId: reportsToId !== undefined ? reportsToId : updated.reportsToId,
         });
       }
 
+      // Must-fix #2: Instructions field mapping — lib expects soulMd/agentsMd, not full field names
       if (instructionsBundleSoulMd !== undefined || instructionsBundleAgentsMd !== undefined) {
         updated = await updateAgentInstructions(agentId, {
-          ...(instructionsBundleSoulMd !== undefined && { instructionsBundleSoulMd }),
-          ...(instructionsBundleAgentsMd !== undefined && { instructionsBundleAgentsMd }),
+          ...(instructionsBundleSoulMd !== undefined && { soulMd: instructionsBundleSoulMd }),
+          ...(instructionsBundleAgentsMd !== undefined && { agentsMd: instructionsBundleAgentsMd }),
         });
       }
     }
@@ -184,8 +230,18 @@ export async function PATCH(
         reason,
       } = body.capabilities;
 
-      // TODO: P1 — require `reason` when granting privileged capabilities (code-execution, MCP servers, toolsets caller doesn't have)
-      // For now, accept updates without escalation policy enforcement
+      // Must-fix #3: Enforce non-empty reason when granting privileged capabilities
+      const isPrivilegeGrant = await checkPrivilegeGrant(
+        runCtx.agentId,
+        runCtx.companyId,
+        { assignedToolsets, mcpServerIds }
+      );
+
+      if (isPrivilegeGrant && (!reason || reason.trim().length === 0)) {
+        return badRequest(
+          'Granting privileged capabilities (code-execution, MCP servers, or toolsets the caller does not hold) requires a non-empty reason field for audit.'
+        );
+      }
 
       updated = await updateAgentCapabilities(agentId, {
         toolsets: assignedToolsets ?? updated.assignedToolsets ?? [],
