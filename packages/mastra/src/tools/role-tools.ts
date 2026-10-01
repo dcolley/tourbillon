@@ -115,14 +115,21 @@ const getApprovalTool = createTool({
 
 const listAgentsTool = createTool({
   id: 'listAgents',
-  description: 'List all agents in the company with their roles and current status. Use to find agent IDs for assignment.',
-  inputSchema: z.object({}),
-  execute: async (_inputData, { requestContext }) => {
+  description: 'List all agents in the company with their roles and current status. Use to find agent IDs for assignment. By default, archived agents are hidden.',
+  inputSchema: z.object({
+    includeArchived: z.boolean().optional().describe('Include archived agents in the list. Default: false'),
+  }),
+  execute: async (inputData, { requestContext }) => {
     const { companyId } = extractToolRuntimeContext(requestContext);
     if (!companyId) {
       return { error: 'missing_company', message: 'companyId not present in tool runtime context' };
     }
-    const res = await tracedAgentFetch('listAgents', requestContext, `/api/companies/${companyId}/agents`);
+    const params = new URLSearchParams();
+    if (inputData.includeArchived) {
+      params.append('includeArchived', 'true');
+    }
+    const url = `/api/companies/${companyId}/agents${params.toString() ? `?${params.toString()}` : ''}`;
+    const res = await tracedAgentFetch('listAgents', requestContext, url);
     if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
     return res.json();
   },
@@ -153,11 +160,252 @@ const createAgentTool = createTool({
   },
 });
 
-const rosterTools = { listAgentsTool, createAgentTool };
+const getAgentTool = createTool({
+  id: 'getAgent',
+  description:
+    'Fetch detailed information about a single agent by ID or urlKey. Use to inspect status, heartbeat, capabilities, model before making changes.',
+  inputSchema: z.object({
+    agentId: z.string().optional().describe('Agent ID (UUID)'),
+    urlKey: z.string().optional().describe('Agent URL key (slug)'),
+  }).refine(
+    (data) => (data.agentId && !data.urlKey) || (!data.agentId && data.urlKey),
+    { message: 'Exactly one of agentId or urlKey is required' }
+  ),
+  execute: async (inputData, { requestContext }) => {
+    const { companyId } = extractToolRuntimeContext(requestContext);
+    if (!companyId) {
+      return { error: 'missing_company', message: 'companyId not present in tool runtime context' };
+    }
+
+    // If urlKey provided, resolve to agentId first via listAgents
+    let targetAgentId = inputData.agentId;
+    if (inputData.urlKey) {
+      const listRes = await tracedAgentFetch(
+        'listAgents',
+        requestContext,
+        `/api/companies/${companyId}/agents?includeArchived=true`
+      );
+      if (!listRes.ok) return { error: `HTTP ${listRes.status}`, message: await listRes.text() };
+      const allAgents = await listRes.json();
+      const found = allAgents.find((a: any) => a.urlKey === inputData.urlKey);
+      if (!found) {
+        return { error: 'not_found', message: `Agent with urlKey "${inputData.urlKey}" not found` };
+      }
+      targetAgentId = found.id;
+    }
+
+    const res = await tracedAgentFetch(
+      'getAgent',
+      requestContext,
+      `/api/companies/${companyId}/agents/${targetAgentId}`
+    );
+    if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
+    return res.json();
+  },
+});
+
+const rosterTools = { listAgentsTool, getAgentTool, createAgentTool };
+
+// ─── Agent Management Tools (write) ───────────────────────────────────────
+
+const setAgentActiveTool = createTool({
+  id: 'setAgentActive',
+  description:
+    'Set another company agent active, paused, or archived. Cannot pause or archive yourself. Cannot archive the last active CEO. Prefer archive over hard delete.',
+  inputSchema: z.object({
+    agentId: z.string().describe('Target agent ID to modify'),
+    status: z.enum(['active', 'paused', 'archived']).describe('New status'),
+    reason: z.string().optional().describe('Optional reason for the change (recommended for audit)'),
+  }),
+  execute: async (inputData, { requestContext }) => {
+    const { companyId } = extractToolRuntimeContext(requestContext);
+    if (!companyId) {
+      return { error: 'missing_company', message: 'companyId not present in tool runtime context' };
+    }
+    const res = await tracedAgentFetch(
+      'setAgentActive',
+      requestContext,
+      `/api/companies/${companyId}/agents/${inputData.agentId}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ status: inputData.status, reason: inputData.reason }),
+      }
+    );
+    if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
+    return res.json();
+  },
+});
+
+const setAgentHeartbeatTool = createTool({
+  id: 'setAgentHeartbeat',
+  description:
+    'Enable or disable an agent heartbeat timer and configure schedule (interval or cron). Changes persist immediately and sync the Mastra schedule.',
+  inputSchema: z.object({
+    agentId: z.string().describe('Target agent ID'),
+    enabled: z.boolean().describe('Enable or disable automatic heartbeat'),
+    intervalSec: z.number().int().positive().optional().describe('Heartbeat interval in seconds (e.g., 3600 for hourly)'),
+    cronExpression: z
+      .string()
+      .optional()
+      .describe('Cron expression for custom schedule (alternative to intervalSec)'),
+    maxSteps: z.number().int().positive().optional().describe('Maximum tool calls per heartbeat'),
+  }),
+  execute: async (inputData, { requestContext }) => {
+    const { companyId } = extractToolRuntimeContext(requestContext);
+    if (!companyId) {
+      return { error: 'missing_company', message: 'companyId not present in tool runtime context' };
+    }
+
+    const heartbeatPatch: any = {
+      enabled: inputData.enabled,
+    };
+    if (inputData.intervalSec !== undefined) {
+      heartbeatPatch.intervalSec = inputData.intervalSec;
+      heartbeatPatch.scheduleMode = 'interval';
+    }
+    if (inputData.cronExpression !== undefined) {
+      heartbeatPatch.cronExpression = inputData.cronExpression;
+      heartbeatPatch.scheduleMode = 'cron';
+    }
+    if (inputData.maxSteps !== undefined) {
+      heartbeatPatch.maxSteps = inputData.maxSteps;
+    }
+
+    const res = await tracedAgentFetch(
+      'setAgentHeartbeat',
+      requestContext,
+      `/api/companies/${companyId}/agents/${inputData.agentId}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ heartbeat: heartbeatPatch }),
+      }
+    );
+    if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
+    return res.json();
+  },
+});
+
+const updateAgentProfileTool = createTool({
+  id: 'updateAgentProfile',
+  description:
+    'Update an agent profile: name, title, reportsTo, urlKey, or instruction bundles (SOUL.md, AGENTS.md). Partial updates allowed.',
+  inputSchema: z.object({
+    agentId: z.string().describe('Target agent ID'),
+    name: z.string().optional().describe('Display name'),
+    title: z.string().optional().describe('Job title'),
+    urlKey: z.string().optional().describe('URL slug (Agent ID)'),
+    reportsToId: z.string().nullable().optional().describe('Manager agent ID (null to clear)'),
+    instructionsBundleSoulMd: z.string().optional().describe('SOUL.md markdown content'),
+    instructionsBundleAgentsMd: z.string().optional().describe('AGENTS.md markdown content'),
+  }),
+  execute: async (inputData, { requestContext }) => {
+    const { companyId } = extractToolRuntimeContext(requestContext);
+    if (!companyId) {
+      return { error: 'missing_company', message: 'companyId not present in tool runtime context' };
+    }
+
+    const { agentId, ...profile } = inputData;
+
+    const res = await tracedAgentFetch(
+      'updateAgentProfile',
+      requestContext,
+      `/api/companies/${companyId}/agents/${agentId}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ profile }),
+      }
+    );
+    if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
+    return res.json();
+  },
+});
+
+const updateAgentModelTool = createTool({
+  id: 'updateAgentModel',
+  description:
+    'Change an agent LLM model and/or provider. Use after checking available models in the company provider registry.',
+  inputSchema: z.object({
+    agentId: z.string().describe('Target agent ID'),
+    modelId: z.string().describe('Model identifier (e.g., "meta-llama/Llama-3.3-70B-Instruct")'),
+    providerId: z.string().optional().describe('Provider ID (defaults to current provider if omitted)'),
+  }),
+  execute: async (inputData, { requestContext }) => {
+    const { companyId } = extractToolRuntimeContext(requestContext);
+    if (!companyId) {
+      return { error: 'missing_company', message: 'companyId not present in tool runtime context' };
+    }
+
+    const { agentId, modelId, providerId } = inputData;
+
+    const res = await tracedAgentFetch(
+      'updateAgentModel',
+      requestContext,
+      `/api/companies/${companyId}/agents/${agentId}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ model: { modelId, providerId } }),
+      }
+    );
+    if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
+    return res.json();
+  },
+});
+
+const updateAgentCapabilitiesTool = createTool({
+  id: 'updateAgentCapabilities',
+  description:
+    'Update agent skills, toolsets, granular tools, MCP servers, or code-execution. Requires a reason when granting privileged capabilities (code-execution, MCP, toolsets the caller does not have). Use with caution.',
+  inputSchema: z.object({
+    agentId: z.string().describe('Target agent ID'),
+    assignedSkills: z.array(z.string()).optional().describe('Skill slugs (e.g., ["control-plane", "para-memory"])'),
+    assignedToolsets: z
+      .array(z.string())
+      .optional()
+      .describe('Toolset IDs (e.g., ["roster", "comments", "code-execution"])'),
+    assignedTools: z.array(z.string()).optional().describe('Granular tool IDs from goal/project/issue groups'),
+    mcpServerIds: z.array(z.string()).optional().describe('MCP server IDs enabled for this agent'),
+    reason: z
+      .string()
+      .describe(
+        'Required when granting privileged capabilities: code-execution, new MCP servers, or toolsets the caller does not hold. Explain why this grant is needed.'
+      ),
+  }),
+  execute: async (inputData, { requestContext }) => {
+    const { companyId } = extractToolRuntimeContext(requestContext);
+    if (!companyId) {
+      return { error: 'missing_company', message: 'companyId not present in tool runtime context' };
+    }
+
+    const { agentId, ...capabilities } = inputData;
+
+    // TODO: Enforce escalation policy — require reason when granting code-execution, MCP, or toolsets caller lacks
+    // For MVP, accept all updates with reason field available
+
+    const res = await tracedAgentFetch(
+      'updateAgentCapabilities',
+      requestContext,
+      `/api/companies/${companyId}/agents/${agentId}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ capabilities }),
+      }
+    );
+    if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
+    return res.json();
+  },
+});
+
+const agentManagementTools = {
+  setAgentActiveTool,
+  setAgentHeartbeatTool,
+  updateAgentProfileTool,
+  updateAgentModelTool,
+  updateAgentCapabilitiesTool,
+};
 
 export const ROLE_TOOLS: Record<string, Record<string, unknown>> = {
   roster: rosterTools,
-  'agent-management': rosterTools, // legacy alias
+  'agent-management': agentManagementTools,
   comments: { addCommentTool },
   approvals: { createApprovalTool, listApprovalsTool, getApprovalTool },
   'web-search': SEARXNG_TOOLS,

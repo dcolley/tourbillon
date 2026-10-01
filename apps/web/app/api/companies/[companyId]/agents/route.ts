@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db, agents } from '@tourbillon/db';
-import { eq } from 'drizzle-orm';
+import { eq, and, ne } from 'drizzle-orm';
 import { validateRunToken } from '@/lib/auth/run-token';
 import { AgentValidationError, createAgent } from '@/lib/agents';
 
@@ -21,10 +21,18 @@ export async function GET(
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
   }
 
+  const url = new URL(req.url);
+  const includeArchived = url.searchParams.get('includeArchived') === 'true';
+
+  // Hide archived by default
+  const whereClause = includeArchived
+    ? eq(agents.companyId, companyId)
+    : and(eq(agents.companyId, companyId), ne(agents.status, 'archived'));
+
   const companyAgents = await db
     .select()
     .from(agents)
-    .where(eq(agents.companyId, companyId));
+    .where(whereClause);
 
   return NextResponse.json(companyAgents);
 }

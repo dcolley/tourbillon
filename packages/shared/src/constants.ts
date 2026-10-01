@@ -45,7 +45,7 @@ export const BOARD_ASSIGNEE_SELECT_VALUE = '__board__';
 export const CONTROL_PLANE_SKILL_SLUG = 'control-plane';
 
 export const ROLE_DEFAULT_SKILLS: Record<string, string[]> = {
-  ceo:      [CONTROL_PLANE_SKILL_SLUG, 'plan-to-tasks', 'create-agent', 'para-memory'],
+  ceo:      [CONTROL_PLANE_SKILL_SLUG, 'plan-to-tasks', 'create-agent', 'manage-agents', 'para-memory'],
   cto:      [CONTROL_PLANE_SKILL_SLUG, 'plan-to-tasks', 'para-memory'],
   engineer: [CONTROL_PLANE_SKILL_SLUG, 'para-memory'],
   pm:       [CONTROL_PLANE_SKILL_SLUG, 'plan-to-tasks', 'para-memory'],
@@ -78,6 +78,11 @@ export const SKILL_CATALOG = [
     description: 'Hiring procedure for new agents — typically CEO.',
   },
   {
+    id: 'manage-agents',
+    label: 'Manage agents',
+    description: 'Agent management methodology: pause/enable, heartbeat, profile, model, capabilities. When to use approvals vs direct actions. Prefer archive over delete.',
+  },
+  {
     id: 'para-memory',
     label: 'PARA memory',
     description: 'Memory discipline: comments vs Mastra memory vs company workspace.',
@@ -108,6 +113,12 @@ export const TOOLSET_CATALOG = [
     id: 'roster',
     label: 'Agent roster',
     description: 'See other agents in the company (listAgents) — needed to assign work.',
+  },
+  {
+    id: 'agent-management',
+    label: 'Agent management',
+    description:
+      'Manage company agents: pause/enable, set heartbeat, update profile, model, capabilities. CEO default; others opt-in. Do not confuse with roster (read-only roster access).',
   },
   {
     id: 'comments',
@@ -159,7 +170,7 @@ export type ToolsetId = (typeof TOOLSET_CATALOG)[number]['id'];
 export const VALID_TOOLSET_IDS = new Set<string>(TOOLSET_CATALOG.map((t) => t.id));
 
 export const ROLE_DEFAULT_TOOLSETS: Record<string, string[]> = {
-  ceo:      ['comments', 'approvals', 'roster', 'web-search'],
+  ceo:      ['comments', 'approvals', 'roster', 'agent-management', 'web-search'],
   cto:      ['comments', 'approvals', 'roster'],
   engineer: ['comments', 'code-execution'],
   pm:       ['comments', 'approvals', 'roster', 'web-search'],
