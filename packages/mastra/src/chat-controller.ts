@@ -1,6 +1,6 @@
 /**
  * Interactive dashboard chat via AgentController — orthogonal to WakeRunner heartbeats.
- * No control-plane inline; chat-safe tool subset; dedicated thread storage.
+ * No control-plane inline; same tools as heartbeat; dedicated thread storage.
  */
 import type { Agent as AgentRecord } from '@tourbillon/db';
 import { getLlmProviderRowById } from '@tourbillon/db';
@@ -41,41 +41,6 @@ import { getMastraInstance } from './mastra-instance';
 import { buildChatWorkspace } from './execution-workspace';
 import { getInternalApiUrl } from './tools/api-client';
 
-/**
- * Chat keeps a small allowlist so tool JSON schemas fit models with modest
- * context (e.g. 4k). Heartbeat keeps the full assigned set.
- */
-const CHAT_ALLOWED_TOOL_IDS = new Set([
-  'getDateTime',
-  'getIdentity',
-  'getComments',
-  'checkoutIssue',
-  'updateIssue',
-  'listWorkspaceFiles',
-  'readWorkspaceFile',
-  'listSkills',
-  'getSkill',
-  'listAgents',
-  'addComment',
-  'listGoals',
-  'getGoalDetail',
-  'listProjects',
-  'getProjectDetail',
-  'sendToAgent',
-  'getMessages',
-]);
-
-/** Toolsets that pull large MCP / search schemas — omit from chat assembly. */
-const CHAT_EXCLUDED_TOOLSETS = new Set([
-  'knowledge-graph',
-  'nitter',
-  'web-search',
-  'web-search-tavily',
-  'buffer',
-  'code-execution',
-  'approvals',
-]);
-
 const CHAT_IDENTITY_CHAR_LIMIT = 2000;
 
 const CHAT_MODE_INSTRUCTIONS = `## Chat Mode
@@ -90,6 +55,7 @@ Rules:
 - You **may** read mail via \`getMessages\` when the human asks about your messages, or after you send a DM you are waiting on.
 - If the human wants autonomous work done, suggest assigning an issue or using Wake / Run heartbeat.
 - When methodology is needed, call \`getSkill(slug)\` first.
+- When unsure what tools you have or how to use them, call \`listTools\` and \`getToolDetails(id)\`.
 - Stay in the conversation; do not end with "EXIT".
 - Page context may appear in a \`[Dashboard context]\` block on the human's message — treat that as authoritative for "this issue/goal/project".`;
 
@@ -162,35 +128,6 @@ function truncateForChat(text: string, limit = CHAT_IDENTITY_CHAR_LIMIT): string
   return `${trimmed.slice(0, limit - 1)}…`;
 }
 
-/** Filter heartbeat tools down to a chat-safe allowlist. */
-export function filterChatTools(
-  tools: Record<string, unknown>,
-): Record<string, unknown> {
-  const filtered: Record<string, unknown> = {};
-  for (const [key, tool] of Object.entries(tools)) {
-    const id = toolIdOf(key, tool);
-    if (CHAT_ALLOWED_TOOL_IDS.has(id) || CHAT_ALLOWED_TOOL_IDS.has(key)) {
-      filtered[key] = tool;
-    }
-  }
-  return filtered;
-}
-
-export async function assembleChatTools(
-  agentRecord: AgentRecord,
-  options?: AssembleAgentToolsOptions,
-): Promise<Record<string, unknown>> {
-  const chatRecord = {
-    ...agentRecord,
-    assignedToolsets: (agentRecord.assignedToolsets ?? []).filter(
-      (id) => !CHAT_EXCLUDED_TOOLSETS.has(id),
-    ),
-    mcpServerIds: [] as string[],
-  };
-  const all = await assembleAgentTools(chatRecord, options);
-  return filterChatTools(all);
-}
-
 function assembleChatSystemPrompt(
   agentRecord: AgentRecord,
   prepared: Awaited<ReturnType<typeof prepareAgentSkills>>,
@@ -221,10 +158,10 @@ function assembleChatSystemPrompt(
     parts.push(`---\n\n${catalogSection}`);
   }
 
-  // Tool schemas are sent separately by the model API — keep the prompt short.
+  // Tool discovery: listTools and getToolDetails are available for on-demand schema lookup.
   if (toolIds.length > 0) {
     parts.push(
-      `---\n\n## Tools\n\nPrefer: ${toolIds.map((id) => `\`${id}\``).join(', ')}.`,
+      `---\n\n## Tools (on demand)\n\nYou have ${toolIds.length} tools available. Use \`listTools\` for a compact catalog and \`getToolDetails(id)\` for full schemas when needed.`,
     );
   }
 
@@ -232,7 +169,7 @@ function assembleChatSystemPrompt(
 }
 
 /**
- * Mastra Agent for interactive chat — same identity/model as heartbeat, no control-plane loop.
+ * Mastra Agent for interactive chat — same identity/model/tools as heartbeat, no control-plane loop.
  */
 export async function createChatAgentWithSkills(
   agentRecord: AgentRecord,
@@ -242,7 +179,7 @@ export async function createChatAgentWithSkills(
     options?.modelIdOverride && options.modelIdOverride !== agentRecord.modelId
       ? { ...agentRecord, modelId: options.modelIdOverride }
       : agentRecord;
-  const tools = await assembleChatTools(effectiveRecord, options);
+  const tools = await assembleAgentTools(effectiveRecord, options);
   const prepared = await prepareAgentSkills(effectiveRecord, { mode: 'chat' });
   const toolIds = Object.values(tools)
     .map((t) =>

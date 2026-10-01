@@ -3,6 +3,7 @@ import { CHECKOUT_EXPECTED_STATUSES } from '@tourbillon/shared';
 import { z } from 'zod';
 import { extractToolRuntimeContext, tracedAgentFetch } from './api-client';
 import { SKILL_TOOLS } from './skill-tools';
+import { TOOL_DISCOVERY_TOOLS } from './tool-discovery-tools';
 
 function formatInTimezone(date: Date, timeZone: string) {
   const parts = new Intl.DateTimeFormat('en-US', {
@@ -438,4 +439,5 @@ export const CONTROL_PLANE_TOOLS = {
   sendToAgentTool,
   getMessagesTool,
   ...SKILL_TOOLS,
+  ...TOOL_DISCOVERY_TOOLS,
 };
