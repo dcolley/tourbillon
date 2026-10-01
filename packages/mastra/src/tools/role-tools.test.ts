@@ -278,6 +278,19 @@ describe('agent-management tools', () => {
       assignedToolsets: ['comments', 'code-execution'],
     });
     assert.ok(valid.success, 'valid input with reason passes');
+
+    const emptyReason = schema.safeParse({
+      agentId: 'agent_123',
+      reason: '',
+      assignedToolsets: ['comments', 'code-execution'],
+    });
+    assert.ok(!emptyReason.success, 'empty reason fails validation');
+
+    const missingReason = schema.safeParse({
+      agentId: 'agent_123',
+      assignedToolsets: ['comments', 'code-execution'],
+    });
+    assert.ok(!missingReason.success, 'missing reason fails validation');
   });
 });
 

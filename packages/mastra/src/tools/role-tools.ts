@@ -354,7 +354,7 @@ const updateAgentModelTool = createTool({
 const updateAgentCapabilitiesTool = createTool({
   id: 'updateAgentCapabilities',
   description:
-    'Update agent skills, toolsets, granular tools, MCP servers, or code-execution. Requires a reason when granting privileged capabilities (code-execution, MCP, toolsets the caller does not have). Use with caution.',
+    'Update agent skills, toolsets, granular tools, MCP servers, or code-execution. Requires a non-empty reason when granting privileged capabilities (code-execution, MCP, toolsets the caller does not have). Use with caution.',
   inputSchema: z.object({
     agentId: z.string().describe('Target agent ID'),
     assignedSkills: z.array(z.string()).optional().describe('Skill slugs (e.g., ["control-plane", "para-memory"])'),
@@ -366,8 +366,9 @@ const updateAgentCapabilitiesTool = createTool({
     mcpServerIds: z.array(z.string()).optional().describe('MCP server IDs enabled for this agent'),
     reason: z
       .string()
+      .min(1)
       .describe(
-        'Required when granting privileged capabilities: code-execution, new MCP servers, or toolsets the caller does not hold. Explain why this grant is needed.'
+        'Required when granting privileged capabilities: code-execution, new MCP servers, or toolsets the caller does not hold. Explain why this grant is needed. Must be non-empty.'
       ),
   }),
   execute: async (inputData, { requestContext }) => {
@@ -377,9 +378,6 @@ const updateAgentCapabilitiesTool = createTool({
     }
 
     const { agentId, ...capabilities } = inputData;
-
-    // TODO: Enforce escalation policy — require reason when granting code-execution, MCP, or toolsets caller lacks
-    // For MVP, accept all updates with reason field available
 
     const res = await tracedAgentFetch(
       'updateAgentCapabilities',
