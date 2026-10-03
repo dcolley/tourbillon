@@ -299,22 +299,37 @@ export function useAgentChatSession(options: {
         let buffer = '';
         let lastActivity = Date.now();
         const HANG_TIMEOUT_MS = 60000; // 60 seconds without any data = hung
+        let timedOut = false;
 
         // Watchdog to detect hung streams
         const hangWatchdog = setInterval(() => {
           const elapsed = Date.now() - lastActivity;
           if (elapsed > HANG_TIMEOUT_MS) {
             clearInterval(hangWatchdog);
-            // Surface error and clear running BEFORE aborting (not silent)
-            setRunning(false);
+            timedOut = true;
             setError('Chat stream timeout: no activity for 60 seconds');
-            ac.abort();
+            // Cancel reader to break out of the read loop, but don't abort ac —
+            // let reconnect logic check actual run state and resubscribe
+            reader.cancel().catch(() => undefined);
           }
         }, 10000); // Check every 10 seconds
 
         try {
           while (!ac.signal.aborted) {
-            const { done, value } = await reader.read();
+            let readResult;
+            try {
+              readResult = await reader.read();
+            } catch (err) {
+              // reader.cancel() from watchdog rejects the in-flight read.
+              // If timedOut is set, break gracefully to allow reconnect logic to run.
+              if (timedOut) {
+                break;
+              }
+              // Otherwise, it's a real error — rethrow
+              throw err;
+            }
+            
+            const { done, value } = readResult;
             if (done) break;
             
             lastActivity = Date.now(); // Update activity timestamp on any data
@@ -378,6 +393,7 @@ export function useAgentChatSession(options: {
           clearInterval(hangWatchdog);
         }
 
+        // Reconnect logic: reload state and retry unless explicitly aborted
         if (!ac.signal.aborted) {
           const tid = threadIdRef.current;
           if (tid) await loadMessages(agentKey, rid, tid);
@@ -386,6 +402,12 @@ export function useAgentChatSession(options: {
             const state = (await stateRes.json()) as { running?: boolean };
             setRunning(state.running === true);
           }
+          
+          // If timed out, clear error before reconnecting
+          if (timedOut) {
+            setError(null);
+          }
+          
           await new Promise((r) => setTimeout(r, 1000));
           if (!ac.signal.aborted) await connect();
         }
