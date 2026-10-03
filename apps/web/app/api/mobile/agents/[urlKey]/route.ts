@@ -144,9 +144,10 @@ export async function PATCH(
     switch (section) {
       case 'profile':
         updated = await updateAgentProfile(agent.id, {
-          name: String(body.name ?? ''),
-          urlKey: String(body.urlKey ?? ''),
-          reportsToId: (body.reportsToId as string | null | undefined) ?? null,
+          name: String(body.name ?? agent.name),
+          title: agent.title,
+          urlKey: String(body.urlKey ?? agent.urlKey),
+          reportsToId: (body.reportsToId as string | null | undefined) ?? agent.reportsToId ?? null,
         });
         break;
       case 'role':
