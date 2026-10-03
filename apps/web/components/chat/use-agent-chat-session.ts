@@ -316,7 +316,20 @@ export function useAgentChatSession(options: {
 
         try {
           while (!ac.signal.aborted) {
-            const { done, value } = await reader.read();
+            let readResult;
+            try {
+              readResult = await reader.read();
+            } catch (err) {
+              // reader.cancel() from watchdog rejects the in-flight read.
+              // If timedOut is set, break gracefully to allow reconnect logic to run.
+              if (timedOut) {
+                break;
+              }
+              // Otherwise, it's a real error — rethrow
+              throw err;
+            }
+            
+            const { done, value } = readResult;
             if (done) break;
             
             lastActivity = Date.now(); // Update activity timestamp on any data
