@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { stripDashboardContext } from '@/lib/chat/dashboard-context';
+import { selectThreadToBind } from './thread-selection';
 
 export type ChatContextType = 'free' | 'issue' | 'project' | 'goal' | 'heartbeat' | 'agent' | 'board';
 
@@ -486,13 +487,8 @@ export function useAgentChatSession(options: {
       // Guard: stop early if agent changed during loadThreads
       if (requestAgentId !== agentIdRef.current) return;
       
-      // Never trust createSession's auto-bound thread unless it matches context tags.
-      let tid =
-        (created.threadId && listed.some((t) => t.id === created.threadId)
-          ? created.threadId
-          : null) ??
-        listed[0]?.id ??
-        null;
+      // Select thread to bind: prefer own threads, never auto-bind shared/untagged threads.
+      let tid = selectThreadToBind(listed, created.threadId);
 
       if (!tid) {
         const newRes = await fetch(`${sessionBase(agentKey, created.resourceId)}/threads?sessionScope=${encodeURIComponent(scope)}`, {
@@ -695,12 +691,28 @@ export function useAgentChatSession(options: {
       const listed = await loadThreads(activeAgentId, rid, tags);
       if (!wasCurrent) return;
 
-      const next = listed[0];
-      if (next) {
-        await bindThread(activeAgentId, rid, next.id);
+      // After delete, select next thread: prefer own threads, never auto-bind shared.
+      const nextThreadId = selectThreadToBind(listed);
+      if (nextThreadId) {
+        await bindThread(activeAgentId, rid, nextThreadId);
       } else {
-        setThreadId(null);
-        setMessages([]);
+        // No own threads left → create new chat instead of binding to a shared thread
+        const scope = sessionScopeFor(contextType, contextId);
+        const newRes = await fetch(`${sessionBase(activeAgentId, rid)}/threads?sessionScope=${encodeURIComponent(scope)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title: 'New chat', tags }),
+          },
+        );
+        if (newRes.ok) {
+          const thread = (await newRes.json()) as ChatThreadInfo;
+          await loadThreads(activeAgentId, rid, tags);
+          await bindThread(activeAgentId, rid, thread.id);
+        } else {
+          // Fallback: clear state (no thread bound)
+          setThreadId(null);
+          setMessages([]);
+        }
       }
     },
     [activeAgentId, bindThread, contextId, contextTags, contextType, loadThreads],
