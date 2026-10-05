@@ -162,7 +162,7 @@ export function SearchBoard({ companyId }: SearchBoardProps) {
           <span className="hidden md:inline">Search</span>
         </Button>
       </DialogTrigger>
-      <DialogContent className="max-h-[80vh] w-[95vw] max-w-[1100px] overflow-hidden p-0 md:w-[80vw]">
+      <DialogContent className="max-h-[80vh] w-[95vw] max-w-[1100px] sm:max-w-[1100px] overflow-hidden p-0 md:w-[80vw]">
         <DialogHeader className="px-6 pt-6">
           <DialogTitle>Search Company</DialogTitle>
           <DialogDescription>
