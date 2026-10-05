@@ -51,6 +51,17 @@ import {
   shouldParkIssue,
 } from './park-helpers';
 
+/**
+ * Error thrown when generation is truncated (finishReason: length).
+ * Outer catch should NOT park when this error is thrown.
+ */
+export class TruncatedGenerationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TruncatedGenerationError';
+  }
+}
+
 export type WakeRequest = HeartbeatJobData;
 
 export interface WakeResult {
@@ -609,7 +620,15 @@ async function runWake(
           aborted: abortController.signal.aborted,
           durationMs: Date.now() - runStartedMs,
         });
-        await parkNoProgressIssue(runId, runTracer, agentId, companyId, taskId);
+        
+        // Skip parking on truncated generation (durable path fail-without-park)
+        const isTruncation = err instanceof TruncatedGenerationError;
+        if (!isTruncation) {
+          await parkNoProgressIssue(runId, runTracer, agentId, companyId, taskId);
+        } else {
+          runTracer.info('skipping park for truncated generation', { runId, taskId });
+        }
+        
         await recordHeartbeatFailure(runId, errorText, companyId, agentId);
         return { runId, status: 'failed', errorText };
       } finally {
@@ -1017,7 +1036,7 @@ export async function runDurableAgentWake(params: {
   await logIssueStateAfterRun(runTracer, taskId);
 
   // Check for truncated generation (finishReason: length) BEFORE parking.
-  // Fail immediately without parking so truncated mid-tool runs don't leave issue parked.
+  // Throw TruncatedGenerationError so outer catch can skip parking.
   const { detectTruncatedGeneration } = await import('@tourbillon/db');
   const truncationCheck = await detectTruncatedGeneration(runId);
   if (truncationCheck.truncated) {
@@ -1025,7 +1044,7 @@ export async function runDurableAgentWake(params: {
       finishReason: truncationCheck.finishReason,
       errorText: truncationCheck.errorText,
     });
-    throw new Error(truncationCheck.errorText);
+    throw new TruncatedGenerationError(truncationCheck.errorText);
   }
 
   // Only check for parking if generation completed successfully (not truncated)
