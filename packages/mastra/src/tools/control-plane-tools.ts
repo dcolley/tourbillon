@@ -423,6 +423,46 @@ export const getMessagesTool = createTool({
   },
 });
 
+export const searchTool = createTool({
+  id: 'search',
+  description:
+    'Search across issues, comments, and documents in your company. ' +
+    'ALWAYS search before creating a new issue or re-asking a settled question to avoid duplicates. ' +
+    'Returns mixed results with type, identifier, title, snippet, and status. ' +
+    'Use type filters (types: ["issue"]) to narrow results. ' +
+    'Query (q) is required and cannot be empty.',
+  inputSchema: z.object({
+    q: z.string().min(1).describe('Search query (required) — keywords or phrases to find'),
+    types: z.array(z.enum(['issue', 'comment', 'document'])).optional().describe('Filter by type (default: all three)'),
+    status: z.string().optional().describe('Filter issues by status (e.g., "in_progress", "done")'),
+    assignee: z.string().optional().describe('Filter issues by assignee agent ID or urlKey'),
+    createdAfter: z.string().optional().describe('ISO 8601 date — only results created after this date'),
+    limit: z.number().int().min(1).max(50).default(20).describe('Max results (default 20, max 50)'),
+  }),
+  execute: async (inputData, { requestContext }) => {
+    const { companyId } = extractToolRuntimeContext(requestContext);
+    if (!companyId) {
+      return { error: 'missing_company', message: 'companyId not present in tool runtime context' };
+    }
+
+    const params = new URLSearchParams();
+    params.append('q', inputData.q);
+    if (inputData.types) params.append('types', inputData.types.join(','));
+    if (inputData.status) params.append('status', inputData.status);
+    if (inputData.assignee) params.append('assignee', inputData.assignee);
+    if (inputData.createdAfter) params.append('createdAfter', inputData.createdAfter);
+    if (inputData.limit) params.append('limit', inputData.limit.toString());
+
+    const res = await tracedAgentFetch(
+      'search',
+      requestContext,
+      `/api/companies/${companyId}/search?${params.toString()}`
+    );
+    if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
+    return res.json();
+  },
+});
+
 export const CONTROL_PLANE_TOOLS = {
   getDateTimeTool,
   getIdentityTool,
@@ -431,6 +471,7 @@ export const CONTROL_PLANE_TOOLS = {
   getHeartbeatContextTool,
   getCommentsTool,
   updateIssueTool,
+  searchTool,
   listWorkspaceFilesTool,
   readWorkspaceFileTool,
   writeWorkspaceFileTool,
