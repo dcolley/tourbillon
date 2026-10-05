@@ -120,6 +120,30 @@ function sessionScopeFor(contextType: ChatContextType, contextId?: string): stri
   return contextId ? `${contextType}:${contextId}` : contextType;
 }
 
+const LAST_AGENT_STORAGE_KEY_PREFIX = 'tourbillon.chat.lastAgent';
+
+function getLastAgentStorageKey(companyId: string): string {
+  return `${LAST_AGENT_STORAGE_KEY_PREFIX}.${companyId}`;
+}
+
+function readLastAgentId(companyId: string | null): string | null {
+  if (!companyId || typeof window === 'undefined') return null;
+  try {
+    return window.localStorage.getItem(getLastAgentStorageKey(companyId));
+  } catch {
+    return null;
+  }
+}
+
+function writeLastAgentId(companyId: string | null, agentId: string): void {
+  if (!companyId || typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(getLastAgentStorageKey(companyId), agentId);
+  } catch {
+    // ignore
+  }
+}
+
 export function useAgentChatSession(options: {
   agentId: string;
   agentName?: string;
@@ -582,6 +606,22 @@ export function useAgentChatSession(options: {
       .catch(() => undefined);
   }, [open, serverActiveCompanyId]);
 
+  // Restore last selected agent for this company when agentOptions load
+  useEffect(() => {
+    if (!open || userPinnedAgent || agentOptions.length === 0) return;
+    const lastAgentId = readLastAgentId(serverActiveCompanyId);
+    if (!lastAgentId || lastAgentId === activeAgentId) return;
+    
+    // Verify the stored agent still exists
+    const storedAgent = agentOptions.find((a) => a.id === lastAgentId);
+    if (storedAgent) {
+      setActiveAgentId(storedAgent.id);
+      setActiveAgentName(storedAgent.name);
+      setUserPinnedAgent(true);
+      onAgentSwitch?.(storedAgent.id, storedAgent.name);
+    }
+  }, [open, userPinnedAgent, agentOptions, serverActiveCompanyId, activeAgentId, onAgentSwitch]);
+
   const refetchAgents = useCallback(() => {
     if (!open) return;
     void fetch('/api/chat/agents')
@@ -740,10 +780,14 @@ export function useAgentChatSession(options: {
       setActiveAgentId(nextAgentId);
       setActiveAgentName(nextAgentName);
       setUserPinnedAgent(true);
+      
+      // Persist the last selected agent per company
+      writeLastAgentId(serverActiveCompanyId, nextAgentId);
+      
       onAgentSwitch?.(nextAgentId, nextAgentName);
       // bootstrap effect re-runs with new activeAgentId and fresh session state
     },
-    [activeAgentId, onAgentSwitch],
+    [activeAgentId, serverActiveCompanyId, onAgentSwitch],
   );
 
 
