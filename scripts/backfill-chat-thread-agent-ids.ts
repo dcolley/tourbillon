@@ -4,8 +4,8 @@
  * 
  * Idempotent: Threads already tagged with agentId are skipped.
  * 
- * Usage:
- *   tsx scripts/backfill-chat-thread-agent-ids.ts
+ * Usage (from repo root):
+ *   npx tsx scripts/backfill-chat-thread-agent-ids.ts
  * 
  * Environment variables:
  *   DATABASE_URL - Required (same as app)
@@ -13,7 +13,7 @@
  * 
  * Inference strategy:
  *   1. Check thread metadata for existing agentId tag → skip if present
- *   2. Extract agent ID from thread.resource_id if it contains agent info
+ *   2. Extract agent ID from thread.resourceId if it contains agent info
  *   3. Look at controller storage metadata if available
  *   4. If no clear agent, thread remains untagged (will appear in "Older shared chats")
  * 
@@ -31,7 +31,7 @@ import { Pool } from 'pg';
 
 interface ThreadRow {
   id: string;
-  resource_id: string;
+  resourceId: string;
   metadata: Record<string, unknown>;
 }
 
@@ -52,40 +52,38 @@ async function backfillChatThreadAgentIds() {
   const pool = new Pool({ connectionString: databaseUrl });
 
   try {
-    // Mastra PostgresStore creates tables with format: {storageId}_memory_threads
-    const storageId = 'tourbillon-chat-threads';
-    const threadsTable = `"${storageId}_memory_threads"`;
+    // Mastra managed table (not custom storage ID format)
+    const threadsTable = 'mastra_threads';
 
-    // Check if tables exist
+    // Check if table exists
     const tableCheck = await pool.query(`
       SELECT table_name 
       FROM information_schema.tables 
       WHERE table_schema = 'public' 
-        AND table_name = '${storageId}_memory_threads'
+        AND table_name = 'mastra_threads'
     `);
 
     if (tableCheck.rows.length === 0) {
-      console.log('⚠️  No Mastra chat thread tables found. This is expected if no chat sessions exist yet.');
-      console.log('   Tables will be created automatically when the first chat session is created.');
-      await pool.end();
+      console.log('⚠️  No Mastra chat thread table found. This is expected if no chat sessions exist yet.');
+      console.log('   Table will be created automatically when the first chat session is created.');
       return;
     }
 
-    console.log(`✓ Found Mastra storage table: ${storageId}_memory_threads\n`);
+    console.log(`✓ Found Mastra storage table: mastra_threads\n`);
 
-    // Find all threads
+    // Find all chat threads (resourceId contains ':chat:')
     const threadsResult = await pool.query<ThreadRow>(`
-      SELECT id, resource_id, metadata
+      SELECT id, "resourceId", metadata
       FROM ${threadsTable}
-      ORDER BY created_at DESC
+      WHERE "resourceId" LIKE '%:chat:%'
+      ORDER BY "createdAt" DESC
     `);
 
     const threads = threadsResult.rows;
-    console.log(`Found ${threads.length} total thread(s)\n`);
+    console.log(`Found ${threads.length} chat thread(s)\n`);
 
     if (threads.length === 0) {
-      console.log('No threads to process.');
-      await pool.end();
+      console.log('No chat threads to process.');
       return;
     }
 
