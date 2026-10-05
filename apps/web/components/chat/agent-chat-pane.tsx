@@ -384,64 +384,144 @@ function ChatPaneBody({
               </Button>
             </div>
             <div className="flex-1 overflow-y-auto">
-              <ul className="space-y-0.5 p-1">
-                {threads.map((t) => (
-                  <li key={t.id} className="group relative">
-                    <button
-                      type="button"
-                      className={cn(
-                        'w-full rounded-md py-1.5 pr-7 pl-2 text-left text-xs hover:bg-muted',
-                        t.id === threadId && 'bg-muted font-medium',
-                      )}
-                      onClick={() => void selectThread(t.id)}
-                    >
-                      <span className="line-clamp-2">{t.title || 'New chat'}</span>
-                    </button>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger
-                        render={
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon-xs"
-                            className={cn(
-                              'absolute top-0.5 right-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-popup-open:opacity-100',
-                              t.id === threadId && 'opacity-70',
-                            )}
-                            aria-label="Session options"
-                            title="Session options"
-                          />
-                        }
-                      >
-                        <MoreHorizontal className="size-3.5" />
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end" side="bottom" className="min-w-36">
-                        <DropdownMenuItem
-                          onClick={() => {
-                            setRenameTarget(t);
-                          }}
-                        >
-                          <Pencil />
-                          Rename
-                        </DropdownMenuItem>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem
-                          variant="destructive"
-                          onClick={() => {
-                            setDeleteTarget(t);
-                          }}
-                        >
-                          <Trash2 />
-                          Delete
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  </li>
-                ))}
-                {threads.length === 0 && (
-                  <li className="px-2 py-3 text-xs text-muted-foreground">No sessions yet</li>
-                )}
-              </ul>
+              {(() => {
+                const ownThreads = threads.filter((t) => t.isOwn);
+                const sharedThreads = threads.filter((t) => t.isShared);
+                
+                return (
+                  <>
+                    {ownThreads.length > 0 && (
+                      <ul className="space-y-0.5 p-1">
+                        {ownThreads.map((t) => (
+                          <li key={t.id} className="group relative">
+                            <button
+                              type="button"
+                              className={cn(
+                                'w-full rounded-md py-1.5 pr-7 pl-2 text-left text-xs hover:bg-muted',
+                                t.id === threadId && 'bg-muted font-medium',
+                              )}
+                              onClick={() => void selectThread(t.id)}
+                            >
+                              <span className="line-clamp-2">{t.title || 'New chat'}</span>
+                            </button>
+                            <DropdownMenu>
+                              <DropdownMenuTrigger
+                                render={
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon-xs"
+                                    className={cn(
+                                      'absolute top-0.5 right-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-popup-open:opacity-100',
+                                      t.id === threadId && 'opacity-70',
+                                    )}
+                                    aria-label="Session options"
+                                    title="Session options"
+                                  />
+                                }
+                              >
+                                <MoreHorizontal className="size-3.5" />
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end" side="bottom" className="min-w-36">
+                                <DropdownMenuItem
+                                  onClick={() => {
+                                    setRenameTarget(t);
+                                  }}
+                                >
+                                  <Pencil />
+                                  Rename
+                                </DropdownMenuItem>
+                                <DropdownMenuSeparator />
+                                <DropdownMenuItem
+                                  variant="destructive"
+                                  onClick={() => {
+                                    setDeleteTarget(t);
+                                  }}
+                                >
+                                  <Trash2 />
+                                  Delete
+                                </DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    
+                    {sharedThreads.length > 0 && (
+                      <>
+                        {ownThreads.length > 0 && (
+                          <div className="border-t px-2 py-1.5">
+                            <span className="text-xs font-medium text-muted-foreground/70">
+                              Older shared chats
+                            </span>
+                          </div>
+                        )}
+                        <ul className="space-y-0.5 p-1">
+                          {sharedThreads.map((t) => (
+                            <li key={t.id} className="group relative">
+                              <button
+                                type="button"
+                                className={cn(
+                                  'w-full rounded-md py-1.5 pr-7 pl-2 text-left text-xs hover:bg-muted',
+                                  t.id === threadId && 'bg-muted font-medium',
+                                  'text-muted-foreground',
+                                )}
+                                onClick={() => void selectThread(t.id)}
+                              >
+                                <span className="line-clamp-2">{t.title || 'New chat'}</span>
+                              </button>
+                              <DropdownMenu>
+                                <DropdownMenuTrigger
+                                  render={
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      size="icon-xs"
+                                      className={cn(
+                                        'absolute top-0.5 right-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-popup-open:opacity-100',
+                                        t.id === threadId && 'opacity-70',
+                                      )}
+                                      aria-label="Session options"
+                                      title="Session options"
+                                    />
+                                  }
+                                >
+                                  <MoreHorizontal className="size-3.5" />
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end" side="bottom" className="min-w-36">
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      setRenameTarget(t);
+                                    }}
+                                  >
+                                    <Pencil />
+                                    Rename
+                                  </DropdownMenuItem>
+                                  <DropdownMenuSeparator />
+                                  <DropdownMenuItem
+                                    variant="destructive"
+                                    onClick={() => {
+                                      setDeleteTarget(t);
+                                    }}
+                                  >
+                                    <Trash2 />
+                                    Delete
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            </li>
+                          ))}
+                        </ul>
+                      </>
+                    )}
+                    
+                    {threads.length === 0 && (
+                      <div className="px-2 py-3 text-xs text-muted-foreground">No sessions yet</div>
+                    )}
+                  </>
+                );
+              })()}
             </div>
           </aside>
         )}

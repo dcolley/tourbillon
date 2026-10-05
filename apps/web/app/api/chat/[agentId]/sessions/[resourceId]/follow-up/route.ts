@@ -36,6 +36,19 @@ export async function POST(
       scope: sessionScope,
     });
     const requestContext = createChatRequestContext(agent);
+    
+    // Tag untagged thread to current agent on follow-up message
+    const currentThread = session.thread.getId();
+    if (currentThread) {
+      const thread = await session.thread.getById({ threadId: currentThread });
+      const metadata = (thread?.metadata as Record<string, unknown> | undefined) ?? {};
+      
+      if (!metadata.agentId) {
+        // Thread is untagged (legacy/shared) — tag it to the current agent
+        await session.thread.setSetting({ key: 'agentId', value: agent.id });
+      }
+    }
+    
     void session.followUp({
       content: wrapMessageWithDashboardContext(body.message, body.context),
       requestContext: requestContext as never,

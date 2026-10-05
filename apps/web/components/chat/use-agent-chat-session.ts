@@ -11,6 +11,8 @@ export interface ChatThreadInfo {
   tags?: Record<string, string>;
   updatedAt?: string;
   createdAt?: string;
+  isOwn?: boolean;
+  isShared?: boolean;
 }
 
 export interface ChatMessagePart {

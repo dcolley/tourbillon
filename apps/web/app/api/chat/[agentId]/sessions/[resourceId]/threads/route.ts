@@ -45,33 +45,49 @@ export async function GET(
 
     const threads = await session.thread.list();
     
-    // Filter by agentId first (only show threads belonging to this agent)
-    const agentFiltered = threads.filter((t) => {
+    // Apply context tag filters first (if provided)
+    const tagEntries = tags
+      ? Object.entries(tags).filter(([key]) => !isReservedThreadMetadataKey(key))
+      : [];
+    const contextFiltered =
+      tagEntries.length > 0
+        ? threads.filter((t) => {
+            const metadata = (t.metadata as Record<string, unknown> | undefined) ?? {};
+            return tagEntries.every(([key, value]) => metadata[key] === value);
+          })
+        : threads;
+    
+    // Separate into agent's own threads vs untagged shared threads
+    const ownThreads = contextFiltered.filter((t) => {
       const metadata = (t.metadata as Record<string, unknown> | undefined) ?? {};
       return metadata.agentId === agent.id;
     });
     
-    // Then apply additional tag filters if provided
-    const tagEntries = tags
-      ? Object.entries(tags).filter(([key]) => !isReservedThreadMetadataKey(key))
-      : [];
-    const scoped =
-      tagEntries.length > 0
-        ? agentFiltered.filter((t) => {
-            const metadata = (t.metadata as Record<string, unknown> | undefined) ?? {};
-            return tagEntries.every(([key, value]) => metadata[key] === value);
-          })
-        : agentFiltered;
+    const sharedThreads = contextFiltered.filter((t) => {
+      const metadata = (t.metadata as Record<string, unknown> | undefined) ?? {};
+      return !metadata.agentId;
+    });
 
     const toTime = (t: { updatedAt?: Date; createdAt?: Date }) =>
       (t.updatedAt ?? t.createdAt)?.getTime() ?? 0;
-    const sorted = [...scoped].sort((a, b) => toTime(b) - toTime(a));
+    
+    // Sort each group separately (newest first)
+    const sortedOwn = [...ownThreads].sort((a, b) => toTime(b) - toTime(a));
+    const sortedShared = [...sharedThreads].sort((a, b) => toTime(b) - toTime(a));
+    
+    // Combine: own threads first, then shared threads
+    const combined = [...sortedOwn, ...sortedShared];
+    
     const max = limitRaw ? Number(limitRaw) : NaN;
-    const limited = Number.isFinite(max) && max > 0 ? sorted.slice(0, max) : sorted;
+    const limited = Number.isFinite(max) && max > 0 ? combined.slice(0, max) : combined;
 
     return NextResponse.json({
       threads: limited.map((t) => {
         const threadTags = extractThreadTags(t.metadata);
+        const metadata = (t.metadata as Record<string, unknown> | undefined) ?? {};
+        const isOwn = metadata.agentId === agent.id;
+        const isShared = !metadata.agentId;
+        
         return {
           id: t.id,
           title: t.title,
@@ -80,6 +96,9 @@ export async function GET(
             t.updatedAt instanceof Date ? t.updatedAt.toISOString() : undefined,
           createdAt:
             t.createdAt instanceof Date ? t.createdAt.toISOString() : undefined,
+          // Flag to help UI group threads
+          isOwn,
+          isShared,
         };
       }),
     });
