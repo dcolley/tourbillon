@@ -670,11 +670,27 @@ export function useAgentChatSession(options: {
   const switchAgent = useCallback(
     async (nextAgentId: string, nextAgentName: string) => {
       if (nextAgentId === activeAgentId) return;
+      
+      // Detach the previous agent's stream without aborting the backend run
+      abortRef.current?.abort();
+      
+      // Clear session state so bootstrap creates a fresh session for the new agent
+      setResourceId(null);
+      setThreadId(null);
+      resourceIdRef.current = null;
+      threadIdRef.current = null;
+      setMessages([]);
+      setThreads([]);
+      setRunning(false);
+      setError(null);
+      setPendingApproval(null);
+      
+      // Update agent identity
       setActiveAgentId(nextAgentId);
       setActiveAgentName(nextAgentName);
       setUserPinnedAgent(true);
       onAgentSwitch?.(nextAgentId, nextAgentName);
-        // bootstrap effect re-runs with same resource/thread refs when possible
+      // bootstrap effect re-runs with new activeAgentId and fresh session state
     },
     [activeAgentId, onAgentSwitch],
   );
