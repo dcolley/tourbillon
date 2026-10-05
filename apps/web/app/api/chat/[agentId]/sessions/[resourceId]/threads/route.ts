@@ -44,16 +44,24 @@ export async function GET(
     });
 
     const threads = await session.thread.list();
+    
+    // Filter by agentId first (only show threads belonging to this agent)
+    const agentFiltered = threads.filter((t) => {
+      const metadata = (t.metadata as Record<string, unknown> | undefined) ?? {};
+      return metadata.agentId === agent.id;
+    });
+    
+    // Then apply additional tag filters if provided
     const tagEntries = tags
       ? Object.entries(tags).filter(([key]) => !isReservedThreadMetadataKey(key))
       : [];
     const scoped =
       tagEntries.length > 0
-        ? threads.filter((t) => {
+        ? agentFiltered.filter((t) => {
             const metadata = (t.metadata as Record<string, unknown> | undefined) ?? {};
             return tagEntries.every(([key, value]) => metadata[key] === value);
           })
-        : threads;
+        : agentFiltered;
 
     const toTime = (t: { updatedAt?: Date; createdAt?: Date }) =>
       (t.updatedAt ?? t.createdAt)?.getTime() ?? 0;
@@ -98,6 +106,7 @@ export async function POST(
       scope: sessionScope,
       tags: {
         kind: 'chat',
+        agentId: agent.id,
         ...(body.tags ?? {}),
       },
     });
@@ -109,6 +118,7 @@ export async function POST(
     // Ensure tags are on metadata even if the session was created earlier without them.
     const metadata: Record<string, string> = {
       kind: 'chat',
+      agentId: agent.id,
       ...(body.tags ?? {}),
     };
     for (const [key, value] of Object.entries(metadata)) {
