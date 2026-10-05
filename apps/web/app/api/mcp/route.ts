@@ -544,7 +544,7 @@ const MCP_TOOLS: McpTool[] = [
   },
   {
     name: 'search',
-    description: 'Search across issues, comments, and documents in the company. Query (q) is required.',
+    description: 'Search across issues, comments, documents, and approvals in the company. Query (q) is required.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -560,9 +560,9 @@ const MCP_TOOLS: McpTool[] = [
           type: 'array',
           items: {
             type: 'string',
-            enum: ['issue', 'comment', 'document'],
+            enum: ['issue', 'comment', 'document', 'approval'],
           },
-          description: 'Filter by type (default: all three)',
+          description: 'Filter by type (default: all four)',
         },
         status: {
           type: 'string',
