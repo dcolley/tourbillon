@@ -19,6 +19,8 @@ import { createCoalescingFetch } from './coalesce-system-messages';
 import { createNousInferenceFetch } from './nous-inference-fetch';
 import { createReasoningTextFetch } from './reasoning-text-fetch';
 import { createFirstFrameCaptureFetch } from './first-frame-capture';
+import { getCurrentHeartbeatContext } from './heartbeat-context';
+import { createStickySessionFetch } from './sticky-session-fetch';
 
 const providerCache = new Map<string, OpenAIProvider>();
 
@@ -38,24 +40,32 @@ function shouldCoalesceSystemMessages(provider: ModelProviderKind, apiMode: Mode
 }
 
 function getOpenAIProvider(
-  config: Pick<ModelProviderConfig, 'provider' | 'baseURL' | 'apiKey' | 'headers' | 'apiMode'>,
+  config: Pick<ModelProviderConfig, 'provider' | 'baseURL' | 'apiKey' | 'headers' | 'apiMode' | 'stickiness' | 'stickinessHeaderName'>,
 ): OpenAIProvider {
-  const key = `${providerCacheKey(config)}|coalesce=${shouldCoalesceSystemMessages(config.provider, config.apiMode)}`;
+  const key = `${providerCacheKey(config)}|coalesce=${shouldCoalesceSystemMessages(config.provider, config.apiMode)}|sticky=${config.stickiness ?? 'off'}:${config.stickinessHeaderName ?? ''}`;
   const cached = providerCache.get(key);
   if (cached) return cached;
+
+  const stickyConfig =
+    config.stickiness && config.stickiness !== 'off' && config.stickinessHeaderName?.trim()
+      ? { stickiness: config.stickiness, headerName: config.stickinessHeaderName }
+      : null;
 
   const provider = createOpenAI({
     apiKey: config.apiKey,
     baseURL: config.baseURL,
     name: config.provider,
     headers: buildProviderRequestHeaders(config),
-    fetch: createFirstFrameCaptureFetch(
-      createReasoningTextFetch(
-        createCoalescingFetch(
-          createNousInferenceFetch(fetch, config.baseURL),
-          shouldCoalesceSystemMessages(config.provider, config.apiMode),
+    fetch: createStickySessionFetch(
+      createFirstFrameCaptureFetch(
+        createReasoningTextFetch(
+          createCoalescingFetch(
+            createNousInferenceFetch(fetch, config.baseURL),
+            shouldCoalesceSystemMessages(config.provider, config.apiMode),
+          ),
         ),
       ),
+      stickyConfig,
     ),
   });
   providerCache.set(key, provider);

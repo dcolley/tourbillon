@@ -39,6 +39,8 @@ export async function PATCH(
       isDefault?: boolean;
       clearApiKey?: boolean;
       defaultModelSettings?: Record<string, unknown>;
+      stickiness?: string;
+      stickinessHeaderName?: string;
     };
 
     const provider = await updateLlmProvider(id, body);

@@ -26,6 +26,8 @@ interface LlmProviderPublic {
   apiMode: 'chat' | 'responses';
   isDefault: boolean;
   defaultModelSettings: AgentModelSettings;
+  stickiness: 'off' | 'agent' | 'chat';
+  stickinessHeaderName: string;
 }
 
 interface ProviderFormState {
@@ -37,6 +39,8 @@ interface ProviderFormState {
   isDefault: boolean;
   headerRows: Array<{ key: string; value: string }>;
   modelSettings: ModelSettingsFormValues;
+  stickiness: 'off' | 'agent' | 'chat';
+  stickinessHeaderName: string;
 }
 
 const EMPTY_FORM: ProviderFormState = {
@@ -48,6 +52,8 @@ const EMPTY_FORM: ProviderFormState = {
   isDefault: false,
   headerRows: [],
   modelSettings: emptyModelSettingsFormValues(),
+  stickiness: 'off',
+  stickinessHeaderName: 'x-litellm-session-id',
 };
 
 function headersToRows(headers: Record<string, string>): Array<{ key: string; value: string }> {
@@ -110,6 +116,8 @@ export function LlmProvidersSettings() {
       isDefault: provider.isDefault,
       headerRows: headersToRows(provider.headers),
       modelSettings: modelSettingsToFormValues(provider.defaultModelSettings),
+      stickiness: provider.stickiness,
+      stickinessHeaderName: provider.stickinessHeaderName,
     });
     setTestResult(null);
   }
@@ -133,6 +141,8 @@ export function LlmProvidersSettings() {
         apiMode: form.apiMode,
         isDefault: form.isDefault,
         defaultModelSettings,
+        stickiness: form.stickiness,
+        stickinessHeaderName: form.stickinessHeaderName,
         ...(form.apiKey.trim() ? { apiKey: form.apiKey.trim() } : {}),
       };
 
@@ -354,6 +364,39 @@ export function LlmProvidersSettings() {
                 <option value="chat">Chat completions</option>
                 <option value="responses">Responses API</option>
               </select>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Session stickiness</label>
+              <select
+                value={form.stickiness}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, stickiness: e.target.value as 'off' | 'agent' | 'chat' }))
+                }
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+              >
+                <option value="off">Off (no sticky routing)</option>
+                <option value="agent">Agent (one ID per agent)</option>
+                <option value="chat">Chat (one ID per thread)</option>
+              </select>
+              <p className="text-xs text-muted-foreground">
+                Sticky routing pins requests to the same LLM replica for consistent context.
+              </p>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Sticky session header</label>
+              <input
+                type="text"
+                value={form.stickinessHeaderName}
+                onChange={(e) => setForm((f) => ({ ...f, stickinessHeaderName: e.target.value }))}
+                placeholder="x-litellm-session-id"
+                disabled={form.stickiness === 'off'}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono disabled:opacity-50"
+              />
+              <p className="text-xs text-muted-foreground">
+                HTTP header name for the session ID. Only sent when stickiness is enabled.
+              </p>
             </div>
           </div>
 

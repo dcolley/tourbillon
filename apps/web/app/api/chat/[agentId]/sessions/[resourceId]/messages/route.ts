@@ -12,6 +12,7 @@ import {
 } from '@/lib/chat/dashboard-context';
 import { chatErrorResponse, decodeResourceId } from '@/lib/chat/route-helpers';
 import { chatModelIdFromSearch } from '@/lib/chat/model-query';
+import { runWithHeartbeatContext } from '@tourbillon/mastra';
 
 const bodySchema = z.object({
   message: z.string().min(1),
@@ -47,11 +48,23 @@ export async function POST(
     });
     const requestContext = createChatRequestContext(agent);
 
-    void session.sendMessage({
-      content: wrapMessageWithDashboardContext(body.message, body.context),
-      files: body.files,
-      requestContext: requestContext as never,
-    });
+    // Wrap chat session sendMessage with heartbeat context for sticky session support
+    const threadId = session.thread.getId() ?? `${resourceId}`;
+    void runWithHeartbeatContext(
+      {
+        runId: `chat-${agent.id}`,
+        companyId: agent.companyId,
+        agentId: agent.id,
+        threadId,
+      },
+      async () => {
+        await session.sendMessage({
+          content: wrapMessageWithDashboardContext(body.message, body.context),
+          files: body.files,
+          requestContext: requestContext as never,
+        });
+      },
+    );
 
     return NextResponse.json({ ok: true });
   } catch (err) {

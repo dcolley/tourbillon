@@ -28,7 +28,11 @@ export interface ModelProviderConfig {
   defaultModel: string;
   providerId?: string;
   providerName?: string;
+  stickiness?: StickinessType;
+  stickinessHeaderName?: string;
 }
+
+export type StickinessType = 'off' | 'agent' | 'chat';
 
 /** Shape of an llm_providers DB row used at runtime (no DB import). */
 export interface LlmProviderRecord {
@@ -41,6 +45,8 @@ export interface LlmProviderRecord {
   apiMode: ModelApiMode;
   isDefault: boolean;
   defaultModelSettings: AgentModelSettings;
+  stickiness: StickinessType;
+  stickinessHeaderName: string;
 }
 
 /** Per-agent overrides stored in agents.adapter_config (and env fallbacks). */
@@ -133,6 +139,14 @@ export function parseModelApiMode(value: string | undefined | null): ModelApiMod
   return null;
 }
 
+export function parseStickinessType(value: string | undefined | null): StickinessType | null {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === 'off') return 'off';
+  if (normalized === 'agent') return 'agent';
+  if (normalized === 'chat') return 'chat';
+  return null;
+}
+
 /** Map a DB llm_providers row to runtime config. */
 export function resolveModelProviderConfigFromRecord(
   record: LlmProviderRecord,
@@ -147,18 +161,59 @@ export function resolveModelProviderConfigFromRecord(
     defaultModel: modelId ?? envDefaultModel(),
     providerId: record.id,
     providerName: record.name,
+    stickiness: record.stickiness,
+    stickinessHeaderName: record.stickinessHeaderName,
   };
 }
 
 /** Build HTTP headers for provider API calls (model listing, etc.). */
 export function buildProviderRequestHeaders(
-  config: Pick<ModelProviderConfig, 'apiKey' | 'headers'>,
+  config: Pick<ModelProviderConfig, 'apiKey' | 'headers' | 'stickiness' | 'stickinessHeaderName'>,
+  context?: { companyId?: string; agentId?: string; threadId?: string },
 ): Record<string, string> {
   const headers: Record<string, string> = { ...config.headers };
   if (config.apiKey && !headers.Authorization && !headers.authorization) {
     headers.Authorization = `Bearer ${config.apiKey}`;
   }
+
+  // Inject sticky session header when configured
+  const stickiness = config.stickiness ?? 'off';
+  const headerName = config.stickinessHeaderName?.trim() || '';
+  
+  if (stickiness !== 'off' && headerName && context) {
+    const sessionId = buildStickySessionId(stickiness, context);
+    if (sessionId) {
+      headers[headerName] = sessionId;
+    }
+  }
+
   return headers;
+}
+
+/**
+ * Build a stable session ID for sticky routing based on stickiness mode.
+ * - agent: one stable ID per company + agent
+ * - chat: one stable ID per chat thread
+ */
+function buildStickySessionId(
+  stickiness: StickinessType,
+  context: { companyId?: string; agentId?: string; threadId?: string },
+): string | null {
+  if (stickiness === 'agent') {
+    if (context.companyId && context.agentId) {
+      return `${context.companyId}:${context.agentId}`;
+    }
+    return null;
+  }
+  
+  if (stickiness === 'chat') {
+    if (context.threadId) {
+      return context.threadId;
+    }
+    return null;
+  }
+  
+  return null;
 }
 
 function envProviderKind(): ModelProviderKind {
@@ -346,12 +401,18 @@ export function toLlmProviderRecord(row: {
   apiMode: string;
   isDefault: boolean;
   defaultModelSettings?: unknown;
+  stickiness?: string;
+  stickinessHeaderName?: string;
 }): LlmProviderRecord {
   const type = parseLlmProviderType(row.type);
   if (!type) {
     throw new Error(`Invalid LLM provider type: ${row.type}`);
   }
   const apiMode = parseModelApiMode(row.apiMode) ?? 'chat';
+  const stickiness = parseStickinessType(row.stickiness) ?? 'off';
+  const stickinessHeaderName = typeof row.stickinessHeaderName === 'string' && row.stickinessHeaderName.trim()
+    ? row.stickinessHeaderName.trim()
+    : 'x-litellm-session-id';
   return {
     id: row.id,
     name: row.name,
@@ -362,6 +423,8 @@ export function toLlmProviderRecord(row: {
     apiMode,
     isDefault: row.isDefault,
     defaultModelSettings: parseAgentModelSettings(row.defaultModelSettings),
+    stickiness,
+    stickinessHeaderName,
   };
 }
 
