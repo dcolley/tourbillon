@@ -113,6 +113,9 @@ async function searchIssues(
     });
     if (agentRecord) {
       conditions.push(eq(issues.assigneeAgentId, agentRecord.id));
+    } else {
+      // Unknown assignee - return no matches
+      return [];
     }
   }
   if (createdAfter) {
@@ -147,7 +150,7 @@ async function searchIssues(
       snippet,
       status: issue.status,
       updatedAt: issue.updatedAt.toISOString(),
-      href: `/issues/${issue.id}`,
+      href: `/issue/${issue.id}`,
       relevance,
       timestamp: issue.updatedAt,
     };
@@ -221,7 +224,7 @@ async function searchComments(
         snippet,
         status: parentIssue.status,
         updatedAt: comment.createdAt.toISOString(),
-        href: `/issues/${parentIssue.id}#comment-${comment.id}`,
+        href: `/issue/${parentIssue.id}#comment-${comment.id}`,
         relevance,
         timestamp: comment.createdAt,
       };

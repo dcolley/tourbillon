@@ -40,10 +40,12 @@ export function DashboardShell({
         />
         <div className="flex min-w-0 flex-1 overflow-hidden" data-chat-resize-root>
           <SidebarInset className="min-w-0 flex-1">
-            <header className="flex h-12 shrink-0 items-center gap-2 border-b px-4 md:hidden">
-              <SidebarTrigger />
-              <Separator orientation="vertical" className="h-4" />
-              <span className="truncate text-sm font-semibold">
+            <header className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
+              <div className="md:hidden flex items-center gap-2">
+                <SidebarTrigger />
+                <Separator orientation="vertical" className="h-4" />
+              </div>
+              <span className="truncate text-sm font-semibold md:hidden">
                 {activeCompanyName ?? 'Tourbillon'}
               </span>
               {activeCompanyId && (

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { validateRunToken } from '@/lib/auth/run-token';
 import { verifyMobileToken } from '@/lib/mobile-auth';
+import { getActiveCompanyOrNull } from '@/lib/company';
 import { searchCompanyText, type SearchOptions } from '@/lib/search';
 import { z } from 'zod';
 
@@ -19,10 +20,10 @@ export async function GET(
 ) {
   const { companyId } = await params;
   
-  // Support both agent run-token and board/mobile JWT
-  const authHeader = req.headers.get('authorization');
+  // Support three auth paths: agent run-token, board session, or mobile token
   let authenticatedCompanyId: string | null = null;
   
+  const authHeader = req.headers.get('authorization');
   if (authHeader?.startsWith('Bearer ')) {
     const token = authHeader.replace('Bearer ', '');
     
@@ -30,12 +31,22 @@ export async function GET(
     const runCtx = validateRunToken(token);
     if (runCtx) {
       authenticatedCompanyId = runCtx.companyId;
-    } else {
-      // Try mobile/board JWT
-      const mobilePayload = verifyMobileToken(token);
-      if (mobilePayload) {
-        authenticatedCompanyId = mobilePayload.companyId;
-      }
+    }
+  }
+  
+  // Try mobile token (MCP via x-company-token header)
+  if (!authenticatedCompanyId) {
+    const mobileCompanyId = await verifyMobileToken(req);
+    if (mobileCompanyId) {
+      authenticatedCompanyId = mobileCompanyId;
+    }
+  }
+  
+  // Try board session (Better Auth cookie)
+  if (!authenticatedCompanyId) {
+    const activeCompany = await getActiveCompanyOrNull();
+    if (activeCompany) {
+      authenticatedCompanyId = activeCompany.id;
     }
   }
   
