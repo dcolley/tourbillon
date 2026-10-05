@@ -5,3 +5,4 @@ export * from './llm-provider-queries';
 export * from './checkout-lock';
 export * from './checkout-activity';
 export * from './heartbeat-run-reconcile';
+export * from './observability-queries';

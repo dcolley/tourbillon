@@ -164,6 +164,88 @@ describe('hasChildCreated', () => {
   });
 });
 
+describe('workspace file activity detection', () => {
+  const checkoutTime = new Date('2026-08-25T12:00:00Z');
+  const afterCheckout = new Date('2026-08-25T12:01:00Z');
+  const beforeCheckout = new Date('2026-08-25T11:59:00Z');
+
+  it('detects workspace.file_write from this run after checkout', () => {
+    const activities: ActivityEntry[] = [
+      {
+        action: 'workspace.file_write',
+        createdAt: afterCheckout,
+        details: { runId: 'run-456', path: 'resources/doc.md' },
+      },
+    ];
+
+    const result = activities.some((a) => {
+      if (!a.createdAt || a.createdAt < checkoutTime) return false;
+      const details = a.details as { runId?: string } | null;
+      if (details?.runId !== 'run-456') return false;
+      return a.action === 'workspace.file_write' || a.action === 'workspace.file_delete';
+    });
+
+    assert.equal(result, true, 'detected workspace write after checkout');
+  });
+
+  it('detects workspace.file_delete from this run after checkout', () => {
+    const activities: ActivityEntry[] = [
+      {
+        action: 'workspace.file_delete',
+        createdAt: afterCheckout,
+        details: { runId: 'run-456', path: 'temp/old.txt' },
+      },
+    ];
+
+    const result = activities.some((a) => {
+      if (!a.createdAt || a.createdAt < checkoutTime) return false;
+      const details = a.details as { runId?: string } | null;
+      if (details?.runId !== 'run-456') return false;
+      return a.action === 'workspace.file_write' || a.action === 'workspace.file_delete';
+    });
+
+    assert.equal(result, true, 'detected workspace delete after checkout');
+  });
+
+  it('does NOT detect workspace activity from different run', () => {
+    const activities: ActivityEntry[] = [
+      {
+        action: 'workspace.file_write',
+        createdAt: afterCheckout,
+        details: { runId: 'run-999', path: 'resources/doc.md' },
+      },
+    ];
+
+    const result = activities.some((a) => {
+      if (!a.createdAt || a.createdAt < checkoutTime) return false;
+      const details = a.details as { runId?: string } | null;
+      if (details?.runId !== 'run-456') return false;
+      return a.action === 'workspace.file_write' || a.action === 'workspace.file_delete';
+    });
+
+    assert.equal(result, false, 'ignored workspace activity from different run');
+  });
+
+  it('does NOT detect workspace activity before checkout', () => {
+    const activities: ActivityEntry[] = [
+      {
+        action: 'workspace.file_write',
+        createdAt: beforeCheckout,
+        details: { runId: 'run-456', path: 'resources/doc.md' },
+      },
+    ];
+
+    const result = activities.some((a) => {
+      if (!a.createdAt || a.createdAt < checkoutTime) return false;
+      const details = a.details as { runId?: string } | null;
+      if (details?.runId !== 'run-456') return false;
+      return a.action === 'workspace.file_write' || a.action === 'workspace.file_delete';
+    });
+
+    assert.equal(result, false, 'ignored workspace activity before checkout');
+  });
+});
+
 describe('material work detection scenarios', () => {
   const checkoutTime = new Date('2026-08-25T12:00:00Z');
   const afterCheckout = new Date('2026-08-25T12:01:00Z');
@@ -194,6 +276,44 @@ describe('material work detection scenarios', () => {
 
     const hasMaterial = hasChildCreated(childIds, childActivities, 'run-456');
     assert.equal(hasMaterial, true, 'createSubtask is material work');
+  });
+
+  it('workspace.file_write this run → do not park (material work)', () => {
+    const activities: ActivityEntry[] = [
+      {
+        action: 'workspace.file_write',
+        createdAt: afterCheckout,
+        details: { runId: 'run-456', path: 'resources/doc.md' },
+      },
+    ];
+
+    const hasMaterial = activities.some((a) => {
+      if (!a.createdAt || a.createdAt < checkoutTime) return false;
+      const details = a.details as { runId?: string } | null;
+      if (details?.runId !== 'run-456') return false;
+      return a.action === 'workspace.file_write' || a.action === 'workspace.file_delete';
+    });
+
+    assert.equal(hasMaterial, true, 'workspace write is material work');
+  });
+
+  it('workspace.file_delete this run → do not park (material work)', () => {
+    const activities: ActivityEntry[] = [
+      {
+        action: 'workspace.file_delete',
+        createdAt: afterCheckout,
+        details: { runId: 'run-456', path: 'temp/old.txt' },
+      },
+    ];
+
+    const hasMaterial = activities.some((a) => {
+      if (!a.createdAt || a.createdAt < checkoutTime) return false;
+      const details = a.details as { runId?: string } | null;
+      if (details?.runId !== 'run-456') return false;
+      return a.action === 'workspace.file_write' || a.action === 'workspace.file_delete';
+    });
+
+    assert.equal(hasMaterial, true, 'workspace delete is material work');
   });
 
   it('checkout only, no children → should park (no material work)', () => {

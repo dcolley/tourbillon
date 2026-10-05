@@ -989,6 +989,17 @@ export async function runDurableAgentWake(params: {
   await logIssueStateAfterRun(runTracer, taskId);
   await parkNoProgressIssue(runId, runTracer, agentRecord.id, companyId, taskId);
 
+  // Check for truncated generation (finishReason: length) and treat as failure
+  const { detectTruncatedGeneration } = await import('@tourbillon/db');
+  const truncationCheck = await detectTruncatedGeneration(runId);
+  if (truncationCheck.truncated) {
+    runTracer.error('durable agent wake truncated', {
+      finishReason: truncationCheck.finishReason,
+      errorText: truncationCheck.errorText,
+    });
+    throw new Error(truncationCheck.errorText);
+  }
+
   await recordHeartbeatSuccess(runId, agentRecord, companyId, providerConfig.provider, {
     inputTokens,
     outputTokens,
