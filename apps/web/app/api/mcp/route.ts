@@ -543,6 +543,48 @@ const MCP_TOOLS: McpTool[] = [
     },
   },
   {
+    name: 'search',
+    description: 'Search across issues, comments, and documents in the company. Query (q) is required.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        company_id: {
+          type: 'string',
+          description: 'Company ID (UUID)',
+        },
+        q: {
+          type: 'string',
+          description: 'Search query (required) — keywords or phrases to find',
+        },
+        types: {
+          type: 'array',
+          items: {
+            type: 'string',
+            enum: ['issue', 'comment', 'document'],
+          },
+          description: 'Filter by type (default: all three)',
+        },
+        status: {
+          type: 'string',
+          description: 'Filter issues by status (e.g., "in_progress", "done")',
+        },
+        assignee: {
+          type: 'string',
+          description: 'Filter issues by assignee agent ID or urlKey',
+        },
+        created_after: {
+          type: 'string',
+          description: 'ISO 8601 date — only results created after this date',
+        },
+        limit: {
+          type: 'number',
+          description: 'Max results (default 20, max 50)',
+        },
+      },
+      required: ['company_id', 'q'],
+    },
+  },
+  {
     name: 'list_approvals',
     description: 'List pending and recent board approvals',
     inputSchema: {
@@ -1359,6 +1401,32 @@ async function handleSetProjectStatus(tokenCompanyId: string, params: any) {
   };
 }
 
+async function handleSearch(tokenCompanyId: string, params: any) {
+  const { company_id, q, types, status, assignee, created_after, limit } = params;
+  if (!company_id) {
+    throw new Error('company_id is required');
+  }
+  if (!q || !q.trim()) {
+    throw new Error('q (search query) is required and cannot be empty');
+  }
+  validateCompanyAccess(tokenCompanyId, company_id);
+
+  const { searchCompanyText } = await import('@/lib/search');
+  
+  const options = {
+    companyId: company_id,
+    q,
+    types: types && Array.isArray(types) ? types : undefined,
+    status,
+    assignee,
+    createdAfter: created_after,
+    limit,
+  };
+
+  const results = await searchCompanyText(options);
+  return results;
+}
+
 async function handleListApprovals(tokenCompanyId: string, params: any) {
   const { company_id, status = 'pending', limit = 50 } = params;
   if (!company_id) {
@@ -1577,6 +1645,8 @@ async function handleToolCall(tokenCompanyId: string, toolName: string, params: 
       return await handleCreateProject(tokenCompanyId, params);
     case 'set_project_status':
       return await handleSetProjectStatus(tokenCompanyId, params);
+    case 'search':
+      return await handleSearch(tokenCompanyId, params);
     case 'list_approvals':
       return await handleListApprovals(tokenCompanyId, params);
     case 'decide_approval':

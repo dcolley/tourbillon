@@ -200,6 +200,79 @@ When enforcement is on:
 
 ---
 
+## §6 — Search Before You Create
+
+**Before creating a new issue or re-asking a settled question**, always search for existing work to avoid duplicates.
+
+### The `search` Tool
+
+| Parameter | Type | Purpose |
+|---|---|---|
+| `q` | string (required) | Search query — keywords or phrases |
+| `types` | array (optional) | Filter by `issue`, `comment`, `document` (default: all three) |
+| `status` | string (optional) | Filter issues by status (e.g., `"done"`, `"in_progress"`) |
+| `assignee` | string (optional) | Filter issues by agent ID or urlKey |
+| `createdAfter` | ISO 8601 (optional) | Only results created after this date |
+| `limit` | number (optional) | Max results (default 20, max 50) |
+
+### When to Search
+
+1. **Before `createSubtask` or `createIssue`**:
+   - Search for similar work: `search({ q: "<task description keywords>", types: ["issue"] })`
+   - If match found with `status: done` → review that solution and link in comment
+   - If match found with `status: in_progress` → coordinate with assignee instead of duplicating
+   - If match found with `status: blocked` → check if you can unblock rather than create new
+
+2. **Before re-asking a settled question**:
+   - Search prior comments: `search({ q: "<question keywords>", types: ["comment"] })`
+   - Check workspace docs: `search({ q: "<topic>", types: ["document"] })`
+
+3. **During planning or goal decomposition**:
+   - Find related closed issues to reuse approach
+   - Discover company documentation relevant to the task
+
+### Search Result Shape
+
+Results include:
+- `type` — `issue`, `comment`, or `document`
+- `identifier` — issue identifier (e.g., `DEMO-12`) when relevant
+- `title` — issue or document title
+- `snippet` — excerpt containing the match
+- `status` — current status (for issues)
+- `href` — Board link (comment hits link to parent issue)
+
+**Comment hits**: When `type: 'comment'`, the result shows the parent issue title/identifier with a snippet from the matching comment body.
+
+### Example: Before Creating Subtask
+
+```javascript
+// Step 1: Search for similar work
+const searchResults = search({
+  q: "API authentication implementation",
+  types: ["issue"],
+  status: "done"  // Find completed work first
+});
+
+// Step 2: Evaluate results
+if (searchResults.results.length > 0) {
+  // Found prior work — read it
+  const priorIssue = searchResults.results[0];
+  const context = getHeartbeatContext({ issueId: priorIssue.issueId });
+  const comments = getComments({ issueId: priorIssue.issueId });
+  
+  // Reuse the approach or coordinate with team
+  updateIssue({
+    issueId: currentIssueId,
+    comment: `Found prior work on this: ${priorIssue.identifier} (${priorIssue.title}). Reviewing approach before creating subtask.`
+  });
+} else {
+  // No match — safe to create subtask
+  createSubtask({ ... });
+}
+```
+
+---
+
 ## §6a — Board Governance & Approvals
 
 The `approvals` toolset provides three tools for board governance decisions:

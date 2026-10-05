@@ -7,6 +7,7 @@ import type { BuildInfo } from '@/lib/build-info';
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar';
 import { Separator } from '@/components/ui/separator';
 import { ChatContextProvider, ChatSidebarSlot } from '@/components/chat/chat-context';
+import { SearchBoard } from '@/components/search-board';
 
 export function DashboardShell({
   children,
@@ -39,12 +40,20 @@ export function DashboardShell({
         />
         <div className="flex min-w-0 flex-1 overflow-hidden" data-chat-resize-root>
           <SidebarInset className="min-w-0 flex-1">
-            <header className="flex h-12 shrink-0 items-center gap-2 border-b px-4 md:hidden">
-              <SidebarTrigger />
-              <Separator orientation="vertical" className="h-4" />
-              <span className="truncate text-sm font-semibold">
+            <header className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
+              <div className="md:hidden flex items-center gap-2">
+                <SidebarTrigger />
+                <Separator orientation="vertical" className="h-4" />
+              </div>
+              <span className="truncate text-sm font-semibold md:hidden">
                 {activeCompanyName ?? 'Tourbillon'}
               </span>
+              {activeCompanyId && (
+                <>
+                  <div className="flex-1" />
+                  <SearchBoard companyId={activeCompanyId} />
+                </>
+              )}
             </header>
             <div className="flex flex-1 flex-col gap-6 overflow-y-auto px-4 pb-4 pt-0 md:px-6 md:pb-6 [&>:not([data-sticky-toolbar-root])]:pt-4 md:[&>:not([data-sticky-toolbar-root])]:pt-6">
               {children}
