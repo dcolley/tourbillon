@@ -514,15 +514,8 @@ async function runWake(
           );
 
           await logIssueStateAfterRun(runTracer, taskId);
-          await parkNoProgressIssue(runId, runTracer, agentRecord.id, companyId, taskId);
-          await recordHarnessResult(
-            runId,
-            agentRecord,
-            companyId,
-            providerConfig.provider,
-            harnessResult,
-          );
 
+          // Check for failure finishReasons BEFORE parking (timeout, error, max_steps, loop)
           if (
             harnessResult.finishReason === 'timeout' ||
             harnessResult.finishReason === 'error' ||
@@ -545,8 +538,43 @@ async function runWake(
                 errorText = 'Harness run failed';
                 break;
             }
+            // Record failure without parking (leave issue in_progress with checkout lock)
+            await recordHarnessResult(runId, agentRecord, companyId, providerConfig.provider, harnessResult);
             return { runId, status: 'failed', errorText };
           }
+
+          // Check for truncated generation (finishReason: length) BEFORE parking.
+          // Harness also emits observability events that may show truncation.
+          const { detectTruncatedGeneration } = await import('@tourbillon/db');
+          const truncationCheck = await detectTruncatedGeneration(runId);
+          if (truncationCheck.truncated) {
+            runTracer.error('harness wake truncated', {
+              finishReason: truncationCheck.finishReason,
+              errorText: truncationCheck.errorText,
+            });
+            // Record as error without parking
+            await db.update(heartbeatRuns)
+              .set({
+                status: 'failed',
+                finishedAt: new Date(),
+                errorText: truncationCheck.errorText,
+                traceId: harnessResult.traceId ?? undefined,
+                harnessRunId: harnessResult.harnessRunId ?? undefined,
+              })
+              .where(eq(heartbeatRuns.id, runId));
+            return { runId, status: 'failed', errorText: truncationCheck.errorText };
+          }
+
+          // Only park if run completed successfully (no failure, no truncation)
+          await parkNoProgressIssue(runId, runTracer, agentRecord.id, companyId, taskId);
+
+          await recordHarnessResult(
+            runId,
+            agentRecord,
+            companyId,
+            providerConfig.provider,
+            harnessResult,
+          );
 
           runTracer.info('harness wake succeeded', {
             finishReason: harnessResult.finishReason,
@@ -987,9 +1015,9 @@ export async function runDurableAgentWake(params: {
   }
 
   await logIssueStateAfterRun(runTracer, taskId);
-  await parkNoProgressIssue(runId, runTracer, agentRecord.id, companyId, taskId);
 
-  // Check for truncated generation (finishReason: length) and treat as failure
+  // Check for truncated generation (finishReason: length) BEFORE parking.
+  // Fail immediately without parking so truncated mid-tool runs don't leave issue parked.
   const { detectTruncatedGeneration } = await import('@tourbillon/db');
   const truncationCheck = await detectTruncatedGeneration(runId);
   if (truncationCheck.truncated) {
@@ -999,6 +1027,9 @@ export async function runDurableAgentWake(params: {
     });
     throw new Error(truncationCheck.errorText);
   }
+
+  // Only check for parking if generation completed successfully (not truncated)
+  await parkNoProgressIssue(runId, runTracer, agentRecord.id, companyId, taskId);
 
   await recordHeartbeatSuccess(runId, agentRecord, companyId, providerConfig.provider, {
     inputTokens,
