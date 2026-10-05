@@ -973,7 +973,7 @@ export async function runDurableAgentWake(params: {
       }
     }
     
-    if (abortSignal.aborted || isAbortLikeError(err)) {
+    if (abortController.signal.aborted || isAbortLikeError(err)) {
       throw heartbeatAbortedError();
     }
     throw err;
