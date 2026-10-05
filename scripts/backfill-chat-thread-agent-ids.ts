@@ -1,0 +1,131 @@
+#!/usr/bin/env tsx
+/**
+ * Backfill agentId metadata for existing chat threads.
+ * 
+ * Idempotent: Threads already tagged with agentId are skipped.
+ * 
+ * Usage:
+ *   tsx scripts/backfill-chat-thread-agent-ids.ts
+ * 
+ * Environment variables:
+ *   DATABASE_URL - Required (same as app)
+ *   DRY_RUN - Set to "true" to preview changes without writing (optional)
+ * 
+ * Inference strategy:
+ *   1. Check thread metadata for existing agentId tag → skip if present
+ *   2. Extract agent ID from thread.resource_id if it contains agent info
+ *   3. Look at controller storage metadata if available
+ *   4. If no clear agent, thread remains untagged (will appear in "Older shared chats")
+ * 
+ * Note: The current Mastra thread storage does not reliably record which agent
+ * created the thread. The resourceId is company-scoped (e.g. "company-{id}:chat:free"),
+ * not agent-scoped. Assistant messages do not include agent metadata in the standard
+ * Mastra schema.
+ * 
+ * Result: Most existing threads will remain untagged and appear in "Older shared chats"
+ * for all agents. They will be tagged to the current agent when a user sends their
+ * first message in that shared thread.
+ */
+
+import { Pool } from 'pg';
+
+interface ThreadRow {
+  id: string;
+  resource_id: string;
+  metadata: Record<string, unknown>;
+}
+
+async function backfillChatThreadAgentIds() {
+  const databaseUrl = process.env.DATABASE_URL;
+  const dryRun = process.env.DRY_RUN === 'true';
+
+  if (!databaseUrl) {
+    console.error('ERROR: DATABASE_URL environment variable is required');
+    process.exit(1);
+  }
+
+  console.log('🔍 Starting chat thread agentId backfill...');
+  if (dryRun) {
+    console.log('🏃 DRY RUN mode: no changes will be written\n');
+  }
+
+  const pool = new Pool({ connectionString: databaseUrl });
+
+  try {
+    // Mastra PostgresStore creates tables with format: {storageId}_memory_threads
+    const storageId = 'tourbillon-chat-threads';
+    const threadsTable = `"${storageId}_memory_threads"`;
+
+    // Check if tables exist
+    const tableCheck = await pool.query(`
+      SELECT table_name 
+      FROM information_schema.tables 
+      WHERE table_schema = 'public' 
+        AND table_name = '${storageId}_memory_threads'
+    `);
+
+    if (tableCheck.rows.length === 0) {
+      console.log('⚠️  No Mastra chat thread tables found. This is expected if no chat sessions exist yet.');
+      console.log('   Tables will be created automatically when the first chat session is created.');
+      await pool.end();
+      return;
+    }
+
+    console.log(`✓ Found Mastra storage table: ${storageId}_memory_threads\n`);
+
+    // Find all threads
+    const threadsResult = await pool.query<ThreadRow>(`
+      SELECT id, resource_id, metadata
+      FROM ${threadsTable}
+      ORDER BY created_at DESC
+    `);
+
+    const threads = threadsResult.rows;
+    console.log(`Found ${threads.length} total thread(s)\n`);
+
+    if (threads.length === 0) {
+      console.log('No threads to process.');
+      await pool.end();
+      return;
+    }
+
+    let alreadyTagged = 0;
+    let couldNotInfer = 0;
+
+    for (const thread of threads) {
+      const metadata = thread.metadata || {};
+      
+      // Skip if already tagged
+      if (metadata.agentId) {
+        alreadyTagged++;
+        console.log(`  ⏭️  Thread ${thread.id.slice(0, 8)}... already tagged (agentId: ${metadata.agentId})`);
+        continue;
+      }
+
+      // Cannot reliably infer agentId from current Mastra storage schema:
+      // - resourceId is company-scoped: "company-{companyId}:chat:free"
+      // - Assistant messages do not include agent metadata
+      // - No FK relationship between threads and agents table
+      couldNotInfer++;
+      console.log(`  ⚠️  Thread ${thread.id.slice(0, 8)}... cannot infer agentId (will appear in "Older shared chats")`);
+    }
+
+    console.log('\n📊 Summary:');
+    console.log(`  Already tagged: ${alreadyTagged}`);
+    console.log(`  Could not infer: ${couldNotInfer}`);
+    console.log(`\n  ℹ️  Inference limitation: Mastra thread storage does not record which agent created the thread.`);
+    console.log(`     resourceId is company-scoped (e.g. "company-{id}:chat:free"), not agent-scoped.`);
+    console.log(`     Assistant messages do not include agent metadata in the standard schema.`);
+    console.log(`\n  Untagged threads will appear in "Older shared chats" for all agents.`);
+    console.log(`  They will be tagged to the current agent when a user sends their first message.`);
+    console.log('\n✅ Backfill complete (no inference possible with current schema).');
+
+  } catch (error) {
+    console.error('❌ Error during backfill:', error);
+    process.exit(1);
+  } finally {
+    await pool.end();
+  }
+}
+
+backfillChatThreadAgentIds();

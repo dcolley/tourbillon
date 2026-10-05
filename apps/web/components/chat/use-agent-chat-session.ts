@@ -11,6 +11,8 @@ export interface ChatThreadInfo {
   tags?: Record<string, string>;
   updatedAt?: string;
   createdAt?: string;
+  isOwn?: boolean;
+  isShared?: boolean;
 }
 
 export interface ChatMessagePart {
@@ -219,6 +221,7 @@ export function useAgentChatSession(options: {
 
   const loadThreads = useCallback(
     async (agentKey: string, rid: string, tags?: Record<string, string>) => {
+      const requestAgentId = agentKey;
       const params = new URLSearchParams();
       if (tags && Object.keys(tags).length > 0) {
         params.set('tags', JSON.stringify(tags));
@@ -228,6 +231,10 @@ export function useAgentChatSession(options: {
       const res = await fetch(`${sessionBase(agentKey, rid)}/threads${qs}`);
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? 'Failed to list threads');
       const data = (await res.json()) as { threads: ChatThreadInfo[] };
+      
+      // Guard: ignore stale responses if agent changed while request was in flight
+      if (requestAgentId !== agentIdRef.current) return data.threads;
+      
       setThreads(data.threads);
       return data.threads;
     },
@@ -446,6 +453,7 @@ export function useAgentChatSession(options: {
     setError(null);
     try {
       const agentKey = activeAgentId;
+      const requestAgentId = agentKey;
       const tags = contextTags();
       const scope = sessionScopeFor(contextType, contextId);
       const createRes = await fetch(`/api/chat/${encodeURIComponent(agentKey)}/sessions`, {
@@ -461,6 +469,10 @@ export function useAgentChatSession(options: {
       if (!createRes.ok) {
         throw new Error((await createRes.json().catch(() => ({}))).error ?? 'Failed to start chat');
       }
+      
+      // Guard: stop early if agent changed during the session creation request
+      if (requestAgentId !== agentIdRef.current) return;
+      
       const created = (await createRes.json()) as {
         resourceId: string;
         threadId?: string;
@@ -470,6 +482,10 @@ export function useAgentChatSession(options: {
       if (created.agentName) setActiveAgentName(created.agentName);
 
       const listed = await loadThreads(agentKey, created.resourceId, tags);
+      
+      // Guard: stop early if agent changed during loadThreads
+      if (requestAgentId !== agentIdRef.current) return;
+      
       // Never trust createSession's auto-bound thread unless it matches context tags.
       let tid =
         (created.threadId && listed.some((t) => t.id === created.threadId)
@@ -491,26 +507,49 @@ export function useAgentChatSession(options: {
         if (!newRes.ok) {
           throw new Error((await newRes.json().catch(() => ({}))).error ?? 'Failed to create thread');
         }
+        
+        // Guard: stop early if agent changed during thread creation
+        if (requestAgentId !== agentIdRef.current) return;
+        
         const thread = (await newRes.json()) as ChatThreadInfo;
         tid = thread.id;
         await loadThreads(agentKey, created.resourceId, tags);
+        
+        // Guard: stop early if agent changed during loadThreads
+        if (requestAgentId !== agentIdRef.current) return;
       }
 
       if (tid) {
         await bindThread(agentKey, created.resourceId, tid);
+        
+        // Guard: stop early if agent changed during bindThread
+        if (requestAgentId !== agentIdRef.current) return;
       }
 
       const stateRes = await fetch(`${sessionBase(agentKey, created.resourceId)}?sessionScope=${encodeURIComponent(scope)}`);
       if (stateRes.ok) {
         const state = (await stateRes.json()) as { running?: boolean };
-        setRunning(state.running === true);
+        
+        // Guard: only update running state if agent hasn't changed
+        if (requestAgentId === agentIdRef.current) {
+          setRunning(state.running === true);
+        }
       }
 
-      await subscribeStream(agentKey, created.resourceId);
+      // Guard: only subscribe if agent hasn't changed
+      if (requestAgentId === agentIdRef.current) {
+        await subscribeStream(agentKey, created.resourceId);
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      // Only set error if still on the same agent
+      if (activeAgentId === agentIdRef.current) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
-      setConnecting(false);
+      // Only clear connecting state if still on the same agent
+      if (activeAgentId === agentIdRef.current) {
+        setConnecting(false);
+      }
     }
   }, [
     activeAgentId,
@@ -670,11 +709,27 @@ export function useAgentChatSession(options: {
   const switchAgent = useCallback(
     async (nextAgentId: string, nextAgentName: string) => {
       if (nextAgentId === activeAgentId) return;
+      
+      // Detach the previous agent's stream without aborting the backend run
+      abortRef.current?.abort();
+      
+      // Clear session state so bootstrap creates a fresh session for the new agent
+      setResourceId(null);
+      setThreadId(null);
+      resourceIdRef.current = null;
+      threadIdRef.current = null;
+      setMessages([]);
+      setThreads([]);
+      setRunning(false);
+      setError(null);
+      setPendingApproval(null);
+      
+      // Update agent identity
       setActiveAgentId(nextAgentId);
       setActiveAgentName(nextAgentName);
       setUserPinnedAgent(true);
       onAgentSwitch?.(nextAgentId, nextAgentName);
-        // bootstrap effect re-runs with same resource/thread refs when possible
+      // bootstrap effect re-runs with new activeAgentId and fresh session state
     },
     [activeAgentId, onAgentSwitch],
   );
