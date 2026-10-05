@@ -8,6 +8,7 @@ import {
   WorkspacePathError,
   WorkspaceSizeError,
 } from '@/lib/company-workspace';
+import { db, activityLog } from '@tourbillon/db';
 
 function unauthorized() {
   return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -77,6 +78,22 @@ export async function PUT(
   try {
     const result = await writeWorkspaceText(companyId, body.path, body.content);
     logAgentApiResponse(`/api/companies/${companyId}/workspace/file`, 'PUT', runCtx, 200, result);
+
+    // Log workspace file write to activity_log for material work detection
+    await db.insert(activityLog).values({
+      companyId,
+      actorType: 'agent',
+      actorId: runCtx.agentId,
+      action: 'workspace.file_write',
+      entityType: 'workspace',
+      entityId: companyId,
+      details: {
+        runId: runCtx.runId,
+        path: body.path,
+        size: result.size,
+      },
+    });
+
     return NextResponse.json(result);
   } catch (err) {
     if (err instanceof WorkspacePathError) {
@@ -110,6 +127,21 @@ export async function DELETE(
   try {
     const result = await deleteWorkspaceEntry(companyId, filePath);
     logAgentApiResponse(`/api/companies/${companyId}/workspace/file`, 'DELETE', runCtx, 200, result);
+
+    // Log workspace file delete to activity_log for material work detection
+    await db.insert(activityLog).values({
+      companyId,
+      actorType: 'agent',
+      actorId: runCtx.agentId,
+      action: 'workspace.file_delete',
+      entityType: 'workspace',
+      entityId: companyId,
+      details: {
+        runId: runCtx.runId,
+        path: filePath,
+      },
+    });
+
     return NextResponse.json(result);
   } catch (err) {
     if (err instanceof WorkspacePathError) {

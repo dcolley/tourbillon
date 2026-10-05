@@ -111,6 +111,7 @@ export async function hasSubtaskCreated(
  * Material work includes:
  * - issue.updated (status/comment changes)
  * - Subtask creation (child issue with parentId === this issue)
+ * - Workspace file writes or deletes (workspace.file_write, workspace.file_delete)
  */
 export async function hasMaterialWork(
   issue: Issue,
@@ -132,7 +133,27 @@ export async function hasMaterialWork(
   }
 
   // Check for subtask creation (createSubtask writes issue.created on the child)
-  return await hasSubtaskCreated(issue.id, runId);
+  if (await hasSubtaskCreated(issue.id, runId)) {
+    return true;
+  }
+
+  // Check for workspace file writes/deletes by this run
+  const workspaceActivities = await db.query.activityLog.findMany({
+    where: and(
+      eq(activityLog.entityType, 'workspace'),
+      eq(activityLog.companyId, issue.companyId),
+    ),
+    columns: { action: true, details: true, createdAt: true },
+  });
+
+  const hasWorkspaceActivity = workspaceActivities.some((a) => {
+    if (!a.createdAt || a.createdAt < checkoutTime) return false;
+    const details = a.details as { runId?: string } | null;
+    if (details?.runId !== runId) return false;
+    return a.action === 'workspace.file_write' || a.action === 'workspace.file_delete';
+  });
+
+  return hasWorkspaceActivity;
 }
 
 /**
