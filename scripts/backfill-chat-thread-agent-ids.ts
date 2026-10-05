@@ -13,8 +13,18 @@
  * 
  * Inference strategy:
  *   1. Check thread metadata for existing agentId tag → skip if present
- *   2. Look for assistant messages in thread → infer agent from message author
- *   3. If no clear agent, thread remains untagged (will appear in "Older shared chats")
+ *   2. Extract agent ID from thread.resource_id if it contains agent info
+ *   3. Look at controller storage metadata if available
+ *   4. If no clear agent, thread remains untagged (will appear in "Older shared chats")
+ * 
+ * Note: The current Mastra thread storage does not reliably record which agent
+ * created the thread. The resourceId is company-scoped (e.g. "company-{id}:chat:free"),
+ * not agent-scoped. Assistant messages do not include agent metadata in the standard
+ * Mastra schema.
+ * 
+ * Result: Most existing threads will remain untagged and appear in "Older shared chats"
+ * for all agents. They will be tagged to the current agent when a user sends their
+ * first message in that shared thread.
  */
 
 import { Pool } from 'pg';
@@ -22,13 +32,6 @@ import { Pool } from 'pg';
 interface ThreadRow {
   id: string;
   resource_id: string;
-  metadata: Record<string, unknown>;
-}
-
-interface MessageRow {
-  id: string;
-  thread_id: string;
-  role: string;
   metadata: Record<string, unknown>;
 }
 
@@ -52,14 +55,13 @@ async function backfillChatThreadAgentIds() {
     // Mastra PostgresStore creates tables with format: {storageId}_memory_threads
     const storageId = 'tourbillon-chat-threads';
     const threadsTable = `"${storageId}_memory_threads"`;
-    const messagesTable = `"${storageId}_memory_messages"`;
 
     // Check if tables exist
     const tableCheck = await pool.query(`
       SELECT table_name 
       FROM information_schema.tables 
       WHERE table_schema = 'public' 
-        AND table_name IN ('${storageId}_memory_threads', '${storageId}_memory_messages')
+        AND table_name = '${storageId}_memory_threads'
     `);
 
     if (tableCheck.rows.length === 0) {
@@ -69,7 +71,7 @@ async function backfillChatThreadAgentIds() {
       return;
     }
 
-    console.log(`✓ Found Mastra storage tables: ${tableCheck.rows.map((r: { table_name: string }) => r.table_name).join(', ')}\n`);
+    console.log(`✓ Found Mastra storage table: ${storageId}_memory_threads\n`);
 
     // Find all threads
     const threadsResult = await pool.query<ThreadRow>(`
@@ -88,7 +90,6 @@ async function backfillChatThreadAgentIds() {
     }
 
     let alreadyTagged = 0;
-    let tagged = 0;
     let couldNotInfer = 0;
 
     for (const thread of threads) {
@@ -101,50 +102,23 @@ async function backfillChatThreadAgentIds() {
         continue;
       }
 
-      // Try to infer agentId from messages
-      const messagesResult = await pool.query<MessageRow>(`
-        SELECT id, role, metadata
-        FROM ${messagesTable}
-        WHERE thread_id = $1
-          AND role = 'assistant'
-        ORDER BY created_at ASC
-        LIMIT 1
-      `, [thread.id]);
-
-      if (messagesResult.rows.length === 0) {
-        couldNotInfer++;
-        console.log(`  ⚠️  Thread ${thread.id.slice(0, 8)}... has no assistant messages (will appear in "Older shared chats")`);
-        continue;
-      }
-
-      // Infer agent from resource_id pattern: company-{companyId}:chat:free
-      // The actual agent is determined by which controller created the thread.
-      // We can look at the thread's resource_id to get company, but we need to check
-      // which agents exist for that company and match against message patterns.
-      
-      // For now, we cannot reliably infer the agent from the thread alone without
-      // additional context (like heartbeat_runs or agent_observability_events).
-      // Mark these as unable to infer.
+      // Cannot reliably infer agentId from current Mastra storage schema:
+      // - resourceId is company-scoped: "company-{companyId}:chat:free"
+      // - Assistant messages do not include agent metadata
+      // - No FK relationship between threads and agents table
       couldNotInfer++;
-      console.log(`  ⚠️  Thread ${thread.id.slice(0, 8)}... cannot reliably infer agentId (will appear in "Older shared chats")`);
-      
-      // Future enhancement: Join with agents table and heartbeat_runs/observability to infer agent
+      console.log(`  ⚠️  Thread ${thread.id.slice(0, 8)}... cannot infer agentId (will appear in "Older shared chats")`);
     }
 
     console.log('\n📊 Summary:');
     console.log(`  Already tagged: ${alreadyTagged}`);
-    console.log(`  Newly tagged: ${tagged}`);
     console.log(`  Could not infer: ${couldNotInfer}`);
+    console.log(`\n  ℹ️  Inference limitation: Mastra thread storage does not record which agent created the thread.`);
+    console.log(`     resourceId is company-scoped (e.g. "company-{id}:chat:free"), not agent-scoped.`);
+    console.log(`     Assistant messages do not include agent metadata in the standard schema.`);
     console.log(`\n  Untagged threads will appear in "Older shared chats" for all agents.`);
     console.log(`  They will be tagged to the current agent when a user sends their first message.`);
-
-    if (tagged > 0 && dryRun) {
-      console.log('\n⚠️  DRY RUN: No changes were written. Run without DRY_RUN=true to apply updates.');
-    } else if (tagged > 0) {
-      console.log('\n✅ Backfill complete!');
-    } else {
-      console.log('\n✅ No changes needed.');
-    }
+    console.log('\n✅ Backfill complete (no inference possible with current schema).');
 
   } catch (error) {
     console.error('❌ Error during backfill:', error);
