@@ -450,13 +450,11 @@ function ChatPaneBody({
                     
                     {sharedThreads.length > 0 && (
                       <>
-                        {ownThreads.length > 0 && (
-                          <div className="border-t px-2 py-1.5">
-                            <span className="text-xs font-medium text-muted-foreground/70">
-                              Older shared chats
-                            </span>
-                          </div>
-                        )}
+                        <div className="border-t px-2 py-1.5">
+                          <span className="text-xs font-medium text-muted-foreground/70">
+                            Older shared chats
+                          </span>
+                        </div>
                         <ul className="space-y-0.5 p-1">
                           {sharedThreads.map((t) => (
                             <li key={t.id} className="group relative">
