@@ -9,6 +9,7 @@ export interface HeartbeatContext {
   runId: string;
   companyId?: string;
   agentId?: string;
+  threadId?: string;
 }
 
 export const heartbeatContextStorage = new AsyncLocalStorage<HeartbeatContext>();

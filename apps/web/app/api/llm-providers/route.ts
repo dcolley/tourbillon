@@ -26,6 +26,8 @@ export async function POST(req: NextRequest) {
       apiMode?: string;
       isDefault?: boolean;
       defaultModelSettings?: Record<string, unknown>;
+      stickiness?: string;
+      stickinessHeaderName?: string;
     };
 
     const provider = await createLlmProvider({
@@ -37,6 +39,8 @@ export async function POST(req: NextRequest) {
       apiMode: body.apiMode,
       isDefault: body.isDefault,
       defaultModelSettings: body.defaultModelSettings,
+      stickiness: body.stickiness,
+      stickinessHeaderName: body.stickinessHeaderName,
     });
 
     return NextResponse.json({ provider }, { status: 201 });

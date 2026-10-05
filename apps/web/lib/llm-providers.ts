@@ -14,6 +14,7 @@ import {
   parseHeaders,
   parseLlmProviderType,
   parseModelApiMode,
+  parseStickinessType,
   resolveModelProviderConfigFromEnv,
   toLlmProviderRecord,
   type AgentModelSettings,
@@ -39,6 +40,8 @@ export interface LlmProviderPublic {
   apiMode: 'chat' | 'responses';
   isDefault: boolean;
   defaultModelSettings: AgentModelSettings;
+  stickiness: 'off' | 'agent' | 'chat';
+  stickinessHeaderName: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -52,6 +55,8 @@ export interface CreateLlmProviderInput {
   apiMode?: string;
   isDefault?: boolean;
   defaultModelSettings?: AgentModelSettings;
+  stickiness?: string;
+  stickinessHeaderName?: string;
 }
 
 export interface UpdateLlmProviderInput {
@@ -64,6 +69,8 @@ export interface UpdateLlmProviderInput {
   isDefault?: boolean;
   clearApiKey?: boolean;
   defaultModelSettings?: AgentModelSettings;
+  stickiness?: string;
+  stickinessHeaderName?: string;
 }
 
 function toPublic(row: LlmProvider): LlmProviderPublic {
@@ -78,6 +85,8 @@ function toPublic(row: LlmProvider): LlmProviderPublic {
     apiMode: record.apiMode,
     isDefault: record.isDefault,
     defaultModelSettings: record.defaultModelSettings,
+    stickiness: record.stickiness,
+    stickinessHeaderName: record.stickinessHeaderName,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -188,6 +197,8 @@ export async function createLlmProvider(input: CreateLlmProviderInput): Promise<
   const headers = input.headers ?? {};
   const isDefault = input.isDefault ?? false;
   const defaultModelSettings = validateDefaultModelSettings(input.defaultModelSettings);
+  const stickiness = parseStickinessType(input.stickiness) ?? 'off';
+  const stickinessHeaderName = input.stickinessHeaderName?.trim() || 'x-litellm-session-id';
 
   if (isDefault) {
     await clearOtherDefaults();
@@ -204,6 +215,8 @@ export async function createLlmProvider(input: CreateLlmProviderInput): Promise<
       apiMode,
       isDefault,
       defaultModelSettings,
+      stickiness,
+      stickinessHeaderName,
     })
     .returning();
 
@@ -240,12 +253,24 @@ export async function updateLlmProvider(
   if (input.isDefault === true) {
     await clearOtherDefaults(id);
     updates.isDefault = true;
-  } else   if (input.isDefault === false) {
+  } else if (input.isDefault === false) {
     updates.isDefault = false;
   }
 
   if (input.defaultModelSettings !== undefined) {
     updates.defaultModelSettings = validateDefaultModelSettings(input.defaultModelSettings);
+  }
+
+  if (input.stickiness !== undefined) {
+    const stickiness = parseStickinessType(input.stickiness);
+    if (!stickiness) {
+      throw new LlmProviderValidationError('Stickiness must be off, agent, or chat.');
+    }
+    updates.stickiness = stickiness;
+  }
+
+  if (input.stickinessHeaderName !== undefined) {
+    updates.stickinessHeaderName = input.stickinessHeaderName.trim() || 'x-litellm-session-id';
   }
 
   const [updated] = await db

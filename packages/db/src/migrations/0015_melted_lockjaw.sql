@@ -1,0 +1,2 @@
+ALTER TABLE "llm_providers" ADD COLUMN "stickiness" text DEFAULT 'off' NOT NULL;--> statement-breakpoint
+ALTER TABLE "llm_providers" ADD COLUMN "stickiness_header_name" text DEFAULT 'x-litellm-session-id' NOT NULL;
