@@ -32,7 +32,7 @@ import { Pool } from 'pg';
 interface ThreadRow {
   id: string;
   resourceId: string;
-  metadata: Record<string, unknown>;
+  metadata: string | Record<string, unknown>;
 }
 
 async function backfillChatThreadAgentIds() {
@@ -91,7 +91,17 @@ async function backfillChatThreadAgentIds() {
     let couldNotInfer = 0;
 
     for (const thread of threads) {
-      const metadata = thread.metadata || {};
+      // Parse metadata if it's stored as text (PostgreSQL may return JSON columns as text)
+      let metadata: Record<string, unknown>;
+      if (typeof thread.metadata === 'string') {
+        try {
+          metadata = JSON.parse(thread.metadata) as Record<string, unknown>;
+        } catch {
+          metadata = {};
+        }
+      } else {
+        metadata = thread.metadata || {};
+      }
       
       // Skip if already tagged
       if (metadata.agentId) {
