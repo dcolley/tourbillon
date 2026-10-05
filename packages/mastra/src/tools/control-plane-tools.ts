@@ -426,14 +426,14 @@ export const getMessagesTool = createTool({
 export const searchTool = createTool({
   id: 'search',
   description:
-    'Search across issues, comments, and documents in your company. ' +
+    'Search across issues, comments, documents, and approvals in your company. ' +
     'ALWAYS search before creating a new issue or re-asking a settled question to avoid duplicates. ' +
     'Returns mixed results with type, identifier, title, snippet, and status. ' +
     'Use type filters (types: ["issue"]) to narrow results. ' +
     'Query (q) is required and cannot be empty.',
   inputSchema: z.object({
     q: z.string().min(1).describe('Search query (required) — keywords or phrases to find'),
-    types: z.array(z.enum(['issue', 'comment', 'document'])).optional().describe('Filter by type (default: all three)'),
+    types: z.array(z.enum(['issue', 'comment', 'document', 'approval'])).optional().describe('Filter by type (default: all four)'),
     status: z.string().optional().describe('Filter issues by status (e.g., "in_progress", "done")'),
     assignee: z.string().optional().describe('Filter issues by assignee agent ID or urlKey'),
     createdAfter: z.string().optional().describe('ISO 8601 date — only results created after this date'),

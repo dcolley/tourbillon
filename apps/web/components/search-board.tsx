@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useCallback } from 'react';
-import { Search } from 'lucide-react';
+import { Search, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -14,9 +14,10 @@ import {
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { useRouter } from 'next/navigation';
+import type { IssueStatus } from '@tourbillon/db';
 
 interface SearchHit {
-  type: 'issue' | 'comment' | 'document';
+  type: 'issue' | 'comment' | 'document' | 'approval';
   id: string;
   issueId?: string;
   identifier?: string;
@@ -31,12 +32,19 @@ interface SearchBoardProps {
   companyId: string;
 }
 
+type SearchType = 'issue' | 'comment' | 'document' | 'approval';
+
+const ALL_TYPES: SearchType[] = ['issue', 'comment', 'document', 'approval'];
+const ISSUE_STATUSES: IssueStatus[] = ['backlog', 'todo', 'in_progress', 'in_review', 'done', 'blocked', 'cancelled'];
+
 export function SearchBoard({ companyId }: SearchBoardProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchHit[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [selectedTypes, setSelectedTypes] = useState<Set<SearchType>>(new Set(ALL_TYPES));
+  const [selectedStatus, setSelectedStatus] = useState<IssueStatus | null>(null);
   const router = useRouter();
 
   const handleSearch = useCallback(async () => {
@@ -50,6 +58,17 @@ export function SearchBoard({ companyId }: SearchBoardProps) {
 
     try {
       const params = new URLSearchParams({ q: query });
+      
+      // Add type filters
+      if (selectedTypes.size > 0 && selectedTypes.size < ALL_TYPES.length) {
+        params.append('types', Array.from(selectedTypes).join(','));
+      }
+      
+      // Add status filter (only when Issue is selected)
+      if (selectedTypes.has('issue') && selectedStatus) {
+        params.append('status', selectedStatus);
+      }
+      
       const response = await fetch(`/api/companies/${companyId}/search?${params.toString()}`, {
         headers: {
           'Content-Type': 'application/json',
@@ -70,7 +89,7 @@ export function SearchBoard({ companyId }: SearchBoardProps) {
     } finally {
       setLoading(false);
     }
-  }, [query, companyId]);
+  }, [query, companyId, selectedTypes, selectedStatus]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
@@ -85,6 +104,18 @@ export function SearchBoard({ companyId }: SearchBoardProps) {
     }
   };
 
+  const toggleType = (type: SearchType) => {
+    setSelectedTypes((prev) => {
+      const next = new Set(prev);
+      if (next.has(type)) {
+        next.delete(type);
+      } else {
+        next.add(type);
+      }
+      return next;
+    });
+  };
+
   const getTypeColor = (type: string) => {
     switch (type) {
       case 'issue':
@@ -93,6 +124,8 @@ export function SearchBoard({ companyId }: SearchBoardProps) {
         return 'bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-300';
       case 'document':
         return 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300';
+      case 'approval':
+        return 'bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-300';
       default:
         return 'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-300';
     }
@@ -108,10 +141,18 @@ export function SearchBoard({ companyId }: SearchBoardProps) {
         return 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300';
       case 'in_review':
         return 'bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-300';
+      case 'pending':
+        return 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-300';
+      case 'approved':
+        return 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300';
+      case 'rejected':
+        return 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300';
       default:
         return 'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-300';
     }
   };
+
+  const showStatusFilter = selectedTypes.has('issue');
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -121,14 +162,14 @@ export function SearchBoard({ companyId }: SearchBoardProps) {
           <span className="hidden md:inline">Search</span>
         </Button>
       </DialogTrigger>
-      <DialogContent className="max-h-[80vh] max-w-2xl overflow-hidden p-0">
+      <DialogContent className="max-h-[80vh] w-[95vw] max-w-[1100px] sm:max-w-[1100px] overflow-hidden p-0 md:w-[80vw]">
         <DialogHeader className="px-6 pt-6">
           <DialogTitle>Search Company</DialogTitle>
           <DialogDescription>
-            Search across issues, comments, and documents
+            Search across issues, comments, documents, and approvals
           </DialogDescription>
         </DialogHeader>
-        <div className="px-6 pb-4">
+        <div className="px-6 pb-4 space-y-4">
           <div className="flex gap-2">
             <Input
               placeholder="Enter search query..."
@@ -142,13 +183,63 @@ export function SearchBoard({ companyId }: SearchBoardProps) {
               {loading ? 'Searching...' : 'Search'}
             </Button>
           </div>
+          
+          {/* Type filter chips */}
+          <div className="space-y-2">
+            <div className="flex flex-wrap gap-2">
+              {ALL_TYPES.map((type) => (
+                <Badge
+                  key={type}
+                  variant={selectedTypes.has(type) ? 'default' : 'outline'}
+                  className="cursor-pointer select-none capitalize"
+                  onClick={() => toggleType(type)}
+                >
+                  {type}
+                  {selectedTypes.has(type) && (
+                    <X className="ml-1 h-3 w-3" />
+                  )}
+                </Badge>
+              ))}
+            </div>
+            
+            {/* Issue status filter */}
+            {showStatusFilter && (
+              <div className="flex flex-wrap gap-2 pt-2 border-t">
+                <span className="text-sm text-muted-foreground self-center">Issue status:</span>
+                <Badge
+                  variant={selectedStatus === null ? 'default' : 'outline'}
+                  className="cursor-pointer select-none"
+                  onClick={() => setSelectedStatus(null)}
+                >
+                  All
+                  {selectedStatus === null && (
+                    <X className="ml-1 h-3 w-3" />
+                  )}
+                </Badge>
+                {ISSUE_STATUSES.map((status) => (
+                  <Badge
+                    key={status}
+                    variant={selectedStatus === status ? 'default' : 'outline'}
+                    className="cursor-pointer select-none"
+                    onClick={() => setSelectedStatus(status === selectedStatus ? null : status)}
+                  >
+                    {status.replace('_', ' ')}
+                    {selectedStatus === status && (
+                      <X className="ml-1 h-3 w-3" />
+                    )}
+                  </Badge>
+                ))}
+              </div>
+            )}
+          </div>
+          
           {error && (
-            <div className="mt-2 text-sm text-red-600 dark:text-red-400">
+            <div className="text-sm text-red-600 dark:text-red-400">
               {error}
             </div>
           )}
         </div>
-        <div className="max-h-[50vh] overflow-y-auto border-t">
+        <div className="max-h-[55vh] overflow-y-auto border-t">
           {results.length === 0 && !loading && query && !error && (
             <div className="px-6 py-8 text-center text-sm text-muted-foreground">
               No results found for "{query}"

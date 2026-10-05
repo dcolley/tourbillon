@@ -1,4 +1,4 @@
-import { db, issues, activityLog, agents } from '@tourbillon/db';
+import { db, issues, activityLog, agents, approvals, type IssueStatus } from '@tourbillon/db';
 import { and, eq, or, ilike, desc, gte, sql, inArray } from 'drizzle-orm';
 import {
   getCompanyWorkspaceDir,
@@ -10,7 +10,7 @@ import {
 import path from 'path';
 
 export interface SearchHit {
-  type: 'issue' | 'comment' | 'document';
+  type: 'issue' | 'comment' | 'document' | 'approval';
   id: string;
   issueId?: string;
   identifier?: string;
@@ -24,7 +24,7 @@ export interface SearchHit {
 export interface SearchOptions {
   companyId: string;
   q: string;
-  types?: ('issue' | 'comment' | 'document')[];
+  types?: ('issue' | 'comment' | 'document' | 'approval')[];
   status?: string;
   assignee?: string;
   createdAfter?: string;
@@ -104,7 +104,7 @@ async function searchIssues(
   
   // Optional filters
   if (status) {
-    conditions.push(eq(issues.status, status));
+    conditions.push(eq(issues.status, status as IssueStatus));
   }
   if (assignee) {
     // Support both agent ID and urlKey
@@ -301,6 +301,58 @@ async function searchDocuments(
   return hits;
 }
 
+async function searchApprovals(
+  companyId: string,
+  query: string,
+  createdAfter?: string
+): Promise<RankedHit[]> {
+  const conditions = [eq(approvals.companyId, companyId)];
+  
+  if (createdAfter) {
+    conditions.push(gte(approvals.createdAt, new Date(createdAfter)));
+  }
+  
+  // Search in title, summary from payload, and decision note
+  const searchPattern = `%${query}%`;
+  const textConditions = [
+    sql`${approvals.payload}->>'title' ILIKE ${searchPattern}`,
+    sql`${approvals.payload}->>'summary' ILIKE ${searchPattern}`,
+    ilike(approvals.note ?? '', searchPattern),
+  ];
+  conditions.push(or(...textConditions)!);
+  
+  const results = await db
+    .select()
+    .from(approvals)
+    .where(and(...conditions));
+  
+  return results.map((approval): RankedHit => {
+    const payload = (approval.payload ?? {}) as Record<string, unknown>;
+    const title = (payload.title || `${approval.type} request`) as string;
+    const summary = (payload.summary || '') as string;
+    const note = approval.note || '';
+    
+    const searchableText = [title, summary, note].join(' ');
+    const relevance = calculateRelevance(searchableText, query);
+    const snippet = extractSnippet(
+      summary || note || title,
+      query
+    );
+    
+    return {
+      type: 'approval',
+      id: approval.id,
+      title,
+      snippet,
+      status: approval.status,
+      updatedAt: approval.updatedAt.toISOString(),
+      href: `/approval?id=${approval.id}`,
+      relevance,
+      timestamp: approval.updatedAt,
+    };
+  });
+}
+
 export async function searchCompanyText(options: SearchOptions): Promise<{ results: SearchHit[] }> {
   const { companyId, q, types, status, assignee, createdAfter } = options;
   let { limit } = options;
@@ -317,7 +369,7 @@ export async function searchCompanyText(options: SearchOptions): Promise<{ resul
   }
   
   // Determine which sources to search
-  const searchTypes = types && types.length > 0 ? types : ['issue', 'comment', 'document'];
+  const searchTypes = types && types.length > 0 ? types : ['issue', 'comment', 'document', 'approval'];
   
   const allHits: RankedHit[] = [];
   
@@ -337,6 +389,12 @@ export async function searchCompanyText(options: SearchOptions): Promise<{ resul
   if (searchTypes.includes('document')) {
     const documentHits = await searchDocuments(companyId, q, createdAfter);
     allHits.push(...documentHits);
+  }
+  
+  // Search approvals
+  if (searchTypes.includes('approval')) {
+    const approvalHits = await searchApprovals(companyId, q, createdAfter);
+    allHits.push(...approvalHits);
   }
   
   // Sort by relevance (desc), then timestamp (desc)

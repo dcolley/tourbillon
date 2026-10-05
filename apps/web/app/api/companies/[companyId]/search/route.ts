@@ -7,7 +7,7 @@ import { z } from 'zod';
 
 const searchQuerySchema = z.object({
   q: z.string().min(1, 'Search query is required'),
-  types: z.array(z.enum(['issue', 'comment', 'document'])).optional(),
+  types: z.array(z.enum(['issue', 'comment', 'document', 'approval'])).optional(),
   status: z.string().optional(),
   assignee: z.string().optional(),
   createdAfter: z.string().optional(),
@@ -88,7 +88,7 @@ export async function GET(
   const validation = searchQuerySchema.safeParse(queryParams);
   if (!validation.success) {
     return NextResponse.json(
-      { error: 'Validation error', details: validation.error.errors },
+      { error: 'Validation error', details: validation.error.issues },
       { status: 400 }
     );
   }
