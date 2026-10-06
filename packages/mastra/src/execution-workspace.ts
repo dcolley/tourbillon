@@ -9,6 +9,7 @@ import {
   resolveSandboxIsolation,
   resolveSandboxTimeoutMs,
   resolveSandboxAllowNetwork,
+  resolveSandboxEgressAllowList,
   type AgentRuntimeConfig,
 } from '@tourbillon/shared';
 import { mkdirSync } from 'node:fs';
@@ -107,14 +108,20 @@ export function buildCodeExecutionWorkspace(): Workspace {
       const isolation = resolveSandboxIsolation(runtimeConfig);
       const timeoutMs = resolveSandboxTimeoutMs(runtimeConfig);
       const allowNetwork = resolveSandboxAllowNetwork(runtimeConfig);
+      const egressAllowList = resolveSandboxEgressAllowList(runtimeConfig);
       
       // AC-B1.3 fix: Hash secret VALUES (not just keys) for cache invalidation.
       // Rotating password values must trigger sandbox recreation with fresh env.
       const agentSecrets = extractAgentSecrets(requestContext);
       const secretsFingerprint = hashSecretValues(agentSecrets);
       
+      // Include egress allow-list in cache key (sorted, comma-joined)
+      const egressKey = egressAllowList !== undefined 
+        ? egressAllowList.slice().sort().join(',')
+        : 'legacy';
+      
       return companyId
-        ? `${companyId}:${taskId ?? 'idle'}:${isolation}:${timeoutMs}:${allowNetwork}:${secretsFingerprint}`
+        ? `${companyId}:${taskId ?? 'idle'}:${isolation}:${timeoutMs}:${allowNetwork}:${egressKey}:${secretsFingerprint}`
         : undefined;
     },
   });

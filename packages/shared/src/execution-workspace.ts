@@ -60,7 +60,21 @@ export function resolveSandboxTimeoutMs(runtimeConfig?: AgentRuntimeConfig | nul
   return getDefaultSandboxTimeoutMs();
 }
 
+export function resolveSandboxEgressAllowList(
+  runtimeConfig?: AgentRuntimeConfig | null,
+): string[] | undefined {
+  return runtimeConfig?.codeExecution?.egressAllowList;
+}
+
 export function resolveSandboxAllowNetwork(runtimeConfig?: AgentRuntimeConfig | null): boolean {
+  const allowList = resolveSandboxEgressAllowList(runtimeConfig);
+  
+  // When allow-list is defined (including empty), it replaces allowNetwork boolean
+  if (allowList !== undefined) {
+    return allowList.length > 0;
+  }
+  
+  // Fall back to legacy allowNetwork boolean (default: false)
   return runtimeConfig?.codeExecution?.allowNetwork ?? false;
 }
 

@@ -600,6 +600,7 @@ export async function updateAgentCodeExecution(
     timeoutMs?: number | null;
     isolation?: string | null;
     allowNetwork?: boolean | null;
+    egressAllowList?: string[] | null;
     clearCodeExecutionOverrides?: boolean;
   },
 ): Promise<Agent> {
@@ -654,8 +655,20 @@ export async function updateAgentCodeExecution(
     } else if (typeof input.allowNetwork === 'boolean') {
       codeExecution.allowNetwork = input.allowNetwork;
     }
+    if (input.egressAllowList === null) {
+      delete codeExecution.egressAllowList;
+    } else if (Array.isArray(input.egressAllowList)) {
+      // Validate and sanitize entries (trim whitespace, filter empty)
+      const sanitized = input.egressAllowList
+        .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+        .filter((entry) => entry.length > 0);
+      codeExecution.egressAllowList = sanitized;
+    }
     runtimeConfig.codeExecution =
-      codeExecution.timeoutMs !== undefined || codeExecution.isolation !== undefined || codeExecution.allowNetwork !== undefined
+      codeExecution.timeoutMs !== undefined || 
+      codeExecution.isolation !== undefined || 
+      codeExecution.allowNetwork !== undefined ||
+      codeExecution.egressAllowList !== undefined
         ? codeExecution
         : undefined;
   }

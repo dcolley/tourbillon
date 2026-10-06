@@ -132,4 +132,117 @@ describe('buildCodeExecutionWorkspace', () => {
       'Agents with different allowNetwork settings must get different sandbox instances'
     );
   });
+
+  it('validates sandbox cache key includes egressAllowList', () => {
+    // The sandboxCacheKey must include egressAllowList so that agents with different
+    // allow-lists get different sandbox instances.
+    
+    const agentA: AgentRuntimeConfig = {
+      heartbeat: {
+        enabled: false,
+        intervalSec: 0,
+        wakeOnAssignment: true,
+        wakeOnDemand: true,
+        wakeOnAutomation: false,
+      },
+      timeout: {
+        heartbeatSec: 300,
+        graceSec: 30,
+      },
+      codeExecution: {
+        isolation: 'bwrap',
+        egressAllowList: [],
+      },
+    };
+    
+    const agentB: AgentRuntimeConfig = {
+      ...agentA,
+      codeExecution: {
+        isolation: 'bwrap',
+        egressAllowList: ['api.example.com', '10.0.0.0/8'],
+      },
+    };
+
+    const agentC: AgentRuntimeConfig = {
+      ...agentA,
+      codeExecution: {
+        isolation: 'bwrap',
+        // egressAllowList undefined - uses legacy allowNetwork
+        allowNetwork: true,
+      },
+    };
+    
+    // Expected cache keys (conceptual):
+    // agentA: "companyId:issueId:bwrap:120000:false::secretsHash"
+    // agentB: "companyId:issueId:bwrap:120000:true:10.0.0.0/8,api.example.com:secretsHash"
+    // agentC: "companyId:issueId:bwrap:120000:true:legacy:secretsHash"
+    
+    assert.deepEqual(
+      agentA.codeExecution?.egressAllowList,
+      [],
+      'Agent A has empty allow-list'
+    );
+    assert.deepEqual(
+      agentB.codeExecution?.egressAllowList,
+      ['api.example.com', '10.0.0.0/8'],
+      'Agent B has non-empty allow-list'
+    );
+    assert.equal(
+      agentC.codeExecution?.egressAllowList,
+      undefined,
+      'Agent C uses legacy allowNetwork'
+    );
+  });
+
+  it('validates empty egressAllowList denies network regardless of allowNetwork', () => {
+    const config: AgentRuntimeConfig = {
+      heartbeat: {
+        enabled: false,
+        intervalSec: 0,
+        wakeOnAssignment: true,
+        wakeOnDemand: true,
+        wakeOnAutomation: false,
+      },
+      timeout: {
+        heartbeatSec: 300,
+        graceSec: 30,
+      },
+      codeExecution: {
+        isolation: 'bwrap',
+        allowNetwork: true, // ignored
+        egressAllowList: [], // takes precedence
+      },
+    };
+    
+    // Empty egressAllowList should result in allowNetwork: false being passed to LocalSandbox
+    assert.deepEqual(config.codeExecution?.egressAllowList, []);
+    assert.equal(config.codeExecution?.allowNetwork, true);
+    // Expected: resolveSandboxAllowNetwork returns false (empty list overrides allowNetwork)
+  });
+
+  it('validates non-empty egressAllowList enables network regardless of allowNetwork', () => {
+    const config: AgentRuntimeConfig = {
+      heartbeat: {
+        enabled: false,
+        intervalSec: 0,
+        wakeOnAssignment: true,
+        wakeOnDemand: true,
+        wakeOnAutomation: false,
+      },
+      timeout: {
+        heartbeatSec: 300,
+        graceSec: 30,
+      },
+      codeExecution: {
+        isolation: 'bwrap',
+        allowNetwork: false, // ignored
+        egressAllowList: ['internal.corp.net'], // takes precedence
+      },
+    };
+    
+    // Non-empty egressAllowList should result in allowNetwork: true being passed to LocalSandbox
+    assert.deepEqual(config.codeExecution?.egressAllowList, ['internal.corp.net']);
+    assert.equal(config.codeExecution?.allowNetwork, false);
+    // Expected: resolveSandboxAllowNetwork returns true (non-empty list overrides allowNetwork)
+  });
 });

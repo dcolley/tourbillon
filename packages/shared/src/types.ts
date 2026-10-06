@@ -104,6 +104,14 @@ export interface AgentRuntimeConfig {
     timeoutMs?: number;
     isolation?: 'none' | 'seatbelt' | 'bwrap';
     allowNetwork?: boolean;
+    /**
+     * Egress network allow-list: hosts or CIDRs (e.g. ['api.example.com', '10.0.0.0/8']).
+     * When defined (including empty array), this replaces the `allowNetwork` boolean:
+     *   - Empty array → no network egress
+     *   - Non-empty array → network egress to listed hosts/CIDRs
+     * When undefined, legacy `allowNetwork` boolean is used for backward compatibility.
+     */
+    egressAllowList?: string[];
   };
   /**
    * Knowledge-graph memory mounts (when `knowledge-graph` toolset is enabled).
