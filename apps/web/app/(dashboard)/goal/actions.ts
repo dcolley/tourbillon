@@ -28,7 +28,14 @@ export async function createGoalAction(
   return { error: null, success: true };
 }
 
-export type UpdateGoalState = { error: string | null; success?: boolean };
+export type UpdateGoalState = {
+  error: string | null;
+  success?: boolean;
+  cascadeInfo?: {
+    projectsPaused: number;
+    projectsResumed: number;
+  };
+};
 
 export async function updateGoalAction(
   _prev: UpdateGoalState,
@@ -38,22 +45,22 @@ export async function updateGoalAction(
   const ownerAgentId = formData.get('ownerAgentId') as string;
 
   try {
-    await updateGoal(goalId, {
+    const result = await updateGoal(goalId, {
       title: formData.get('title') as string,
       description: (formData.get('description') as string) || null,
       status: formData.get('status') as string,
       ownerAgentId: ownerAgentId || null,
     });
+
+    revalidatePath('/goal');
+    revalidatePath(`/goal/${goalId}`);
+    return { error: null, success: true, cascadeInfo: result.cascadeInfo };
   } catch (err) {
     if (err instanceof GoalValidationError) {
       return { error: err.message };
     }
     throw err;
   }
-
-  revalidatePath('/goal');
-  revalidatePath(`/goal/${goalId}`);
-  return { error: null, success: true };
 }
 
 export type CreateGoalIssueState = { error: string | null; success?: boolean };

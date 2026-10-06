@@ -71,8 +71,8 @@ export async function PATCH(
   );
 
   try {
-    const goal = await updateGoal(goalId, body, companyId);
-    if (goal.companyId !== companyId) {
+    const result = await updateGoal(goalId, body, companyId);
+    if (result.goal.companyId !== companyId) {
       return NextResponse.json({ error: 'Not found' }, { status: 404 });
     }
     logAgentApiResponse(
@@ -80,9 +80,9 @@ export async function PATCH(
       'PATCH',
       runCtx,
       200,
-      { goalId: goal.id },
+      { goalId: result.goal.id, cascadeInfo: result.cascadeInfo },
     );
-    return NextResponse.json(goal);
+    return NextResponse.json(result.goal);
   } catch (err) {
     if (err instanceof GoalValidationError) {
       return NextResponse.json({ error: err.message }, { status: 400 });

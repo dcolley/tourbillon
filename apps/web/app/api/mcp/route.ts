@@ -1305,11 +1305,11 @@ async function handleSetGoalStatus(tokenCompanyId: string, params: any) {
   }
 
   const input: UpdateGoalInput = { status };
-  const updated = await updateGoal(goal_id, input, company_id);
+  const result = await updateGoal(goal_id, input, company_id);
   return {
-    id: updated.id,
-    title: updated.title,
-    status: updated.status,
+    id: result.goal.id,
+    title: result.goal.title,
+    status: result.goal.status,
   };
 }
 

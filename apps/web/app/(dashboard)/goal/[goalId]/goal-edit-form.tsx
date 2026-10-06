@@ -60,6 +60,16 @@ export function GoalEditForm({
             {state.error}
           </div>
         )}
+        {state?.success && state.cascadeInfo && (
+          <div className="rounded-lg border border-blue-500/50 bg-blue-50 px-4 py-3 text-sm text-blue-700">
+            {state.cascadeInfo.projectsPaused > 0 && (
+              <p>{state.cascadeInfo.projectsPaused} project{state.cascadeInfo.projectsPaused === 1 ? '' : 's'} paused</p>
+            )}
+            {state.cascadeInfo.projectsResumed > 0 && (
+              <p>{state.cascadeInfo.projectsResumed} project{state.cascadeInfo.projectsResumed === 1 ? '' : 's'} resumed</p>
+            )}
+          </div>
+        )}
 
         <form action={formAction} className="space-y-4">
           <input type="hidden" name="goalId" value={goal.id} />

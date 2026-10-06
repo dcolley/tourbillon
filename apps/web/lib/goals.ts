@@ -1,4 +1,4 @@
-import { db, goals, issues, agents, companies, activityLog, type Goal, type Issue } from '@tourbillon/db';
+import { db, goals, issues, agents, companies, activityLog, projects, type Goal, type Issue } from '@tourbillon/db';
 import { and, desc, eq } from 'drizzle-orm';
 import { assertCompanyAccess, getActiveCompany } from './company';
 import { listProjectsForGoal, type GoalProjectRow } from './projects';
@@ -121,11 +121,19 @@ export interface UpdateGoalInput {
   ownerAgentId?: string | null;
 }
 
+export interface UpdateGoalResult {
+  goal: Goal;
+  cascadeInfo?: {
+    projectsPaused: number;
+    projectsResumed: number;
+  };
+}
+
 export async function updateGoal(
   goalId: string,
   input: UpdateGoalInput,
   companyId?: string,
-): Promise<Goal> {
+): Promise<UpdateGoalResult> {
   const goal = await db.query.goals.findFirst({ where: eq(goals.id, goalId) });
   if (!goal) throw new GoalValidationError('Goal not found.');
 
@@ -156,6 +164,10 @@ export async function updateGoal(
     }
   }
 
+  const statusChanged = input.status !== undefined && input.status !== goal.status;
+  const statusChangedToArchived = statusChanged && input.status === 'archived';
+  const statusChangedFromArchivedToActive = statusChanged && goal.status === 'archived' && input.status === 'active';
+
   if (input.status !== undefined) {
     const status = input.status as GoalStatus;
     if (!GOAL_STATUSES.includes(status)) {
@@ -182,23 +194,107 @@ export async function updateGoal(
   }
 
   if (Object.keys(changed).length === 0) {
-    return goal;
+    return { goal };
   }
 
-  const [updated] = await db.update(goals).set(updates).where(eq(goals.id, goalId)).returning();
+  // Execute goal update and project cascade in a transaction
+  const result = await db.transaction(async (tx) => {
+    const [updated] = await tx.update(goals).set(updates).where(eq(goals.id, goalId)).returning();
 
-  await db.insert(activityLog).values({
-    companyId: goal.companyId,
-    actorType: 'user',
-    actorId: 'dashboard',
-    actorName: 'Dashboard',
-    action: 'goal.updated',
-    entityType: 'goal',
-    entityId: goalId,
-    details: changed,
+    await tx.insert(activityLog).values({
+      companyId: goal.companyId,
+      actorType: 'user',
+      actorId: 'dashboard',
+      actorName: 'Dashboard',
+      action: 'goal.updated',
+      entityType: 'goal',
+      entityId: goalId,
+      details: changed,
+    });
+
+    let projectsPaused = 0;
+    let projectsResumed = 0;
+
+    // Cascade: pause active projects when archiving goal
+    if (statusChangedToArchived) {
+      const activeProjects = await tx
+        .select()
+        .from(projects)
+        .where(and(eq(projects.goalId, goalId), eq(projects.status, 'active')));
+
+      for (const project of activeProjects) {
+        await tx
+          .update(projects)
+          .set({
+            status: 'paused',
+            autoPausedByGoalId: goalId,
+            updatedAt: new Date(),
+          })
+          .where(eq(projects.id, project.id));
+
+        await tx.insert(activityLog).values({
+          companyId: goal.companyId,
+          actorType: 'system',
+          actorId: 'goal-cascade',
+          actorName: 'System',
+          action: 'project.auto_paused',
+          entityType: 'project',
+          entityId: project.id,
+          details: { reason: 'goal_archived', goalId, goalTitle: goal.title },
+        });
+
+        projectsPaused++;
+      }
+    }
+
+    // Cascade: resume auto-paused projects when reactivating goal
+    if (statusChangedFromArchivedToActive) {
+      const autoPausedProjects = await tx
+        .select()
+        .from(projects)
+        .where(
+          and(
+            eq(projects.goalId, goalId),
+            eq(projects.status, 'paused'),
+            eq(projects.autoPausedByGoalId, goalId)
+          )
+        );
+
+      for (const project of autoPausedProjects) {
+        await tx
+          .update(projects)
+          .set({
+            status: 'active',
+            autoPausedByGoalId: null,
+            updatedAt: new Date(),
+          })
+          .where(eq(projects.id, project.id));
+
+        await tx.insert(activityLog).values({
+          companyId: goal.companyId,
+          actorType: 'system',
+          actorId: 'goal-cascade',
+          actorName: 'System',
+          action: 'project.auto_resumed',
+          entityType: 'project',
+          entityId: project.id,
+          details: { reason: 'goal_reactivated', goalId, goalTitle: goal.title },
+        });
+
+        projectsResumed++;
+      }
+    }
+
+    return {
+      goal: updated,
+      cascadeInfo:
+        projectsPaused > 0 || projectsResumed > 0
+          ? { projectsPaused, projectsResumed }
+          : undefined,
+    };
   });
 
-  return updated;
+  return result;
 }
 
 export async function getGoalDetail(goalId: string): Promise<GoalDetail | null> {

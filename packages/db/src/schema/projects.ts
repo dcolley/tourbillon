@@ -12,6 +12,7 @@ export const projects = pgTable('projects', {
   title: text('title').notNull(),
   description: text('description'),
   status: text('status', { enum: ['active', 'paused', 'completed', 'archived'] }).notNull().default('active'),
+  autoPausedByGoalId: text('auto_paused_by_goal_id'),
   createdAt: timestamp('created_at').notNull().defaultNow(),
   updatedAt: timestamp('updated_at').notNull().defaultNow(),
 });
