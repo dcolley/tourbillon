@@ -2,15 +2,23 @@ import { strict as assert } from 'node:assert';
 import { createServer } from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { describe, it } from 'node:test';
+import { copyFileSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { EgressProxy } from './egress-proxy';
 import {
   assertCanEnforceEgressAllowList,
+  assertEgressFilterLibraryHash,
   buildEgressFilterEnv,
+  buildTourbillonBwrapArgs,
   egressProxySocketPath,
   ensureEgressLandlockLibrary,
+  getEgressLibDir,
   getEgressRuntimeDir,
+  hashFileSha256,
   landlockNetAvailable,
   probeLandlockAbi,
+  resolveEgressBwrapBinds,
   seccompFilterSupported,
 } from './egress-enforcement';
 
@@ -44,13 +52,34 @@ describe('assertCanEnforceEgressAllowList', () => {
       /isolation=none/,
     );
   });
+
+  it('refuses isolation=seatbelt with a non-empty list', () => {
+    assert.throws(
+      () => assertCanEnforceEgressAllowList('seatbelt', ['api.example.com']),
+      /isolation=seatbelt/,
+    );
+  });
 });
 
 describe('egress filter artifacts', () => {
-  it('compiles the filter outside /tmp', () => {
+  it('compiles the filter outside /tmp into the lib dir', () => {
     const lib = ensureEgressLandlockLibrary();
-    assert.ok(lib.startsWith(getEgressRuntimeDir()), lib);
+    assert.ok(lib.startsWith(getEgressLibDir()), lib);
     assert.ok(!lib.includes('/tmp/'), lib);
+  });
+
+  it('refuses a tampered filter library', () => {
+    const lib = ensureEgressLandlockLibrary();
+    const expected = hashFileSha256(lib);
+    const bogus = join(tmpdir(), `tourbillon-tampered-${process.pid}.so`);
+    copyFileSync(lib, bogus);
+    chmodSync(bogus, 0o644);
+    writeFileSync(bogus, 'not-a-real-filter');
+    assert.throws(
+      () => assertEgressFilterLibraryHash(bogus, expected),
+      /hash mismatch/,
+    );
+    assert.doesNotThrow(() => assertEgressFilterLibraryHash(lib, expected));
   });
 
   it('probes Landlock ABI on this host', () => {
@@ -63,8 +92,73 @@ describe('egress filter artifacts', () => {
   });
 });
 
+function rwBindSources(args: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--bind' && args[i + 1]) {
+      out.push(args[i + 1]);
+    }
+  }
+  return out;
+}
+
+function roBindSources(args: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--ro-bind' && args[i + 1]) {
+      out.push(args[i + 1]);
+    }
+  }
+  return out;
+}
+
+describe('bwrap bind policy', () => {
+  it('empty list binds the filter read-only and no socket / runtime dir', () => {
+    const lib = ensureEgressLandlockLibrary();
+    const binds = resolveEgressBwrapBinds({});
+    assert.deepEqual(binds.extraRoBinds, [lib]);
+    assert.deepEqual(binds.extraRwBinds, []);
+    const ws = join(tmpdir(), `tourbillon-ws-empty-${process.pid}`);
+    mkdirSync(ws, { recursive: true });
+    const args = buildTourbillonBwrapArgs({
+      workspacePath: ws,
+      allowNetwork: false,
+      extraRoBinds: binds.extraRoBinds,
+      extraRwBinds: binds.extraRwBinds,
+    });
+    assert.ok(roBindSources(args).includes(lib), args.join(' '));
+    for (const src of rwBindSources(args)) {
+      assert.ok(
+        !src.startsWith(getEgressRuntimeDir()),
+        `empty list must not RW-bind runtime paths: ${src}`,
+      );
+    }
+  });
+
+  it('non-empty list binds only this run socket, not the shared runtime dir', () => {
+    const socketPath = egressProxySocketPath('co-bind', 'run1');
+    writeFileSync(socketPath, '');
+    const binds = resolveEgressBwrapBinds({ proxySocketPath: socketPath });
+    assert.deepEqual(binds.extraRwBinds, [socketPath]);
+    assert.ok(!binds.extraRwBinds.includes(getEgressRuntimeDir()));
+    const ws = join(tmpdir(), `tourbillon-ws-list-${process.pid}`);
+    mkdirSync(ws, { recursive: true });
+    const args = buildTourbillonBwrapArgs({
+      workspacePath: ws,
+      allowNetwork: false,
+      extraRoBinds: binds.extraRoBinds,
+      extraRwBinds: binds.extraRwBinds,
+    });
+    const rw = rwBindSources(args);
+    assert.ok(rw.includes(socketPath), args.join(' '));
+    assert.ok(!rw.includes(getEgressRuntimeDir()));
+    assert.ok(!rw.includes(getEgressLibDir()));
+    assert.ok(!rw.some((src) => src !== socketPath && src.startsWith(getEgressRuntimeDir())));
+  });
+});
+
 describe('Landlock + seccomp enforcement', () => {
-  it('empty allow-list blocks TCP and UDP', { skip: !filterReady }, () => {
+  it('empty allow-list blocks TCP, UDP, and AF_UNIX', { skip: !filterReady }, () => {
     const env = buildEgressFilterEnv({});
     const result = spawnSync(
       process.execPath,
@@ -90,20 +184,27 @@ describe('Landlock + seccomp enforcement', () => {
             resolve(e.code || e.message);
           }
         });
-        Promise.all([tcp, udp]).then(([t, u]) => {
-          process.stdout.write(JSON.stringify({ tcp: t, udp: u }));
+        const unix = new Promise((resolve) => {
+          const s = net.connect({ path: '/tmp/tourbillon-no-such.sock' });
+          s.on('connect', () => { s.destroy(); resolve('unix-ok'); });
+          s.on('error', (e) => resolve(e.code || e.message));
+        });
+        Promise.all([tcp, udp, unix]).then(([t, u, x]) => {
+          process.stdout.write(JSON.stringify({ tcp: t, udp: u, unix: x }));
           const tcpBlocked = t !== 'tcp-ok';
           const udpBlocked = u !== 'udp-ok';
-          process.exit(tcpBlocked && udpBlocked ? 0 : 1);
+          const unixBlocked = x !== 'unix-ok';
+          process.exit(tcpBlocked && udpBlocked && unixBlocked ? 0 : 1);
         });
         `,
       ],
         { env: { ...process.env, ...env }, encoding: 'utf8', timeout: 10_000 },
       );
-    assert.equal(result.status, 0, `empty list must block TCP+UDP: ${result.stdout} ${result.stderr}`);
-    const parsed = JSON.parse(result.stdout) as { tcp: string; udp: string };
+    assert.equal(result.status, 0, `empty list must block TCP+UDP+AF_UNIX: ${result.stdout} ${result.stderr}`);
+    const parsed = JSON.parse(result.stdout) as { tcp: string; udp: string; unix: string };
     assert.notEqual(parsed.tcp, 'tcp-ok');
     assert.notEqual(parsed.udp, 'udp-ok');
+    assert.notEqual(parsed.unix, 'unix-ok');
   });
 
   it('proxy helper forwards loopback HTTP and blocks TCP/53', { skip: !filterReady }, async () => {

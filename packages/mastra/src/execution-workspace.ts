@@ -22,7 +22,7 @@ import {
   buildEgressFilterEnv,
   buildTourbillonBwrapArgs,
   egressProxySocketPath,
-  getEgressRuntimeDir,
+  resolveEgressBwrapBinds,
 } from './egress-enforcement';
 
 function readCodeExecutionConfig(requestContext: {
@@ -129,6 +129,8 @@ export function buildCodeExecutionWorkspace(): Workspace {
 
       let sandboxEnv: NodeJS.ProcessEnv = { ...agentSecrets };
       let proxy: EgressProxy | undefined;
+      let extraRoBinds: string[] = [];
+      let extraRwBinds: string[] = [];
 
       if (egressAllowList !== undefined) {
         if (egressAllowList.length > 0) {
@@ -141,9 +143,15 @@ export function buildCodeExecutionWorkspace(): Workspace {
             proxySocketPath: socketPath,
             extra: sandboxEnv,
           });
+          const binds = resolveEgressBwrapBinds({ proxySocketPath: socketPath });
+          extraRoBinds = binds.extraRoBinds;
+          extraRwBinds = binds.extraRwBinds;
         } else {
           try {
             sandboxEnv = buildEgressFilterEnv({ extra: sandboxEnv });
+            const binds = resolveEgressBwrapBinds({});
+            extraRoBinds = binds.extraRoBinds;
+            extraRwBinds = binds.extraRwBinds;
           } catch (err) {
             if (isolation === 'none') throw err;
           }
@@ -158,7 +166,8 @@ export function buildCodeExecutionWorkspace(): Workspace {
               bwrapArgs: buildTourbillonBwrapArgs({
                 workspacePath: cwd,
                 allowNetwork,
-                extraRwBinds: [getEgressRuntimeDir()],
+                extraRoBinds,
+                extraRwBinds,
               }),
             }
           : { allowNetwork };

@@ -2,7 +2,7 @@
  * Tourbillon sandbox egress filter (LD_PRELOAD).
  *
  * Landlock: deny all TCP except (proxy mode) loopback helper port 17999.
- * seccomp (x86_64): deny AF_INET/AF_INET6 in deny mode; deny SOCK_DGRAM in proxy mode.
+ * seccomp (x86_64): deny AF_INET/AF_INET6/AF_UNIX in deny mode; deny SOCK_DGRAM in proxy mode.
  * Proxy mode: a constructor helper listens on 127.0.0.1:PORT and forwards to
  * TOURBILLON_EGRESS_PROXY_SOCKET. Combined with bwrap --unshare-net, that port
  * is only reachable on the sandbox loopback (no same-port internet bypass).
@@ -149,8 +149,9 @@ static int apply_seccomp(int deny_all_inet)
 		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_socket, 1, 0),
 		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
 		BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])),
-		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AF_INET, 2, 0),
-		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AF_INET6, 1, 0),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AF_INET, 3, 0),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AF_INET6, 2, 0),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AF_UNIX, 1, 0),
 		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
 		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & 0xffff)),
 	};

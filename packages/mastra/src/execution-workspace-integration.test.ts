@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { mkdtempSync } from 'node:fs';
+import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -12,6 +12,7 @@ import {
   egressProxySocketPath,
   getEgressRuntimeDir,
   landlockNetAvailable,
+  resolveEgressBwrapBinds,
   seccompFilterSupported,
 } from './egress-enforcement';
 
@@ -30,6 +31,7 @@ describe('Sandbox DNS and /dev/null under filter + bwrap', () => {
   it('/dev/null is usable under bwrap --dev /dev + egress filter', { skip: !bwrapAvailable() || !filterReady }, async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'tourbillon-bwrap-devnull-'));
     const env = buildEgressFilterEnv({});
+    const binds = resolveEgressBwrapBinds({});
     const sandbox = new LocalSandbox({
       workingDirectory: cwd,
       isolation: 'bwrap',
@@ -40,7 +42,8 @@ describe('Sandbox DNS and /dev/null under filter + bwrap', () => {
         bwrapArgs: buildTourbillonBwrapArgs({
           workspacePath: cwd,
           allowNetwork: false,
-          extraRwBinds: [getEgressRuntimeDir()],
+          extraRoBinds: binds.extraRoBinds,
+          extraRwBinds: binds.extraRwBinds,
         }),
       },
     });
@@ -58,6 +61,55 @@ describe('Sandbox DNS and /dev/null under filter + bwrap', () => {
     }
   });
 
+  it('empty list cannot see another run’s proxy socket or the shared runtime dir', { skip: !bwrapAvailable() || !filterReady }, async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'tourbillon-bwrap-empty-iso-'));
+    const foreign = new EgressProxy({
+      allowList: ['example.org'],
+      companyId: 'co-foreign',
+    });
+    const foreignSocket = egressProxySocketPath('co-foreign', 'other');
+    await foreign.start({ socketPath: foreignSocket });
+
+    const planted = join(getEgressRuntimeDir(), 'planted-leak.sock');
+    writeFileSync(planted, 'not-a-socket-but-visible-if-dir-bound');
+    chmodSync(planted, 0o666);
+
+    const env = buildEgressFilterEnv({});
+    const binds = resolveEgressBwrapBinds({});
+    assert.deepEqual(binds.extraRwBinds, []);
+
+    const sandbox = new LocalSandbox({
+      workingDirectory: cwd,
+      isolation: 'bwrap',
+      timeout: 20_000,
+      env,
+      nativeSandbox: {
+        allowNetwork: false,
+        bwrapArgs: buildTourbillonBwrapArgs({
+          workspacePath: cwd,
+          allowNetwork: false,
+          extraRoBinds: binds.extraRoBinds,
+          extraRwBinds: binds.extraRwBinds,
+        }),
+      },
+    });
+    await sandbox.start();
+    try {
+      const probe = await sandbox.executeCommand?.('sh', [
+        '-c',
+        `lib=${JSON.stringify(binds.extraRoBinds[0])}; test -e ${JSON.stringify(foreignSocket)} && echo saw-foreign; test -e ${JSON.stringify(planted)} && echo saw-runtime; test -e "$lib" && test ! -w "$lib" && echo so-readonly || echo so-missing-or-writable; echo done`,
+      ]);
+      assert.ok(probe);
+      assert.equal(probe.exitCode, 0, `${probe.stderr}\n${probe.stdout}`);
+      assert.doesNotMatch(probe.stdout, /saw-foreign/);
+      assert.doesNotMatch(probe.stdout, /saw-runtime/);
+      assert.match(probe.stdout, /so-readonly/);
+    } finally {
+      await sandbox.destroy();
+      await foreign.stop();
+    }
+  });
+
   it('proxy resolves a real hostname; sandbox cannot use TCP/53 or skip the proxy', { skip: !bwrapAvailable() || !filterReady }, async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'tourbillon-bwrap-dns-'));
     const proxy = new EgressProxy({
@@ -68,6 +120,9 @@ describe('Sandbox DNS and /dev/null under filter + bwrap', () => {
     await proxy.start({ socketPath });
 
     const env = buildEgressFilterEnv({ proxySocketPath: socketPath });
+    const binds = resolveEgressBwrapBinds({ proxySocketPath: socketPath });
+    assert.deepEqual(binds.extraRwBinds, [socketPath]);
+
     const sandbox = new LocalSandbox({
       workingDirectory: cwd,
       isolation: 'bwrap',
@@ -78,7 +133,8 @@ describe('Sandbox DNS and /dev/null under filter + bwrap', () => {
         bwrapArgs: buildTourbillonBwrapArgs({
           workspacePath: cwd,
           allowNetwork: false,
-          extraRwBinds: [getEgressRuntimeDir()],
+          extraRoBinds: binds.extraRoBinds,
+          extraRwBinds: binds.extraRwBinds,
         }),
       },
     });

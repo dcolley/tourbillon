@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { getExecutionWorkspaceRoot, type SandboxIsolation } from '@tourbillon/shared';
 
@@ -29,11 +29,38 @@ const DEFAULT_READONLY_BINDS = [
 
 let cachedAbi: number | null | undefined;
 let cachedLibPath: string | undefined;
+let cachedLibSha256: string | undefined;
 
+/** Host-only runtime root. Never bind this directory into a sandbox. */
 export function getEgressRuntimeDir(): string {
   const dir = join(getExecutionWorkspaceRoot(), '.runtime');
-  mkdirSync(dir, { recursive: true });
+  mkdirSync(dir, { recursive: true, mode: 0o755 });
   return dir;
+}
+
+/** Compiled filter libraries. Bind individual `.so` files read-only, never this dir RW. */
+export function getEgressLibDir(): string {
+  const dir = join(getEgressRuntimeDir(), 'lib');
+  mkdirSync(dir, { recursive: true, mode: 0o755 });
+  return dir;
+}
+
+/** Per-run directory that holds only this sandbox's proxy socket. */
+export function getEgressRunDir(companyId: string, taskId?: string): string {
+  const safe = `${companyId}-${taskId ?? 'idle'}`.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40);
+  const dir = join(getEgressRuntimeDir(), 'runs', safe);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  return dir;
+}
+
+export function hashFileSha256(filePath: string): string {
+  return createHash('sha256').update(readFileSync(filePath)).digest('hex');
+}
+
+export function assertEgressFilterLibraryHash(libPath: string, expectedSha256: string): void {
+  if (!existsSync(libPath) || hashFileSha256(libPath) !== expectedSha256) {
+    throw new Error('Egress filter library hash mismatch; refusing to start');
+  }
 }
 
 /** Highest Landlock ABI, or null when unavailable. Network rules need ABI 4+. */
@@ -85,35 +112,101 @@ export function seccompFilterSupported(): boolean {
   return process.platform === 'linux' && process.arch === 'x64';
 }
 
-/** Compile (or reuse) the LD_PRELOAD filter into the execution runtime dir — not /tmp. */
+function compileFilterLibrary(dest: string): void {
+  try {
+    execFileSync(
+      'gcc',
+      ['-shared', '-fPIC', '-O2', '-pthread', '-o', dest, LANDLOCK_SOURCE, '-ldl'],
+      { stdio: 'pipe' },
+    );
+    chmodSync(dest, 0o444);
+  } catch (err) {
+    try {
+      unlinkSync(dest);
+    } catch {
+      /* tmp may not exist */
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`Failed to compile egress filter (gcc required): ${message}`);
+  }
+}
+
+/**
+ * Compile (or reuse) the LD_PRELOAD filter into the lib dir — not /tmp.
+ * Always hash-checks the on-disk `.so` before returning; refuses if tampered.
+ */
 export function ensureEgressLandlockLibrary(): string {
-  if (cachedLibPath && existsSync(cachedLibPath)) return cachedLibPath;
   if (!existsSync(LANDLOCK_SOURCE)) {
     throw new Error(`Egress filter source missing: ${LANDLOCK_SOURCE}`);
   }
   const source = readFileSync(LANDLOCK_SOURCE);
-  const hash = createHash('sha256').update(source).digest('hex').slice(0, 16);
-  const dir = getEgressRuntimeDir();
-  const lib = join(dir, `tourbillon-egress-filter-${hash}.so`);
-  if (!existsSync(lib)) {
-    try {
-      execFileSync(
-        'gcc',
-        ['-shared', '-fPIC', '-O2', '-pthread', '-o', lib, LANDLOCK_SOURCE, '-ldl'],
-        { stdio: 'pipe' },
-      );
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      throw new Error(`Failed to compile egress filter (gcc required): ${message}`);
-    }
+  const sourceHash = createHash('sha256').update(source).digest('hex');
+  const lib = join(getEgressLibDir(), `tourbillon-egress-filter-${sourceHash.slice(0, 16)}.so`);
+
+  if (cachedLibPath === lib && cachedLibSha256) {
+    assertEgressFilterLibraryHash(lib, cachedLibSha256);
+    return lib;
   }
+
+  const tmp = `${lib}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+  compileFilterLibrary(tmp);
+  const freshHash = hashFileSha256(tmp);
+
+  if (existsSync(lib)) {
+    try {
+      assertEgressFilterLibraryHash(lib, freshHash);
+    } catch (err) {
+      try {
+        unlinkSync(tmp);
+      } catch {
+        /* ignore */
+      }
+      throw err;
+    }
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* ignore */
+    }
+    chmodSync(lib, 0o444);
+  } else {
+    try {
+      renameSync(tmp, lib);
+    } catch {
+      if (!existsSync(lib)) {
+        throw new Error('Failed to publish egress filter library');
+      }
+      try {
+        unlinkSync(tmp);
+      } catch {
+        /* ignore */
+      }
+      assertEgressFilterLibraryHash(lib, freshHash);
+    }
+    chmodSync(lib, 0o444);
+  }
+
   cachedLibPath = lib;
+  cachedLibSha256 = freshHash;
   return lib;
 }
 
 export function egressProxySocketPath(companyId: string, taskId?: string): string {
-  const safe = `${companyId}-${taskId ?? 'idle'}`.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40);
-  return join(getEgressRuntimeDir(), `proxy-${safe}.sock`);
+  return join(getEgressRunDir(companyId, taskId), 'proxy.sock');
+}
+
+/**
+ * Binds for one sandbox: the filter `.so` read-only, and (only when a list
+ * is non-empty) this run's proxy socket. Never the shared runtime dir.
+ */
+export function resolveEgressBwrapBinds(options: {
+  proxySocketPath?: string;
+}): { extraRoBinds: string[]; extraRwBinds: string[] } {
+  const lib = ensureEgressLandlockLibrary();
+  return {
+    extraRoBinds: [lib],
+    extraRwBinds: options.proxySocketPath ? [options.proxySocketPath] : [],
+  };
 }
 
 export function buildEgressFilterEnv(options: {
@@ -144,9 +237,8 @@ export function buildEgressFilterEnv(options: {
 
 /**
  * An allow-list (including empty) requires a real enforcement backend.
- * isolation=none needs Landlock + seccomp (x86_64). Native isolation can
- * OS-block an empty list (`--unshare-net`). A non-empty list on none also
- * needs the unix-socket remap filter.
+ * Empty + bwrap/seatbelt: OS network off (no proxy socket). Empty + none:
+ * Landlock+seccomp. Non-empty: isolation=bwrap only (seatbelt and none refuse).
  */
 export function assertCanEnforceEgressAllowList(
   isolation: SandboxIsolation,
@@ -155,18 +247,17 @@ export function assertCanEnforceEgressAllowList(
   if (egressAllowList === undefined) return;
 
   const empty = egressAllowList.length === 0;
-  const native = isolation === 'seatbelt' || isolation === 'bwrap';
 
-  if (empty && native) {
-    return;
+  if (!empty && isolation !== 'bwrap') {
+    throw new Error(
+      `Cannot enforce a non-empty egress allow-list with isolation=${isolation}. ` +
+        'Only isolation=bwrap binds a per-run unix-socket proxy and unshares the netns. ' +
+        'isolation=none and isolation=seatbelt are refused.',
+    );
   }
 
-  if (!empty && isolation === 'none') {
-    throw new Error(
-      'Cannot enforce a non-empty egress allow-list with isolation=none: ' +
-        'Landlock is port-based, so a TCP helper port would be reachable on any IP. ' +
-        'Use isolation=bwrap (unshare-net + unix-socket proxy) or isolation=seatbelt.',
-    );
+  if (empty && (isolation === 'bwrap' || isolation === 'seatbelt')) {
+    return;
   }
 
   if (!landlockNetAvailable() || !seccompFilterSupported()) {
@@ -176,7 +267,7 @@ export function assertCanEnforceEgressAllowList(
           '(UDP/TCP would leak). Need Linux Landlock ABI 4+ and x86_64 seccomp, ' +
           'or isolation=bwrap/seatbelt. Refusing to start.'
         : 'Cannot enforce egress allow-list destinations without Linux Landlock (ABI 4+), ' +
-          'seccomp, and bwrap --unshare-net + unix-socket proxy. Refusing to start.',
+          'seccomp, and bwrap --unshare-net + a per-run unix-socket proxy. Refusing to start.',
     );
   }
 }
