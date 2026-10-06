@@ -17,6 +17,7 @@ export * from './monorepo-root';
 export * from './company-workspace';
 export * from './execution-workspace';
 export * from './egress-private-ranges-copy';
+export * from './egress-allow-list';
 export * from './observability';
 export * from './tool-catalog';
 export * from './company-settings';
