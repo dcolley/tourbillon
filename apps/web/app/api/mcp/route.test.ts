@@ -832,7 +832,409 @@ describe('MCP Control Plane - Snake Case API', () => {
     });
   });
 
-  describe('US8: docs list new tools + X-Company-Token + company_id', () => {
+  describe('US8: MCP write handlers work headless (no cookie, token-only company)', () => {
+    it('set_agent_active works headless', async () => {
+      const req = mockRequest(
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'set_agent_active',
+            arguments: {
+              company_id: companyA.id,
+              agent_id: agentA1.id,
+              active: false,
+            },
+          },
+        },
+        tokenA
+      );
+
+      const response = await POST(req);
+      const data = await response.json();
+
+      assert.strictEqual(response.status, 200);
+      const result = JSON.parse(data.result.content[0].text);
+      assert.strictEqual(result.success, true);
+      assert.strictEqual(result.status, 'paused');
+    });
+
+    it('set_heartbeat works headless', async () => {
+      const req = mockRequest(
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'set_heartbeat',
+            arguments: {
+              company_id: companyA.id,
+              agent_id: agentA1.id,
+              enabled: false,
+            },
+          },
+        },
+        tokenA
+      );
+
+      const response = await POST(req);
+      const data = await response.json();
+
+      assert.strictEqual(response.status, 200);
+      const result = JSON.parse(data.result.content[0].text);
+      assert.strictEqual(result.success, true);
+      assert.strictEqual(result.heartbeatEnabled, false);
+    });
+
+    it('set_om works headless', async () => {
+      const req = mockRequest(
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'set_om',
+            arguments: {
+              company_id: companyA.id,
+              agent_id: agentA1.id,
+              mode: 'off',
+            },
+          },
+        },
+        tokenA
+      );
+
+      const response = await POST(req);
+      const data = await response.json();
+
+      assert.strictEqual(response.status, 200);
+      const result = JSON.parse(data.result.content[0].text);
+      assert.strictEqual(result.success, true);
+      assert.strictEqual(result.mode, 'off');
+    });
+
+    it('set_agent_model works headless', async () => {
+      const req = mockRequest(
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'set_agent_model',
+            arguments: {
+              company_id: companyA.id,
+              agent_id: agentA1.id,
+              model_id: 'test-model-headless',
+            },
+          },
+        },
+        tokenA
+      );
+
+      const response = await POST(req);
+      const data = await response.json();
+
+      assert.strictEqual(response.status, 200);
+      const result = JSON.parse(data.result.content[0].text);
+      assert.strictEqual(result.success, true);
+      assert.strictEqual(result.modelId, 'test-model-headless');
+    });
+
+    it('create_issue works headless', async () => {
+      const req = mockRequest(
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'create_issue',
+            arguments: {
+              company_id: companyA.id,
+              title: 'Headless test issue',
+            },
+          },
+        },
+        tokenA
+      );
+
+      const response = await POST(req);
+      const data = await response.json();
+
+      assert.strictEqual(response.status, 200);
+      const result = JSON.parse(data.result.content[0].text);
+      assert.ok(result.id);
+      assert.strictEqual(result.title, 'Headless test issue');
+      assert.strictEqual(result.status, 'backlog');
+    });
+
+    it('set_issue_status works headless', async () => {
+      const [testIssue] = await db
+        .insert(issues)
+        .values({
+          companyId: companyA.id,
+          identifier: `${companyA.name}-headless-1`,
+          title: 'Test headless issue status',
+          status: 'todo',
+          priority: 'medium',
+        })
+        .returning();
+
+      const req = mockRequest(
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'set_issue_status',
+            arguments: {
+              company_id: companyA.id,
+              issue_id: testIssue.id,
+              status: 'in_progress',
+            },
+          },
+        },
+        tokenA
+      );
+
+      const response = await POST(req);
+      const data = await response.json();
+
+      assert.strictEqual(response.status, 200);
+      const result = JSON.parse(data.result.content[0].text);
+      assert.strictEqual(result.status, 'in_progress');
+    });
+
+    it('add_issue_comment works headless', async () => {
+      const [testIssue] = await db
+        .insert(issues)
+        .values({
+          companyId: companyA.id,
+          identifier: `${companyA.name}-headless-2`,
+          title: 'Test headless comment',
+          status: 'todo',
+          priority: 'medium',
+        })
+        .returning();
+
+      const req = mockRequest(
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'add_issue_comment',
+            arguments: {
+              company_id: companyA.id,
+              issue_id: testIssue.id,
+              body: 'Headless test comment',
+            },
+          },
+        },
+        tokenA
+      );
+
+      const response = await POST(req);
+      const data = await response.json();
+
+      assert.strictEqual(response.status, 200);
+      const result = JSON.parse(data.result.content[0].text);
+      assert.ok(result.id);
+      assert.strictEqual(result.body, 'Headless test comment');
+    });
+
+    it('create_goal works headless', async () => {
+      const req = mockRequest(
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'create_goal',
+            arguments: {
+              company_id: companyA.id,
+              title: 'Headless test goal',
+            },
+          },
+        },
+        tokenA
+      );
+
+      const response = await POST(req);
+      const data = await response.json();
+
+      assert.strictEqual(response.status, 200);
+      const result = JSON.parse(data.result.content[0].text);
+      assert.ok(result.id);
+      assert.strictEqual(result.title, 'Headless test goal');
+      assert.strictEqual(result.status, 'active');
+    });
+
+    it('set_goal_status works headless', async () => {
+      const { createGoal } = await import('@/lib/goals');
+      const testGoal = await createGoal({
+        companyId: companyA.id,
+        title: 'Test headless goal status',
+      });
+
+      const req = mockRequest(
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'set_goal_status',
+            arguments: {
+              company_id: companyA.id,
+              goal_id: testGoal.id,
+              status: 'completed',
+            },
+          },
+        },
+        tokenA
+      );
+
+      const response = await POST(req);
+      const data = await response.json();
+
+      assert.strictEqual(response.status, 200);
+      const result = JSON.parse(data.result.content[0].text);
+      assert.strictEqual(result.status, 'completed');
+    });
+
+    it('create_project works headless', async () => {
+      const { createGoal } = await import('@/lib/goals');
+      const testGoal = await createGoal({
+        companyId: companyA.id,
+        title: 'Test goal for headless project',
+      });
+
+      const req = mockRequest(
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'create_project',
+            arguments: {
+              company_id: companyA.id,
+              title: 'Headless test project',
+              goal_id: testGoal.id,
+            },
+          },
+        },
+        tokenA
+      );
+
+      const response = await POST(req);
+      const data = await response.json();
+
+      assert.strictEqual(response.status, 200);
+      const result = JSON.parse(data.result.content[0].text);
+      assert.ok(result.id);
+      assert.strictEqual(result.title, 'Headless test project');
+      assert.strictEqual(result.status, 'active');
+    });
+
+    it('set_project_status works headless', async () => {
+      const { createGoal } = await import('@/lib/goals');
+      const { createProject } = await import('@/lib/projects');
+      const testGoal = await createGoal({
+        companyId: companyA.id,
+        title: 'Test goal for headless project status',
+      });
+      const testProject = await createProject({
+        companyId: companyA.id,
+        title: 'Test headless project status',
+        goalId: testGoal.id,
+      });
+
+      const req = mockRequest(
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'set_project_status',
+            arguments: {
+              company_id: companyA.id,
+              project_id: testProject.id,
+              status: 'paused',
+            },
+          },
+        },
+        tokenA
+      );
+
+      const response = await POST(req);
+      const data = await response.json();
+
+      assert.strictEqual(response.status, 200);
+      const result = JSON.parse(data.result.content[0].text);
+      assert.strictEqual(result.status, 'paused');
+    });
+
+    it('decide_approval works headless', async () => {
+      const [testIssue] = await db
+        .insert(issues)
+        .values({
+          companyId: companyA.id,
+          identifier: `${companyA.name}-headless-approval`,
+          title: 'Test headless approval',
+          status: 'blocked',
+          priority: 'medium',
+        })
+        .returning();
+
+      const [testApproval] = await db
+        .insert(approvals)
+        .values({
+          companyId: companyA.id,
+          type: 'request_board_approval',
+          status: 'pending',
+          requestedByAgentId: agentA1.id,
+          issueIds: [testIssue.id],
+          payload: {
+            title: 'Test headless approval',
+            priorStatuses: { [testIssue.id]: 'todo' },
+          },
+        })
+        .returning();
+
+      await db
+        .update(issues)
+        .set({ boardApprovalId: testApproval.id })
+        .where(eq(issues.id, testIssue.id));
+
+      const req = mockRequest(
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'decide_approval',
+            arguments: {
+              company_id: companyA.id,
+              approval_id: testApproval.id,
+              decision: 'approved',
+              reason: 'Test headless approval',
+            },
+          },
+        },
+        tokenA
+      );
+
+      const response = await POST(req);
+      const data = await response.json();
+
+      assert.strictEqual(response.status, 200);
+      const result = JSON.parse(data.result.content[0].text);
+      assert.strictEqual(result.status, 'approved');
+      assert.strictEqual(result.decision, 'approved');
+    });
+  });
+
+  describe('US9: docs list new tools + X-Company-Token + company_id', () => {
     it('doc confirms new tools and authentication', async () => {
       const fs = await import('fs/promises');
       const docPath = '../../../../../docs/mcp-control-plane.md';

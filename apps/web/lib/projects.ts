@@ -10,7 +10,7 @@ import {
   type Issue,
 } from '@tourbillon/db';
 import { and, desc, eq } from 'drizzle-orm';
-import { assertCompanyAccess, getActiveCompany } from './company';
+import { assertCompanyAccess, getActiveCompany, getCompanyById } from './company';
 import { validateGoalId } from './goals';
 
 export class ProjectValidationError extends Error {
@@ -166,11 +166,20 @@ export interface UpdateProjectInput {
   ownerAgentId?: string | null;
 }
 
-export async function updateProject(projectId: string, input: UpdateProjectInput): Promise<Project> {
+export async function updateProject(
+  projectId: string,
+  input: UpdateProjectInput,
+  tokenCompanyId?: string
+): Promise<Project> {
   const project = await db.query.projects.findFirst({ where: eq(projects.id, projectId) });
   if (!project) throw new ProjectValidationError('Project not found.');
 
-  const activeCompany = await getActiveCompany();
+  const activeCompany = tokenCompanyId
+    ? await getCompanyById(tokenCompanyId)
+    : await getActiveCompany();
+  if (!activeCompany) {
+    throw new ProjectValidationError('No active company selected');
+  }
   assertCompanyAccess(project.companyId, activeCompany.id);
 
   const updates: Partial<Project> & { updatedAt: Date } = { updatedAt: new Date() };
