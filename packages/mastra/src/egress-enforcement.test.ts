@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import { createServer } from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { describe, it } from 'node:test';
-import { copyFileSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs';
+import { copyFileSync, mkdirSync, symlinkSync, writeFileSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EgressProxy } from './egress-proxy';
@@ -17,6 +17,7 @@ import {
   getEgressRuntimeDir,
   hashEgressRunId,
   hashFileSha256,
+  resolveEgressSocketRoot,
   UNIX_SOCKET_PATH_MAX,
   landlockNetAvailable,
   probeLandlockAbi,
@@ -183,6 +184,31 @@ describe('egress proxy socket identity', () => {
     assert.notEqual(pathA, pathB);
     assert.ok(Buffer.byteLength(pathA, 'utf8') <= UNIX_SOCKET_PATH_MAX);
     assert.match(pathA, /\.sock$/);
+  });
+
+  it('includes a unique run id so same company+task+list do not share a socket', () => {
+    const company = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const task = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const list = ['example.com'];
+    const a = hashEgressRunId({ companyId: company, taskId: task, allowList: list, runId: 'run-1' });
+    const b = hashEgressRunId({ companyId: company, taskId: task, allowList: list, runId: 'run-2' });
+    assert.notEqual(a, b);
+    assert.notEqual(
+      egressProxySocketPath(company, task, list, { runId: 'run-1' }),
+      egressProxySocketPath(company, task, list, { runId: 'run-2' }),
+    );
+  });
+
+  it('refuses a symlink socket root', () => {
+    const tmp = join(tmpdir(), `tb-egress-root-${process.pid}`);
+    const real = join(tmp, 'real');
+    const link = join(tmp, 'link');
+    mkdirSync(real, { recursive: true, mode: 0o700 });
+    symlinkSync(real, link);
+    assert.throws(
+      () => resolveEgressSocketRoot(link),
+      /symlink|0700|Refusing to start/i,
+    );
   });
 
   it('refuses an overlong path instead of truncating', () => {

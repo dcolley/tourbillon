@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { getExecutionWorkspaceRoot, type SandboxIsolation } from '@tourbillon/shared';
 
@@ -54,10 +54,48 @@ export function getEgressLibDir(): string {
   return dir;
 }
 
+function inspectSocketRoot(dir: string): 'ok' | 'unsafe' | 'missing' {
+  try {
+    const st = lstatSync(dir);
+    if (st.isSymbolicLink() || !st.isDirectory()) {
+      return 'unsafe';
+    }
+    if (typeof process.getuid === 'function' && st.uid !== process.getuid()) {
+      return 'unsafe';
+    }
+    if ((st.mode & 0o777) !== 0o700) {
+      try {
+        chmodSync(dir, 0o700);
+      } catch {
+        return 'unsafe';
+      }
+      const st2 = lstatSync(dir);
+      if (st2.isSymbolicLink() || !st2.isDirectory() || (st2.mode & 0o777) !== 0o700) {
+        return 'unsafe';
+      }
+      if (typeof process.getuid === 'function' && st2.uid !== process.getuid()) {
+        return 'unsafe';
+      }
+    }
+    return 'ok';
+  } catch (err) {
+    const code = err && typeof err === 'object' && 'code' in err ? (err as { code?: string }).code : undefined;
+    return code === 'ENOENT' ? 'missing' : 'unsafe';
+  }
+}
+
 function tryCreateSocketRoot(dir: string): boolean {
   try {
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    chmodSync(dir, 0o700);
+    const before = inspectSocketRoot(dir);
+    if (before === 'unsafe') {
+      return false;
+    }
+    if (before === 'missing') {
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+    }
+    if (inspectSocketRoot(dir) !== 'ok') {
+      return false;
+    }
     const probe = join(dir, `.w-${process.pid}`);
     writeFileSync(probe, '');
     unlinkSync(probe);
@@ -81,7 +119,7 @@ export function resolveEgressSocketRoot(override?: string): string {
     }
     if (override || process.env.TOURBILLON_EGRESS_SOCKET_ROOT === dir) {
       throw new Error(
-        `Cannot create egress socket root ${dir} (need a 0700 directory). Refusing to start.`,
+        `Cannot use egress socket root ${dir}: must be a 0700 directory we own, not a symlink. Refusing to start.`,
       );
     }
   }
@@ -108,11 +146,14 @@ export function hashEgressRunId(options: {
   companyId: string;
   taskId?: string;
   allowList?: string[];
+  /** Unique per sandbox instance so teardown cannot unlink another run's socket. */
+  runId?: string;
 }): string {
   const identity = [
     options.companyId,
     options.taskId ?? 'idle',
     (options.allowList ?? []).slice().sort().join('\n'),
+    options.runId ?? '',
   ].join('\0');
   return createHash('sha256').update(identity).digest('hex').slice(0, 16);
 }
@@ -257,16 +298,21 @@ export function ensureEgressLandlockLibrary(): string {
 
 /**
  * Per-run unix socket: `/run/tourbillon/egress/<hash>.sock`.
- * Hash covers the full companyId, taskId, and allow-list (never truncated names).
+ * Hash covers companyId, taskId, allow-list, and unique run id (never truncated names).
  */
 export function egressProxySocketPath(
   companyId: string,
   taskId?: string,
   allowList: string[] = [],
-  options?: { socketRoot?: string },
+  options?: { socketRoot?: string; runId?: string },
 ): string {
   const root = resolveEgressSocketRoot(options?.socketRoot);
-  const hash = hashEgressRunId({ companyId, taskId, allowList });
+  const hash = hashEgressRunId({
+    companyId,
+    taskId,
+    allowList,
+    runId: options?.runId,
+  });
   const socketPath = join(root, `${hash}.sock`);
   assertUnixSocketPathLength(socketPath);
   return socketPath;

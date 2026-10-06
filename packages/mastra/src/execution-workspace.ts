@@ -16,7 +16,7 @@ import {
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { EgressProxy } from './egress-proxy';
 import {
   assertCanEnforceEgressAllowList,
@@ -96,27 +96,13 @@ export function resolveCodeExecutionProxySocketPath(
   companyId: string,
   taskId: string | undefined,
   allowList: string[],
-  options?: { socketRoot?: string },
+  options?: { socketRoot?: string; runId?: string },
 ): string {
   return egressProxySocketPath(companyId, taskId, allowList, options);
 }
 
-const proxyRegistry = new Map<string, EgressProxy>();
-
-async function getOrStartProxy(
-  cacheKey: string,
-  allowList: string[],
-  companyId: string,
-  taskId?: string,
-): Promise<EgressProxy> {
-  const existing = proxyRegistry.get(cacheKey);
-  if (existing) return existing;
-  const proxy = new EgressProxy({ allowList, companyId, taskId });
-  await proxy.start({
-    socketPath: resolveCodeExecutionProxySocketPath(companyId, taskId, allowList),
-  });
-  proxyRegistry.set(cacheKey, proxy);
-  return proxy;
+export function newEgressRunId(): string {
+  return randomBytes(16).toString('hex');
 }
 
 export function buildCodeExecutionWorkspace(): Workspace {
@@ -138,7 +124,6 @@ export function buildCodeExecutionWorkspace(): Workspace {
 
       const allowNetwork = resolveSandboxAllowNetwork(runtimeConfig);
       const agentSecrets = extractAgentSecrets(requestContext);
-      const cacheKey = buildCacheKey(companyId, taskId, runtimeConfig, agentSecrets);
 
       let sandboxEnv: NodeJS.ProcessEnv = { ...agentSecrets };
       let proxy: EgressProxy | undefined;
@@ -147,9 +132,16 @@ export function buildCodeExecutionWorkspace(): Workspace {
 
       if (egressAllowList !== undefined) {
         if (egressAllowList.length > 0) {
-          proxy = await getOrStartProxy(cacheKey, egressAllowList, companyId, taskId);
-          const socketPath = proxy.getSocketPath();
-          if (!socketPath) {
+          const runId = newEgressRunId();
+          const socketPath = resolveCodeExecutionProxySocketPath(
+            companyId,
+            taskId,
+            egressAllowList,
+            { runId },
+          );
+          proxy = new EgressProxy({ allowList: egressAllowList, companyId, taskId });
+          await proxy.start({ socketPath });
+          if (!proxy.getSocketPath()) {
             throw new Error('Egress proxy did not bind a unix socket');
           }
           sandboxEnv = buildEgressFilterEnv({
@@ -201,10 +193,8 @@ export function buildCodeExecutionWorkspace(): Workspace {
       const originalDestroy = sandbox.destroy.bind(sandbox);
       sandbox.destroy = async () => {
         await originalDestroy();
-        const cachedProxy = proxyRegistry.get(cacheKey);
-        if (cachedProxy) {
-          await cachedProxy.stop();
-          proxyRegistry.delete(cacheKey);
+        if (proxy) {
+          await proxy.stop();
         }
       };
 

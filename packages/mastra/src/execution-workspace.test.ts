@@ -2,7 +2,10 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import { join } from 'node:path';
 import type { AgentRuntimeConfig } from '@tourbillon/shared';
-import { resolveCodeExecutionProxySocketPath } from './execution-workspace';
+import { newEgressRunId, resolveCodeExecutionProxySocketPath } from './execution-workspace';
+import { EgressProxy } from './egress-proxy';
+import { existsSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { UNIX_SOCKET_PATH_MAX } from './egress-enforcement';
 
 describe('buildCodeExecutionWorkspace', () => {
@@ -276,5 +279,51 @@ describe('buildCodeExecutionWorkspace proxy socket identity', () => {
       () => resolveCodeExecutionProxySocketPath(company, taskA, ['example.com'], { socketRoot: longRoot }),
       /107|refusing to start/i,
     );
+  });
+
+  it('gives each run its own socket; destroying one leaves the other serving 200', async () => {
+    const origin = createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('via-proxy');
+    });
+    const originPort = await new Promise<number>((resolve) => {
+      origin.listen(0, '127.0.0.1', () => resolve((origin.address() as { port: number }).port));
+    });
+
+    const list = ['127.0.0.1'];
+    const path1 = resolveCodeExecutionProxySocketPath(company, taskA, list, { runId: newEgressRunId() });
+    const path2 = resolveCodeExecutionProxySocketPath(company, taskA, list, { runId: newEgressRunId() });
+    assert.notEqual(path1, path2);
+
+    const d1 = new EgressProxy({ allowList: list, companyId: company, taskId: taskA });
+    const d2 = new EgressProxy({ allowList: list, companyId: company, taskId: taskA });
+    await d1.start({ socketPath: path1 });
+    await d2.start({ socketPath: path2 });
+
+    await d1.stop();
+    assert.ok(!existsSync(path1), 'destroyed run unlinks only its socket');
+    assert.ok(existsSync(path2), 'survivor socket remains');
+
+    const { request } = await import('node:http');
+    const body = await new Promise<string>((resolve, reject) => {
+      const req = request(
+        {
+          socketPath: path2,
+          path: `http://127.0.0.1:${originPort}/`,
+          method: 'GET',
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (c) => chunks.push(c));
+          res.on('end', () => resolve(Buffer.concat(chunks).toString()));
+        },
+      );
+      req.on('error', reject);
+      req.end();
+    });
+    assert.match(body, /via-proxy/);
+
+    await d2.stop();
+    origin.close();
   });
 });
