@@ -1,0 +1,1 @@
+ALTER TABLE "projects" ADD COLUMN "auto_paused_by_goal_id" text;
