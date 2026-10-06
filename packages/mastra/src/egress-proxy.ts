@@ -2,77 +2,27 @@ import * as http from 'node:http';
 import * as net from 'node:net';
 import { chmodSync, unlinkSync } from 'node:fs';
 import { createTraceLogger } from '@tourbillon/shared';
+import {
+  authorizeEgressTarget,
+  parseHostPort,
+  type HostResolver,
+} from './egress-private-ranges';
+
+export { isHostAllowed, parseHostPort } from './egress-private-ranges';
 
 const logger = createTraceLogger('egress-proxy', {});
-
-export function parseHostPort(target: string): { host: string; port?: number } {
-  const trimmed = target.trim();
-  if (trimmed.startsWith('[')) {
-    const end = trimmed.indexOf(']');
-    if (end === -1) return { host: trimmed };
-    const host = trimmed.slice(1, end);
-    const rest = trimmed.slice(end + 1);
-    if (rest.startsWith(':')) {
-      const port = parseInt(rest.slice(1), 10);
-      return { host, port: Number.isFinite(port) ? port : undefined };
-    }
-    return { host };
-  }
-  const idx = trimmed.lastIndexOf(':');
-  if (idx > 0 && /^\d+$/.test(trimmed.slice(idx + 1))) {
-    return { host: trimmed.slice(0, idx), port: parseInt(trimmed.slice(idx + 1), 10) };
-  }
-  return { host: trimmed };
-}
-
-function isIpv4(ip: string): boolean {
-  const parts = ip.split('.');
-  if (parts.length !== 4) return false;
-  return parts.every((p) => {
-    if (!/^\d+$/.test(p)) return false;
-    const n = Number(p);
-    return n >= 0 && n <= 255;
-  });
-}
-
-function matchesCidr(ip: string, cidr: string): boolean {
-  if (!isIpv4(ip)) return false;
-  const [network, prefixStr] = cidr.split('/');
-  if (!network || prefixStr === undefined || !isIpv4(network)) return false;
-  const prefix = parseInt(prefixStr, 10);
-  if (!Number.isFinite(prefix) || prefix < 0 || prefix > 32) return false;
-
-  const ipInt = ip.split('.').reduce((acc, octet) => (acc << 8) | Number(octet), 0) >>> 0;
-  const networkInt = network.split('.').reduce((acc, octet) => (acc << 8) | Number(octet), 0) >>> 0;
-  const mask = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
-  return (ipInt & mask) === (networkInt & mask);
-}
-
-/**
- * Whether a hostname or IP is in the allow-list.
- * Entries: exact host, IPv4, `*.example.com`, or IPv4 CIDR.
- */
-export function isHostAllowed(host: string, allowList: string[]): boolean {
-  if (allowList.length === 0) return false;
-  const hostWithoutPort = parseHostPort(host).host.replace(/^\[|\]$/g, '').toLowerCase();
-
-  for (const raw of allowList) {
-    const entry = raw.trim().toLowerCase();
-    if (!entry) continue;
-    if (entry === hostWithoutPort) return true;
-    if (entry.startsWith('*.')) {
-      const domain = entry.slice(2);
-      if (hostWithoutPort.endsWith(`.${domain}`)) return true;
-    }
-    if (entry.includes('/') && matchesCidr(hostWithoutPort, entry)) return true;
-  }
-  return false;
-}
 
 export interface EgressProxyOptions {
   allowList: string[];
   companyId: string;
   taskId?: string;
+  /**
+   * Legacy `allowNetwork: true` with no list: any public destination is
+   * allowed; blocked private ranges are still refused.
+   */
+  publicInternet?: boolean;
+  /** Injected resolver for tests (resolve-then-pin). */
+  resolve?: HostResolver;
 }
 
 export class EgressProxy {
@@ -82,11 +32,15 @@ export class EgressProxy {
   private readonly allowList: string[];
   private readonly companyId: string;
   private readonly taskId?: string;
+  private readonly publicInternet: boolean;
+  private readonly resolve?: HostResolver;
 
   constructor(options: EgressProxyOptions) {
     this.allowList = options.allowList;
     this.companyId = options.companyId;
     this.taskId = options.taskId;
+    this.publicInternet = options.publicInternet === true;
+    this.resolve = options.resolve;
   }
 
   async start(listen: { socketPath: string } | { tcp: true } = { tcp: true }): Promise<number> {
@@ -99,7 +53,7 @@ export class EgressProxy {
         this.handleHttpRequest(req, res);
       });
 
-      this.server.on('connect', (req, clientSocket, head) => {
+      this.server.on('connect', (req, clientSocket: net.Duplex, head) => {
         this.handleConnect(req, clientSocket, head);
       });
 
@@ -229,6 +183,13 @@ export class EgressProxy {
   }
 
   private handleHttpRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
+    void this.handleHttpRequestAsync(req, res);
+  }
+
+  private async handleHttpRequestAsync(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
     const target = this.resolveTargetHost(req);
     if (!target) {
       res.writeHead(400, { 'Content-Type': 'text/plain' });
@@ -236,25 +197,45 @@ export class EgressProxy {
       return;
     }
 
-    if (!isHostAllowed(target.host, this.allowList)) {
+    const decision = await authorizeEgressTarget({
+      host: target.host,
+      allowList: this.allowList,
+      publicInternet: this.publicInternet,
+      resolve: this.resolve,
+    });
+
+    if (!decision.allowed) {
       logger.warn('Blocked HTTP request', {
         companyId: this.companyId,
         taskId: this.taskId,
         host: target.host,
+        reason: decision.reason,
         method: req.method,
       });
-      res.writeHead(403, { 'Content-Type': 'text/plain' });
-      res.end(`Forbidden: Host '${target.host}' is not in the egress allow-list`);
+      res.writeHead(decision.status, { 'Content-Type': 'text/plain' });
+      res.end(decision.detail);
       return;
+    }
+
+    const headers = { ...req.headers };
+    if (!headers.host) {
+      headers.host = target.port === 80 ? target.host : `${target.host}:${target.port}`;
     }
 
     const proxyReq = http.request(
       {
-        hostname: target.host,
+        hostname: decision.pin.address,
         port: target.port,
         path: target.path,
         method: req.method,
-        headers: req.headers,
+        headers,
+        family: decision.pin.family,
+        createConnection: () =>
+          net.connect({
+            port: target.port,
+            host: decision.pin.address,
+            family: decision.pin.family,
+          }),
       },
       (proxyRes) => {
         res.writeHead(proxyRes.statusCode || 500, proxyRes.headers);
@@ -267,6 +248,7 @@ export class EgressProxy {
         companyId: this.companyId,
         taskId: this.taskId,
         host: target.host,
+        pin: decision.pin.address,
         error: err.message,
       });
       if (!res.headersSent) {
@@ -278,33 +260,54 @@ export class EgressProxy {
     req.pipe(proxyReq);
   }
 
-  private handleConnect(req: http.IncomingMessage, clientSocket: net.Socket, head: Buffer): void {
+  private handleConnect(req: http.IncomingMessage, clientSocket: net.Duplex, head: Buffer): void {
+    void this.handleConnectAsync(req, clientSocket, head);
+  }
+
+  private async handleConnectAsync(
+    req: http.IncomingMessage,
+    clientSocket: net.Duplex,
+    head: Buffer,
+  ): Promise<void> {
     const { host, port } = parseHostPort(req.url || '');
     const destPort = port ?? 443;
 
-    if (!host || !isHostAllowed(host, this.allowList)) {
+    const decision = await authorizeEgressTarget({
+      host: host || '',
+      allowList: this.allowList,
+      publicInternet: this.publicInternet,
+      resolve: this.resolve,
+    });
+
+    if (!decision.allowed) {
       logger.warn('Blocked HTTPS CONNECT', {
         companyId: this.companyId,
         taskId: this.taskId,
         host,
+        reason: decision.reason,
       });
-      clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-      clientSocket.end(`Forbidden: Host '${host}' is not in the egress allow-list`);
+      const code = decision.status === 502 ? '502 Bad Gateway' : '403 Forbidden';
+      clientSocket.write(`HTTP/1.1 ${code}\r\n\r\n`);
+      clientSocket.end(decision.detail);
       return;
     }
 
-    const serverSocket = net.connect(destPort, host, () => {
-      clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-      if (head.length) serverSocket.write(head);
-      serverSocket.pipe(clientSocket);
-      clientSocket.pipe(serverSocket);
-    });
+    const serverSocket = net.connect(
+      { port: destPort, host: decision.pin.address, family: decision.pin.family },
+      () => {
+        clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+        if (head.length) serverSocket.write(head);
+        serverSocket.pipe(clientSocket);
+        clientSocket.pipe(serverSocket);
+      },
+    );
 
     serverSocket.on('error', (err) => {
       logger.error('CONNECT tunnel error', {
         companyId: this.companyId,
         taskId: this.taskId,
         host,
+        pin: decision.pin.address,
         error: err.message,
       });
       clientSocket.end();

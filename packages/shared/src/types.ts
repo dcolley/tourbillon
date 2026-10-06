@@ -111,8 +111,17 @@ export interface AgentRuntimeConfig {
      * seatbelt denies network*; isolation=none uses Landlock+seccomp (TCP/UDP
      * and AF_UNIX sockets) or refuses. Residual: isolation=none still sees the
      * host filesystem; this is not a kernel IP filter.
-     * Non-empty → isolation=bwrap only (per-run unix-socket proxy). 
+     * Non-empty → isolation=bwrap only (per-run unix-socket proxy).
      * isolation=none and isolation=seatbelt refuse a non-empty list.
+     * The proxy blocks localhost/LAN/link-local/CGNAT by default. A private
+     * destination is allowed only by an exact IP, a CIDR, or an exact hostname
+     * whose resolved IPs are in that range. Wildcards never allow a private IP.
+     * 169.254.169.254 is never allowed. Loopback overrides must be an exact IP.
+     *
+     * Legacy `allowNetwork: true` with no list uses the proxy in public-internet
+     * mode (public destinations allowed; private ranges blocked) when
+     * isolation=bwrap. isolation=none/seatbelt cannot enforce the proxy: the
+     * run is not refused; a per-run warning is logged instead.
      */
     egressAllowList?: string[];
   };

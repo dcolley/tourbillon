@@ -3,6 +3,7 @@ import { createServer, request as httpRequest, type IncomingMessage, type Server
 import type { AddressInfo } from 'node:net';
 import { describe, it } from 'node:test';
 import { EgressProxy, isHostAllowed, parseHostPort } from './egress-proxy';
+import type { HostResolver } from './egress-private-ranges';
 
 describe('isHostAllowed', () => {
   it('returns false for empty allow-list', () => {
@@ -54,6 +55,7 @@ describe('parseHostPort', () => {
   it('parses host:port and IPv6 brackets', () => {
     assert.deepEqual(parseHostPort('example.com:8080'), { host: 'example.com', port: 8080 });
     assert.deepEqual(parseHostPort('[::1]:443'), { host: '::1', port: 443 });
+    assert.deepEqual(parseHostPort('::1'), { host: '::1' });
     assert.deepEqual(parseHostPort('example.com'), { host: 'example.com' });
   });
 });
@@ -138,10 +140,15 @@ describe('EgressProxy enforcement', () => {
   });
 
   it('CONNECT to a denied host is 403', async () => {
-    const proxy = new EgressProxy({ allowList: ['127.0.0.1'], companyId: 'co-connect' });
+    const resolve: HostResolver = async () => [{ address: '1.1.1.1', family: 4 }];
+    const proxy = new EgressProxy({
+      allowList: ['127.0.0.1'],
+      companyId: 'co-connect',
+      resolve,
+    });
     const port = await proxy.start();
     try {
-      const status = await new Promise<number>((resolve, reject) => {
+      const status = await new Promise<number>((resolveStatus, reject) => {
         const req = httpRequest({
           host: '127.0.0.1',
           port,
@@ -150,10 +157,10 @@ describe('EgressProxy enforcement', () => {
         });
         req.on('connect', (res, socket) => {
           socket.destroy();
-          resolve(res.statusCode ?? 0);
+          resolveStatus(res.statusCode ?? 0);
         });
         req.on('response', (res) => {
-          resolve(res.statusCode ?? 0);
+          resolveStatus(res.statusCode ?? 0);
         });
         req.on('error', reject);
         req.end();
@@ -161,6 +168,94 @@ describe('EgressProxy enforcement', () => {
       assert.equal(status, 403);
     } finally {
       await proxy.stop();
+    }
+  });
+
+  it('resolves then pins the checked IP (no second lookup of the hostname)', async () => {
+    const origin = await listenOrigin('pinned-ok');
+    const resolve: HostResolver = async (host) => {
+      assert.equal(host, 'pin.test');
+      return [{ address: '127.0.0.1', family: 4 }];
+    };
+    const proxy = new EgressProxy({
+      allowList: ['127.0.0.1'],
+      companyId: 'co-pin',
+      resolve,
+    });
+    try {
+      const port = await proxy.start();
+      const hit = await requestViaProxy(port, `http://pin.test:${origin.port}/`);
+      assert.equal(hit.status, 200);
+      assert.equal(hit.body, 'pinned-ok');
+    } finally {
+      await proxy.stop();
+      await origin.close();
+    }
+  });
+
+  it('public-internet mode 403s loopback, LAN, CGNAT, and metadata', async () => {
+    const origin = await listenOrigin('should-not-see');
+    const proxy = new EgressProxy({
+      allowList: [],
+      companyId: 'co-public',
+      publicInternet: true,
+    });
+    try {
+      const port = await proxy.start();
+
+      const lan = await requestViaProxy(port, origin.url);
+      assert.equal(lan.status, 403, '127.0.0.1 is blocked in public-internet mode');
+      assert.match(lan.body, /private range/);
+
+      const rfc1918 = await requestViaProxy(port, 'http://192.168.10.1/');
+      assert.equal(rfc1918.status, 403);
+
+      const cgnat = await requestViaProxy(port, 'http://100.64.1.1/');
+      assert.equal(cgnat.status, 403);
+
+      const metadata = await requestViaProxy(port, 'http://169.254.169.254/');
+      assert.equal(metadata.status, 403);
+      assert.match(metadata.body, /[Mm]etadata/);
+
+      const loopback6 = await requestViaProxy(port, 'http://[::1]/');
+      assert.equal(loopback6.status, 403);
+      assert.match(loopback6.body, /private range/);
+    } finally {
+      await proxy.stop();
+      await origin.close();
+    }
+  });
+
+  it('wildcard that resolves to LAN is 403; exact IP LAN entry is 200', async () => {
+    const origin = await listenOrigin('lan-ok');
+    const resolve: HostResolver = async (host) => {
+      if (host === 'searx.example.com') return [{ address: '192.168.10.165', family: 4 }];
+      throw new Error(`unexpected host ${host}`);
+    };
+    const wildcardProxy = new EgressProxy({
+      allowList: ['*.example.com'],
+      companyId: 'co-wild',
+      resolve,
+    });
+    const ipProxy = new EgressProxy({
+      allowList: ['127.0.0.1'],
+      companyId: 'co-ip',
+    });
+    try {
+      const wildPort = await wildcardProxy.start();
+      const ipPort = await ipProxy.start();
+
+      const wild = await requestViaProxy(wildPort, 'http://searx.example.com/');
+      assert.equal(wild.status, 403);
+      assert.match(wild.body, /private range/);
+
+      const exact = await requestViaProxy(ipPort, origin.url);
+      assert.equal(exact.status, 200);
+      assert.equal(exact.body, 'lan-ok');
+    } finally {
+      await wildcardProxy.stop();
+      await ipProxy.stop();
+      await origin.close();
     }
   });
 });

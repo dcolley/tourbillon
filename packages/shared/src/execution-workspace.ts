@@ -70,7 +70,9 @@ export function resolveSandboxEgressAllowList(
  * OS-level network share for Mastra LocalSandbox (`allowNetwork` / `--unshare-net`).
  * When `egressAllowList` is set (empty or not), this is always false: the sandbox
  * has no shared netns. Egress, if any, is only via the unix-socket proxy.
- * When the list is unset, legacy `allowNetwork` on/off applies.
+ * When the list is unset, this is the legacy `allowNetwork` flag ("wants
+ * network"). isolation=bwrap routes that through the public-internet proxy
+ * (no shared netns); none/seatbelt cannot enforce the proxy.
  */
 export function resolveSandboxAllowNetwork(runtimeConfig?: AgentRuntimeConfig | null): boolean {
   const allowList = resolveSandboxEgressAllowList(runtimeConfig);
