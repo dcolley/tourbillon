@@ -5,10 +5,11 @@ import { PageHeader } from '@/components/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { StatusBadge } from '@/lib/status-badges';
-import { listProjects, type ProjectStatus } from '@/lib/projects';
+import { listProjects } from '@/lib/projects';
 import { listGoalOptions } from '@/lib/goals';
 import { getActiveCompanyOrNull } from '@/lib/company';
 import { NewProjectDialog } from './new-project-dialog';
+import { parseProjectFilter } from './project-filter';
 
 const FILTERS = [
   { id: 'active', label: 'Active' },
@@ -18,20 +19,13 @@ const FILTERS = [
   { id: 'archived', label: 'Archived' },
 ] as const;
 
-function parseFilter(value: string | undefined): ProjectStatus | 'all' {
-  if (value === 'paused' || value === 'completed' || value === 'archived' || value === 'all') {
-    return value;
-  }
-  return 'active';
-}
-
 export default async function ProjectsPage({
   searchParams,
 }: {
   searchParams: Promise<{ filter?: string }>;
 }) {
   const params = await searchParams;
-  const filter = parseFilter(params.filter);
+  const filter = parseProjectFilter(params.filter);
   const company = await getActiveCompanyOrNull();
   if (!company) return null;
 
