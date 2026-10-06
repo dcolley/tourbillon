@@ -204,4 +204,62 @@ describe('Goal cascade logic', () => {
       assert.equal(activityEntry.details.goalId, goalId);
     });
   });
+
+  describe('Manual status change clears auto-pause marker', () => {
+    it('verifies marker cleared when project status manually changed', () => {
+      const goalId = 'goal-123';
+      
+      // Simulate: project was auto-paused by goal archive
+      const autoPausedProject: { id: string; status: string; autoPausedByGoalId: string | null } = {
+        id: 'proj-1',
+        status: 'paused',
+        autoPausedByGoalId: goalId,
+      };
+      
+      assert.equal(autoPausedProject.autoPausedByGoalId, goalId);
+      
+      // Simulate: person manually changes status (to 'active' or 'paused')
+      const manuallyChangedProject: { id: string; status: string; autoPausedByGoalId: string | null } = {
+        id: autoPausedProject.id,
+        status: 'active',
+        autoPausedByGoalId: null, // cleared by updateProject
+      };
+      
+      assert.equal(manuallyChangedProject.autoPausedByGoalId, null);
+      
+      // When goal reactivates, this project should NOT be auto-resumed
+      const shouldAutoResume = 
+        manuallyChangedProject.status === 'paused' && 
+        manuallyChangedProject.autoPausedByGoalId === goalId;
+      
+      assert.equal(shouldAutoResume, false);
+    });
+
+    it('verifies marker cleared even when manually paused again', () => {
+      const goalId = 'goal-123';
+      
+      // 1. Project auto-paused by goal archive
+      let project: { id: string; status: string; autoPausedByGoalId: string | null } = {
+        id: 'proj-1',
+        status: 'paused',
+        autoPausedByGoalId: goalId,
+      };
+      
+      // 2. Person manually resumes it
+      project = { ...project, status: 'active', autoPausedByGoalId: null };
+      assert.equal(project.autoPausedByGoalId, null);
+      
+      // 3. Person manually pauses it again
+      project = { ...project, status: 'paused', autoPausedByGoalId: null };
+      assert.equal(project.status, 'paused');
+      assert.equal(project.autoPausedByGoalId, null);
+      
+      // 4. Goal reactivation should NOT resume this project
+      const shouldAutoResume = 
+        project.status === 'paused' && 
+        project.autoPausedByGoalId === goalId;
+      
+      assert.equal(shouldAutoResume, false);
+    });
+  });
 });

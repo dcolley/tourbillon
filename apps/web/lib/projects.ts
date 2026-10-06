@@ -210,6 +210,10 @@ export async function updateProject(
     if (status !== project.status) {
       updates.status = status;
       changed.status = status;
+      // Clear auto-pause marker when status is manually changed
+      // so future goal reactivations won't override manual status changes
+      updates.autoPausedByGoalId = null;
+      changed.autoPausedByGoalId = null;
     }
   }
 

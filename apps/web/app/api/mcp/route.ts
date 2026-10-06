@@ -1310,6 +1310,10 @@ async function handleSetGoalStatus(tokenCompanyId: string, params: any) {
     id: result.goal.id,
     title: result.goal.title,
     status: result.goal.status,
+    ...(result.cascadeInfo && {
+      projectsPaused: result.cascadeInfo.projectsPaused,
+      projectsResumed: result.cascadeInfo.projectsResumed,
+    }),
   };
 }
 
