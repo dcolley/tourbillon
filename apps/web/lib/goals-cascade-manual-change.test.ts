@@ -102,7 +102,7 @@ describe('Goal cascade: manual status change clears auto-pause marker', () => {
     assert.equal(finalProject.autoPausedByGoalId, null);
   });
 
-  it('should clear marker even when changing to the same status', async () => {
+  it('should NOT clear marker when status is unchanged (no-op update)', async () => {
     // Archive goal → auto-pause project
     await updateGoal(goal.id, { status: 'archived' }, company.id);
 
@@ -112,18 +112,24 @@ describe('Goal cascade: manual status change clears auto-pause marker', () => {
     assert.ok(pausedProject);
     assert.equal(pausedProject.autoPausedByGoalId, goal.id);
 
-    // Manually set status to 'paused' again (same status) → should clear marker
+    // Manually set status to 'paused' again (same status) → no-op, marker should remain
     const updated = await updateProject(project.id, { status: 'paused' }, company.id);
     
     assert.equal(updated.status, 'paused');
-    assert.equal(updated.autoPausedByGoalId, null);
+    assert.equal(updated.autoPausedByGoalId, goal.id); // marker unchanged
 
-    // Reactivate goal → should not resume
+    // Reactivate goal → should still auto-resume because marker wasn't cleared
     const reactivateResult = await updateGoal(goal.id, { status: 'active' }, company.id);
     
-    if (reactivateResult.cascadeInfo) {
-      assert.equal(reactivateResult.cascadeInfo.projectsResumed, 0);
-    }
+    assert.equal(reactivateResult.cascadeInfo?.projectsResumed, 1);
+    
+    // Verify project was auto-resumed
+    const finalProject = await db.query.projects.findFirst({
+      where: eq(projects.id, project.id),
+    });
+    assert.ok(finalProject);
+    assert.equal(finalProject.status, 'active');
+    assert.equal(finalProject.autoPausedByGoalId, null);
   });
 
   it('should handle multiple projects with mixed manual changes', async () => {

@@ -301,9 +301,13 @@ export async function updateGoal(
 
   // Revalidate affected project pages after cascade
   if (result.affectedProjectIds.length > 0) {
-    revalidatePath('/project');
-    for (const projectId of result.affectedProjectIds) {
-      revalidatePath(`/project/${projectId}`);
+    try {
+      revalidatePath('/project');
+      for (const projectId of result.affectedProjectIds) {
+        revalidatePath(`/project/${projectId}`);
+      }
+    } catch (err) {
+      // Ignore revalidation errors outside Next.js request context (e.g., in tests)
     }
   }
 
