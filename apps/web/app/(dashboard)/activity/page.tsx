@@ -69,6 +69,8 @@ function formatAction(action: string): string {
     'agent.created': 'Agent hired',
     'approval.created': 'Approval requested',
     'approval.decided': 'Approval decided',
+    'agent.github_policy_blocked': 'GitHub policy blocked',
+    'company.agent_pr_policy_disabled': 'Agent PR policy disabled',
   };
   return labels[action] ?? action.replace(/\./g, ' · ').replace(/_/g, ' ');
 }
@@ -78,6 +80,8 @@ function summarizeDetails(details: Record<string, unknown>): string {
   if (details.status) parts.push(`status → ${details.status}`);
   if (details.comment) parts.push('comment added');
   if (details.runId) parts.push(`run ${String(details.runId).slice(0, 8)}…`);
+  if (typeof details.tool === 'string') parts.push(details.tool);
+  if (typeof details.reason === 'string') parts.push(details.reason);
   return parts.join(', ') || JSON.stringify(details);
 }
 

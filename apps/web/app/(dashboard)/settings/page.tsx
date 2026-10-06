@@ -5,6 +5,7 @@ import {
   updateCompanyIntegrations,
   updateCompanyObservationalMemory,
   updateCompanyHitlyGate,
+  updateCompanyAgentPrPolicy,
 } from '@/lib/company';
 import { getVaultCredentialStatus } from '@/lib/vault';
 import {
@@ -16,7 +17,10 @@ import {
   isTavilyConfigured,
   isHitlyGateConfigured,
   resolveObservationalMemoryModel,
+  resolveAgentPrPolicy,
+  BOARD_DISPLAY_NAME,
 } from '@tourbillon/shared';
+import { listIssueAgentOptions } from '@/lib/issues';
 import { LlmProvidersSettings } from '@/components/llm-providers-settings';
 import { ObservationalMemorySettingsForm } from '@/components/observational-memory-settings-form';
 import { listLlmProvidersPublic } from '@/lib/llm-providers';
@@ -132,6 +136,27 @@ async function saveObservationalMemory(
   }
 }
 
+async function saveAgentPrPolicy(
+  _prev: ActionResult | null,
+  formData: FormData,
+): Promise<ActionResult> {
+  'use server';
+
+  const company = await getActiveCompany();
+
+  try {
+    await updateCompanyAgentPrPolicy(company.id, {
+      enabled: formData.get('enabled') === 'on',
+      protectedBranchPatterns: (formData.get('protectedBranchPatterns') as string) || undefined,
+      testAgentId: (formData.get('testAgentId') as string) || undefined,
+    });
+    return actionSuccess('Agent PR policy saved.');
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to save Agent PR policy.';
+    return actionError(message);
+  }
+}
+
 async function saveHitlyGate(
   _prev: ActionResult | null,
   formData: FormData,
@@ -166,6 +191,8 @@ export default async function SettingsPage() {
   const integrationSettings = parseCompanySettings(company.settings);
   const omResolved = resolveObservationalMemoryModel(integrationSettings);
   const providers = await listLlmProvidersPublic();
+  const companyAgents = await listIssueAgentOptions(company.id);
+  const agentPrPolicy = resolveAgentPrPolicy(integrationSettings);
 
   const llm = resolveModelProviderConfig();
 
@@ -217,7 +244,16 @@ export default async function SettingsPage() {
       </div>
 
       <CompanySettingsTabs
-        company={<CompanyTab company={company} saveSettings={saveSettings} />}
+        company={
+          <>
+            <CompanyTab company={company} saveSettings={saveSettings} />
+            <AgentPrPolicyTab
+              policy={agentPrPolicy}
+              agents={companyAgents}
+              saveAgentPrPolicy={saveAgentPrPolicy}
+            />
+          </>
+        }
         integrations={
           <IntegrationsTab
             companyId={company.id}
@@ -324,6 +360,90 @@ function CompanyTab({
         </label>
 
         <ActionSubmitButton label="Save company settings" />
+      </ActionForm>
+    </section>
+  );
+}
+
+function AgentPrPolicyTab({
+  policy,
+  agents,
+  saveAgentPrPolicy,
+}: {
+  policy: { enabled: boolean; protectedBranchPatterns: string[]; testAgentId: string | null };
+  agents: Array<{ id: string; name: string; urlKey: string }>;
+  saveAgentPrPolicy: (prev: ActionResult | null, formData: FormData) => Promise<ActionResult>;
+}) {
+  const ActionForm = require('@/components/action-form').ActionForm;
+  const ActionSubmitButton = require('@/components/action-form').ActionSubmitButton;
+
+  return (
+    <section className="border rounded-lg p-4 space-y-4">
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="text-lg font-semibold">Agent PR policy</h2>
+        <span
+          className={`text-xs rounded px-2 py-0.5 ${policy.enabled ? 'bg-green-100 text-green-800' : 'bg-muted text-muted-foreground'}`}
+        >
+          {policy.enabled ? 'On' : 'Off'}
+        </span>
+      </div>
+      <p className="text-sm text-muted-foreground">
+        Enforced in the GitHub tool layer (not prompts). Agent PRs stay draft. Merge, ready-for-review,
+        and writes to protected branches are blocked. Opening a PR creates a Test issue. Only the Board
+        can turn this off — disabling is recorded in Activity.
+      </p>
+      <ActionForm action={saveAgentPrPolicy} className="space-y-4">
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            name="enabled"
+            defaultChecked={policy.enabled}
+            className="rounded border-input"
+          />
+          <span className="font-medium">Enforce Agent PR policy</span>
+        </label>
+
+        <div className="space-y-1.5">
+          <label htmlFor="protectedBranchPatterns" className="text-sm font-medium">
+            Protected branch patterns
+          </label>
+          <textarea
+            id="protectedBranchPatterns"
+            name="protectedBranchPatterns"
+            rows={3}
+            defaultValue={policy.protectedBranchPatterns.join('\n')}
+            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+          />
+          <p className="text-xs text-muted-foreground">
+            One pattern per line. <code className="text-xs">*</code> matches one path segment
+            (e.g. <code className="text-xs">release/*</code>). Default: main, master, release/*.
+          </p>
+        </div>
+
+        <div className="space-y-1.5">
+          <label htmlFor="testAgentId" className="text-sm font-medium">
+            Designated test agent
+          </label>
+          <select
+            id="testAgentId"
+            name="testAgentId"
+            defaultValue={policy.testAgentId ?? ''}
+            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+          >
+            <option value="">{BOARD_DISPLAY_NAME}</option>
+            {agents.map((agent) => (
+              <option key={agent.id} value={agent.id}>
+                {agent.name} ({agent.urlKey})
+              </option>
+            ))}
+          </select>
+          <p className="text-xs text-muted-foreground">
+            Auto Test issues for agent-opened PRs are assigned here. Demo uses TestSuper. If unset, the
+            Board gets the issue.
+          </p>
+        </div>
+
+        <ActionSubmitButton label="Save Agent PR policy" />
       </ActionForm>
     </section>
   );

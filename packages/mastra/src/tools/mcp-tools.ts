@@ -22,6 +22,7 @@ import {
   getCompanyWorkspaceDir,
 } from '@tourbillon/shared/company-workspace';
 import { filterMcpTools } from './mcp-tool-filter';
+import { wrapGithubMcpTools } from './github-pr-policy';
 
 const mcpClientCache = new Map<string, MCPClient>();
 
@@ -240,7 +241,16 @@ export async function buildMCPTools(
     try {
       const clientTools = await client.listTools();
       const filtered = filterMcpTools(clientTools, def, runtimeConfig);
-      Object.assign(tools, filtered);
+      const gated =
+        serverId === 'github-mcp'
+          ? wrapGithubMcpTools(filtered, {
+              companyId: agentRecord.companyId,
+              agentId: agentRecord.id,
+              agentName: agentRecord.name,
+              companySettings,
+            })
+          : filtered;
+      Object.assign(tools, gated);
     } catch (err) {
       console.warn(`[mcp-tools] Failed to load tools from ${serverId}:`, err);
     }

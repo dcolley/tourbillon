@@ -1,4 +1,5 @@
 import type { AgentModelSettings } from './model-settings';
+import type { AgentPrPolicySettings } from './agent-pr-policy';
 
 // ─── Wake Loop Types ───────────────────────────────────────────────────────
 
@@ -201,6 +202,8 @@ export interface CompanySettings {
   tavilyApiKey?: string;
   observationalMemory?: ObservationalMemorySettings;
   hitlyGate?: HitlyGateSettings;
+  /** Draft-only agent PRs, protected-branch writes, Auto Test issues. Default ON. */
+  agentPrPolicy?: AgentPrPolicySettings;
 }
 
 export const DEFAULT_RUNTIME_CONFIG: AgentRuntimeConfig = {

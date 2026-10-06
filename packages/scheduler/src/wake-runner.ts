@@ -117,7 +117,7 @@ async function persistContextBudgetSnapshot(
     });
     toolSchemas = Object.values(tools);
     
-    systemPrompt = await assembleAgentSystemPrompt(agentRecord);
+    systemPrompt = await assembleAgentSystemPrompt(agentRecord, { companySettings });
   } catch (err) {
     tracer.warn('failed to assemble tools/prompt for budget snapshot', {
       error: err instanceof Error ? err.message : String(err),

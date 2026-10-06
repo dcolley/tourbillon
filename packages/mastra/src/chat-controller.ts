@@ -20,7 +20,10 @@ import {
   isMastraTracingEnabled,
   type CompanySettings,
   type AgentRuntimeConfig,
+  GITHUB_AGENT_PR_POLICY_PROMPT,
+  resolveAgentPrPolicy,
 } from '@tourbillon/shared';
+import { resolveAgentMcpServerIds } from '@tourbillon/shared/mcp-registry';
 import {
   assembleAgentTools,
   getAgentMemory,
@@ -132,6 +135,7 @@ function assembleChatSystemPrompt(
   agentRecord: AgentRecord,
   prepared: Awaited<ReturnType<typeof prepareAgentSkills>>,
   toolIds: string[],
+  companySettings?: CompanySettings | null,
 ): string {
   const parts: string[] = [];
 
@@ -165,6 +169,14 @@ function assembleChatSystemPrompt(
     );
   }
 
+  const githubPolicyOn = resolveAgentPrPolicy(companySettings).enabled;
+  const hasGithub = resolveAgentMcpServerIds(agentRecord, {
+    agentRuntime: agentRecord.runtimeConfig as AgentRuntimeConfig,
+  }).includes('github-mcp');
+  if (githubPolicyOn && hasGithub) {
+    parts.push(`---\n\n${GITHUB_AGENT_PR_POLICY_PROMPT}`);
+  }
+
   return parts.join('\n\n');
 }
 
@@ -188,7 +200,12 @@ export async function createChatAgentWithSkills(
         : null,
     )
     .filter((id): id is string => Boolean(id));
-  const systemPrompt = assembleChatSystemPrompt(effectiveRecord, prepared, toolIds);
+  const systemPrompt = assembleChatSystemPrompt(
+    effectiveRecord,
+    prepared,
+    toolIds,
+    options?.companySettings,
+  );
 
   const providerOverrides = modelProviderOverridesFromAgent(
     effectiveRecord.adapterType,
