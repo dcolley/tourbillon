@@ -10,7 +10,14 @@ export const BLOCKED_IPV4_CIDRS = [
   '100.64.0.0/10',
 ] as const;
 
+/** @deprecated Use METADATA_NEVER_IPV4_CIDR — the never-list is the whole /16. */
 export const CLOUD_METADATA_IPV4 = '169.254.169.254';
+
+export const METADATA_NEVER_IPV4_CIDR = '169.254.0.0/16';
+export const METADATA_NEVER_LINK_LOCAL_CIDR = 'fe80::/10';
+export const METADATA_NEVER_AWS_IPV6 = 'fd00:ec2::254';
+export const METADATA_NEVER_ALIBABA_IPV4 = '100.100.100.200';
+export const METADATA_NEVER_HOSTNAMES = ['metadata.google.internal', 'metadata'] as const;
 
 export const LOOPBACK_IPV4_CIDR = '127.0.0.0/8';
 
@@ -71,16 +78,20 @@ export function isHostAllowed(host: string, allowList: string[]): boolean {
   if (allowList.length === 0) return false;
   const hostWithoutPort = parseHostPort(host).host.replace(/^\[|\]$/g, '').toLowerCase();
 
+  const hostCanon = canonicalIp(hostWithoutPort);
+
   for (const raw of allowList) {
     const entry = raw.trim().toLowerCase();
     if (!entry) continue;
     if (entry === hostWithoutPort) return true;
+    if (hostCanon && canonicalIp(entry) === hostCanon) return true;
     if (entry.startsWith('*.')) {
       const domain = entry.slice(2);
       if (hostWithoutPort.endsWith(`.${domain}`)) return true;
     }
     if (entry.includes('/')) {
-      if (isIpv4Address(hostWithoutPort) && matchesIpv4Cidr(hostWithoutPort, entry)) return true;
+      const ipForCidr = effectiveIpv4(hostWithoutPort) ?? hostWithoutPort;
+      if (isIpv4Address(ipForCidr) && matchesIpv4Cidr(ipForCidr, entry)) return true;
       if (parseIpv6Bytes(hostWithoutPort) && matchesIpv6Cidr(hostWithoutPort, entry)) return true;
     }
   }
@@ -227,8 +238,26 @@ export function effectiveIpv4(ip: string): string | null {
   return unwrapIpv4Mapped(ip);
 }
 
+/**
+ * Cloud metadata destinations that are never allowed, even when listed.
+ * Exactly: 169.254.0.0/16, fe80::/10, fd00:ec2::254, 100.100.100.200
+ * (plus IPv4-mapped forms of the IPv4 entries).
+ */
 export function isCloudMetadataIp(ip: string): boolean {
-  return effectiveIpv4(ip) === CLOUD_METADATA_IPV4;
+  const v4 = effectiveIpv4(ip);
+  if (v4) {
+    if (matchesIpv4Cidr(v4, METADATA_NEVER_IPV4_CIDR)) return true;
+    if (v4 === METADATA_NEVER_ALIBABA_IPV4) return true;
+    return false;
+  }
+  if (matchesIpv6Cidr(ip, METADATA_NEVER_LINK_LOCAL_CIDR)) return true;
+  if (canonicalIp(ip) === canonicalIp(METADATA_NEVER_AWS_IPV6)) return true;
+  return false;
+}
+
+export function isCloudMetadataHost(host: string): boolean {
+  const normalized = normalizeHost(host);
+  return (METADATA_NEVER_HOSTNAMES as readonly string[]).includes(normalized);
 }
 
 export function isIpv6Unspecified(ip: string): boolean {
@@ -305,7 +334,7 @@ function cidrContainsIp(ip: string, network: string, prefix: number): boolean {
  * (or a /32 or /128 of that exact address) — never a wider CIDR, never a hostname.
  */
 export function hasPrivateOverride(ip: string, host: string, allowList: string[]): boolean {
-  if (isCloudMetadataIp(ip)) return false;
+  if (isCloudMetadataIp(ip) || isCloudMetadataHost(host)) return false;
 
   const hostNorm = normalizeHost(host);
   const loopback = isLoopbackIp(ip);
@@ -362,6 +391,67 @@ function pinChecked(rec: ResolvedAddress): ResolvedAddress {
   return rec;
 }
 
+/** Exact host or `*.domain` only — IP/CIDR entries do not count as a hostname match. */
+export function isHostnameListed(host: string, allowList: string[]): boolean {
+  const normalized = normalizeHost(host);
+  if (!normalized || ipLiteral(normalized)) return false;
+  for (const raw of allowList) {
+    const parsed = parseAllowListEntry(raw);
+    if (!parsed) continue;
+    if (parsed.kind === 'host' && parsed.value === normalized) return true;
+    if (parsed.kind === 'wildcard') {
+      const domain = parsed.value.slice(2);
+      if (domain && normalized.endsWith(`.${domain}`)) return true;
+    }
+  }
+  return false;
+}
+
+function denyNotOnAllowList(host: string): EgressDecision {
+  return {
+    allowed: false,
+    status: 403,
+    reason: 'not_on_allow_list',
+    detail: `Forbidden: Host '${host}' is not in the egress allow-list`,
+  };
+}
+
+function denyMetadata(): EgressDecision {
+  return {
+    allowed: false,
+    status: 403,
+    reason: 'cloud_metadata',
+    detail: 'Forbidden: Cloud metadata address is not allowed',
+  };
+}
+
+function checkResolvedAddresses(
+  host: string,
+  resolved: ResolvedAddress[],
+  allowList: string[],
+  publicInternet: boolean,
+): EgressDecision {
+  for (const rec of resolved) {
+    const ip = rec.address;
+    if (isCloudMetadataIp(ip)) return denyMetadata();
+    if (isBlockedPrivateRange(ip)) {
+      if (publicInternet || !hasPrivateOverride(ip, host, allowList)) {
+        return {
+          allowed: false,
+          status: 403,
+          reason: 'private_range',
+          detail: `Forbidden: Host '${host}' resolves to a blocked private range`,
+        };
+      }
+    }
+  }
+  return {
+    allowed: true,
+    pin: pinChecked(resolved[0]!),
+    checked: resolved.map(pinChecked),
+  };
+}
+
 export async function authorizeEgressTarget(options: {
   host: string;
   allowList: string[];
@@ -382,19 +472,27 @@ export async function authorizeEgressTarget(options: {
     };
   }
 
-  if (!publicInternet && allowList.length === 0) {
-    return {
-      allowed: false,
-      status: 403,
-      reason: 'not_on_allow_list',
-      detail: `Forbidden: Host '${host}' is not in the egress allow-list`,
-    };
+  if (isCloudMetadataHost(host)) {
+    return denyMetadata();
   }
 
   const literal = ipLiteral(host);
+  if (literal) {
+    if (!publicInternet && !isHostAllowed(host, allowList)) {
+      return denyNotOnAllowList(host);
+    }
+    return checkResolvedAddresses(host, [literal], allowList, publicInternet);
+  }
+
+  if (!publicInternet) {
+    if (!isHostnameListed(host, allowList)) {
+      return denyNotOnAllowList(host);
+    }
+  }
+
   let resolved: ResolvedAddress[];
   try {
-    resolved = literal ? [literal] : await resolve(host);
+    resolved = await resolve(host);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return {
@@ -414,40 +512,5 @@ export async function authorizeEgressTarget(options: {
     };
   }
 
-  for (const rec of resolved) {
-    const ip = rec.address;
-    if (isCloudMetadataIp(ip)) {
-      return {
-        allowed: false,
-        status: 403,
-        reason: 'cloud_metadata',
-        detail: `Forbidden: Cloud metadata address is not allowed`,
-      };
-    }
-    if (isBlockedPrivateRange(ip)) {
-      if (publicInternet || !hasPrivateOverride(ip, host, allowList)) {
-        return {
-          allowed: false,
-          status: 403,
-          reason: 'private_range',
-          detail: `Forbidden: Host '${host}' resolves to a blocked private range`,
-        };
-      }
-      continue;
-    }
-    if (!publicInternet && !isHostAllowed(host, allowList)) {
-      return {
-        allowed: false,
-        status: 403,
-        reason: 'not_on_allow_list',
-        detail: `Forbidden: Host '${host}' is not in the egress allow-list`,
-      };
-    }
-  }
-
-  return {
-    allowed: true,
-    pin: pinChecked(resolved[0]!),
-    checked: resolved.map(pinChecked),
-  };
+  return checkResolvedAddresses(host, resolved, allowList, publicInternet);
 }

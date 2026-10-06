@@ -178,7 +178,7 @@ describe('EgressProxy enforcement', () => {
       return [{ address: '127.0.0.1', family: 4 }];
     };
     const proxy = new EgressProxy({
-      allowList: ['127.0.0.1'],
+      allowList: ['pin.test', '127.0.0.1'],
       companyId: 'co-pin',
       resolve,
     });

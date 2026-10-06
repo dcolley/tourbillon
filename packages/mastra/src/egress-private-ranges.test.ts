@@ -6,7 +6,9 @@ import {
   canonicalIp,
   hasPrivateOverride,
   isBlockedPrivateRange,
+  isCloudMetadataHost,
   isCloudMetadataIp,
+  isHostnameListed,
   isIpv6Loopback,
   isIpv6Unspecified,
   isLoopbackIp,
@@ -92,11 +94,26 @@ describe('blocked private ranges', () => {
     assert.equal(isLoopbackIp('192.168.1.1'), false);
   });
 
-  it('identifies cloud metadata in v4 and mapped v6', () => {
+  it('identifies the exact metadata-never IP list (and mapped forms)', () => {
     assert.equal(isCloudMetadataIp('169.254.169.254'), true);
+    assert.equal(isCloudMetadataIp('169.254.169.253'), true);
+    assert.equal(isCloudMetadataIp('169.254.170.2'), true);
+    assert.equal(isCloudMetadataIp('169.254.0.1'), true);
     assert.equal(isCloudMetadataIp(mapped('169.254.169.254')), true);
-    assert.equal(isCloudMetadataIp(mappedHex('169.254.169.254')), true);
-    assert.equal(isCloudMetadataIp('169.254.169.253'), false);
+    assert.equal(isCloudMetadataIp(mappedHex('169.254.170.2')), true);
+    assert.equal(isCloudMetadataIp('100.100.100.200'), true);
+    assert.equal(isCloudMetadataIp(mapped('100.100.100.200')), true);
+    assert.equal(isCloudMetadataIp('fd00:ec2::254'), true);
+    assert.equal(isCloudMetadataIp('fe80::1'), true);
+    assert.equal(isCloudMetadataIp('fe80:0:0:0:0:0:0:1'), true);
+    assert.equal(isCloudMetadataIp('169.255.0.1'), false);
+    assert.equal(isCloudMetadataIp('100.100.100.201'), false);
+    assert.equal(isCloudMetadataIp('fd00:ec2::255'), false);
+    assert.equal(isCloudMetadataIp('1.1.1.1'), false);
+    assert.equal(isCloudMetadataHost('metadata'), true);
+    assert.equal(isCloudMetadataHost('metadata.google.internal'), true);
+    assert.equal(isCloudMetadataHost('METADATA.GOOGLE.INTERNAL'), true);
+    assert.equal(isCloudMetadataHost('api.example.com'), false);
   });
 
   it('unwraps dotted and hex IPv4-mapped forms to the same canonical IPv4', () => {
@@ -114,6 +131,13 @@ describe('hasPrivateOverride', () => {
       hasPrivateOverride('169.254.169.254', '169.254.169.254', ['169.254.169.254']),
       false,
     );
+    assert.equal(
+      hasPrivateOverride('169.254.170.2', '169.254.170.2', ['169.254.170.2', '169.254.0.0/16']),
+      false,
+    );
+    assert.equal(hasPrivateOverride('100.100.100.200', '100.100.100.200', ['100.100.100.200']), false);
+    assert.equal(hasPrivateOverride('fd00:ec2::254', 'fd00:ec2::254', ['fd00:ec2::254']), false);
+    assert.equal(hasPrivateOverride('fe80::1', 'fe80::1', ['fe80::1']), false);
     assert.equal(
       hasPrivateOverride(mapped('169.254.169.254'), 'metadata', ['169.254.169.254', '169.254.0.0/16']),
       false,
@@ -140,7 +164,6 @@ describe('hasPrivateOverride', () => {
     assert.equal(hasPrivateOverride('100.64.1.2', 'tailscale.example', ['*.example']), false);
     assert.equal(hasPrivateOverride('100.64.1.2', '100.64.1.2', ['100.64.0.0/10']), true);
     assert.equal(hasPrivateOverride('fc00::1', 'fc00::1', ['fc00::/7']), true);
-    assert.equal(hasPrivateOverride('fe80::1', 'fe80::1', ['fe80::1']), true);
   });
 });
 
@@ -162,7 +185,7 @@ describe('authorizeEgressTarget', () => {
     }
   });
 
-  it('refuses 127.0.0.1, LAN, CGNAT, metadata, and ::1 by default', async () => {
+  it('refuses 127.0.0.1, LAN, CGNAT, metadata, and ::1 when not listed', async () => {
     const blocked = [
       '127.0.0.1',
       '192.168.10.1',
@@ -178,10 +201,7 @@ describe('authorizeEgressTarget', () => {
       assert.equal(decision.allowed, false, host);
       if (!decision.allowed) {
         assert.equal(decision.status, 403, host);
-        assert.ok(
-          decision.reason === 'private_range' || decision.reason === 'cloud_metadata',
-          `${host} ${decision.reason}`,
-        );
+        assert.equal(decision.reason, 'not_on_allow_list', `${host} ${decision.reason}`);
       }
     }
   });
@@ -301,6 +321,111 @@ describe('authorizeEgressTarget', () => {
     assert.equal(decision.allowed, true);
     if (decision.allowed) {
       assert.deepEqual(decision.pin, { address: '127.0.0.1', family: 4 });
+    }
+  });
+
+  it('does not resolve unlisted hostnames in allow-list mode', async () => {
+    let lookups = 0;
+    const resolve: HostResolver = async (host) => {
+      lookups += 1;
+      throw new Error(`unexpected lookup for ${host}`);
+    };
+    assert.equal(isHostnameListed('never-allow.invalid', ['example.com', '*.example.com']), false);
+
+    const decision = await authorizeEgressTarget({
+      host: 'never-allow.invalid',
+      allowList: ['example.com', '*.example.com', '1.2.3.4'],
+      resolve,
+    });
+    assert.equal(decision.allowed, false);
+    if (!decision.allowed) {
+      assert.equal(decision.status, 403);
+      assert.equal(decision.reason, 'not_on_allow_list');
+    }
+    assert.equal(lookups, 0, 'unlisted hostname must not trigger DNS');
+  });
+
+  it('resolves only listed hostnames, then private-checks and pins', async () => {
+    const seen: string[] = [];
+    const resolve: HostResolver = async (host) => {
+      seen.push(host);
+      return [{ address: '1.1.1.1', family: 4 }];
+    };
+    const listed = await authorizeEgressTarget({
+      host: 'api.example.com',
+      allowList: ['api.example.com'],
+      resolve,
+    });
+    assert.equal(listed.allowed, true);
+    assert.deepEqual(seen, ['api.example.com']);
+
+    const unlisted = await authorizeEgressTarget({
+      host: 'other.example.com',
+      allowList: ['api.example.com'],
+      resolve,
+    });
+    assert.equal(unlisted.allowed, false);
+    if (!unlisted.allowed) assert.equal(unlisted.reason, 'not_on_allow_list');
+    assert.deepEqual(seen, ['api.example.com']);
+  });
+
+  it('public-internet mode still resolves unlisted hostnames', async () => {
+    let lookups = 0;
+    const resolve: HostResolver = async () => {
+      lookups += 1;
+      return [{ address: '1.1.1.1', family: 4 }];
+    };
+    const decision = await authorizeEgressTarget({
+      host: 'never-allow.invalid',
+      allowList: [],
+      publicInternet: true,
+      resolve,
+    });
+    assert.equal(decision.allowed, true);
+    assert.equal(lookups, 1);
+  });
+
+  it('refuses metadata hostnames and IPs even when listed, with no DNS for hostnames', async () => {
+    let lookups = 0;
+    const resolve: HostResolver = async () => {
+      lookups += 1;
+      return [{ address: '1.1.1.1', family: 4 }];
+    };
+    for (const host of ['metadata', 'metadata.google.internal']) {
+      const decision = await authorizeEgressTarget({
+        host,
+        allowList: [host, '*.google.internal'],
+        resolve,
+      });
+      assert.equal(decision.allowed, false, host);
+      if (!decision.allowed) {
+        assert.equal(decision.reason, 'cloud_metadata', host);
+        assert.equal(decision.status, 403, host);
+      }
+    }
+    assert.equal(lookups, 0);
+
+    for (const host of ['169.254.170.2', '100.100.100.200', 'fd00:ec2::254', 'fe80::1']) {
+      const decision = await authorizeEgressTarget({
+        host,
+        allowList: [host],
+      });
+      assert.equal(decision.allowed, false, host);
+      if (!decision.allowed) {
+        assert.equal(decision.reason, 'cloud_metadata', host);
+      }
+    }
+  });
+
+  it('refuses a listed hostname that resolves to a metadata IP', async () => {
+    const decision = await authorizeEgressTarget({
+      host: 'imds.example.com',
+      allowList: ['imds.example.com'],
+      resolve: resolveTo('169.254.169.254'),
+    });
+    assert.equal(decision.allowed, false);
+    if (!decision.allowed) {
+      assert.equal(decision.reason, 'cloud_metadata');
     }
   });
 });

@@ -116,7 +116,9 @@ export interface AgentRuntimeConfig {
      * The proxy blocks localhost/LAN/link-local/CGNAT by default. A private
      * destination is allowed only by an exact IP, a CIDR, or an exact hostname
      * whose resolved IPs are in that range. Wildcards never allow a private IP.
-     * 169.254.169.254 is never allowed. Loopback overrides must be an exact IP.
+     * Cloud metadata is never allowed, even when listed: 169.254.0.0/16,
+     * fe80::/10, fd00:ec2::254, 100.100.100.200, and hostnames metadata /
+     * metadata.google.internal. Loopback overrides must be an exact IP.
      *
      * Legacy `allowNetwork: true` with no list uses the proxy in public-internet
      * mode (public destinations allowed; private ranges blocked) when
