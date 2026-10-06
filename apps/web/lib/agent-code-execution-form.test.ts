@@ -18,6 +18,7 @@ describe('AgentCodeExecutionForm egress allow-list editor', () => {
     assert.match(source, /Empty list/);
     assert.match(source, /List of entries/);
     assert.match(source, /parseEgressAllowListEntry/);
+    assert.match(source, /@tourbillon\/shared\/egress-allow-list/);
     assert.match(source, /EGRESS_ALLOW_LIST_HELP/);
     assert.match(source, /EGRESS_ALLOW_LIST_ISOLATION_WARNING/);
     assert.match(source, /effectiveIsolation === 'none' \|\| effectiveIsolation === 'seatbelt'/);
