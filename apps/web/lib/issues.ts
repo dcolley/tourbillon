@@ -303,13 +303,13 @@ export interface UpdateIssueInput {
 export async function updateIssue(
   issueId: string,
   input: UpdateIssueInput,
-  companyIdOverride?: string
+  tokenCompanyId?: string
 ): Promise<Issue> {
   const issue = await db.query.issues.findFirst({ where: eq(issues.id, issueId) });
   if (!issue) throw new IssueValidationError('Issue not found.');
 
-  const activeCompany = companyIdOverride
-    ? await getCompanyById(companyIdOverride)
+  const activeCompany = tokenCompanyId
+    ? await getCompanyById(tokenCompanyId)
     : await getActiveCompany();
   if (!activeCompany) {
     throw new IssueValidationError('No active company selected');
