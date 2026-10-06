@@ -15,7 +15,9 @@ import {
   ensureEgressLandlockLibrary,
   getEgressLibDir,
   getEgressRuntimeDir,
+  hashEgressRunId,
   hashFileSha256,
+  UNIX_SOCKET_PATH_MAX,
   landlockNetAvailable,
   probeLandlockAbi,
   resolveEgressBwrapBinds,
@@ -127,6 +129,7 @@ describe('bwrap bind policy', () => {
       extraRwBinds: binds.extraRwBinds,
     });
     assert.ok(roBindSources(args).includes(lib), args.join(' '));
+    assert.ok(!args.includes('/sys'), 'do not bind host /sys into the sandbox');
     for (const src of rwBindSources(args)) {
       assert.ok(
         !src.startsWith(getEgressRuntimeDir()),
@@ -154,6 +157,40 @@ describe('bwrap bind policy', () => {
     assert.ok(!rw.includes(getEgressRuntimeDir()));
     assert.ok(!rw.includes(getEgressLibDir()));
     assert.ok(!rw.some((src) => src !== socketPath && src.startsWith(getEgressRuntimeDir())));
+  });
+});
+
+describe('egress proxy socket identity', () => {
+  it('hashes the full run id so UUID tasks and allow-lists do not collide', () => {
+    const company = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const taskA = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const taskB = 'bbbbcccc-cccc-4ccc-8ccc-cccccccccccc';
+    const truncatedA = `${company}-${taskA}`.slice(0, 40);
+    const truncatedB = `${company}-${taskB}`.slice(0, 40);
+    assert.equal(truncatedA, truncatedB);
+
+    assert.notEqual(
+      hashEgressRunId({ companyId: company, taskId: taskA, allowList: ['example.com'] }),
+      hashEgressRunId({ companyId: company, taskId: taskB, allowList: ['example.com'] }),
+    );
+    assert.notEqual(
+      hashEgressRunId({ companyId: company, taskId: taskA, allowList: ['example.com'] }),
+      hashEgressRunId({ companyId: company, taskId: taskA, allowList: ['example.org'] }),
+    );
+
+    const pathA = egressProxySocketPath(company, taskA, ['example.com']);
+    const pathB = egressProxySocketPath(company, taskB, ['example.com']);
+    assert.notEqual(pathA, pathB);
+    assert.ok(Buffer.byteLength(pathA, 'utf8') <= UNIX_SOCKET_PATH_MAX);
+    assert.match(pathA, /\.sock$/);
+  });
+
+  it('refuses an overlong path instead of truncating', () => {
+    const longRoot = join('/tmp', 'r'.repeat(90));
+    assert.throws(
+      () => egressProxySocketPath('co', 'task', ['h'], { socketRoot: longRoot }),
+      /107/,
+    );
   });
 });
 

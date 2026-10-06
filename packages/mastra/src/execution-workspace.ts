@@ -5,6 +5,7 @@ import {
   type IsolationBackend,
 } from '@mastra/core/workspace';
 import {
+  createTraceLogger,
   ensureExecutionWorkspace,
   resolveSandboxIsolation,
   resolveSandboxTimeoutMs,
@@ -90,6 +91,16 @@ function buildCacheKey(
   return `${companyId}:${taskId ?? 'idle'}:${isolation}:${timeoutMs}:${allowNetwork}:${egressKey}:${secretsFingerprint}`;
 }
 
+/** Socket path the code-execution factory binds for a non-empty allow-list. */
+export function resolveCodeExecutionProxySocketPath(
+  companyId: string,
+  taskId: string | undefined,
+  allowList: string[],
+  options?: { socketRoot?: string },
+): string {
+  return egressProxySocketPath(companyId, taskId, allowList, options);
+}
+
 const proxyRegistry = new Map<string, EgressProxy>();
 
 async function getOrStartProxy(
@@ -101,7 +112,9 @@ async function getOrStartProxy(
   const existing = proxyRegistry.get(cacheKey);
   if (existing) return existing;
   const proxy = new EgressProxy({ allowList, companyId, taskId });
-  await proxy.start({ socketPath: egressProxySocketPath(companyId, taskId) });
+  await proxy.start({
+    socketPath: resolveCodeExecutionProxySocketPath(companyId, taskId, allowList),
+  });
   proxyRegistry.set(cacheKey, proxy);
   return proxy;
 }
@@ -154,6 +167,11 @@ export function buildCodeExecutionWorkspace(): Workspace {
             extraRwBinds = binds.extraRwBinds;
           } catch (err) {
             if (isolation === 'none') throw err;
+            const message = err instanceof Error ? err.message : String(err);
+            createTraceLogger('egress', { companyId, taskId }).warn(
+              'Egress filter unavailable; continuing with OS network isolation only',
+              { error: message },
+            );
           }
         }
       }

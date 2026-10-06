@@ -1,6 +1,9 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
+import { join } from 'node:path';
 import type { AgentRuntimeConfig } from '@tourbillon/shared';
+import { resolveCodeExecutionProxySocketPath } from './execution-workspace';
+import { UNIX_SOCKET_PATH_MAX } from './egress-enforcement';
 
 describe('buildCodeExecutionWorkspace', () => {
   it('documents sandbox network configuration behavior', () => {
@@ -243,5 +246,35 @@ describe('buildCodeExecutionWorkspace', () => {
     assert.deepEqual(config.codeExecution?.egressAllowList, ['internal.corp.net']);
     assert.equal(config.codeExecution?.allowNetwork, false);
     // Expected: resolveSandboxAllowNetwork returns false (unix-socket proxy; no shared netns)
+  });
+});
+
+describe('buildCodeExecutionWorkspace proxy socket identity', () => {
+  const company = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const taskA = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const taskB = 'bbbbcccc-cccc-4ccc-8ccc-cccccccccccc';
+
+  it('does not collide UUID company+task ids that share a 40-char prefix', () => {
+    const truncatedA = `${company}-${taskA}`.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40);
+    const truncatedB = `${company}-${taskB}`.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40);
+    assert.equal(truncatedA, truncatedB, 'precondition: 40-char truncate must collide');
+
+    const pathA = resolveCodeExecutionProxySocketPath(company, taskA, ['example.com']);
+    const pathB = resolveCodeExecutionProxySocketPath(company, taskB, ['example.com']);
+    const pathAOrg = resolveCodeExecutionProxySocketPath(company, taskA, ['example.org']);
+
+    assert.notEqual(pathA, pathB);
+    assert.notEqual(pathA, pathAOrg);
+    assert.ok(Buffer.byteLength(pathA, 'utf8') <= UNIX_SOCKET_PATH_MAX, pathA);
+    assert.ok(Buffer.byteLength(pathB, 'utf8') <= UNIX_SOCKET_PATH_MAX, pathB);
+    assert.doesNotMatch(pathA, /aaaaaaaa-aaaa/);
+  });
+
+  it('refuses an overlong socket root instead of truncating', () => {
+    const longRoot = join('/tmp', 'r'.repeat(90));
+    assert.throws(
+      () => resolveCodeExecutionProxySocketPath(company, taskA, ['example.com'], { socketRoot: longRoot }),
+      /107|refusing to start/i,
+    );
   });
 });

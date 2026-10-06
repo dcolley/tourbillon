@@ -25,7 +25,14 @@ const DEFAULT_READONLY_BINDS = [
   '/etc/nsswitch.conf',
   '/etc/ld.so.cache',
   '/etc/localtime',
-  '/sys',
+];
+
+/** sockaddr_un.sun_path including the trailing NUL (Linux). */
+export const UNIX_SOCKET_PATH_MAX = 107;
+
+const DEFAULT_SOCKET_ROOTS = [
+  '/run/tourbillon/egress',
+  `/run/user/${process.getuid?.() ?? 1000}/tourbillon-egress`,
 ];
 
 let cachedAbi: number | null | undefined;
@@ -46,12 +53,67 @@ export function getEgressLibDir(): string {
   return dir;
 }
 
-/** Per-run directory that holds only this sandbox's proxy socket. */
-export function getEgressRunDir(companyId: string, taskId?: string): string {
-  const safe = `${companyId}-${taskId ?? 'idle'}`.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40);
-  const dir = join(getEgressRuntimeDir(), 'runs', safe);
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  return dir;
+function tryCreateSocketRoot(dir: string): boolean {
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(dir, 0o700);
+    const probe = join(dir, `.w-${process.pid}`);
+    writeFileSync(probe, '');
+    unlinkSync(probe);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Short fixed root for unix proxy sockets. Never the execution-workspace tree. */
+export function resolveEgressSocketRoot(override?: string): string {
+  const candidates = [
+    override,
+    process.env.TOURBILLON_EGRESS_SOCKET_ROOT,
+    ...DEFAULT_SOCKET_ROOTS,
+  ].filter((v): v is string => typeof v === 'string' && v.length > 0);
+
+  for (const dir of candidates) {
+    if (tryCreateSocketRoot(dir)) {
+      return dir;
+    }
+    if (override || process.env.TOURBILLON_EGRESS_SOCKET_ROOT === dir) {
+      throw new Error(
+        `Cannot create egress socket root ${dir} (need a 0700 directory). Refusing to start.`,
+      );
+    }
+  }
+  throw new Error(
+    'Cannot create a short egress socket root ' +
+      '(/run/tourbillon/egress or /run/user/$UID/tourbillon-egress). ' +
+      'Set TOURBILLON_EGRESS_SOCKET_ROOT. Refusing to start.',
+  );
+}
+
+export function assertUnixSocketPathLength(socketPath: string): void {
+  const bytes = Buffer.byteLength(socketPath, 'utf8');
+  if (bytes > UNIX_SOCKET_PATH_MAX) {
+    throw new Error(
+      `Egress proxy unix socket path is ${bytes} bytes (max ${UNIX_SOCKET_PATH_MAX}). ` +
+        'Refusing to start; never truncating. Use a shorter TOURBILLON_EGRESS_SOCKET_ROOT ' +
+        `(default /run/tourbillon/egress). Path: ${socketPath}`,
+    );
+  }
+}
+
+/** Stable hash of the full run identity — never a truncated companyId-taskId. */
+export function hashEgressRunId(options: {
+  companyId: string;
+  taskId?: string;
+  allowList?: string[];
+}): string {
+  const identity = [
+    options.companyId,
+    options.taskId ?? 'idle',
+    (options.allowList ?? []).slice().sort().join('\n'),
+  ].join('\0');
+  return createHash('sha256').update(identity).digest('hex').slice(0, 16);
 }
 
 export function hashFileSha256(filePath: string): string {
@@ -192,8 +254,21 @@ export function ensureEgressLandlockLibrary(): string {
   return lib;
 }
 
-export function egressProxySocketPath(companyId: string, taskId?: string): string {
-  return join(getEgressRunDir(companyId, taskId), 'proxy.sock');
+/**
+ * Per-run unix socket: `/run/tourbillon/egress/<hash>.sock`.
+ * Hash covers the full companyId, taskId, and allow-list (never truncated names).
+ */
+export function egressProxySocketPath(
+  companyId: string,
+  taskId?: string,
+  allowList: string[] = [],
+  options?: { socketRoot?: string },
+): string {
+  const root = resolveEgressSocketRoot(options?.socketRoot);
+  const hash = hashEgressRunId({ companyId, taskId, allowList });
+  const socketPath = join(root, `${hash}.sock`);
+  assertUnixSocketPathLength(socketPath);
+  return socketPath;
 }
 
 /**

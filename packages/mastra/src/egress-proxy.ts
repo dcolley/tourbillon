@@ -137,6 +137,17 @@ export class EgressProxy {
       };
 
       if ('socketPath' in listen) {
+        const pathBytes = Buffer.byteLength(listen.socketPath, 'utf8');
+        if (pathBytes > 107) {
+          reject(
+            new Error(
+              `Egress proxy unix socket path is ${pathBytes} bytes (max 107). ` +
+                'Refusing to start; never truncating.',
+            ),
+          );
+          this.server = null;
+          return;
+        }
         this.socketPath = listen.socketPath;
         try {
           unlinkSync(listen.socketPath);
