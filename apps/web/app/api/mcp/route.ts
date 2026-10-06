@@ -1195,7 +1195,7 @@ async function handleSetIssueStatus(tokenCompanyId: string, params: any) {
     throw new Error('Issue not found');
   }
 
-  const updated = await updateIssue(issue_id, { status });
+  const updated = await updateIssue(issue_id, { status }, company_id);
   return {
     id: updated.id,
     identifier: updated.identifier,
@@ -1393,7 +1393,7 @@ async function handleSetProjectStatus(tokenCompanyId: string, params: any) {
   }
 
   const input: UpdateProjectInput = { status };
-  const updated = await updateProject(project_id, input);
+  const updated = await updateProject(project_id, input, company_id);
   return {
     id: updated.id,
     title: updated.title,

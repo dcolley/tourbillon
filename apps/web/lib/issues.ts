@@ -300,11 +300,20 @@ export interface UpdateIssueInput {
   projectId?: string | null;
 }
 
-export async function updateIssue(issueId: string, input: UpdateIssueInput): Promise<Issue> {
+export async function updateIssue(
+  issueId: string,
+  input: UpdateIssueInput,
+  companyIdOverride?: string
+): Promise<Issue> {
   const issue = await db.query.issues.findFirst({ where: eq(issues.id, issueId) });
   if (!issue) throw new IssueValidationError('Issue not found.');
 
-  const activeCompany = await getActiveCompany();
+  const activeCompany = companyIdOverride
+    ? await getCompanyById(companyIdOverride)
+    : await getActiveCompany();
+  if (!activeCompany) {
+    throw new IssueValidationError('No active company selected');
+  }
   assertCompanyAccess(issue.companyId, activeCompany.id);
 
   const updates: Partial<Issue> & { updatedAt: Date } = { updatedAt: new Date() };
