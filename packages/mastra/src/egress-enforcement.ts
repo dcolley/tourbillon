@@ -33,6 +33,7 @@ export const UNIX_SOCKET_PATH_MAX = 107;
 const DEFAULT_SOCKET_ROOTS = [
   '/run/tourbillon/egress',
   `/run/user/${process.getuid?.() ?? 1000}/tourbillon-egress`,
+  '/tmp/tourbillon-egress',
 ];
 
 let cachedAbi: number | null | undefined;
@@ -86,7 +87,7 @@ export function resolveEgressSocketRoot(override?: string): string {
   }
   throw new Error(
     'Cannot create a short egress socket root ' +
-      '(/run/tourbillon/egress or /run/user/$UID/tourbillon-egress). ' +
+      '(/run/tourbillon/egress, /run/user/$UID/tourbillon-egress, or /tmp/tourbillon-egress). ' +
       'Set TOURBILLON_EGRESS_SOCKET_ROOT. Refusing to start.',
   );
 }
