@@ -3,8 +3,9 @@ import { PageHeader } from '@/components/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { StatusBadge } from '@/lib/status-badges';
-import { listGoals, type GoalStatus } from '@/lib/goals';
+import { listGoals } from '@/lib/goals';
 import { NewGoalDialog } from './new-goal-dialog';
+import { parseGoalFilter } from './goal-filter';
 
 const FILTERS = [
   { id: 'active', label: 'Active' },
@@ -13,17 +14,13 @@ const FILTERS = [
   { id: 'archived', label: 'Archived' },
 ] as const;
 
-function parseFilter(value: string | undefined): GoalStatus | 'all' {
-  if (value === 'completed' || value === 'archived' || value === 'all') return value;
-  return 'active';
-}
-
 export default async function GoalsPage({
   searchParams,
 }: {
-  searchParams: { filter?: string };
+  searchParams: Promise<{ filter?: string }>;
 }) {
-  const filter = parseFilter(searchParams.filter);
+  const params = await searchParams;
+  const filter = parseGoalFilter(params.filter);
   const goalList = await listGoals(filter);
 
   return (
