@@ -3,6 +3,10 @@
 import { useActionState, useState } from 'react';
 import type { AgentRuntimeType, SandboxIsolation } from '@tourbillon/shared';
 import type { CodeExecutionAvailability } from '@tourbillon/shared';
+import {
+  EGRESS_LAN_BLOCKING_NEEDS_BWRAP,
+  EGRESS_PRIVATE_RANGES_HELP,
+} from '@tourbillon/shared';
 import type { ActionResult } from '@/lib/action-result';
 import { useActionToast } from '@/hooks/use-action-toast';
 import { ActionSubmitButton } from '@/components/action-form';
@@ -38,6 +42,10 @@ export function AgentCodeExecutionForm({
   const [state, formAction] = useActionState(updateCodeExecution, null);
   useActionToast(state);
   const [enabled, setEnabled] = useState(codeExecutionEnabled);
+  const [isolation, setIsolation] = useState(isolationOverride ?? '');
+  const effectiveIsolation = (isolation || availability.isolation) as SandboxIsolation;
+  const showLanBlockingWarning =
+    enabled && (effectiveIsolation === 'none' || effectiveIsolation === 'seatbelt');
 
   return (
     <form action={formAction} className="space-y-4 border-t pt-4">
@@ -160,7 +168,8 @@ export function AgentCodeExecutionForm({
             <select
               id="codeExecutionIsolation"
               name="codeExecutionIsolation"
-              defaultValue={isolationOverride ?? ''}
+              value={isolation}
+              onChange={(e) => setIsolation(e.target.value)}
               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
             >
               <option value="">Use environment default ({availability.isolation})</option>
@@ -181,11 +190,18 @@ export function AgentCodeExecutionForm({
               <span>
                 <span className="text-sm font-medium">Allow network (sandbox)</span>
                 <span className="block text-xs text-muted-foreground">
-                  Dangerous: this lets the agent reach the internet from code execution. Only enable for
+                  Dangerous: this lets the agent reach the public internet from code execution via the
+                  egress proxy. Private ranges are blocked unless listed explicitly. Only enable for
                   testing agents with strict instructions.
                 </span>
               </span>
             </label>
+            <p className="text-xs text-muted-foreground">{EGRESS_PRIVATE_RANGES_HELP}</p>
+            {showLanBlockingWarning && (
+              <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-950 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-100">
+                {EGRESS_LAN_BLOCKING_NEEDS_BWRAP}
+              </div>
+            )}
           </div>
           {(timeoutOverride !== undefined || isolationOverride !== undefined || allowNetworkOverride !== undefined) && (
             <label className="flex items-center gap-2 text-xs text-muted-foreground">

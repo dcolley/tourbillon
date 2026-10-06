@@ -2,7 +2,11 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import { join } from 'node:path';
 import type { AgentRuntimeConfig } from '@tourbillon/shared';
-import { newEgressRunId, resolveCodeExecutionProxySocketPath } from './execution-workspace';
+import {
+  newEgressRunId,
+  planCodeExecutionEgress,
+  resolveCodeExecutionProxySocketPath,
+} from './execution-workspace';
 import { EgressProxy } from './egress-proxy';
 import { existsSync } from 'node:fs';
 import { createServer } from 'node:http';
@@ -53,7 +57,8 @@ describe('buildCodeExecutionWorkspace', () => {
       },
     };
     assert.equal(allowConfig.codeExecution?.allowNetwork, true);
-    // Expected: LocalSandbox constructed with nativeSandbox: { allowNetwork: true }
+    // Expected: isolation=bwrap + legacy allowNetwork routes through the
+    // public-internet proxy (no shared netns). Private ranges stay blocked.
     
     // Scenario 4: isolation='none' (no nativeSandbox config)
     const noneConfig: AgentRuntimeConfig = {
@@ -95,7 +100,59 @@ describe('buildCodeExecutionWorkspace', () => {
     assert.equal(config.codeExecution?.allowNetwork, true);
     
     // Expected behavior: LocalSandbox constructed WITHOUT nativeSandbox parameter
-    // because isolation is 'none'
+    // because isolation is 'none'. Proxy cannot be enforced; a per-run warning
+    // is logged and the run is not refused.
+  });
+
+  it('plans public-internet proxy for legacy allowNetwork on bwrap', () => {
+    const config: AgentRuntimeConfig = {
+      heartbeat: {
+        enabled: false,
+        intervalSec: 0,
+        wakeOnAssignment: true,
+        wakeOnDemand: true,
+        wakeOnAutomation: false,
+      },
+      timeout: { heartbeatSec: 300, graceSec: 30 },
+      codeExecution: { isolation: 'bwrap', allowNetwork: true },
+    };
+    assert.deepEqual(planCodeExecutionEgress('bwrap', config), { kind: 'public-internet' });
+    assert.deepEqual(planCodeExecutionEgress('none', config), {
+      kind: 'unenforceable-legacy',
+      isolation: 'none',
+    });
+    assert.deepEqual(planCodeExecutionEgress('seatbelt', config), {
+      kind: 'unenforceable-legacy',
+      isolation: 'seatbelt',
+    });
+  });
+
+  it('plans deny-filter and allow-list independently of allowNetwork', () => {
+    const base: AgentRuntimeConfig = {
+      heartbeat: {
+        enabled: false,
+        intervalSec: 0,
+        wakeOnAssignment: true,
+        wakeOnDemand: true,
+        wakeOnAutomation: false,
+      },
+      timeout: { heartbeatSec: 300, graceSec: 30 },
+    };
+    assert.deepEqual(
+      planCodeExecutionEgress('bwrap', { ...base, codeExecution: { egressAllowList: [] } }),
+      { kind: 'deny-filter' },
+    );
+    assert.deepEqual(
+      planCodeExecutionEgress('bwrap', {
+        ...base,
+        codeExecution: { egressAllowList: ['api.example.com'] },
+      }),
+      { kind: 'allow-list', allowList: ['api.example.com'] },
+    );
+    assert.deepEqual(
+      planCodeExecutionEgress('bwrap', { ...base, codeExecution: { allowNetwork: false } }),
+      { kind: 'none' },
+    );
   });
 
   it('validates sandbox cache key includes allowNetwork', () => {
