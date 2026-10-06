@@ -66,6 +66,12 @@ export function resolveSandboxEgressAllowList(
   return runtimeConfig?.codeExecution?.egressAllowList;
 }
 
+/**
+ * OS-level network share for Mastra LocalSandbox (`allowNetwork` / `--unshare-net`).
+ * When `egressAllowList` is set, this is only the coarse switch (empty → off,
+ * non-empty → on so DNS and the per-run proxy are reachable). Destination
+ * filtering is enforced separately (Landlock + egress proxy), not by this boolean.
+ */
 export function resolveSandboxAllowNetwork(runtimeConfig?: AgentRuntimeConfig | null): boolean {
   const allowList = resolveSandboxEgressAllowList(runtimeConfig);
   

@@ -105,11 +105,12 @@ export interface AgentRuntimeConfig {
     isolation?: 'none' | 'seatbelt' | 'bwrap';
     allowNetwork?: boolean;
     /**
-     * Egress network allow-list: hosts or CIDRs (e.g. ['api.example.com', '10.0.0.0/8']).
-     * When defined (including empty array), this replaces the `allowNetwork` boolean:
-     *   - Empty array → no network egress
-     *   - Non-empty array → network egress to listed hosts/CIDRs
-     * When undefined, legacy `allowNetwork` boolean is used for backward compatibility.
+     * Egress allow-list: hosts or CIDRs (e.g. ['api.example.com', '10.0.0.0/8']).
+     * When defined (including empty), this replaces `allowNetwork`:
+     *   - Empty array → no TCP egress (enforced)
+     *   - Non-empty → only listed hosts/CIDRs (Landlock + per-run proxy)
+     * When undefined, legacy `allowNetwork` on/off is used.
+     * isolation=none with an allow-list requires Linux Landlock ABI 4+; otherwise the sandbox refuses to start.
      */
     egressAllowList?: string[];
   };

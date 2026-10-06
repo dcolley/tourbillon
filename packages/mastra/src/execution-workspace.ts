@@ -16,6 +16,12 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
+import { EgressProxy } from './egress-proxy';
+import {
+  assertCanEnforceEgressAllowList,
+  buildEgressFilterEnv,
+  sandboxDevNullPaths,
+} from './egress-enforcement';
 
 function readCodeExecutionConfig(requestContext: {
   get: (key: string) => unknown;
@@ -42,7 +48,6 @@ function extractAgentSecrets(requestContext: {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(secrets)) {
     if (typeof key === 'string' && typeof value === 'string' && key.trim() && value.trim()) {
-      // Only inject well-formed key=value pairs
       env[key.trim()] = value;
     }
   }
@@ -53,25 +58,50 @@ function extractAgentSecrets(requestContext: {
 /**
  * AC-B1.3 fix: Hash secret values (not just keys) for sandboxCacheKey.
  * Rotating password values must recreate LocalSandbox with fresh env.
- * 
- * Returns SHA-256 hash of stable-sorted key=value pairs.
- * Never logs plaintext secrets or raw hash inputs.
  */
 function hashSecretValues(secrets: Record<string, string>): string {
   if (Object.keys(secrets).length === 0) {
     return '';
   }
   
-  // Stable sort: alphabetical by key, then hash "key=value\n" lines
   const sortedKeys = Object.keys(secrets).sort();
   const lines = sortedKeys.map((k) => `${k}=${secrets[k]}`);
   const input = lines.join('\n');
-  
-  // SHA-256 fingerprint (hex digest)
   const hash = createHash('sha256').update(input, 'utf8').digest('hex');
-  
-  // Return first 16 chars (sufficient for cache key uniqueness)
   return hash.substring(0, 16);
+}
+
+function buildCacheKey(
+  companyId: string,
+  taskId: string | undefined,
+  runtimeConfig: AgentRuntimeConfig | null,
+  agentSecrets: Record<string, string>,
+): string {
+  const isolation = resolveSandboxIsolation(runtimeConfig);
+  const timeoutMs = resolveSandboxTimeoutMs(runtimeConfig);
+  const allowNetwork = resolveSandboxAllowNetwork(runtimeConfig);
+  const egressAllowList = resolveSandboxEgressAllowList(runtimeConfig);
+  const secretsFingerprint = hashSecretValues(agentSecrets);
+  const egressKey = egressAllowList !== undefined 
+    ? egressAllowList.slice().sort().join(',')
+    : 'legacy';
+  return `${companyId}:${taskId ?? 'idle'}:${isolation}:${timeoutMs}:${allowNetwork}:${egressKey}:${secretsFingerprint}`;
+}
+
+const proxyRegistry = new Map<string, EgressProxy>();
+
+async function getOrStartProxy(
+  cacheKey: string,
+  allowList: string[],
+  companyId: string,
+  taskId?: string,
+): Promise<EgressProxy> {
+  const existing = proxyRegistry.get(cacheKey);
+  if (existing) return existing;
+  const proxy = new EgressProxy({ allowList, companyId, taskId });
+  await proxy.start();
+  proxyRegistry.set(cacheKey, proxy);
+  return proxy;
 }
 
 export function buildCodeExecutionWorkspace(): Workspace {
@@ -87,42 +117,64 @@ export function buildCodeExecutionWorkspace(): Workspace {
       const runtimeConfig = readCodeExecutionConfig(requestContext);
       const cwd = await ensureExecutionWorkspace(companyId, taskId);
       const isolation = resolveSandboxIsolation(runtimeConfig) as IsolationBackend;
+      const egressAllowList = resolveSandboxEgressAllowList(runtimeConfig);
+
+      assertCanEnforceEgressAllowList(isolation, egressAllowList);
+
       const allowNetwork = resolveSandboxAllowNetwork(runtimeConfig);
-      
-      // AC-B1.2: Inject agent secrets as environment variables into sandbox
       const agentSecrets = extractAgentSecrets(requestContext);
-      
-      return new LocalSandbox({
+      const cacheKey = buildCacheKey(companyId, taskId, runtimeConfig, agentSecrets);
+
+      let sandboxEnv: NodeJS.ProcessEnv = { ...agentSecrets };
+      let proxy: EgressProxy | undefined;
+
+      if (egressAllowList !== undefined) {
+        if (egressAllowList.length > 0) {
+          proxy = await getOrStartProxy(cacheKey, egressAllowList, companyId, taskId);
+          sandboxEnv = buildEgressFilterEnv({
+            proxyPort: proxy.getPort(),
+            extra: sandboxEnv,
+          });
+        } else {
+          try {
+            sandboxEnv = buildEgressFilterEnv({ extra: sandboxEnv });
+          } catch (err) {
+            if (isolation === 'none') throw err;
+          }
+        }
+      }
+
+      const sandbox = new LocalSandbox({
         workingDirectory: cwd,
         isolation,
         timeout: resolveSandboxTimeoutMs(runtimeConfig),
-        nativeSandbox: isolation !== 'none' ? { allowNetwork } : undefined,
-        // Inject secrets as environment variables
-        env: Object.keys(agentSecrets).length > 0 ? (agentSecrets as unknown as NodeJS.ProcessEnv) : undefined,
+        nativeSandbox: isolation !== 'none'
+          ? {
+              allowNetwork,
+              readOnlyPaths: sandboxDevNullPaths(),
+            }
+          : undefined,
+        env: Object.keys(sandboxEnv).length > 0 ? sandboxEnv : undefined,
       });
+
+      const originalDestroy = sandbox.destroy.bind(sandbox);
+      sandbox.destroy = async () => {
+        await originalDestroy();
+        const cachedProxy = proxyRegistry.get(cacheKey);
+        if (cachedProxy) {
+          await cachedProxy.stop();
+          proxyRegistry.delete(cacheKey);
+        }
+      };
+
+      return sandbox;
     },
     sandboxCacheKey: ({ requestContext }) => {
       const companyId = requestContext.get('companyId') as string | undefined;
       const taskId = requestContext.get('taskId') as string | undefined;
       const runtimeConfig = readCodeExecutionConfig(requestContext);
-      const isolation = resolveSandboxIsolation(runtimeConfig);
-      const timeoutMs = resolveSandboxTimeoutMs(runtimeConfig);
-      const allowNetwork = resolveSandboxAllowNetwork(runtimeConfig);
-      const egressAllowList = resolveSandboxEgressAllowList(runtimeConfig);
-      
-      // AC-B1.3 fix: Hash secret VALUES (not just keys) for cache invalidation.
-      // Rotating password values must trigger sandbox recreation with fresh env.
       const agentSecrets = extractAgentSecrets(requestContext);
-      const secretsFingerprint = hashSecretValues(agentSecrets);
-      
-      // Include egress allow-list in cache key (sorted, comma-joined)
-      const egressKey = egressAllowList !== undefined 
-        ? egressAllowList.slice().sort().join(',')
-        : 'legacy';
-      
-      return companyId
-        ? `${companyId}:${taskId ?? 'idle'}:${isolation}:${timeoutMs}:${allowNetwork}:${egressKey}:${secretsFingerprint}`
-        : undefined;
+      return companyId ? buildCacheKey(companyId, taskId, runtimeConfig, agentSecrets) : undefined;
     },
   });
 }
