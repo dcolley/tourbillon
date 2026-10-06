@@ -64,6 +64,16 @@
 #define SOCK_TYPE_MASK 0xf
 #endif
 
+extern char *program_invocation_short_name;
+
+/* LD_PRELOAD is inherited by the bwrap helper; applying filters there
+ * breaks --unshare-net loopback setup (AF_INET DGRAM ioctl). */
+static int is_bwrap_process(void)
+{
+	const char *name = program_invocation_short_name;
+	return name && (strcmp(name, "bwrap") == 0 || strcmp(name, "bubblewrap") == 0);
+}
+
 static int ll_create_ruleset(const struct landlock_ruleset_attr *attr, size_t size, unsigned int flags)
 {
 	return (int)syscall(__NR_landlock_create_ruleset, attr, size, flags);
@@ -374,6 +384,10 @@ static int bind_loopback(int family, unsigned long port)
 
 static void __attribute__((constructor)) tourbillon_apply_egress_filter(void)
 {
+	if (is_bwrap_process()) {
+		return;
+	}
+
 	const char *mode = getenv("TOURBILLON_EGRESS_MODE");
 	int proxy_mode = mode && strcmp(mode, "proxy") == 0;
 	unsigned long port = 17999;

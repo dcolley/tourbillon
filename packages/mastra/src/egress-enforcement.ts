@@ -25,6 +25,7 @@ const DEFAULT_READONLY_BINDS = [
   '/etc/nsswitch.conf',
   '/etc/ld.so.cache',
   '/etc/localtime',
+  '/sys',
 ];
 
 let cachedAbi: number | null | undefined;
