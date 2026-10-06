@@ -186,17 +186,17 @@ describe('resolveSandboxAllowNetwork with egressAllowList', () => {
     assert.equal(result, false, 'Empty egressAllowList should deny network even if allowNetwork is true');
   });
 
-  it('returns true when egressAllowList has entries', () => {
+  it('returns false when egressAllowList has entries (unix-socket proxy, no shared netns)', () => {
     const config: AgentRuntimeConfig = {
       heartbeat: { enabled: false, intervalSec: 0, wakeOnAssignment: true, wakeOnDemand: true, wakeOnAutomation: false },
       timeout: { heartbeatSec: 300, graceSec: 30 },
       codeExecution: {
-        allowNetwork: false, // legacy field ignored when egressAllowList is present
+        allowNetwork: true, // ignored — list present means no OS network share
         egressAllowList: ['api.example.com'],
       },
     };
     const result = resolveSandboxAllowNetwork(config);
-    assert.equal(result, true, 'Non-empty egressAllowList should enable network even if allowNetwork is false');
+    assert.equal(result, false, 'Allow-list uses unix-socket proxy; OS network stays off');
   });
 
   it('uses legacy allowNetwork boolean when egressAllowList is undefined', () => {

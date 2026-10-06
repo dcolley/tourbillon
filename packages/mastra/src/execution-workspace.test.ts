@@ -174,7 +174,7 @@ describe('buildCodeExecutionWorkspace', () => {
     
     // Expected cache keys (conceptual):
     // agentA: "companyId:issueId:bwrap:120000:false::secretsHash"
-    // agentB: "companyId:issueId:bwrap:120000:true:10.0.0.0/8,api.example.com:secretsHash"
+    // agentB: "companyId:issueId:bwrap:120000:false:10.0.0.0/8,api.example.com:secretsHash"
     // agentC: "companyId:issueId:bwrap:120000:true:legacy:secretsHash"
     
     assert.deepEqual(
@@ -220,7 +220,7 @@ describe('buildCodeExecutionWorkspace', () => {
     // Expected: resolveSandboxAllowNetwork returns false (empty list overrides allowNetwork)
   });
 
-  it('validates non-empty egressAllowList enables network regardless of allowNetwork', () => {
+  it('validates non-empty egressAllowList does not share the host network', () => {
     const config: AgentRuntimeConfig = {
       heartbeat: {
         enabled: false,
@@ -240,9 +240,8 @@ describe('buildCodeExecutionWorkspace', () => {
       },
     };
     
-    // Non-empty egressAllowList should result in allowNetwork: true being passed to LocalSandbox
     assert.deepEqual(config.codeExecution?.egressAllowList, ['internal.corp.net']);
     assert.equal(config.codeExecution?.allowNetwork, false);
-    // Expected: resolveSandboxAllowNetwork returns true (non-empty list overrides allowNetwork)
+    // Expected: resolveSandboxAllowNetwork returns false (unix-socket proxy; no shared netns)
   });
 });

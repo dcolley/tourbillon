@@ -1,5 +1,6 @@
 import * as http from 'node:http';
 import * as net from 'node:net';
+import { chmodSync, unlinkSync } from 'node:fs';
 import { createTraceLogger } from '@tourbillon/shared';
 
 const logger = createTraceLogger('egress-proxy', {});
@@ -77,6 +78,7 @@ export interface EgressProxyOptions {
 export class EgressProxy {
   private server: http.Server | null = null;
   private port = 0;
+  private socketPath: string | undefined;
   private readonly allowList: string[];
   private readonly companyId: string;
   private readonly taskId?: string;
@@ -87,7 +89,7 @@ export class EgressProxy {
     this.taskId = options.taskId;
   }
 
-  async start(): Promise<number> {
+  async start(listen: { socketPath: string } | { tcp: true } = { tcp: true }): Promise<number> {
     if (this.server) {
       throw new Error('Proxy already started');
     }
@@ -110,7 +112,16 @@ export class EgressProxy {
         reject(err);
       });
 
-      this.server.listen(0, '127.0.0.1', () => {
+      const onListening = () => {
+        if (this.socketPath) {
+          logger.info('Egress proxy started (unix)', {
+            companyId: this.companyId,
+            taskId: this.taskId,
+            socketPath: this.socketPath,
+          });
+          resolve(0);
+          return;
+        }
         const addr = this.server!.address();
         if (addr && typeof addr === 'object') {
           this.port = addr.port;
@@ -121,17 +132,46 @@ export class EgressProxy {
           });
           resolve(this.port);
         } else {
-          reject(new Error('Failed to get proxy port'));
+          reject(new Error('Failed to get proxy address'));
         }
-      });
+      };
+
+      if ('socketPath' in listen) {
+        this.socketPath = listen.socketPath;
+        try {
+          unlinkSync(listen.socketPath);
+        } catch {
+          /* missing is fine */
+        }
+        this.server.listen(listen.socketPath, () => {
+          /* User-ns sandboxes see a different uid; world-connect is required. */
+          try {
+            chmodSync(listen.socketPath, 0o666);
+          } catch {
+            /* chmod is best-effort; same-uid hosts still connect */
+          }
+          onListening();
+        });
+      } else {
+        this.server.listen(0, '127.0.0.1', onListening);
+      }
     });
   }
 
   async stop(): Promise<void> {
     if (!this.server) return;
+    const socketPath = this.socketPath;
 
     return new Promise((resolve, reject) => {
+      this.server!.closeAllConnections?.();
       this.server!.close((err) => {
+        if (socketPath) {
+          try {
+            unlinkSync(socketPath);
+          } catch {
+            /* already gone */
+          }
+        }
         if (err) {
           logger.error('Error stopping proxy', {
             companyId: this.companyId,
@@ -142,6 +182,7 @@ export class EgressProxy {
         } else {
           this.server = null;
           this.port = 0;
+          this.socketPath = undefined;
           resolve();
         }
       });
@@ -150,6 +191,10 @@ export class EgressProxy {
 
   getPort(): number {
     return this.port;
+  }
+
+  getSocketPath(): string | undefined {
+    return this.socketPath;
   }
 
   private resolveTargetHost(req: http.IncomingMessage): { host: string; port: number; path: string } | null {

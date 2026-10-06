@@ -20,7 +20,9 @@ import { EgressProxy } from './egress-proxy';
 import {
   assertCanEnforceEgressAllowList,
   buildEgressFilterEnv,
-  sandboxDevNullPaths,
+  buildTourbillonBwrapArgs,
+  egressProxySocketPath,
+  getEgressRuntimeDir,
 } from './egress-enforcement';
 
 function readCodeExecutionConfig(requestContext: {
@@ -99,7 +101,7 @@ async function getOrStartProxy(
   const existing = proxyRegistry.get(cacheKey);
   if (existing) return existing;
   const proxy = new EgressProxy({ allowList, companyId, taskId });
-  await proxy.start();
+  await proxy.start({ socketPath: egressProxySocketPath(companyId, taskId) });
   proxyRegistry.set(cacheKey, proxy);
   return proxy;
 }
@@ -131,8 +133,12 @@ export function buildCodeExecutionWorkspace(): Workspace {
       if (egressAllowList !== undefined) {
         if (egressAllowList.length > 0) {
           proxy = await getOrStartProxy(cacheKey, egressAllowList, companyId, taskId);
+          const socketPath = proxy.getSocketPath();
+          if (!socketPath) {
+            throw new Error('Egress proxy did not bind a unix socket');
+          }
           sandboxEnv = buildEgressFilterEnv({
-            proxyPort: proxy.getPort(),
+            proxySocketPath: socketPath,
             extra: sandboxEnv,
           });
         } else {
@@ -144,16 +150,24 @@ export function buildCodeExecutionWorkspace(): Workspace {
         }
       }
 
+      const nativeSandbox = isolation === 'none'
+        ? undefined
+        : isolation === 'bwrap'
+          ? {
+              allowNetwork,
+              bwrapArgs: buildTourbillonBwrapArgs({
+                workspacePath: cwd,
+                allowNetwork,
+                extraRwBinds: [getEgressRuntimeDir()],
+              }),
+            }
+          : { allowNetwork };
+
       const sandbox = new LocalSandbox({
         workingDirectory: cwd,
         isolation,
         timeout: resolveSandboxTimeoutMs(runtimeConfig),
-        nativeSandbox: isolation !== 'none'
-          ? {
-              allowNetwork,
-              readOnlyPaths: sandboxDevNullPaths(),
-            }
-          : undefined,
+        nativeSandbox,
         env: Object.keys(sandboxEnv).length > 0 ? sandboxEnv : undefined,
       });
 

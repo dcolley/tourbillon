@@ -1,14 +1,40 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import type { SandboxIsolation } from '@tourbillon/shared';
+import { dirname, join } from 'node:path';
+import { getExecutionWorkspaceRoot, type SandboxIsolation } from '@tourbillon/shared';
 
 const LANDLOCK_SOURCE = join(__dirname, 'native', 'tourbillon-egress-landlock.c');
 
+/** Loopback port advertised as HTTP_PROXY; the LD_PRELOAD helper forwards to the unix proxy. */
+export const EGRESS_PROXY_LOOPBACK_PORT = 17999;
+
+const DEFAULT_READONLY_BINDS = [
+  '/usr',
+  '/lib',
+  '/lib64',
+  '/bin',
+  '/sbin',
+  '/etc/alternatives',
+  '/etc/ssl',
+  '/etc/ca-certificates',
+  '/etc/resolv.conf',
+  '/etc/hosts',
+  '/etc/passwd',
+  '/etc/group',
+  '/etc/nsswitch.conf',
+  '/etc/ld.so.cache',
+  '/etc/localtime',
+];
+
 let cachedAbi: number | null | undefined;
 let cachedLibPath: string | undefined;
+
+export function getEgressRuntimeDir(): string {
+  const dir = join(getExecutionWorkspaceRoot(), '.runtime');
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
 
 /** Highest Landlock ABI, or null when unavailable. Network rules need ABI 4+. */
 export function probeLandlockAbi(): number | null {
@@ -34,8 +60,7 @@ export function probeLandlockAbi(): number | null {
       '}',
       '',
     ].join('\n');
-    const dir = join(tmpdir(), 'tourbillon-egress-landlock');
-    mkdirSync(dir, { recursive: true });
+    const dir = getEgressRuntimeDir();
     const hash = createHash('sha256').update(src).digest('hex').slice(0, 12);
     const bin = join(dir, `abi-probe-${hash}`);
     if (!existsSync(bin)) {
@@ -56,30 +81,43 @@ export function landlockNetAvailable(): boolean {
   return abi !== null && abi >= 4;
 }
 
-/** Compile (or reuse) the LD_PRELOAD Landlock filter. */
+export function seccompFilterSupported(): boolean {
+  return process.platform === 'linux' && process.arch === 'x64';
+}
+
+/** Compile (or reuse) the LD_PRELOAD filter into the execution runtime dir — not /tmp. */
 export function ensureEgressLandlockLibrary(): string {
   if (cachedLibPath && existsSync(cachedLibPath)) return cachedLibPath;
   if (!existsSync(LANDLOCK_SOURCE)) {
-    throw new Error(`Landlock filter source missing: ${LANDLOCK_SOURCE}`);
+    throw new Error(`Egress filter source missing: ${LANDLOCK_SOURCE}`);
   }
   const source = readFileSync(LANDLOCK_SOURCE);
   const hash = createHash('sha256').update(source).digest('hex').slice(0, 16);
-  const dir = join(tmpdir(), 'tourbillon-egress-landlock');
-  mkdirSync(dir, { recursive: true });
-  const lib = join(dir, `tourbillon-egress-landlock-${hash}.so`);
+  const dir = getEgressRuntimeDir();
+  const lib = join(dir, `tourbillon-egress-filter-${hash}.so`);
   if (!existsSync(lib)) {
     try {
-      execFileSync('gcc', ['-shared', '-fPIC', '-O2', '-o', lib, LANDLOCK_SOURCE], { stdio: 'pipe' });
+      execFileSync(
+        'gcc',
+        ['-shared', '-fPIC', '-O2', '-pthread', '-o', lib, LANDLOCK_SOURCE, '-ldl'],
+        { stdio: 'pipe' },
+      );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      throw new Error(`Failed to compile egress Landlock filter (gcc required): ${message}`);
+      throw new Error(`Failed to compile egress filter (gcc required): ${message}`);
     }
   }
   cachedLibPath = lib;
   return lib;
 }
 
+export function egressProxySocketPath(companyId: string, taskId?: string): string {
+  const safe = `${companyId}-${taskId ?? 'idle'}`.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40);
+  return join(getEgressRuntimeDir(), `proxy-${safe}.sock`);
+}
+
 export function buildEgressFilterEnv(options: {
+  proxySocketPath?: string;
   proxyPort?: number;
   extra?: NodeJS.ProcessEnv;
 }): NodeJS.ProcessEnv {
@@ -88,10 +126,12 @@ export function buildEgressFilterEnv(options: {
     ...options.extra,
     LD_PRELOAD: lib,
     TOURBILLON_EGRESS_ENFORCE: '1',
+    TOURBILLON_EGRESS_MODE: options.proxySocketPath ? 'proxy' : 'deny',
   };
-  if (options.proxyPort !== undefined) {
-    env.TOURBILLON_EGRESS_PROXY_PORT = String(options.proxyPort);
-    const proxyUrl = `http://127.0.0.1:${options.proxyPort}`;
+  if (options.proxySocketPath) {
+    env.TOURBILLON_EGRESS_PROXY_SOCKET = options.proxySocketPath;
+    env.TOURBILLON_EGRESS_PROXY_PORT = String(options.proxyPort ?? EGRESS_PROXY_LOOPBACK_PORT);
+    const proxyUrl = `http://127.0.0.1:${EGRESS_PROXY_LOOPBACK_PORT}`;
     env.HTTP_PROXY = proxyUrl;
     env.HTTPS_PROXY = proxyUrl;
     env.http_proxy = proxyUrl;
@@ -104,8 +144,9 @@ export function buildEgressFilterEnv(options: {
 
 /**
  * An allow-list (including empty) requires a real enforcement backend.
- * Linux Landlock ABI 4+ is the no-root path. isolation=none is allowed only
- * when Landlock can apply. Native isolation can still OS-block an empty list.
+ * isolation=none needs Landlock + seccomp (x86_64). Native isolation can
+ * OS-block an empty list (`--unshare-net`). A non-empty list on none also
+ * needs the unix-socket remap filter.
  */
 export function assertCanEnforceEgressAllowList(
   isolation: SandboxIsolation,
@@ -120,19 +161,71 @@ export function assertCanEnforceEgressAllowList(
     return;
   }
 
-  if (!landlockNetAvailable()) {
+  if (!empty && isolation === 'none') {
+    throw new Error(
+      'Cannot enforce a non-empty egress allow-list with isolation=none: ' +
+        'Landlock is port-based, so a TCP helper port would be reachable on any IP. ' +
+        'Use isolation=bwrap (unshare-net + unix-socket proxy) or isolation=seatbelt.',
+    );
+  }
+
+  if (!landlockNetAvailable() || !seccompFilterSupported()) {
     throw new Error(
       empty
         ? `Cannot enforce empty egress allow-list with isolation=${isolation} ` +
-          '(no Linux Landlock network ABI 4+). Use isolation=bwrap or isolation=seatbelt, ' +
-          'or run on Linux 6.7+ with Landlock.'
-        : 'Cannot enforce egress allow-list destinations without Linux Landlock (ABI 4+). ' +
-          'iptables/netns would require root and is not enabled. ' +
-          'Refusing to start the sandbox so an allow-list is never a no-op.',
+          '(UDP/TCP would leak). Need Linux Landlock ABI 4+ and x86_64 seccomp, ' +
+          'or isolation=bwrap/seatbelt. Refusing to start.'
+        : 'Cannot enforce egress allow-list destinations without Linux Landlock (ABI 4+), ' +
+          'seccomp, and bwrap --unshare-net + unix-socket proxy. Refusing to start.',
     );
   }
 }
 
-export function sandboxDevNullPaths(): string[] {
-  return ['/dev/null'];
+/**
+ * Full bwrap argv (replaces Mastra defaults) so we can add `--dev /dev`.
+ * When `allowNetwork` is false, `--unshare-net` is included.
+ */
+export function buildTourbillonBwrapArgs(options: {
+  workspacePath: string;
+  allowNetwork: boolean;
+  extraRoBinds?: string[];
+  extraRwBinds?: string[];
+}): string[] {
+  const args: string[] = [
+    '--unshare-pid',
+    '--unshare-ipc',
+    '--unshare-uts',
+  ];
+  if (!options.allowNetwork) {
+    args.push('--unshare-net');
+  }
+  args.push('--proc', '/proc');
+  args.push('--dev', '/dev');
+  args.push('--tmpfs', '/tmp');
+
+  for (const path of DEFAULT_READONLY_BINDS) {
+    args.push('--ro-bind-try', path, path);
+  }
+  for (const path of options.extraRoBinds ?? []) {
+    if (path && existsSync(path)) {
+      args.push('--ro-bind', path, path);
+    }
+  }
+  for (const path of options.extraRwBinds ?? []) {
+    if (path && existsSync(path)) {
+      args.push('--bind', path, path);
+    }
+  }
+
+  const nodeDir = dirname(process.execPath);
+  if (!DEFAULT_READONLY_BINDS.some((p) => nodeDir === p || nodeDir.startsWith(`${p}/`))) {
+    args.push('--ro-bind-try', nodeDir, nodeDir);
+  }
+  args.push('--ro-bind-try', '/opt', '/opt');
+  args.push('--ro-bind-try', '/snap', '/snap');
+
+  args.push('--bind', options.workspacePath, options.workspacePath);
+  args.push('--chdir', options.workspacePath);
+  args.push('--die-with-parent');
+  return args;
 }
