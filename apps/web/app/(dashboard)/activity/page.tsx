@@ -67,6 +67,7 @@ function formatAction(action: string): string {
     'issue.updated': 'Issue updated',
     'issue.created': 'Issue created',
     'agent.created': 'Agent hired',
+    'agent.code_execution_updated': 'Agent code & execution updated',
     'approval.created': 'Approval requested',
     'approval.decided': 'Approval decided',
   };
@@ -78,6 +79,13 @@ function summarizeDetails(details: Record<string, unknown>): string {
   if (details.status) parts.push(`status → ${details.status}`);
   if (details.comment) parts.push('comment added');
   if (details.runId) parts.push(`run ${String(details.runId).slice(0, 8)}…`);
+  if ('egressAllowList' in details) {
+    parts.push(
+      Array.isArray(details.egressAllowList)
+        ? `egress ${details.egressAllowList.length === 0 ? '[]' : details.egressAllowList.join(', ')}`
+        : 'egress off',
+    );
+  }
   return parts.join(', ') || JSON.stringify(details);
 }
 

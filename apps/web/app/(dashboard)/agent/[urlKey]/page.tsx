@@ -6,6 +6,7 @@ import { eq, desc } from 'drizzle-orm';
 import type { AgentRuntimeConfig, ObservationalMemorySettings } from '@tourbillon/shared';
 import { modelProviderOverridesFromAgent, resolveModelProviderConfig, isAgentBudgetEnforced, isAgentBudgetExceeded, agentRuntimeLabel, agentRuntimeFromAdapter, resolveAssignedTools, modelSettingsFromFormData, isCodeExecutionAvailable, formatExecutionWorkspacePathPreview, parseCompanySettings } from '@tourbillon/shared';
 import { AgentValidationError, AGENT_ROLE_OPTIONS, getAgentByUrlKey, listAgentsByUrlKey, updateAgentRuntimeConfig, updateAgentCapabilities, updateAgentBudget, updateAgentInstructions, updateAgentModel, updateAgentModelSettings, updateAgentProfile, updateAgentCodeExecution, cloneAgent, suggestCloneUrlKey } from '@/lib/agents';
+import { parseCodeExecutionFormData } from '@/lib/code-execution-config';
 import { actionError, actionSuccess, type ActionResult } from '@/lib/action-result';
 import { AgentDisambiguation } from '@/components/agent-disambiguation';
 import { DeepLinkCompanySync } from '@/components/deep-link-company-sync';
@@ -195,28 +196,19 @@ async function updateCodeExecution(
 ): Promise<ActionResult> {
   'use server';
 
-  const agentId = formData.get('agentId') as string;
-  const runtimeType = (formData.get('runtimeType') as 'agent' | 'harness') || 'agent';
-  const codeExecutionEnabled = formData.get('codeExecutionEnabled') === 'on';
+  let parsed;
+  try {
+    parsed = parseCodeExecutionFormData(formData);
+  } catch (err) {
+    return actionError(err instanceof Error ? err.message : 'Invalid egress allow-list.');
+  }
 
-  const timeoutRaw = (formData.get('codeExecutionTimeoutMs') as string)?.trim();
-  const timeoutMs = timeoutRaw ? parseInt(timeoutRaw, 10) : undefined;
-  if (timeoutRaw && (!Number.isFinite(timeoutMs) || timeoutMs! < 1000)) {
+  if (parsed.timeoutRaw && (!Number.isFinite(parsed.timeoutMs) || parsed.timeoutMs! < 1000)) {
     return actionError('Timeout must be at least 1000 ms.');
   }
 
-  const isolation = (formData.get('codeExecutionIsolation') as string) || null;
-  const allowNetwork = formData.get('codeExecutionAllowNetwork') === 'on';
-
   try {
-    await updateAgentCodeExecution(agentId, {
-      runtimeType,
-      codeExecutionEnabled,
-      timeoutMs: timeoutRaw ? timeoutMs : undefined,
-      isolation,
-      allowNetwork,
-      clearCodeExecutionOverrides: formData.get('clearCodeExecutionOverrides') === 'on',
-    });
+    await updateAgentCodeExecution(parsed.agentId, parsed.input);
   } catch (err) {
     return actionError(
       err instanceof AgentValidationError
@@ -848,6 +840,7 @@ export default async function AgentDetailPage({
                   timeoutOverride={runtime.codeExecution?.timeoutMs}
                   isolationOverride={runtime.codeExecution?.isolation}
                   allowNetworkOverride={runtime.codeExecution?.allowNetwork}
+                  egressAllowListOverride={runtime.codeExecution?.egressAllowList}
                   updateCodeExecution={updateCodeExecution}
                 />
               </section>

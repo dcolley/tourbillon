@@ -1,4 +1,4 @@
-import { db, agents, companies, type Agent } from '@tourbillon/db';
+import { db, agents, companies, activityLog, type Agent } from '@tourbillon/db';
 import { and, eq } from 'drizzle-orm';
 import {
   ROLE_DEFAULT_TOOLSETS,
@@ -22,7 +22,6 @@ import {
   type AgentModelSettingsPatch,
   type AgentRuntimeConfig,
   type AgentRuntimeType,
-  type SandboxIsolation,
 } from '@tourbillon/shared';
 import {
   resolveAgentMcpServerIds,
@@ -39,6 +38,10 @@ import { getActiveCompany } from './company';
 import { getDefaultLlmProviderRecord } from './llm-providers';
 import { invalidateChatControllerForAgent } from './chat';
 import { clearIdleThreadOnRuntimeSwitch } from '@tourbillon/mastra';
+import {
+  applyCodeExecutionOverrides,
+  buildCodeExecutionActivityDetails,
+} from './code-execution-config';
 
 const AGENT_ROLES = ['ceo', 'cto', 'engineer', 'pm', 'qa', 'designer', 'custom'] as const;
 export type AgentRole = (typeof AGENT_ROLES)[number];
@@ -590,8 +593,6 @@ export async function updateAgentCapabilities(
   return updated;
 }
 
-const VALID_SANDBOX_ISOLATION = new Set<SandboxIsolation>(['none', 'seatbelt', 'bwrap']);
-
 export async function updateAgentCodeExecution(
   agentId: string,
   input: {
@@ -636,41 +637,12 @@ export async function updateAgentCodeExecution(
   const current = agent.runtimeConfig as AgentRuntimeConfig;
   const runtimeConfig: AgentRuntimeConfig = { ...current };
 
-  if (input.clearCodeExecutionOverrides) {
-    runtimeConfig.codeExecution = undefined;
-  } else {
-    const codeExecution = { ...current.codeExecution };
-    if (input.timeoutMs === null || input.timeoutMs === 0) {
-      delete codeExecution.timeoutMs;
-    } else if (typeof input.timeoutMs === 'number' && Number.isFinite(input.timeoutMs) && input.timeoutMs > 0) {
-      codeExecution.timeoutMs = input.timeoutMs;
-    }
-    if (input.isolation === null || input.isolation === '') {
-      delete codeExecution.isolation;
-    } else if (input.isolation && VALID_SANDBOX_ISOLATION.has(input.isolation as SandboxIsolation)) {
-      codeExecution.isolation = input.isolation as SandboxIsolation;
-    }
-    if (input.allowNetwork === null) {
-      delete codeExecution.allowNetwork;
-    } else if (typeof input.allowNetwork === 'boolean') {
-      codeExecution.allowNetwork = input.allowNetwork;
-    }
-    if (input.egressAllowList === null) {
-      delete codeExecution.egressAllowList;
-    } else if (Array.isArray(input.egressAllowList)) {
-      // Validate and sanitize entries (trim whitespace, filter empty)
-      const sanitized = input.egressAllowList
-        .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
-        .filter((entry) => entry.length > 0);
-      codeExecution.egressAllowList = sanitized;
-    }
-    runtimeConfig.codeExecution =
-      codeExecution.timeoutMs !== undefined || 
-      codeExecution.isolation !== undefined || 
-      codeExecution.allowNetwork !== undefined ||
-      codeExecution.egressAllowList !== undefined
-        ? codeExecution
-        : undefined;
+  try {
+    runtimeConfig.codeExecution = applyCodeExecutionOverrides(current.codeExecution, input);
+  } catch (err) {
+    throw new AgentValidationError(
+      err instanceof Error ? err.message : 'Invalid egress allow-list.',
+    );
   }
 
   // Clean up idle threads when switching between Agent and Harness runtimes.
@@ -690,6 +662,23 @@ export async function updateAgentCodeExecution(
     })
     .where(eq(agents.id, agentId))
     .returning();
+
+  await db.insert(activityLog).values({
+    companyId: agent.companyId,
+    actorType: 'user',
+    actorId: 'dashboard',
+    actorName: 'Dashboard',
+    action: 'agent.code_execution_updated',
+    entityType: 'agent',
+    entityId: agent.id,
+    details: buildCodeExecutionActivityDetails({
+      runtimeType,
+      codeExecutionEnabled: input.codeExecutionEnabled,
+      before: current.codeExecution,
+      after: runtimeConfig.codeExecution,
+      clearCodeExecutionOverrides: input.clearCodeExecutionOverrides,
+    }),
+  });
 
   return updated;
 }

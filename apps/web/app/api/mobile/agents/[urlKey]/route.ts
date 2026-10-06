@@ -176,6 +176,12 @@ export async function PATCH(
           codeExecutionEnabled: body.codeExecutionEnabled === true,
           timeoutMs: typeof body.timeoutMs === 'number' ? body.timeoutMs : null,
           isolation: typeof body.isolation === 'string' ? body.isolation : null,
+          allowNetwork: typeof body.allowNetwork === 'boolean' ? body.allowNetwork : undefined,
+          egressAllowList: Array.isArray(body.egressAllowList)
+            ? body.egressAllowList.map(String)
+            : body.egressAllowList === null
+              ? null
+              : undefined,
           clearCodeExecutionOverrides: body.clearCodeExecutionOverrides === true,
         });
         break;

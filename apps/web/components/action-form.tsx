@@ -69,15 +69,17 @@ export function ActionSubmitButton({
   pendingLabel = 'Saving…',
   className,
   variant = 'outline',
+  disabled = false,
 }: {
   label?: string;
   pendingLabel?: string;
   className?: string;
   variant?: 'default' | 'outline' | 'secondary' | 'ghost' | 'destructive' | 'link';
+  disabled?: boolean;
 }) {
   const { pending } = useFormStatus();
   return (
-    <Button type="submit" disabled={pending} className={className} variant={variant}>
+    <Button type="submit" disabled={pending || disabled} className={className} variant={variant}>
       {pending ? pendingLabel : label}
     </Button>
   );
