@@ -28,9 +28,10 @@ function parseFilter(value: string | undefined): ProjectStatus | 'all' {
 export default async function ProjectsPage({
   searchParams,
 }: {
-  searchParams: { filter?: string };
+  searchParams: Promise<{ filter?: string }>;
 }) {
-  const filter = parseFilter(searchParams.filter);
+  const params = await searchParams;
+  const filter = parseFilter(params.filter);
   const company = await getActiveCompanyOrNull();
   if (!company) return null;
 

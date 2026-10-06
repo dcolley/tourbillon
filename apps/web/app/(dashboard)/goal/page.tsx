@@ -21,9 +21,10 @@ function parseFilter(value: string | undefined): GoalStatus | 'all' {
 export default async function GoalsPage({
   searchParams,
 }: {
-  searchParams: { filter?: string };
+  searchParams: Promise<{ filter?: string }>;
 }) {
-  const filter = parseFilter(searchParams.filter);
+  const params = await searchParams;
+  const filter = parseFilter(params.filter);
   const goalList = await listGoals(filter);
 
   return (
