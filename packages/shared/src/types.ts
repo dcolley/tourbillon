@@ -104,6 +104,17 @@ export interface AgentRuntimeConfig {
     timeoutMs?: number;
     isolation?: 'none' | 'seatbelt' | 'bwrap';
     allowNetwork?: boolean;
+    /**
+     * Egress allow-list: hosts or CIDRs (e.g. ['api.example.com', '10.0.0.0/8']).
+     * When defined (including empty), this replaces `allowNetwork`.
+     * Empty → no sandbox network: bwrap `--unshare-net` (no proxy socket bound);
+     * seatbelt denies network*; isolation=none uses Landlock+seccomp (TCP/UDP
+     * and AF_UNIX sockets) or refuses. Residual: isolation=none still sees the
+     * host filesystem; this is not a kernel IP filter.
+     * Non-empty → isolation=bwrap only (per-run unix-socket proxy). 
+     * isolation=none and isolation=seatbelt refuse a non-empty list.
+     */
+    egressAllowList?: string[];
   };
   /**
    * Knowledge-graph memory mounts (when `knowledge-graph` toolset is enabled).

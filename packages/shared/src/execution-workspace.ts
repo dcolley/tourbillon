@@ -60,7 +60,23 @@ export function resolveSandboxTimeoutMs(runtimeConfig?: AgentRuntimeConfig | nul
   return getDefaultSandboxTimeoutMs();
 }
 
+export function resolveSandboxEgressAllowList(
+  runtimeConfig?: AgentRuntimeConfig | null,
+): string[] | undefined {
+  return runtimeConfig?.codeExecution?.egressAllowList;
+}
+
+/**
+ * OS-level network share for Mastra LocalSandbox (`allowNetwork` / `--unshare-net`).
+ * When `egressAllowList` is set (empty or not), this is always false: the sandbox
+ * has no shared netns. Egress, if any, is only via the unix-socket proxy.
+ * When the list is unset, legacy `allowNetwork` on/off applies.
+ */
 export function resolveSandboxAllowNetwork(runtimeConfig?: AgentRuntimeConfig | null): boolean {
+  const allowList = resolveSandboxEgressAllowList(runtimeConfig);
+  if (allowList !== undefined) {
+    return false;
+  }
   return runtimeConfig?.codeExecution?.allowNetwork ?? false;
 }
 

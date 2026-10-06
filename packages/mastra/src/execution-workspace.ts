@@ -5,16 +5,26 @@ import {
   type IsolationBackend,
 } from '@mastra/core/workspace';
 import {
+  createTraceLogger,
   ensureExecutionWorkspace,
   resolveSandboxIsolation,
   resolveSandboxTimeoutMs,
   resolveSandboxAllowNetwork,
+  resolveSandboxEgressAllowList,
   type AgentRuntimeConfig,
 } from '@tourbillon/shared';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import { EgressProxy } from './egress-proxy';
+import {
+  assertCanEnforceEgressAllowList,
+  buildEgressFilterEnv,
+  buildTourbillonBwrapArgs,
+  egressProxySocketPath,
+  resolveEgressBwrapBinds,
+} from './egress-enforcement';
 
 function readCodeExecutionConfig(requestContext: {
   get: (key: string) => unknown;
@@ -41,7 +51,6 @@ function extractAgentSecrets(requestContext: {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(secrets)) {
     if (typeof key === 'string' && typeof value === 'string' && key.trim() && value.trim()) {
-      // Only inject well-formed key=value pairs
       env[key.trim()] = value;
     }
   }
@@ -52,25 +61,48 @@ function extractAgentSecrets(requestContext: {
 /**
  * AC-B1.3 fix: Hash secret values (not just keys) for sandboxCacheKey.
  * Rotating password values must recreate LocalSandbox with fresh env.
- * 
- * Returns SHA-256 hash of stable-sorted key=value pairs.
- * Never logs plaintext secrets or raw hash inputs.
  */
 function hashSecretValues(secrets: Record<string, string>): string {
   if (Object.keys(secrets).length === 0) {
     return '';
   }
   
-  // Stable sort: alphabetical by key, then hash "key=value\n" lines
   const sortedKeys = Object.keys(secrets).sort();
   const lines = sortedKeys.map((k) => `${k}=${secrets[k]}`);
   const input = lines.join('\n');
-  
-  // SHA-256 fingerprint (hex digest)
   const hash = createHash('sha256').update(input, 'utf8').digest('hex');
-  
-  // Return first 16 chars (sufficient for cache key uniqueness)
   return hash.substring(0, 16);
+}
+
+function buildCacheKey(
+  companyId: string,
+  taskId: string | undefined,
+  runtimeConfig: AgentRuntimeConfig | null,
+  agentSecrets: Record<string, string>,
+): string {
+  const isolation = resolveSandboxIsolation(runtimeConfig);
+  const timeoutMs = resolveSandboxTimeoutMs(runtimeConfig);
+  const allowNetwork = resolveSandboxAllowNetwork(runtimeConfig);
+  const egressAllowList = resolveSandboxEgressAllowList(runtimeConfig);
+  const secretsFingerprint = hashSecretValues(agentSecrets);
+  const egressKey = egressAllowList !== undefined 
+    ? egressAllowList.slice().sort().join(',')
+    : 'legacy';
+  return `${companyId}:${taskId ?? 'idle'}:${isolation}:${timeoutMs}:${allowNetwork}:${egressKey}:${secretsFingerprint}`;
+}
+
+/** Socket path the code-execution factory binds for a non-empty allow-list. */
+export function resolveCodeExecutionProxySocketPath(
+  companyId: string,
+  taskId: string | undefined,
+  allowList: string[],
+  options?: { socketRoot?: string; runId?: string },
+): string {
+  return egressProxySocketPath(companyId, taskId, allowList, options);
+}
+
+export function newEgressRunId(): string {
+  return randomBytes(16).toString('hex');
 }
 
 export function buildCodeExecutionWorkspace(): Workspace {
@@ -86,36 +118,94 @@ export function buildCodeExecutionWorkspace(): Workspace {
       const runtimeConfig = readCodeExecutionConfig(requestContext);
       const cwd = await ensureExecutionWorkspace(companyId, taskId);
       const isolation = resolveSandboxIsolation(runtimeConfig) as IsolationBackend;
+      const egressAllowList = resolveSandboxEgressAllowList(runtimeConfig);
+
+      assertCanEnforceEgressAllowList(isolation, egressAllowList);
+
       const allowNetwork = resolveSandboxAllowNetwork(runtimeConfig);
-      
-      // AC-B1.2: Inject agent secrets as environment variables into sandbox
       const agentSecrets = extractAgentSecrets(requestContext);
-      
-      return new LocalSandbox({
+
+      let sandboxEnv: NodeJS.ProcessEnv = { ...agentSecrets };
+      let proxy: EgressProxy | undefined;
+      let extraRoBinds: string[] = [];
+      let extraRwBinds: string[] = [];
+
+      if (egressAllowList !== undefined) {
+        if (egressAllowList.length > 0) {
+          const runId = newEgressRunId();
+          const socketPath = resolveCodeExecutionProxySocketPath(
+            companyId,
+            taskId,
+            egressAllowList,
+            { runId },
+          );
+          proxy = new EgressProxy({ allowList: egressAllowList, companyId, taskId });
+          await proxy.start({ socketPath });
+          if (!proxy.getSocketPath()) {
+            throw new Error('Egress proxy did not bind a unix socket');
+          }
+          sandboxEnv = buildEgressFilterEnv({
+            proxySocketPath: socketPath,
+            extra: sandboxEnv,
+          });
+          const binds = resolveEgressBwrapBinds({ proxySocketPath: socketPath });
+          extraRoBinds = binds.extraRoBinds;
+          extraRwBinds = binds.extraRwBinds;
+        } else {
+          try {
+            sandboxEnv = buildEgressFilterEnv({ extra: sandboxEnv });
+            const binds = resolveEgressBwrapBinds({});
+            extraRoBinds = binds.extraRoBinds;
+            extraRwBinds = binds.extraRwBinds;
+          } catch (err) {
+            if (isolation === 'none') throw err;
+            const message = err instanceof Error ? err.message : String(err);
+            createTraceLogger('egress', { companyId, taskId }).warn(
+              'Egress filter unavailable; continuing with OS network isolation only',
+              { error: message },
+            );
+          }
+        }
+      }
+
+      const nativeSandbox = isolation === 'none'
+        ? undefined
+        : isolation === 'bwrap'
+          ? {
+              allowNetwork,
+              bwrapArgs: buildTourbillonBwrapArgs({
+                workspacePath: cwd,
+                allowNetwork,
+                extraRoBinds,
+                extraRwBinds,
+              }),
+            }
+          : { allowNetwork };
+
+      const sandbox = new LocalSandbox({
         workingDirectory: cwd,
         isolation,
         timeout: resolveSandboxTimeoutMs(runtimeConfig),
-        nativeSandbox: isolation !== 'none' ? { allowNetwork } : undefined,
-        // Inject secrets as environment variables
-        env: Object.keys(agentSecrets).length > 0 ? (agentSecrets as unknown as NodeJS.ProcessEnv) : undefined,
+        nativeSandbox,
+        env: Object.keys(sandboxEnv).length > 0 ? sandboxEnv : undefined,
       });
+
+      const originalDestroy = sandbox.destroy.bind(sandbox);
+      sandbox.destroy = async () => {
+        await originalDestroy();
+        if (proxy) {
+          await proxy.stop();
+        }
+      };
+
+      return sandbox;
     },
     sandboxCacheKey: ({ requestContext }) => {
       const companyId = requestContext.get('companyId') as string | undefined;
       const taskId = requestContext.get('taskId') as string | undefined;
       const runtimeConfig = readCodeExecutionConfig(requestContext);
-      const isolation = resolveSandboxIsolation(runtimeConfig);
-      const timeoutMs = resolveSandboxTimeoutMs(runtimeConfig);
-      const allowNetwork = resolveSandboxAllowNetwork(runtimeConfig);
-      
-      // AC-B1.3 fix: Hash secret VALUES (not just keys) for cache invalidation.
-      // Rotating password values must trigger sandbox recreation with fresh env.
       const agentSecrets = extractAgentSecrets(requestContext);
-      const secretsFingerprint = hashSecretValues(agentSecrets);
-      
-      return companyId
-        ? `${companyId}:${taskId ?? 'idle'}:${isolation}:${timeoutMs}:${allowNetwork}:${secretsFingerprint}`
-        : undefined;
+      return companyId ? buildCacheKey(companyId, taskId, runtimeConfig, agentSecrets) : undefined;
     },
   });
 }
