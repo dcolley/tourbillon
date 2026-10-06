@@ -1,5 +1,6 @@
 import { db, goals, issues, agents, companies, activityLog, projects, type Goal, type Issue } from '@tourbillon/db';
 import { and, desc, eq } from 'drizzle-orm';
+import { revalidatePath } from 'next/cache';
 import { assertCompanyAccess, getActiveCompany } from './company';
 import { listProjectsForGoal, type GoalProjectRow } from './projects';
 
@@ -214,6 +215,7 @@ export async function updateGoal(
 
     let projectsPaused = 0;
     let projectsResumed = 0;
+    const affectedProjectIds: string[] = [];
 
     // Cascade: pause active projects when archiving goal
     if (statusChangedToArchived) {
@@ -244,6 +246,7 @@ export async function updateGoal(
         });
 
         projectsPaused++;
+        affectedProjectIds.push(project.id);
       }
     }
 
@@ -282,6 +285,7 @@ export async function updateGoal(
         });
 
         projectsResumed++;
+        affectedProjectIds.push(project.id);
       }
     }
 
@@ -291,10 +295,22 @@ export async function updateGoal(
         projectsPaused > 0 || projectsResumed > 0
           ? { projectsPaused, projectsResumed }
           : undefined,
+      affectedProjectIds,
     };
   });
 
-  return result;
+  // Revalidate affected project pages after cascade
+  if (result.affectedProjectIds.length > 0) {
+    revalidatePath('/project');
+    for (const projectId of result.affectedProjectIds) {
+      revalidatePath(`/project/${projectId}`);
+    }
+  }
+
+  return {
+    goal: result.goal,
+    cascadeInfo: result.cascadeInfo,
+  };
 }
 
 export async function getGoalDetail(goalId: string): Promise<GoalDetail | null> {
