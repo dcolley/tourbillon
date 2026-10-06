@@ -98,7 +98,7 @@ async function buildBackingAgent(
   options?: AssembleAgentToolsOptions,
 ): Promise<Agent> {
   const tools = await assembleAgentTools(agentRecord, options);
-  const systemPrompt = await assembleAgentSystemPrompt(agentRecord);
+  const systemPrompt = await assembleAgentSystemPrompt(agentRecord, options);
   const codeExecutionEnabled = await shouldAttachCodeExecutionWorkspace(agentRecord);
   const providerRow = agentRecord.providerId
     ? await getLlmProviderRowById(agentRecord.providerId)

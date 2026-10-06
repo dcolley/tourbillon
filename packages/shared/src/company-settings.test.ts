@@ -231,6 +231,38 @@ describe('mergeCompanySettings - observationalMemory', () => {
     assert.equal(merged.observationalMemory?.maxOutputTokens, undefined);
   });
 
+  it('merges agent PR policy including disable', () => {
+    const current = {
+      agentPrPolicy: {
+        enabled: true,
+        protectedBranchPatterns: ['main'],
+        testAgentId: 'agent-1',
+      },
+    };
+    const merged = mergeCompanySettings(current, {
+      agentPrPolicy: {
+        enabled: false,
+        protectedBranchPatterns: ['main', 'release/*'],
+      },
+    });
+    assert.equal(merged.agentPrPolicy?.enabled, false);
+    assert.deepEqual(merged.agentPrPolicy?.protectedBranchPatterns, ['main', 'release/*']);
+    assert.equal(merged.agentPrPolicy?.testAgentId, undefined);
+  });
+
+  it('parses agent PR policy from raw settings', () => {
+    const settings = parseCompanySettings({
+      agentPrPolicy: {
+        enabled: false,
+        protectedBranchPatterns: ['main', 'release/*'],
+        testAgentId: '  test-super  ',
+      },
+    });
+    assert.equal(settings.agentPrPolicy?.enabled, false);
+    assert.deepEqual(settings.agentPrPolicy?.protectedBranchPatterns, ['main', 'release/*']);
+    assert.equal(settings.agentPrPolicy?.testAgentId, 'test-super');
+  });
+
   it('allows disabling OM', () => {
     const current = {
       observationalMemory: {

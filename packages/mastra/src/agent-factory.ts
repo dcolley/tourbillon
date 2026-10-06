@@ -16,6 +16,8 @@ import {
   isSearxngConfigured,
   isTavilyConfigured,
   isCodeExecutionAvailable,
+  GITHUB_AGENT_PR_POLICY_PROMPT,
+  resolveAgentPrPolicy,
 } from '@tourbillon/shared';
 import {
   getEmbeddingModel,
@@ -30,7 +32,7 @@ import {
   formatSkillsCatalogSection,
   prepareAgentSkills,
 } from './skills/on-demand-skills';
-import { agentNeedsMcpTools } from '@tourbillon/shared/mcp-registry';
+import { agentNeedsMcpTools, resolveAgentMcpServerIds } from '@tourbillon/shared/mcp-registry';
 import { buildMCPTools } from './tools/mcp-tools';
 import { SEARXNG_TOOLS } from './tools/searxng-tools';
 import { TAVILY_TOOLS } from './tools/tavily-tools';
@@ -204,9 +206,12 @@ export async function shouldAttachCodeExecutionWorkspace(
   return true;
 }
 
-export async function assembleAgentSystemPrompt(agentRecord: AgentRecord): Promise<string> {
+export async function assembleAgentSystemPrompt(
+  agentRecord: AgentRecord,
+  options?: { companySettings?: CompanySettings | null },
+): Promise<string> {
   const prepared = await prepareAgentSkills(agentRecord);
-  return assembleSystemPrompt(agentRecord, prepared);
+  return assembleSystemPrompt(agentRecord, prepared, options?.companySettings);
 }
 
 /**
@@ -225,7 +230,7 @@ export async function createAgentWithSkills(
   const tools = await assembleAgentTools(agentRecord, options);
 
   const prepared = await prepareAgentSkills(agentRecord);
-  const systemPrompt = assembleSystemPrompt(agentRecord, prepared);
+  const systemPrompt = assembleSystemPrompt(agentRecord, prepared, options?.companySettings);
 
   const providerOverrides = modelProviderOverridesFromAgent(
     agentRecord.adapterType,
@@ -306,9 +311,21 @@ export async function createDurableAgentWithSkills(
   return durableAgent;
 }
 
+function shouldIncludeGithubPolicyPrompt(
+  agentRecord: AgentRecord,
+  companySettings?: CompanySettings | null,
+): boolean {
+  if (!resolveAgentPrPolicy(companySettings).enabled) return false;
+  const serverIds = resolveAgentMcpServerIds(agentRecord, {
+    agentRuntime: agentRecord.runtimeConfig as AgentRuntimeConfig,
+  });
+  return serverIds.includes('github-mcp');
+}
+
 function assembleSystemPrompt(
   agentRecord: AgentRecord,
   prepared: Awaited<ReturnType<typeof prepareAgentSkills>>,
+  companySettings?: CompanySettings | null,
 ): string {
   const parts: string[] = [];
 
@@ -328,6 +345,10 @@ function assembleSystemPrompt(
   const catalogSection = formatSkillsCatalogSection(prepared.catalog);
   if (catalogSection) {
     parts.push(`---\n\n${catalogSection}`);
+  }
+
+  if (shouldIncludeGithubPolicyPrompt(agentRecord, companySettings)) {
+    parts.push(`---\n\n${GITHUB_AGENT_PR_POLICY_PROMPT}`);
   }
 
   return parts.join('\n\n');

@@ -4,6 +4,7 @@ import type {
   HitlyGateSettings,
   ObservationalMemorySettings,
 } from './types';
+import { parseAgentPrPolicySettings } from './agent-pr-policy';
 
 function trimRecord(values: unknown): Record<string, string> | undefined {
   if (!values || typeof values !== 'object') return undefined;
@@ -81,6 +82,7 @@ export function parseCompanySettings(raw: unknown): CompanySettings {
       typeof record.tavilyApiKey === 'string' ? record.tavilyApiKey.trim() || undefined : undefined,
     observationalMemory: parseObservationalMemorySettings(record.observationalMemory),
     hitlyGate: parseHitlyGateSettings(record.hitlyGate),
+    agentPrPolicy: parseAgentPrPolicySettings(record.agentPrPolicy),
   };
 }
 
@@ -123,7 +125,7 @@ export function mergeCompanySettings(
       ...(om.temperature !== undefined ? { temperature: om.temperature } : {}),
     };
   }
-  if (patch.hitlyGate !== undefined) {
+    if (patch.hitlyGate !== undefined) {
     const hg = patch.hitlyGate;
     next.hitlyGate = {
       enabled: hg.enabled === true,
@@ -132,6 +134,18 @@ export function mergeCompanySettings(
       ...(hg.projectId?.trim() ? { projectId: hg.projectId.trim() } : {}),
       ...(hg.apiKey?.trim() ? { apiKey: hg.apiKey.trim() } : {}),
       ...(hg.types && hg.types.length > 0 ? { types: hg.types } : {}),
+    };
+  }
+  if (patch.agentPrPolicy !== undefined) {
+    const policy = patch.agentPrPolicy;
+    const patterns = policy.protectedBranchPatterns
+      ?.map((pattern) => pattern.trim())
+      .filter(Boolean);
+    const testAgentId = policy.testAgentId?.trim();
+    next.agentPrPolicy = {
+      enabled: policy.enabled !== false,
+      ...(patterns && patterns.length > 0 ? { protectedBranchPatterns: patterns } : {}),
+      ...(testAgentId ? { testAgentId } : {}),
     };
   }
 

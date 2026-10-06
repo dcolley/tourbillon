@@ -1,7 +1,17 @@
 import { cookies } from 'next/headers';
-import { db, companies, type Company } from '@tourbillon/db';
-import { ensureCompanyWorkspace, mergeCompanySettings, parseCompanySettings, type CompanySettings } from '@tourbillon/shared';
-import { asc, eq } from 'drizzle-orm';
+import { db, companies, agents, activityLog, type Company } from '@tourbillon/db';
+import {
+  ensureCompanyWorkspace,
+  mergeCompanySettings,
+  parseCompanySettings,
+  parseProtectedBranchPatterns,
+  resolveAgentPrPolicy,
+  AGENT_PR_POLICY_DISABLED_ACTION,
+  BOARD_DISPLAY_NAME,
+  BOARD_USER_ID,
+  type CompanySettings,
+} from '@tourbillon/shared';
+import { and, asc, eq } from 'drizzle-orm';
 import { deriveIssuePrefix, slugifyCompanySlug } from './company-utils';
 
 export const ACTIVE_COMPANY_COOKIE = 'active_company_id';
@@ -340,6 +350,64 @@ export async function updateCompanyHitlyGate(
     .returning();
 
   if (!updated) throw new Error('Company not found.');
+  return updated;
+}
+
+export async function updateCompanyAgentPrPolicy(
+  companyId: string,
+  input: {
+    enabled: boolean;
+    protectedBranchPatterns?: string;
+    testAgentId?: string;
+  },
+): Promise<Company> {
+  const company = await db.query.companies.findFirst({ where: eq(companies.id, companyId) });
+  if (!company) throw new Error('Company not found.');
+
+  const current = parseCompanySettings(company.settings);
+  const wasEnabled = resolveAgentPrPolicy(current).enabled;
+
+  let testAgentId = input.testAgentId?.trim() || undefined;
+  if (testAgentId) {
+    const testAgent = await db.query.agents.findFirst({
+      where: and(eq(agents.id, testAgentId), eq(agents.companyId, companyId)),
+    });
+    if (!testAgent) throw new Error('Test agent not found in this company.');
+  }
+
+  const settings = mergeCompanySettings(company.settings, {
+    agentPrPolicy: {
+      enabled: input.enabled,
+      protectedBranchPatterns: parseProtectedBranchPatterns(input.protectedBranchPatterns),
+      testAgentId,
+    },
+  });
+
+  const [updated] = await db
+    .update(companies)
+    .set({ settings, updatedAt: new Date() })
+    .where(eq(companies.id, companyId))
+    .returning();
+
+  if (!updated) throw new Error('Company not found.');
+
+  if (wasEnabled && !input.enabled) {
+    await db.insert(activityLog).values({
+      companyId,
+      actorType: 'user',
+      actorId: BOARD_USER_ID,
+      actorName: BOARD_DISPLAY_NAME,
+      action: AGENT_PR_POLICY_DISABLED_ACTION,
+      entityType: 'company',
+      entityId: companyId,
+      details: {
+        enabled: false,
+        protectedBranchPatterns: settings.agentPrPolicy?.protectedBranchPatterns,
+        testAgentId: settings.agentPrPolicy?.testAgentId ?? null,
+      },
+    });
+  }
+
   return updated;
 }
 
