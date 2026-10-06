@@ -162,8 +162,10 @@ describe('Goal cascade: manual status change clears auto-pause marker', () => {
     await updateProject(project.id, { status: 'active' }, company.id);
 
     // Leave project2 with marker intact
-    // Manually change project3 (clear marker)
-    await updateProject(project3.id, { status: 'paused' }, company.id);
+    
+    // Manually change project3 (clear marker via resume then pause)
+    await updateProject(project3.id, { status: 'active' }, company.id); // clears marker
+    await updateProject(project3.id, { status: 'paused' }, company.id);  // manual pause
 
     // Reactivate goal → only project2 should auto-resume
     const reactivateResult = await updateGoal(goal.id, { status: 'active' }, company.id);
@@ -181,7 +183,7 @@ describe('Goal cascade: manual status change clears auto-pause marker', () => {
     assert.equal(final2?.status, 'active'); // auto-resumed
     assert.equal(final2?.autoPausedByGoalId, null);
 
-    assert.equal(final3?.status, 'paused'); // manually paused, stayed paused
+    assert.equal(final3?.status, 'paused'); // manually resumed then paused, stayed paused
     assert.equal(final3?.autoPausedByGoalId, null);
   });
 });
