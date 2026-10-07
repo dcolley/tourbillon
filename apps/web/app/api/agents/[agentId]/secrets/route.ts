@@ -7,7 +7,6 @@ import {
   AgentValidationError,
   type UpdateAgentSecretsInput,
 } from '@/lib/agents';
-import { validateRunToken } from '@/lib/auth/run-token';
 import { verifyMobileToken } from '@/lib/mobile-auth';
 import { getActiveCompanyOrNull } from '@/lib/company';
 import type { Agent, Company } from '@tourbillon/db';
@@ -26,19 +25,23 @@ const DeleteSecretsSchema = z.object({
 /**
  * #103: Board-only access, scoped to the caller's company.
  * - Agent run/chat tokens are rejected outright (403): agents must never write
- *   (their own or a peer's) secrets through this route.
+ *   (their own or a peer's) secrets through this route. This is a PREFIX check on
+ *   the bearer, not a token validation, so any pm_run_/pm_chat_ bearer (valid,
+ *   expired, unsigned or malformed) gets 403 regardless of how tokens are signed.
  * - Board auth reuses the existing board pattern (see /api/jobs/heartbeat/list,
  *   /api/companies/[companyId]/search): mobile X-Company-Token, else the
  *   active-company board cookie. Neither present → 401.
  * - The agent is looked up inside that company only, so another company's
  *   agent is indistinguishable from a missing one (404).
  */
+const AGENT_TOKEN_BEARER = /^pm_(run|chat)_/;
+
 async function resolveBoardAgent(
   req: NextRequest,
   agentUrlKey: string,
 ): Promise<{ agent: Agent; company: Company } | { error: NextResponse }> {
   const bearer = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '').trim();
-  if (bearer && validateRunToken(bearer)) {
+  if (bearer && AGENT_TOKEN_BEARER.test(bearer)) {
     return {
       error: NextResponse.json({ error: 'Agent tokens cannot manage agent secrets' }, { status: 403 }),
     };

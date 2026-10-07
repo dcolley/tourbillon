@@ -7,7 +7,7 @@ import { NextRequest } from 'next/server';
  * #103: PUT/DELETE/GET /api/agents/:agentId/secrets — board auth + write-only responses.
  * DB-backed modules (@/lib/agents, @/lib/company) are mocked via Module.prototype.require,
  * the same approach as app/api/mobile/agents-route.test.ts. Token checks use the real
- * @/lib/mobile-auth (jose) and @/lib/auth/run-token. All credential values are fakes.
+ * @/lib/mobile-auth (jose); agent bearers are refused by pm_run_/pm_chat_ prefix. All credential values are fakes.
  */
 
 const SESSION_SECRET = new TextEncoder().encode(
@@ -176,6 +176,29 @@ describe('/api/agents/:agentId/secrets (#103)', () => {
       ctx(),
     );
     assert.equal(del.status, 403);
+    assert.equal(writes, 0);
+  });
+
+  it('rejects any pm_run_/pm_chat_ bearer (chat, malformed, unsigned, signed-format) with 403 even with the company cookie set', async () => {
+    activeCompanyCookie = 'company-a';
+    const chatPayload = Buffer.from(
+      JSON.stringify({ chatSessionId: 'chat-agent-a2', agentId: 'agent-a2', companyId: 'company-a', iat: Date.now() }),
+    ).toString('base64url');
+    const bearers = [
+      `pm_chat_${chatPayload}`,
+      'pm_run_not-base64-json',
+      'pm_chat_',
+      `${runTokenFor('agent-a2', 'company-a')}.Zm9yZ2VkLXNpZ25hdHVyZQ`,
+    ];
+    for (const bearer of bearers) {
+      const res = await PUT(req('PUT', { authorization: `Bearer ${bearer}` }, putBody), ctx());
+      assert.equal(res.status, 403, `PUT with ${bearer.slice(0, 12)}…`);
+      const del = await DELETE(
+        req('DELETE', { authorization: `Bearer ${bearer}` }, { keys: ['TEST_PASSWORD'] }),
+        ctx(),
+      );
+      assert.equal(del.status, 403, `DELETE with ${bearer.slice(0, 12)}…`);
+    }
     assert.equal(writes, 0);
   });
 
