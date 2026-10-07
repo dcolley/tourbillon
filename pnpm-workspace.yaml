@@ -28,10 +28,10 @@ catalog:
   "@types/node": ^26.1.2
   eslint: ^9.39.5
   prettier: ^3.9.6
-  "@ai-sdk/openai": ^4.0.25
+  "@ai-sdk/openai": ^4.0.86
   drizzle-orm: ^0.45.2
   ioredis: ^5.11.1
-  zod: ^4.4.3
+  zod: ^4.6.5
 
 allowBuilds:
   esbuild: true

@@ -4,6 +4,7 @@ import {
   LocalFilesystem,
   type IsolationBackend,
 } from '@mastra/core/workspace';
+import { RequestContext } from '@mastra/core/request-context';
 import {
   createTraceLogger,
   ensureExecutionWorkspace,
