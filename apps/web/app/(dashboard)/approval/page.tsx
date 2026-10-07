@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import { db, approvals, agents, issues } from '@tourbillon/db';
-import { desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, ilike, or, sql, inArray } from 'drizzle-orm';
 import { PageHeader } from '@/components/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -8,20 +8,63 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { StatusBadge } from '@/lib/status-badges';
 import { getActiveCompanyOrNull } from '@/lib/company';
+import { ApprovalFilterToolbar } from './approval-filter-toolbar';
+import {
+  parseApprovalStatusFilter,
+  statusesForApprovalFilter,
+  normalizeApprovalSearchQuery,
+} from './approval-filter';
 
-export default async function ApprovalsPage() {
+export default async function ApprovalsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ q?: string; status?: string }>;
+}) {
+  const params = await searchParams;
+  const statusFilter = parseApprovalStatusFilter(params.status);
+  const query = normalizeApprovalSearchQuery(params.q);
+
   const company = await getActiveCompanyOrNull();
   if (!company) return null;
-  const pendingApprovals = await db
+
+  // Company scope stays first; status + search are applied in SQL (before
+  // the 50-row limit) so filtered views aren't starved by newest rows.
+  const conditions = [eq(approvals.companyId, company.id)];
+
+  const statuses = statusesForApprovalFilter(statusFilter);
+  if (statuses) {
+    conditions.push(inArray(approvals.status, [...statuses]));
+  }
+
+  if (query) {
+    const pattern = `%${query}%`;
+    conditions.push(
+      or(
+        sql`${approvals.payload}->>'title' ILIKE ${pattern}`,
+        sql`${approvals.payload}->>'summary' ILIKE ${pattern}`,
+        sql`${approvals.payload}->>'description' ILIKE ${pattern}`,
+        sql`${approvals.payload}->>'body' ILIKE ${pattern}`,
+        ilike(approvals.note, pattern),
+        ilike(agents.name, pattern),
+        sql`EXISTS (
+          SELECT 1 FROM "issues" i
+          WHERE i."id" IN (SELECT unnest(${approvals.issueIds}))
+            AND (i."identifier" ILIKE ${pattern} OR i."title" ILIKE ${pattern})
+        )`,
+      )!,
+    );
+  }
+
+  const approvalRows = await db
     .select({ approval: approvals, agent: agents })
     .from(approvals)
     .leftJoin(agents, eq(approvals.requestedByAgentId, agents.id))
-    .where(eq(approvals.companyId, company.id))
+    .where(and(...conditions))
     .orderBy(desc(approvals.createdAt))
     .limit(50);
 
   const allIssueIds = [
-    ...new Set(pendingApprovals.flatMap(({ approval }) => approval.issueIds ?? [])),
+    ...new Set(approvalRows.flatMap(({ approval }) => approval.issueIds ?? [])),
   ];
   const linkedIssues =
     allIssueIds.length > 0
@@ -37,14 +80,19 @@ export default async function ApprovalsPage() {
       : [];
   const issuesById = new Map(linkedIssues.map((row) => [row.id, row]));
 
-  const pending = pendingApprovals.filter((r) => r.approval.status === 'pending');
-  const decided = pendingApprovals.filter((r) => r.approval.status !== 'pending');
+  const showAwaiting = statusFilter === 'all' || statusFilter === 'awaiting' || statusFilter === 'pending';
+  const showDecided = statusFilter === 'all' || statusFilter === 'decided' || statusFilter === 'approved' || statusFilter === 'rejected';
+
+  const pending = approvalRows.filter((r) => r.approval.status === 'pending');
+  const decided = approvalRows.filter((r) => r.approval.status !== 'pending');
 
   return (
     <div className="space-y-6">
       <PageHeader title="Approvals" description="Governance queue — board decisions" />
 
-      {pending.length > 0 && (
+      <ApprovalFilterToolbar status={statusFilter} query={query} />
+
+      {showAwaiting && pending.length > 0 && (
         <section className="space-y-3">
           <h2 className="text-sm font-semibold tracking-wider text-muted-foreground uppercase">
             Awaiting Decision ({pending.length})
@@ -64,13 +112,14 @@ export default async function ApprovalsPage() {
         </section>
       )}
 
-      <section className="space-y-3">
-        <h2 className="text-sm font-semibold tracking-wider text-muted-foreground uppercase">
-          Recent Decisions
-        </h2>
-        <Card>
-          <CardContent className="p-0">
-            {decided.length === 0 ? (
+      {showDecided && (
+        <section className="space-y-3">
+          <h2 className="text-sm font-semibold tracking-wider text-muted-foreground uppercase">
+            Recent Decisions
+          </h2>
+          <Card>
+            <CardContent className="p-0">
+              {decided.length === 0 ? (
               <p className="p-4 text-sm text-muted-foreground">No decisions yet.</p>
             ) : (
               <div className="divide-y">
