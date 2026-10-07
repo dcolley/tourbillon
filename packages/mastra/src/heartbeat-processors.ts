@@ -15,6 +15,7 @@ import {
   stripAssistantReasoning,
   stripToolLoopAssistantMonologue,
 } from './responses-tool-loop-compat';
+import { PinPlainUserAfterTrimProcessor } from './qwen-plain-user-guard';
 
 /**
  * Env fallback when neither provider nor agent sets maxContextTokens.
@@ -44,6 +45,9 @@ export function buildHeartbeatInputProcessors(
       // Prefer contiguous recent history so the current tool loop stays coherent.
       trimMode: 'contiguous',
     }),
+    // After contiguous trim: re-pin original plain user wake (Qwen requires ≥1)
+    // or TripWire fail-closed — never send system+assistant+tool-only prompts.
+    new PinPlainUserAfterTrimProcessor(),
     new ProviderHistoryCompat({
       additionalRules: [
         stripAssistantReasoning,
