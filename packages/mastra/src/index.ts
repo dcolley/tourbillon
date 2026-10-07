@@ -5,6 +5,10 @@ export * from './provider';
 export * from './model-settings';
 export * from './agent-factory';
 export * from './controller-config';
+export {
+  destroyCodeExecutionWorkspace,
+  sweepStaleEgressSockets,
+} from './execution-workspace';
 // chat-controller is WIP — uncomment when chat feature ships
 // export * from './chat-controller';
 // harness-config.ts re-exports controller-config for deprecated import paths only;

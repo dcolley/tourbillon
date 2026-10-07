@@ -1,4 +1,7 @@
 import { strict as assert } from 'node:assert';
+import { existsSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { describe, it } from 'node:test';
@@ -257,5 +260,24 @@ describe('EgressProxy enforcement', () => {
       await ipProxy.stop();
       await origin.close();
     }
+  });
+});
+
+describe('EgressProxy stop() socket hygiene', () => {
+  it('stop() unlinks the unix socket and is idempotent', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'tourbillon-egress-stop-'));
+    const socketPath = join(root, 'run.sock');
+    const proxy = new EgressProxy({
+      allowList: ['example.com'],
+      companyId: 'co-stop',
+    });
+    await proxy.start({ socketPath });
+    assert.ok(existsSync(socketPath), 'sock must exist after start');
+
+    await proxy.stop();
+    assert.ok(!existsSync(socketPath), 'stop() must unlink sock');
+
+    await proxy.stop(); // second stop is a no-op
+    assert.ok(!existsSync(socketPath));
   });
 });

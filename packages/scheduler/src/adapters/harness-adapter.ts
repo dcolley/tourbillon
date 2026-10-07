@@ -13,6 +13,7 @@ import {
   buildHeartbeatTracingOptions,
   createHeartbeatTraceId,
   TripwireDetector,
+  destroyCodeExecutionWorkspace,
 } from '@tourbillon/mastra';
 import type { HeartbeatJobData, AgentRuntimeConfig } from '@tourbillon/shared';
 import {
@@ -171,6 +172,29 @@ export async function runWithHarness(
 
     return { ...result, threadId, harnessRunId, traceId: resolvedTraceId };
   } finally {
+    // controller.destroy() only stops interval timers — it never destroys the
+    // backing Agent's workspace nor the session's resolved workspace, so the
+    // egress-proxy unix sockets bound per wake would leak. Release every
+    // distinct live sandbox reachable from this wake before deleting the
+    // session (a session destroyed during its own teardown may already be
+    // gone from the controller's registry).
+    try {
+      const candidates = new Set<unknown>();
+      const controllerWs = controller.getWorkspace?.();
+      if (controllerWs) candidates.add(controllerWs);
+      const backingAgent = (controller as unknown as {
+        getAgent?: () => { getWorkspace?: (options?: unknown) => Promise<unknown> };
+      }).getAgent?.();
+      const backingWs = await backingAgent?.getWorkspace?.();
+      if (backingWs) candidates.add(backingWs);
+      const sessionWs = session.getWorkspace?.();
+      if (sessionWs) candidates.add(sessionWs);
+      for (const workspace of candidates) {
+        await destroyCodeExecutionWorkspace(workspace as never).catch(() => undefined);
+      }
+    } catch {
+      /* teardown is best-effort; never mask the original wake error */
+    }
     await controller.destroy().catch(() => undefined);
   }
 }
