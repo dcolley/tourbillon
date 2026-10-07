@@ -39,6 +39,7 @@ export async function PATCH(
       isDefault?: boolean;
       clearApiKey?: boolean;
       defaultModelSettings?: Record<string, unknown>;
+      defaultModel?: string | null;
       stickiness?: string;
       stickinessHeaderName?: string;
     };

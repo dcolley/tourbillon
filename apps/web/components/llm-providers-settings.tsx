@@ -26,6 +26,7 @@ interface LlmProviderPublic {
   apiMode: 'chat' | 'responses';
   isDefault: boolean;
   defaultModelSettings: AgentModelSettings;
+  defaultModel: string | null;
   stickiness: 'off' | 'agent' | 'chat';
   stickinessHeaderName: string;
 }
@@ -37,6 +38,7 @@ interface ProviderFormState {
   apiKey: string;
   apiMode: 'chat' | 'responses';
   isDefault: boolean;
+  defaultModel: string;
   headerRows: Array<{ key: string; value: string }>;
   modelSettings: ModelSettingsFormValues;
   stickiness: 'off' | 'agent' | 'chat';
@@ -50,6 +52,7 @@ const EMPTY_FORM: ProviderFormState = {
   apiKey: '',
   apiMode: 'chat',
   isDefault: false,
+  defaultModel: '',
   headerRows: [],
   modelSettings: emptyModelSettingsFormValues(),
   stickiness: 'off',
@@ -78,6 +81,7 @@ export function LlmProvidersSettings() {
   const [saving, setSaving] = useState(false);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<string | null>(null);
+  const [modelSuggestions, setModelSuggestions] = useState<string[]>([]);
 
   const loadProviders = useCallback(async () => {
     setLoading(true);
@@ -103,10 +107,18 @@ export function LlmProvidersSettings() {
     setEditingId('new');
     setForm(EMPTY_FORM);
     setTestResult(null);
+    setModelSuggestions([]);
   }
 
   function startEdit(provider: LlmProviderPublic) {
     setEditingId(provider.id);
+    setModelSuggestions([]);
+    void fetch(`/api/models?providerId=${encodeURIComponent(provider.id)}`)
+      .then((res) => (res.ok ? res.json() : { models: [] }))
+      .then((data: { models?: Array<{ id: string }> }) =>
+        setModelSuggestions((data.models ?? []).map((m) => m.id)),
+      )
+      .catch(() => setModelSuggestions([]));
     setForm({
       name: provider.name,
       type: provider.type,
@@ -114,6 +126,7 @@ export function LlmProvidersSettings() {
       apiKey: '',
       apiMode: provider.apiMode,
       isDefault: provider.isDefault,
+      defaultModel: provider.defaultModel ?? '',
       headerRows: headersToRows(provider.headers),
       modelSettings: modelSettingsToFormValues(provider.defaultModelSettings),
       stickiness: provider.stickiness,
@@ -141,6 +154,7 @@ export function LlmProvidersSettings() {
         apiMode: form.apiMode,
         isDefault: form.isDefault,
         defaultModelSettings,
+        defaultModel: form.defaultModel.trim(),
         stickiness: form.stickiness,
         stickinessHeaderName: form.stickinessHeaderName,
         ...(form.apiKey.trim() ? { apiKey: form.apiKey.trim() } : {}),
@@ -277,7 +291,8 @@ export function LlmProvidersSettings() {
                 </div>
               </div>
               <p className="text-xs text-muted-foreground">
-                API key: {provider.hasApiKey ? 'set' : 'none'} · Headers:{' '}
+                {provider.defaultModel ? `Default model: ${provider.defaultModel}` : 'No default model set'}{' '}
+                · API key: {provider.hasApiKey ? 'set' : 'none'} · Headers:{' '}
                 {Object.keys(provider.headers).length || 'none'} · Mode: {provider.apiMode}
               </p>
             </div>
@@ -350,6 +365,27 @@ export function LlmProvidersSettings() {
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
               />
               <p className="text-xs text-muted-foreground">Sent as Bearer token when set.</p>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Default model</label>
+              <input
+                type="text"
+                value={form.defaultModel}
+                onChange={(e) => setForm((f) => ({ ...f, defaultModel: e.target.value }))}
+                placeholder="e.g. meta-llama/Llama-3.3-70B-Instruct (blank = use env default)"
+                list="provider-default-model-suggestions"
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+              />
+              <datalist id="provider-default-model-suggestions">
+                {modelSuggestions.map((modelId) => (
+                  <option key={modelId} value={modelId} />
+                ))}
+              </datalist>
+              <p className="text-xs text-muted-foreground">
+                Model id given to new agents hired on this provider. Blank falls back to the
+                LLM_DEFAULT_MODEL env var.
+              </p>
             </div>
 
             <div className="space-y-1.5">

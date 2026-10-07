@@ -26,6 +26,7 @@ export async function POST(req: NextRequest) {
       apiMode?: string;
       isDefault?: boolean;
       defaultModelSettings?: Record<string, unknown>;
+      defaultModel?: string | null;
       stickiness?: string;
       stickinessHeaderName?: string;
     };
@@ -39,6 +40,7 @@ export async function POST(req: NextRequest) {
       apiMode: body.apiMode,
       isDefault: body.isDefault,
       defaultModelSettings: body.defaultModelSettings,
+      defaultModel: body.defaultModel,
       stickiness: body.stickiness,
       stickinessHeaderName: body.stickinessHeaderName,
     });
