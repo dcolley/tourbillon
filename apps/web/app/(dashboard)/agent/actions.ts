@@ -8,7 +8,8 @@ import {
   setAgentActive,
   updateAgentRole,
 } from '@/lib/agents';
-import { triggerAgentHeartbeat } from '@/lib/heartbeat';
+import { triggerAgentHeartbeat, retryFailedHeartbeat } from '@/lib/heartbeat';
+import { getHeartbeatRun, getInFlightHeartbeatRun } from '@/lib/heartbeats';
 import { actionError, actionSuccess, type ActionResult } from '@/lib/action-result';
 
 export async function triggerAgentHeartbeatAction(formData: FormData) {
@@ -144,4 +145,55 @@ export async function forceKillHeartbeatAction(formData: FormData) {
   }
   
   redirect(`${returnPath}?killed=1`);
+}
+
+/**
+ * Retry a failed heartbeat run as a NEW wake (new runId, empty model context).
+ * The failed row stays immutable. Mirrors forceKillHeartbeatAction /
+ * triggerAgentHeartbeatAction for auth + redirect patterns.
+ */
+export async function retryFailedHeartbeatAction(formData: FormData) {
+  const runId = formData.get('runId') as string;
+  const companyId = formData.get('companyId') as string;
+  const returnPath = `/heartbeat/${runId}`;
+
+  if (!runId || !companyId) {
+    redirect('/heartbeat?error=' + encodeURIComponent('Run ID and Company ID are required'));
+  }
+
+  const detail = await getHeartbeatRun(runId);
+  if (!detail || detail.run.companyId !== companyId || detail.run.status !== 'failed') {
+    redirect(`${returnPath}?error=${encodeURIComponent('Heartbeat run cannot be retried.')}`);
+  }
+
+  const inFlight = await getInFlightHeartbeatRun(detail.run.agentId);
+  if (inFlight) {
+    redirect(
+      `${returnPath}?error=${encodeURIComponent(
+        `A heartbeat is already in flight for this agent (${inFlight.status}, run ${inFlight.id}).`,
+      )}`,
+    );
+  }
+
+  let queueError: string | null = null;
+  let result: Awaited<ReturnType<typeof retryFailedHeartbeat>> | undefined;
+  try {
+    result = await retryFailedHeartbeat(detail.run);
+  } catch (err) {
+    queueError = err instanceof Error ? err.message : 'Failed to queue retry heartbeat.';
+  }
+
+  if (queueError) {
+    redirect(`${returnPath}?error=${encodeURIComponent(queueError)}`);
+  }
+
+  if (!result?.jobId) {
+    const message =
+      result?.outcome === 'skipped'
+        ? (result.skipReason ?? 'Retry was not queued — a wake may already be in flight for this agent.')
+        : 'Retry was not queued — a wake may already be in flight for this agent.';
+    redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
+  }
+
+  redirect(`/heartbeat/${result.jobId}`);
 }

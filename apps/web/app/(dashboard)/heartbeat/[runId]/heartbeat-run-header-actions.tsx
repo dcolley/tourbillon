@@ -2,7 +2,10 @@
 
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
-import { forceKillHeartbeatAction } from '../../agent/actions';
+import {
+  forceKillHeartbeatAction,
+  retryFailedHeartbeatAction,
+} from '../../agent/actions';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -18,7 +21,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { canForceKillHeartbeat } from '@tourbillon/shared/heartbeat-liveness';
+import {
+  canForceKillHeartbeat,
+  canRetryFailedHeartbeat,
+} from '@tourbillon/shared/heartbeat-liveness';
 
 export function HeartbeatRunHeaderActions({
   runId,
@@ -30,6 +36,19 @@ export function HeartbeatRunHeaderActions({
   status: string;
 }) {
   const [showKillDialog, setShowKillDialog] = useState(false);
+
+  // Failed runs offer "Retry in new heartbeat" (new runId; failed row stays immutable).
+  if (canRetryFailedHeartbeat(status)) {
+    return (
+      <form action={retryFailedHeartbeatAction}>
+        <input type="hidden" name="runId" value={runId} />
+        <input type="hidden" name="companyId" value={companyId} />
+        <Button type="submit" variant="outline" size="sm">
+          Retry in new heartbeat
+        </Button>
+      </form>
+    );
+  }
 
   if (!canForceKillHeartbeat(status)) {
     return null;
