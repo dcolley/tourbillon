@@ -68,7 +68,7 @@ export function ApprovalFilterToolbar({
         <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
         <Input
           name="q"
-          defaultValue={query}
+          value={draftQuery}
           onChange={(e) => setDraftQuery(e.target.value)}
           placeholder="Search approvals (title, body, requester, issue)…"
           className="h-9 pl-8 text-sm"

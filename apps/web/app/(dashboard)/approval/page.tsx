@@ -1,3 +1,4 @@
+import { Suspense } from 'react';
 import Link from 'next/link';
 import { db, approvals, agents, issues } from '@tourbillon/db';
 import { and, desc, eq, ilike, or, sql, inArray } from 'drizzle-orm';
@@ -10,6 +11,7 @@ import { StatusBadge } from '@/lib/status-badges';
 import { getActiveCompanyOrNull } from '@/lib/company';
 import { ApprovalFilterToolbar } from './approval-filter-toolbar';
 import {
+  approvalSectionsForFilter,
   parseApprovalStatusFilter,
   statusesForApprovalFilter,
   normalizeApprovalSearchQuery,
@@ -80,8 +82,8 @@ export default async function ApprovalsPage({
       : [];
   const issuesById = new Map(linkedIssues.map((row) => [row.id, row]));
 
-  const showAwaiting = statusFilter === 'all' || statusFilter === 'awaiting' || statusFilter === 'pending';
-  const showDecided = statusFilter === 'all' || statusFilter === 'decided' || statusFilter === 'approved' || statusFilter === 'rejected';
+  const { awaiting: showAwaiting, decided: showDecided } =
+    approvalSectionsForFilter(statusFilter);
 
   const pending = approvalRows.filter((r) => r.approval.status === 'pending');
   const decided = approvalRows.filter((r) => r.approval.status !== 'pending');
@@ -90,7 +92,9 @@ export default async function ApprovalsPage({
     <div className="space-y-6">
       <PageHeader title="Approvals" description="Governance queue — board decisions" />
 
-      <ApprovalFilterToolbar status={statusFilter} query={query} />
+      <Suspense fallback={<p className="text-sm text-muted-foreground">Loading filters…</p>}>
+        <ApprovalFilterToolbar status={statusFilter} query={query} />
+      </Suspense>
 
       {showAwaiting && pending.length > 0 && (
         <section className="space-y-3">
@@ -152,6 +156,7 @@ export default async function ApprovalsPage({
           </CardContent>
         </Card>
       </section>
+      )}
     </div>
   );
 }
