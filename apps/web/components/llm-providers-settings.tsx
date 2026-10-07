@@ -481,7 +481,11 @@ export function LlmProvidersSettings() {
                           return { ...f, headerRows };
                         })
                       }
-                      placeholder="Value"
+                      placeholder={
+                        editingId && editingId !== 'new' && row.key && row.value === ''
+                          ? 'Unchanged (write-only)'
+                          : 'Value'
+                      }
                       className="flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
                     />
                     <button

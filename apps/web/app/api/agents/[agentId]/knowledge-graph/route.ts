@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db, agents } from '@tourbillon/db';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import {
   loadAgentKnowledgeGraph,
   loadCompanyKnowledgeGraph,
@@ -8,6 +8,7 @@ import {
   searchKnowledgeGraph,
   type KnowledgeGraphScope,
 } from '@tourbillon/shared/knowledge-graph';
+import { requireBoardCompany } from '@/lib/board-route-auth';
 
 export async function GET(
   req: NextRequest,
@@ -15,7 +16,13 @@ export async function GET(
 ) {
   const { agentId } = await context.params;
 
-  const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+  // #106: board only (returns agent memory); scoped to the board's company (other company → 404).
+  const auth = await requireBoardCompany(req);
+  if (!auth.ok) return auth.response;
+
+  const agent = await db.query.agents.findFirst({
+    where: and(eq(agents.id, agentId), eq(agents.companyId, auth.value.id)),
+  });
   if (!agent) {
     return NextResponse.json({ error: 'Agent not found' }, { status: 404 });
   }
