@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { canForceKillHeartbeat } from './heartbeat-liveness';
+import { canForceKillHeartbeat, canRetryFailedHeartbeat } from './heartbeat-liveness';
 
 describe('canForceKillHeartbeat', () => {
   it('returns true for queued status', () => {
@@ -29,5 +29,35 @@ describe('canForceKillHeartbeat', () => {
 
   it('returns false for unknown status', () => {
     assert.equal(canForceKillHeartbeat('unknown'), false);
+  });
+});
+
+describe('canRetryFailedHeartbeat', () => {
+  it('returns true for failed status', () => {
+    assert.equal(canRetryFailedHeartbeat('failed'), true);
+  });
+
+  it('returns false for queued status', () => {
+    assert.equal(canRetryFailedHeartbeat('queued'), false);
+  });
+
+  it('returns false for running status', () => {
+    assert.equal(canRetryFailedHeartbeat('running'), false);
+  });
+
+  it('returns false for succeeded status', () => {
+    assert.equal(canRetryFailedHeartbeat('succeeded'), false);
+  });
+
+  it('returns false for cancelled status', () => {
+    assert.equal(canRetryFailedHeartbeat('cancelled'), false);
+  });
+
+  it('returns false for coalesced status', () => {
+    assert.equal(canRetryFailedHeartbeat('coalesced'), false);
+  });
+
+  it('returns false for unknown status', () => {
+    assert.equal(canRetryFailedHeartbeat('unknown'), false);
   });
 });

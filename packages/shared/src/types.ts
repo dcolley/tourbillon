@@ -28,6 +28,8 @@ export interface HeartbeatJobData {
   approvalNote?: string;
   linkedIssueIds?: string[];
   wakePayloadJson?: string;
+  /** Lineage: runId of the failed run this retry re-attempts (retry-in-new-heartbeat). */
+  resumeOfRunId?: string;
   /** Agent mail data (agent_mail wakes). */
   mailId?: string;
   mailFromAgentId?: string;

@@ -16,7 +16,9 @@ import { HeartbeatRunQueryToast } from './heartbeat-run-query-toast';
 
 async function dismissHeartbeatAction(_formData: FormData) {
   'use server';
-  // Heartbeat runs are immutable audit rows — no retry/remove from this page.
+  // Heartbeat runs are immutable audit rows — no queue-level retry/remove here.
+  // Failed runs offer "Retry in new heartbeat" in the page header instead
+  // (starts a NEW run; this failed row is never rewritten).
 }
 
 export default async function HeartbeatRunPage({

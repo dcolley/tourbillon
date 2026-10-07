@@ -67,6 +67,14 @@ export function canForceKillHeartbeat(status: string): boolean {
   return status === 'queued' || status === 'running';
 }
 
+/**
+ * Determines if a failed heartbeat run can be retried via a *new* heartbeat
+ * (new runId, empty model context). Only failed runs offer the retry affordance.
+ */
+export function canRetryFailedHeartbeat(status: string): boolean {
+  return status === 'failed';
+}
+
 export interface HeartbeatProgressLastEvent {
   type: string;
   at: Date;
