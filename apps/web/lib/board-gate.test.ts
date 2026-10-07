@@ -91,7 +91,7 @@ describe('#105 central board gate', () => {
     reqState.headers = {};
     process.env.TOURBILLON_BOARD_SECRET = BOARD_SECRET;
     delete process.env.TOURBILLON_BOARD_AUTH_INSECURE_DEV;
-    delete process.env.BETTER_AUTH_SECRET;
+    process.env.BETTER_AUTH_SECRET = 'test-better-auth-secret-not-default';
   });
 
   it('cookie-only (active_company_id, no board session) is not board', async () => {
@@ -161,6 +161,18 @@ describe('#105 central board gate', () => {
     const id = await mobileAuth.verifyMobileToken(req);
     assert.equal(id, 'company-a');
     assert.equal((await company.getActiveCompanyOrNull(id))?.id, 'company-a');
+  });
+
+  it('requireBoardSession (server-action guard, B1): throws without a valid session', async () => {
+    reqState.cookies = { active_company_id: 'company-a' };
+    await assert.rejects(() => company.requireBoardSession(), { name: 'BoardSessionRequiredError' });
+    reqState.cookies = { [SESSION_COOKIE]: await sessionToken({ secret: 'attacker-guess' }) };
+    await assert.rejects(() => company.requireBoardSession(), { name: 'BoardSessionRequiredError' });
+    reqState.cookies = { [SESSION_COOKIE]: await sessionToken() };
+    reqState.headers = { authorization: 'Bearer pm_run_malformed' };
+    await assert.rejects(() => company.requireBoardSession(), { name: 'BoardSessionRequiredError' });
+    reqState.headers = {};
+    await company.requireBoardSession();
   });
 
   it('agent run token + valid board JWT: verifyMobileToken returns null', async () => {

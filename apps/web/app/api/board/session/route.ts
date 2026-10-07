@@ -24,7 +24,7 @@ export async function POST(req: NextRequest) {
   if (hasAgentToken(req.headers.get('authorization'))) {
     return NextResponse.json({ error: 'Agents cannot open a board session' }, { status: 403 });
   }
-  if (!isBoardAuthConfigured()) {
+  if (!isBoardAuthConfigured(req.headers)) {
     console.warn('Board session: TOURBILLON_BOARD_SECRET is not set; refusing to unlock');
     return new NextResponse(null, { status: 401 });
   }
@@ -38,11 +38,11 @@ export async function POST(req: NextRequest) {
       presented = null;
     }
   }
-  if (!verifyOperatorSecret(presented)) {
+  if (!verifyOperatorSecret(presented, req.headers)) {
     return new NextResponse(null, { status: 401 });
   }
 
-  const token = await createBoardSessionToken();
+  const token = await createBoardSessionToken(req.headers);
   if (!token) return new NextResponse(null, { status: 401 });
 
   const expiresAt = new Date(Date.now() + BOARD_SESSION_TTL_SEC * 1000).toISOString();

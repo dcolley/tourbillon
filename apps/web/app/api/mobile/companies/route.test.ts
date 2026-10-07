@@ -8,6 +8,8 @@ import { SignJWT, jwtVerify } from 'jose';
 import { NextRequest } from 'next/server';
 
 const BOARD_SECRET = 'test-operator-secret-105';
+const JWT_SECRET = 'test-better-auth-secret-not-default';
+const LOOPBACK = { host: 'localhost:3002' };
 const AGENT_TOKEN = `pm_run_${Buffer.from(
   JSON.stringify({ runId: 'r1', agentId: 'agent-1', companyId: 'company-a', iat: 1 }),
 ).toString('base64url')}`;
@@ -66,7 +68,7 @@ describe('#105 /api/mobile/companies', () => {
     env.NODE_ENV = 'test';
     env.TOURBILLON_BOARD_SECRET = BOARD_SECRET;
     delete env.TOURBILLON_BOARD_AUTH_INSECURE_DEV;
-    delete env.BETTER_AUTH_SECRET;
+    env.BETTER_AUTH_SECRET = JWT_SECRET;
   });
 
   it('mint without operator secret → 401, no token, no cookie', async () => {
@@ -88,11 +90,62 @@ describe('#105 /api/mobile/companies', () => {
     assert.deepEqual(state.cookieSet, []);
   });
 
-  it('env unset + TOURBILLON_BOARD_AUTH_INSECURE_DEV=1 (non-production) → mint allowed', async () => {
+  it('env unset + TOURBILLON_BOARD_AUTH_INSECURE_DEV=1 (non-production, loopback host) → mint allowed', async () => {
     delete env.TOURBILLON_BOARD_SECRET;
     env.TOURBILLON_BOARD_AUTH_INSECURE_DEV = '1';
-    const res = await POST(post({ 'X-Board-Secret': 'dev' }));
+    const res = await POST(post({ 'X-Board-Secret': 'dev', ...LOOPBACK }));
     assert.equal(res.status, 200);
+  });
+
+  it('insecure-dev flag is refused on a non-loopback host (B3)', async () => {
+    delete env.TOURBILLON_BOARD_SECRET;
+    env.TOURBILLON_BOARD_AUTH_INSECURE_DEV = '1';
+    env.NODE_ENV = 'development';
+    assert.equal((await POST(post({ 'X-Board-Secret': 'dev', host: 'tourbillon-test.example.com' }))).status, 401);
+    // Spoofed loopback Host behind a proxy that forwards the public host is still refused.
+    assert.equal(
+      (await POST(post({ 'X-Board-Secret': 'dev', ...LOOPBACK, 'x-forwarded-host': 'tourbillon-test.example.com' }))).status,
+      401,
+    );
+    // No Host header at all → refused.
+    assert.equal((await POST(post({ 'X-Board-Secret': 'dev' }))).status, 401);
+  });
+
+  it('NODE_ENV=development alone does not enable the insecure-dev opt-in (B3)', async () => {
+    delete env.TOURBILLON_BOARD_SECRET;
+    env.NODE_ENV = 'development';
+    assert.equal((await POST(post({ 'X-Board-Secret': 'dev', ...LOOPBACK }))).status, 401);
+  });
+
+  for (const nodeEnv of ['development', 'test', 'production']) {
+    it(`NODE_ENV=${nodeEnv}: unset/default BETTER_AUTH_SECRET refuses to mint (503) (B3)`, async () => {
+      env.NODE_ENV = nodeEnv;
+      delete env.BETTER_AUTH_SECRET;
+      assert.equal((await POST(post({ 'X-Board-Secret': BOARD_SECRET, ...LOOPBACK }))).status, 503);
+      env.BETTER_AUTH_SECRET = 'change-me-in-production';
+      assert.equal((await POST(post({ 'X-Board-Secret': BOARD_SECRET, ...LOOPBACK }))).status, 503);
+    });
+
+    it(`NODE_ENV=${nodeEnv}: board JWT signed with the public default secret is rejected (B3)`, async () => {
+      env.NODE_ENV = nodeEnv;
+      env.BETTER_AUTH_SECRET = 'change-me-in-production';
+      const forged = await boardJwt('company-a', new TextEncoder().encode('change-me-in-production'));
+      assert.equal((await GET(get({ 'X-Company-Token': forged, ...LOOPBACK }))).status, 401);
+      delete env.BETTER_AUTH_SECRET;
+      assert.equal((await GET(get({ 'X-Company-Token': forged, ...LOOPBACK }))).status, 401);
+    });
+  }
+
+  it('insecure-dev + loopback may use the default BETTER_AUTH_SECRET (local dev only)', async () => {
+    env.NODE_ENV = 'development';
+    env.TOURBILLON_BOARD_AUTH_INSECURE_DEV = '1';
+    delete env.BETTER_AUTH_SECRET;
+    const res = await POST(post({ 'X-Board-Secret': BOARD_SECRET, ...LOOPBACK }));
+    assert.equal(res.status, 200);
+    const { token } = (await res.json()) as { token: string };
+    assert.equal((await GET(get({ 'X-Company-Token': token, ...LOOPBACK }))).status, 200);
+    // The same token presented on a public host is rejected.
+    assert.equal((await GET(get({ 'X-Company-Token': token, host: 'tourbillon-test.example.com' }))).status, 401);
   });
 
   it('insecure-dev flag is ignored in production', async () => {

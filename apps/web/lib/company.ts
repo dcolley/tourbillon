@@ -38,20 +38,41 @@ export async function getCompanyById(companyId: string): Promise<Company | null>
   return company;
 }
 
+async function requestHeaders(): Promise<Headers | null> {
+  try {
+    return await headers();
+  } catch {
+    return null; // outside a request scope
+  }
+}
+
 /** #105: true when the current request carries an agent run/chat token (never board). */
 async function requestHasAgentToken(): Promise<boolean> {
-  try {
-    return hasAgentToken((await headers()).get('authorization'));
-  } catch {
-    return false; // outside a request scope
-  }
+  return hasAgentToken((await requestHeaders())?.get('authorization'));
 }
 
 /** #105: true when the current request carries a valid signed board session cookie. */
 export async function hasBoardSession(): Promise<boolean> {
-  if (await requestHasAgentToken()) return false;
+  const reqHeaders = await requestHeaders();
+  if (hasAgentToken(reqHeaders?.get('authorization'))) return false;
   const cookieStore = await cookies();
-  return verifyBoardSessionToken(cookieStore.get(BOARD_SESSION_COOKIE)?.value);
+  return verifyBoardSessionToken(cookieStore.get(BOARD_SESSION_COOKIE)?.value, reqHeaders);
+}
+
+/** #105: thrown by server actions invoked without a board session. */
+export class BoardSessionRequiredError extends Error {
+  constructor(message = 'Board session required.') {
+    super(message);
+    this.name = 'BoardSessionRequiredError';
+  }
+}
+
+/**
+ * #105 B1: in-action board guard. Server actions are reachable by action id on any page path,
+ * so every 'use server' function calls this first (defence in depth behind proxy.ts).
+ */
+export async function requireBoardSession(): Promise<void> {
+  if (!(await hasBoardSession())) throw new BoardSessionRequiredError();
 }
 
 /**

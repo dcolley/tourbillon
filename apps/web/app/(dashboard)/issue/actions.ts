@@ -8,6 +8,7 @@ import { createIssue, updateIssue, IssueValidationError } from '@/lib/issues';
 import { releaseIssueCheckoutLock } from '@/lib/checkout-lock';
 import { db, issues } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
+import { requireBoardSession } from '@/lib/company';
 
 export type CreateIssueState = { error: string | null; success?: boolean; issueId?: string };
 
@@ -15,6 +16,7 @@ export async function createIssueAction(
   _prev: CreateIssueState,
   formData: FormData
 ): Promise<CreateIssueState> {
+  await requireBoardSession();
   const assignees = assigneesFromFormSelect(formData.get('assigneeAgentId') as string);
   const goalId = formData.get('goalId') as string;
   const projectId = formData.get('projectId') as string;
@@ -53,6 +55,7 @@ export async function updateIssueDescriptionAction(
   _prev: UpdateIssueDescriptionState,
   formData: FormData
 ): Promise<UpdateIssueDescriptionState> {
+  await requireBoardSession();
   const issueId = formData.get('issueId') as string;
 
   try {
@@ -77,6 +80,7 @@ export async function updateIssueAction(
   _prev: UpdateIssueState,
   formData: FormData
 ): Promise<UpdateIssueState> {
+  await requireBoardSession();
   const issueId = formData.get('issueId') as string;
   const assignees = assigneesFromFormSelect(formData.get('assigneeAgentId') as string);
   const goalId = formData.get('goalId') as string;
@@ -114,6 +118,7 @@ export async function commentOnIssueAction(
   _prev: CommentOnIssueState,
   formData: FormData
 ): Promise<CommentOnIssueState> {
+  await requireBoardSession();
   const issueId = formData.get('issueId') as string;
   const comment = (formData.get('comment') as string)?.trim();
   const status = formData.get('status') as string;
@@ -163,6 +168,7 @@ export async function commentOnIssueAction(
 }
 
 export async function releaseCheckoutLockAction(formData: FormData): Promise<void> {
+  await requireBoardSession();
   const issueId = formData.get('issueId') as string;
   if (!issueId) return;
 

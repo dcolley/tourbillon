@@ -2,12 +2,13 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { db, agents } from '@tourbillon/db';
 import { desc, eq } from 'drizzle-orm';
-import { getActiveCompany, getActiveCompanyOrNull } from '@/lib/company';
+import { getActiveCompany, getActiveCompanyOrNull, requireBoardSession } from '@/lib/company';
 import { AgentValidationError, AGENT_ROLE_OPTIONS, createAgent } from '@/lib/agents';
 import { AgentInstructionFields } from './agent-instruction-fields';
 
 async function hireAgent(formData: FormData) {
   'use server';
+  await requireBoardSession();
 
   const reportsToId = formData.get('reportsToId') as string | null;
   let created;

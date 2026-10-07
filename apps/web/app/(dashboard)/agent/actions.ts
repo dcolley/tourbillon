@@ -11,8 +11,10 @@ import {
 import { triggerAgentHeartbeat, retryFailedHeartbeat } from '@/lib/heartbeat';
 import { getHeartbeatRun, getInFlightHeartbeatRun } from '@/lib/heartbeats';
 import { actionError, actionSuccess, type ActionResult } from '@/lib/action-result';
+import { requireBoardSession } from '@/lib/company';
 
 export async function triggerAgentHeartbeatAction(formData: FormData) {
+  await requireBoardSession();
   const agentId = formData.get('agentId') as string;
   const companyId = formData.get('companyId') as string;
   const urlKey = (formData.get('urlKey') as string) || null;
@@ -45,6 +47,7 @@ export async function triggerAgentHeartbeatAction(formData: FormData) {
 }
 
 export async function toggleAgentActiveAction(formData: FormData) {
+  await requireBoardSession();
   const agentId = formData.get('agentId') as string;
   const active = formData.get('active') === 'true';
 
@@ -66,6 +69,7 @@ export async function updateAgentRoleAction(
   formData: FormData,
 ): Promise<ActionResult> {
   'use server';
+  await requireBoardSession();
 
   const agentId = formData.get('agentId') as string;
   const role = formData.get('role') as string;
@@ -83,6 +87,7 @@ export async function updateAgentRoleAction(
 }
 
 export async function deleteAgentAction(formData: FormData) {
+  await requireBoardSession();
   const agentId = formData.get('agentId') as string;
   const urlKey = formData.get('urlKey') as string;
   const confirmUrlKey = formData.get('confirmUrlKey') as string;
@@ -102,6 +107,7 @@ export async function deleteAgentAction(formData: FormData) {
 }
 
 export async function forceKillHeartbeatAction(formData: FormData) {
+  await requireBoardSession();
   const runId = formData.get('runId') as string;
   const companyId = formData.get('companyId') as string;
   const returnPath = formData.get('returnPath') as string;
@@ -153,6 +159,7 @@ export async function forceKillHeartbeatAction(formData: FormData) {
  * triggerAgentHeartbeatAction for auth + redirect patterns.
  */
 export async function retryFailedHeartbeatAction(formData: FormData) {
+  await requireBoardSession();
   const runId = formData.get('runId') as string;
   const companyId = formData.get('companyId') as string;
   const returnPath = `/heartbeat/${runId}`;

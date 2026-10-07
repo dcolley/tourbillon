@@ -24,10 +24,37 @@ describe('#105 proxy board gate', () => {
   const req = (path: string, init: { method?: string; headers?: Record<string, string> } = {}) =>
     new NextRequest(`http://localhost${path}`, init);
 
-  it('landing page, /unlock and /health are public for GET', async () => {
+  it('landing page and /unlock are public for GET; /health is not a web route (gated)', async () => {
     assert.equal((await proxy(req('/'))).headers.get('x-middleware-next'), '1');
-    assert.equal((await proxy(req('/health'))).headers.get('x-middleware-next'), '1');
     assert.equal((await proxy(req('/unlock'))).headers.get('x-middleware-next'), '1');
+    assert.equal((await proxy(req('/health'))).status, 307);
+  });
+
+  it('B1: server action POST to an image-suffixed dynamic route without session → 401', async () => {
+    for (const p of ['/agent/x.png', '/issue/A.svg', '/heartbeat/z.jpg', '/agent/new.png', '/project/x.ico']) {
+      const res = await proxy(req(p, { method: 'POST', headers: { 'next-action': 'abc' } }));
+      assert.equal(res.status, 401, p);
+    }
+  });
+
+  it('B1: any Next-Action request without session → 401, even GET on a public path', async () => {
+    assert.equal((await proxy(req('/', { headers: { 'next-action': 'abc' } }))).status, 401);
+    assert.equal((await proxy(req('/unlock', { headers: { 'next-action': 'abc' } }))).status, 401);
+    assert.equal((await proxy(req('/logo.svg', { method: 'POST', headers: { 'next-action': 'abc' } }))).status, 401);
+  });
+
+  it('B1: Next-Action with a valid session passes; with session + agent token → 401', async () => {
+    const token = await createBoardSessionToken();
+    const cookie = `tourbillon_board_session=${token}`;
+    const ok = await proxy(req('/agent/x.png', { method: 'POST', headers: { cookie, 'next-action': 'abc' } }));
+    assert.equal(ok.headers.get('x-middleware-next'), '1');
+    const agent = await proxy(
+      req('/agent/x.png', {
+        method: 'POST',
+        headers: { cookie, 'next-action': 'abc', authorization: `Bearer ${AGENT_TOKEN}` },
+      }),
+    );
+    assert.equal(agent.status, 401);
   });
 
   it('dashboard without session → redirect to /unlock?next=', async () => {
@@ -53,17 +80,78 @@ describe('#105 proxy board gate', () => {
     assert.equal(res.headers.get('x-middleware-next'), '1');
   });
 
-  it('matcher excludes /api, Next assets and static images; includes pages', async () => {
-    const { config } = await import('./proxy');
-    const { pathToRegexp } = require('next/dist/compiled/path-to-regexp') as {
-      pathToRegexp: (p: string) => RegExp;
-    };
-    const re = pathToRegexp(config.matcher[0]);
-    for (const p of ['/api/mobile/companies', '/api/auth/login', '/_next/static/x.js', '/logo.svg', '/favicon.ico']) {
-      assert.equal(re.test(p), false, p);
+  /**
+   * B1: apply the EXPORTED matcher config exactly the way Next does: compile it with Next's own
+   * getMiddlewareMatchers (build-time analysis) and evaluate with getMiddlewareRouteMatcher
+   * (the runtime matcher, which also honours `has` conditions).
+   */
+  function nextMatcher() {
+    const { config } = require('./proxy') as typeof import('./proxy');
+    const { getMiddlewareMatchers } = require('next/dist/build/analysis/get-page-static-info');
+    const { getMiddlewareRouteMatcher } = require('next/dist/shared/lib/router/utils/middleware-route-matcher');
+    const matchers = getMiddlewareMatchers(config.matcher, {});
+    const match = getMiddlewareRouteMatcher(matchers) as (
+      pathname: string,
+      req: { headers: Record<string, string>; cookies: Record<string, string> },
+      query: Record<string, string>,
+    ) => boolean;
+    return (pathname: string, headers: Record<string, string> = {}) => match(pathname, { headers, cookies: {} }, {});
+  }
+
+  const PUBLIC_FILES = [
+    '/logo.svg',
+    '/icon.svg',
+    '/favicon.ico',
+    '/gears-working-cog-bronze-gear-mechanism-in-rim-mLskLLME.jpg',
+  ];
+
+  it('matcher (compiled by Next): image-suffixed dynamic routes and pages run the proxy', () => {
+    const runs = nextMatcher();
+    for (const p of [
+      '/agent/x.png',
+      '/issue/A.svg',
+      '/heartbeat/z.jpg',
+      '/goal/x.jpg',
+      '/project/x.ico',
+      '/heartbeat/x.webp',
+      '/jobs/heartbeat/x.gif',
+      '/agent/new.png',
+      '/x.png',
+      '/agent/logo.svg',
+      '/logo.svg/x',
+      '/api.png',
+      '/dashboard',
+      '/select-company',
+      '/bullmq',
+      '/agent/x',
+      '/',
+      '/unlock',
+    ]) {
+      assert.equal(runs(p), true, p);
     }
-    for (const p of ['/dashboard', '/select-company', '/bullmq', '/agent/x', '/']) {
-      assert.equal(re.test(p), true, p);
+  });
+
+  it('matcher (compiled by Next): only /api, Next assets and the named public files are exempt', () => {
+    const runs = nextMatcher();
+    for (const p of ['/api/mobile/companies', '/api/auth/login', '/_next/static/x.js', '/_next/image', ...PUBLIC_FILES]) {
+      assert.equal(runs(p), false, p);
+    }
+  });
+
+  it('matcher (compiled by Next): exempt files listed in the matcher exist in public/ (or app/icon.svg)', () => {
+    const fs = require('node:fs') as typeof import('node:fs');
+    const path = require('node:path') as typeof import('node:path');
+    for (const p of PUBLIC_FILES.filter((f) => f !== '/favicon.ico')) {
+      const inPublic = fs.existsSync(path.join(__dirname, 'public', p));
+      const appIcon = p === '/icon.svg' && fs.existsSync(path.join(__dirname, 'app', 'icon.svg'));
+      assert.ok(inPublic || appIcon, `${p} is exempt but does not exist`);
+    }
+  });
+
+  it('matcher (compiled by Next): any Next-Action request runs the proxy, even on exempt paths', () => {
+    const runs = nextMatcher();
+    for (const p of [...PUBLIC_FILES, '/_next/static/x.js', '/api/mobile/companies', '/agent/x.png', '/']) {
+      assert.equal(runs(p, { 'next-action': 'abc' }), true, p);
     }
   });
 

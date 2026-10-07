@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { SAFE_NEXT_FALLBACK, sameOriginPath } from '@/lib/safe-next';
 
 export function UnlockForm({ next }: { next: string }) {
   const [secret, setSecret] = useState('');
@@ -24,7 +25,8 @@ export function UnlockForm({ next }: { next: string }) {
         setError('Invalid operator secret.');
         return;
       }
-      window.location.assign(next);
+      // #105 B2: re-check against the real origin before navigating (defence in depth).
+      window.location.assign(sameOriginPath(next, window.location.origin) ?? SAFE_NEXT_FALLBACK);
     } catch {
       setError('Could not reach the server.');
     } finally {

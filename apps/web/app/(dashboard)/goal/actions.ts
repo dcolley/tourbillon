@@ -4,6 +4,7 @@ import { revalidatePath } from 'next/cache';
 import { assigneesFromFormSelect } from '@tourbillon/shared';
 import { createGoal, updateGoal, GoalValidationError } from '@/lib/goals';
 import { createIssue, IssueValidationError } from '@/lib/issues';
+import { requireBoardSession } from '@/lib/company';
 
 export type CreateGoalState = { error: string | null; success?: boolean };
 
@@ -11,6 +12,7 @@ export async function createGoalAction(
   _prev: CreateGoalState,
   formData: FormData
 ): Promise<CreateGoalState> {
+  await requireBoardSession();
   try {
     await createGoal({
       title: formData.get('title') as string,
@@ -41,6 +43,7 @@ export async function updateGoalAction(
   _prev: UpdateGoalState,
   formData: FormData
 ): Promise<UpdateGoalState> {
+  await requireBoardSession();
   const goalId = formData.get('goalId') as string;
   const ownerAgentId = formData.get('ownerAgentId') as string;
 
@@ -69,6 +72,7 @@ export async function createGoalIssueAction(
   _prev: CreateGoalIssueState,
   formData: FormData
 ): Promise<CreateGoalIssueState> {
+  await requireBoardSession();
   const goalId = formData.get('goalId') as string;
   const assignees = assigneesFromFormSelect(formData.get('assigneeAgentId') as string);
 

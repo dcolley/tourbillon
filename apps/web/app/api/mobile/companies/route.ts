@@ -19,7 +19,7 @@ function hasOperatorSecret(req: NextRequest): boolean {
   if (hasAgentToken(req.headers.get('authorization'))) return false;
   const presented = req.headers.get(BOARD_SECRET_HEADER);
   if (!presented) return false; // always required, even with the local-dev opt-in
-  return verifyOperatorSecret(presented);
+  return verifyOperatorSecret(presented, req.headers);
 }
 
 /**
@@ -59,11 +59,12 @@ export async function GET(req: NextRequest) {
  * Select active company and return a board JWT.
  * Body: { companyId: string }
  * #105: requires the operator secret in X-Board-Secret (TOURBILLON_BOARD_SECRET).
- * Fails closed (401) when TOURBILLON_BOARD_SECRET is unset, unless local-dev opt-in
- * TOURBILLON_BOARD_AUTH_INSECURE_DEV=1 is set outside production.
+ * Fails closed (401) when TOURBILLON_BOARD_SECRET is unset, unless the local-dev opt-in
+ * TOURBILLON_BOARD_AUTH_INSECURE_DEV=1 is set outside production AND the request host is loopback.
+ * Returns 503 when BETTER_AUTH_SECRET is unset/default (whatever NODE_ENV is).
  */
 export async function POST(req: NextRequest) {
-  if (!isBoardAuthConfigured()) {
+  if (!isBoardAuthConfigured(req.headers)) {
     console.warn('Mobile API: TOURBILLON_BOARD_SECRET is not set; refusing to mint board tokens');
     return unauthorized();
   }
@@ -90,9 +91,9 @@ export async function POST(req: NextRequest) {
     }
     
     // Issue a board JWT (fails closed if no usable signing key, e.g. default secret in production)
-    const token = await mintBoardJwt(companyId);
+    const token = await mintBoardJwt(companyId, req.headers);
     if (!token) {
-      console.error('Mobile API: BETTER_AUTH_SECRET unset or default in production; cannot mint');
+      console.error('Mobile API: BETTER_AUTH_SECRET unset or default; cannot mint board tokens');
       return NextResponse.json({ error: 'Board auth is not configured' }, { status: 503 });
     }
 

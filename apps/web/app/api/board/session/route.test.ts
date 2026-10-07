@@ -72,6 +72,26 @@ describe('#105 /api/board/session', () => {
     assert.match(res.headers.get('set-cookie') ?? '', /Secure/);
   });
 
+  it('insecure-dev opt-in: loopback host unlocks; public host or dev NODE_ENV alone does not (B3)', async () => {
+    delete env.TOURBILLON_BOARD_SECRET;
+    env.NODE_ENV = 'development';
+    // NODE_ENV=development without the flag: still fail closed.
+    assert.equal((await route.POST(post({ host: 'localhost:3002' }, { secret: 'x' }))).status, 401);
+    env.TOURBILLON_BOARD_AUTH_INSECURE_DEV = '1';
+    assert.equal((await route.POST(post({ host: 'tourbillon-test.example.com' }, { secret: 'x' }))).status, 401);
+    assert.equal((await route.POST(post({ host: '[::1]:3002' }, { secret: 'x' }))).status, 200);
+    const res = await route.POST(post({ host: '127.0.0.1:3002' }, { secret: 'x' }));
+    assert.equal(res.status, 200);
+    const token = (res.headers.get('set-cookie') ?? '').split(';')[0].split('=')[1];
+    // The insecure-dev session only verifies for loopback requests.
+    assert.equal(await boardAuth.verifyBoardSessionToken(token, new Headers({ host: 'localhost' })), true);
+    assert.equal(await boardAuth.verifyBoardSessionToken(token, new Headers({ host: 'evil.example' })), false);
+    assert.equal(await boardAuth.verifyBoardSessionToken(token), false);
+    // Production ignores the flag even on loopback.
+    env.NODE_ENV = 'production';
+    assert.equal((await route.POST(post({ host: 'localhost' }, { secret: 'x' }))).status, 401);
+  });
+
   it('DELETE clears the cookie', async () => {
     const res = await route.DELETE();
     assert.match(res.headers.get('set-cookie') ?? '', /tourbillon_board_session=;.*Max-Age=0/);

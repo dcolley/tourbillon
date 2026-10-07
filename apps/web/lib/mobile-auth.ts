@@ -15,5 +15,5 @@ export async function verifyMobileToken(req: NextRequest): Promise<string | null
   const token = req.headers.get('x-company-token');
   if (!token) return null;
   if (hasAgentToken(req.headers.get('authorization'))) return null;
-  return verifyBoardJwt(token);
+  return verifyBoardJwt(token, req.headers);
 }
