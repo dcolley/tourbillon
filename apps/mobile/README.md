@@ -161,8 +161,8 @@ The mobile app uses **existing Tourbillon API routes** with one addition for ses
 
 | Method | Path | Purpose | Notes |
 |---|---|---|---|
-| `GET` | `/api/mobile/companies` | List all companies | Mobile-only (no auth required) |
-| `POST` | `/api/mobile/companies` | Select company, get session token | Mobile-only (returns JWT) |
+| `GET` | `/api/mobile/companies` | List all companies | Board only: `X-Board-Secret` (operator secret) or `X-Company-Token`; else 401 (#105) |
+| `POST` | `/api/mobile/companies` | Select company, get session token | Requires `X-Board-Secret` (returns JWT) (#105) |
 | `GET` | `/api/chat/agents` | List agents | Existing route, accepts `X-Company-Token` |
 | `GET` | `/api/issues/list?filter=active` | List active issues | Existing route, accepts `X-Company-Token` |
 

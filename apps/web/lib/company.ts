@@ -1,8 +1,9 @@
-import { cookies } from 'next/headers';
+import { cookies, headers } from 'next/headers';
 import { db, companies, type Company } from '@tourbillon/db';
 import { ensureCompanyWorkspace, mergeCompanySettings, parseCompanySettings, type CompanySettings } from '@tourbillon/shared';
 import { asc, eq } from 'drizzle-orm';
 import { deriveIssuePrefix, slugifyCompanySlug } from './company-utils';
+import { BOARD_SESSION_COOKIE, hasAgentToken, verifyBoardSessionToken } from './board-auth';
 
 export const ACTIVE_COMPANY_COOKIE = 'active_company_id';
 
@@ -37,14 +38,42 @@ export async function getCompanyById(companyId: string): Promise<Company | null>
   return company;
 }
 
+/** #105: true when the current request carries an agent run/chat token (never board). */
+async function requestHasAgentToken(): Promise<boolean> {
+  try {
+    return hasAgentToken((await headers()).get('authorization'));
+  } catch {
+    return false; // outside a request scope
+  }
+}
+
+/** #105: true when the current request carries a valid signed board session cookie. */
+export async function hasBoardSession(): Promise<boolean> {
+  if (await requestHasAgentToken()) return false;
+  const cookieStore = await cookies();
+  return verifyBoardSessionToken(cookieStore.get(BOARD_SESSION_COOKIE)?.value);
+}
+
+/**
+ * Resolve the board's active company.
+ *
+ * #105: this is the central board gate for API routes, pages and server actions.
+ * - `companyIdOverride` must come from a verified board JWT (`verifyMobileToken`).
+ * - Otherwise the `active_company_id` cookie only *selects* the company; it is honoured only
+ *   alongside a valid signed board session cookie.
+ * - A request carrying an agent run/chat token is never board.
+ */
 export async function getActiveCompanyOrNull(
   companyIdOverride?: string | null
 ): Promise<Company | null> {
-  // Allow header-based company override for mobile/API clients
+  if (await requestHasAgentToken()) return null;
+
+  // Verified board JWT (mobile/MCP/operator clients)
   if (companyIdOverride) {
     return getCompanyById(companyIdOverride);
   }
-  
+
+  if (!(await hasBoardSession())) return null;
   const cookieStore = await cookies();
   const companyId = cookieStore.get(ACTIVE_COMPANY_COOKIE)?.value;
   if (!companyId) return null;
