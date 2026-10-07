@@ -14,6 +14,7 @@ import {
   createTraceLogger,
 } from '@tourbillon/shared';
 import { TourbillonPostgresExporter } from './observability/tourbillon-postgres-exporter';
+import { SecretValueRedactionProcessor } from './observability/secret-value-redaction';
 
 const globalForMastra = globalThis as unknown as {
   tourbillonMastra?: Mastra;
@@ -42,6 +43,11 @@ function buildExporters(): ObservabilityExporter[] {
   return exporters;
 }
 
+/** #100: known-secret-value scrub runs first, then Mastra's key-name SensitiveDataFilter. */
+export function buildSpanOutputProcessors() {
+  return [new SecretValueRedactionProcessor(), new SensitiveDataFilter()];
+}
+
 function buildObservability(): Observability | undefined {
   if (!isMastraTracingEnabled()) return undefined;
 
@@ -66,7 +72,7 @@ function buildObservability(): Observability | undefined {
           'jobId',
         ],
         excludeSpanTypes,
-        spanOutputProcessors: [new SensitiveDataFilter()],
+        spanOutputProcessors: buildSpanOutputProcessors(),
         exporters,
       },
     },

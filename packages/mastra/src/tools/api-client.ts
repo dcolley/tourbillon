@@ -1,5 +1,6 @@
 import { RequestContext } from '@mastra/core/request-context';
 import { formatTrace, safeJson, type AgentRuntimeConfig, type TraceContext } from '@tourbillon/shared';
+import { registerKnownSecretValues } from '../observability/secret-value-redaction';
 
 export function getInternalApiUrl(): string {
   return process.env.INTERNAL_API_URL ?? 'http://localhost:3000';
@@ -37,6 +38,9 @@ export function createHeartbeatRuntimeContext(
   if (values.jobId) requestContext.set('jobId', values.jobId);
   if (values.agentRuntimeConfig) {
     requestContext.set('agentRuntimeConfig', values.agentRuntimeConfig);
+    // #100: every run (heartbeat, harness, chat) builds its context here, so the running
+    // agent's own secret values are always known to the observability scrub.
+    registerKnownSecretValues(`agent:${values.agentId}`, [values.agentRuntimeConfig]);
   }
   return requestContext;
 }

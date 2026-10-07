@@ -32,6 +32,7 @@ import {
 } from './skills/on-demand-skills';
 import { agentNeedsMcpTools } from '@tourbillon/shared/mcp-registry';
 import { buildMCPTools } from './tools/mcp-tools';
+import { withAgentSecretRedaction } from './tools/redact-tool-output';
 import { SEARXNG_TOOLS } from './tools/searxng-tools';
 import { TAVILY_TOOLS } from './tools/tavily-tools';
 import { getInternalApiUrl } from './tools/api-client';
@@ -179,7 +180,8 @@ export async function assembleAgentTools(
     delete tools.sendToAgentTool;
   }
 
-  return tools;
+  // #100: one choke point — no tool result may carry agent runtimeConfig secret values.
+  return withAgentSecretRedaction(tools);
 }
 
 export async function shouldAttachCodeExecutionWorkspace(

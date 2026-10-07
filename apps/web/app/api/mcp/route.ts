@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { verifyMobileToken } from '@/lib/mobile-auth';
+import { redactAgentSecretsDeep } from '@tourbillon/shared';
 import {
   setAgentActive,
   updateAgentRuntimeConfig,
@@ -1735,7 +1736,9 @@ export async function POST(req: NextRequest) {
         }
 
         try {
-          const result = await handleToolCall(companyId, toolName, toolArgs);
+          // #100: single choke point for every MCP tool result — agent runtimeConfig secrets
+          // are reduced to key names even if a handler starts returning raw agent rows.
+          const result = redactAgentSecretsDeep(await handleToolCall(companyId, toolName, toolArgs));
           const response: McpResponse = {
             jsonrpc: '2.0',
             id: body.id,

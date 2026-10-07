@@ -25,6 +25,7 @@ export * from './tools/skill-tools';
 export * from './observability/harness-event-writer';
 export * from './observability/heartbeat-tracing-options';
 export * from './observability/error-details-registry';
+export { registerKnownSecretValues, scrubKnownSecretValues } from './observability/secret-value-redaction';
 export { TripwireDetector, tripwireDetectorRegistry } from './observability/tripwire-detector';
 export {
   buildMCPTools,
