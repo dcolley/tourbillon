@@ -124,34 +124,63 @@ export class EgressProxy {
   }
 
   async stop(): Promise<void> {
-    if (!this.server) return;
+    const server = this.server;
+    if (!server) return; // idempotent: second stop() is a no-op
+
     const socketPath = this.socketPath;
 
-    return new Promise((resolve, reject) => {
-      this.server!.closeAllConnections?.();
-      this.server!.close((err) => {
-        if (socketPath) {
-          try {
-            unlinkSync(socketPath);
-          } catch {
-            /* already gone */
-          }
-        }
-        if (err) {
-          logger.error('Error stopping proxy', {
-            companyId: this.companyId,
-            taskId: this.taskId,
-            error: err.message,
-          });
-          reject(err);
-        } else {
-          this.server = null;
-          this.port = 0;
-          this.socketPath = undefined;
-          resolve();
-        }
+    const closeError = await new Promise<Error | null>((resolve) => {
+      let settled = false;
+      const done = (err: Error | null) => {
+        if (settled) return;
+        settled = true;
+        resolve(err);
+      };
+      // Let idle keep-alive sockets/tunnels drain so close() can settle.
+      server.closeAllConnections?.();
+      server.close((err) => {
+        done(err ?? null);
       });
+      // Do not hang teardown if the listener never drains (stale keep-alive
+      // tunnels, or an errored listener with no fd). close() on an
+      // already-closed handle calls back with an error, which still resolves —
+      // the timeout only covers a handle that never drains.
+      setTimeout(() => {
+        done(null);
+      }, 2_000).unref();
     });
+
+    // Always best-effort unlink and always clear state, even when close()
+    // errored: rejecting on close error used to leave the unix socket bound
+    // on disk because callers skipped the unlink when stop() rejected.
+    if (socketPath) {
+      try {
+        unlinkSync(socketPath);
+      } catch {
+        /* already gone */
+      }
+    }
+
+    this.server = null;
+    this.port = 0;
+    this.socketPath = undefined;
+
+    if (closeError) {
+      logger.error('Error stopping proxy (socket unlinked anyway)', {
+        companyId: this.companyId,
+        taskId: this.taskId,
+        error: closeError.message,
+      });
+      return;
+    }
+
+    if (socketPath) {
+      logger.info('Egress proxy stopped (unix)', {
+        companyId: this.companyId,
+        taskId: this.taskId,
+        socketPath,
+      });
+    }
   }
 
   getPort(): number {

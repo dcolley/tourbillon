@@ -8,7 +8,8 @@ import {
   resolveCodeExecutionProxySocketPath,
 } from './execution-workspace';
 import { EgressProxy } from './egress-proxy';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
 import { UNIX_SOCKET_PATH_MAX } from './egress-enforcement';
 
@@ -382,5 +383,78 @@ describe('buildCodeExecutionWorkspace proxy socket identity', () => {
 
     await d2.stop();
     origin.close();
+  });
+});
+
+describe('workspace.destroy stops resolver egress proxy', () => {
+  it('unlinks the proxy sock when workspace.destroy runs', async () => {
+    const { RequestContext } = await import('@mastra/core/request-context');
+    const { readdirSync } = await import('node:fs');
+    const {
+      buildCodeExecutionWorkspace,
+      destroyCodeExecutionWorkspace,
+    } = await import('./execution-workspace');
+
+    const root = mkdtempSync(join(tmpdir(), 'tourbillon-egress-ws-'));
+    const prev = process.env.TOURBILLON_EGRESS_SOCKET_ROOT;
+    process.env.TOURBILLON_EGRESS_SOCKET_ROOT = root;
+
+    const workspace = buildCodeExecutionWorkspace();
+    const requestContext = new RequestContext();
+    requestContext.set('companyId', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+    requestContext.set('taskId', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+    // public-internet mode only activates on isolation=bwrap; allow-list also needs bwrap.
+    // Unit environments without bwrap still exercise destroy idempotency below.
+    requestContext.set('agentRuntimeConfig', {
+      codeExecution: {
+        isolation: 'bwrap',
+        allowNetwork: false,
+        egressAllowList: ['example.com'],
+      },
+    } satisfies AgentRuntimeConfig);
+
+    try {
+      let resolved = false;
+      try {
+        await (workspace as unknown as {
+          resolveSandbox: (args: { requestContext: unknown }) => Promise<unknown>;
+        }).resolveSandbox({ requestContext });
+        resolved = true;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        // Skip full sock assertion when host cannot enforce egress (no bwrap / landlock).
+        if (!/bwrap|enforce|landlock|seccomp|filter|not found|ENOENT/i.test(message)) {
+          throw err;
+        }
+      }
+
+      if (resolved) {
+        const socksBefore = readdirSync(root).filter((n) => n.endsWith('.sock'));
+        assert.ok(
+          socksBefore.length >= 1,
+          `expected a sock under ${root}, got [${socksBefore.join(', ')}]`,
+        );
+      }
+
+      await destroyCodeExecutionWorkspace(workspace);
+
+      if (resolved) {
+        const socksAfter = existsSync(root)
+          ? readdirSync(root).filter((n) => n.endsWith('.sock'))
+          : [];
+        assert.deepEqual(
+          socksAfter,
+          [],
+          `socks must be unlinked after destroy, still have [${socksAfter.join(', ')}]`,
+        );
+      }
+
+      // Idempotent second destroy
+      await destroyCodeExecutionWorkspace(workspace);
+    } finally {
+      if (prev === undefined) delete process.env.TOURBILLON_EGRESS_SOCKET_ROOT;
+      else process.env.TOURBILLON_EGRESS_SOCKET_ROOT = prev;
+      await destroyCodeExecutionWorkspace(workspace).catch(() => undefined);
+    }
   });
 });

@@ -1,9 +1,12 @@
-import { getMastraInstance } from '@tourbillon/mastra';
+import { getMastraInstance, sweepStaleEgressSockets } from '@tourbillon/mastra';
 import { createTraceLogger, isObservabilityEnabled, isPhoenixCollectorEnabled } from '@tourbillon/shared';
 import { startWakeServer, startStaleSweepInterval } from './wake-server';
 import { bootMastraSchedules } from './schedule-boot';
 
 async function main(): Promise<void> {
+  // Defence-in-depth: unlink dead egress proxy socks left by prior crashes.
+  // Live listeners are connect-probed and never removed.
+  await sweepStaleEgressSockets().catch(() => undefined);
   const wakeServer = startWakeServer();
   const staleSweep = startStaleSweepInterval();
   await bootMastraSchedules();
