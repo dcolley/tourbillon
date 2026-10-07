@@ -258,6 +258,13 @@ export async function driveSessionHeadless(
 
         case 'error': {
           const err = event.error;
+          // Stop the controller stream: without this the run is marked failed but the
+          // model keeps calling tools (TEST 36cf8ea4 wrote to TOUR-468 13 min after failing).
+          try {
+            session.abort();
+          } catch {
+            // ignore
+          }
           if (isTokenLimiterTripwireError(err)) {
             fail(tripwireErrorFromUnknown(err));
           } else {
