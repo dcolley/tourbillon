@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db, issues, agents } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
-import { validateRunToken } from '@/lib/auth/run-token';
+import { authenticateAgentToken } from '@/lib/auth/agent-token-auth';
 import { logAgentApiRequest, logAgentApiResponse, summarizeBody } from '@/lib/agent-api-trace';
 import { addIssueComment, listIssueComments } from '@/lib/issue-comments';
 
@@ -12,7 +12,7 @@ export async function GET(
   const { issueId } = await params;
   const token = req.headers.get('authorization')?.replace('Bearer ', '');
   if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  const runCtx = validateRunToken(token);
+  const runCtx = await authenticateAgentToken(token);
   if (!runCtx) return NextResponse.json({ error: 'Invalid token' }, { status: 401 });
 
   const after = req.nextUrl.searchParams.get('after') ?? undefined;
@@ -49,7 +49,7 @@ export async function POST(
   const { issueId } = await params;
   const token = req.headers.get('authorization')?.replace('Bearer ', '');
   if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  const runCtx = validateRunToken(token);
+  const runCtx = await authenticateAgentToken(token);
   if (!runCtx) return NextResponse.json({ error: 'Invalid token' }, { status: 401 });
 
   const runId = req.headers.get('x-paperclip-run-id') ?? runCtx.runId;

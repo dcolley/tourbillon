@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db, agents } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
-import { validateRunToken, type RunTokenPayload } from '@/lib/auth/run-token';
+import type { RunTokenPayload } from '@/lib/auth/run-token';
+import { authenticateAgentToken } from '@/lib/auth/agent-token-auth';
 import { getNitterUrl } from '@/lib/nitter/config';
 import {
   NitterPayloadError,
@@ -21,7 +22,7 @@ export async function authorizeNitterRequest(
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const runCtx = validateRunToken(token);
+  const runCtx = await authenticateAgentToken(token);
   if (!runCtx) {
     return NextResponse.json({ error: 'Invalid token' }, { status: 401 });
   }

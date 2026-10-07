@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { validateRunToken } from '@/lib/auth/run-token';
+import { authenticateAgentToken } from '@/lib/auth/agent-token-auth';
 import { logAgentApiRequest, logAgentApiResponse } from '@/lib/agent-api-trace';
 import {
   readWorkspaceText,
@@ -21,7 +21,7 @@ export async function GET(
   const { companyId } = await params;
   const token = req.headers.get('authorization')?.replace('Bearer ', '');
   if (!token) return unauthorized();
-  const runCtx = validateRunToken(token);
+  const runCtx = await authenticateAgentToken(token);
   if (!runCtx) return unauthorized();
   if (runCtx.companyId !== companyId) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
@@ -60,7 +60,7 @@ export async function PUT(
   const { companyId } = await params;
   const token = req.headers.get('authorization')?.replace('Bearer ', '');
   if (!token) return unauthorized();
-  const runCtx = validateRunToken(token);
+  const runCtx = await authenticateAgentToken(token);
   if (!runCtx) return unauthorized();
   if (runCtx.companyId !== companyId) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
@@ -113,7 +113,7 @@ export async function DELETE(
   const { companyId } = await params;
   const token = req.headers.get('authorization')?.replace('Bearer ', '');
   if (!token) return unauthorized();
-  const runCtx = validateRunToken(token);
+  const runCtx = await authenticateAgentToken(token);
   if (!runCtx) return unauthorized();
   if (runCtx.companyId !== companyId) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 });

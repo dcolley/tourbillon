@@ -37,7 +37,8 @@
     "./vault-encryption": "./src/vault-encryption.ts",
     "./vault-credentials": "./src/vault-credentials.ts",
     "./knowledge-graph": "./src/knowledge-graph.ts",
-    "./knowledge-graph-config": "./src/knowledge-graph-config.ts"
+    "./knowledge-graph-config": "./src/knowledge-graph-config.ts",
+    "./agent-token": "./src/agent-token.ts"
   },
   "dependencies": {
     "croner": "^10.0.1",

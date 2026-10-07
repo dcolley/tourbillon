@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db, approvals, issues, activityLog, companies, agents, type IssueStatus } from '@tourbillon/db';
 import { and, eq, inArray, desc, gte, or, ilike, sql } from 'drizzle-orm';
-import { validateRunToken } from '@/lib/auth/run-token';
+import { authenticateAgentToken } from '@/lib/auth/agent-token-auth';
 import { parseCompanySettings, resolveHitlyGate, publicOriginFromRequest } from '@tourbillon/shared';
 import { ingestHitlyApproval, type HitlyIngestPayload } from '@/lib/hitly/client';
 import { randomBytes } from 'crypto';
@@ -23,7 +23,7 @@ export async function POST(
   const { companyId } = await params;
   const token = req.headers.get('authorization')?.replace('Bearer ', '');
   if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  const runCtx = validateRunToken(token);
+  const runCtx = await authenticateAgentToken(token);
   if (!runCtx) return NextResponse.json({ error: 'Invalid token' }, { status: 401 });
   if (runCtx.companyId !== companyId) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
 
@@ -241,7 +241,7 @@ export async function GET(
   const { companyId } = await params;
   const token = req.headers.get('authorization')?.replace('Bearer ', '');
   if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  const runCtx = validateRunToken(token);
+  const runCtx = await authenticateAgentToken(token);
   if (!runCtx) return NextResponse.json({ error: 'Invalid token' }, { status: 401 });
   if (runCtx.companyId !== companyId) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
 

@@ -86,6 +86,8 @@ Sidebar (company-scoped): Dashboard, Approvals (`/approval`), Issues (`/issue`),
 
 Do not keep retrying these with the company JWT.
 
+Agent run tokens (#110) are HMAC-signed `pm_run_`/`pm_chat_` tokens (`TOURBILLON_AGENT_TOKEN_SECRET`), checked against the DB (run still `running`, agent in that company) and expiring with the run. Only the scheduler and web chat can mint them; an operator cannot hand-craft one.
+
 ## Operating rules
 
 - One company at a time. Confirm the sidebar company before mutating.

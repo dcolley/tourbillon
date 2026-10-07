@@ -1,46 +1,38 @@
 /**
  * Run-scoped (and chat-scoped) token validation.
  *
- * Tokens are issued by the heartbeat worker with format:
- *   pm_run_{base64url(JSON.stringify({ runId, agentId, companyId, iat }))}
+ * #110: tokens are HMAC-SHA256 signed with TOURBILLON_AGENT_TOKEN_SECRET and carry `exp`:
+ *   pm_run_{base64url(JSON{ v, runId, agentId, companyId, iat, exp })}.{hmac}   (scheduler)
+ *   pm_chat_{base64url(JSON{ v, chatSessionId, agentId, companyId, iat, exp })}.{hmac} (web chat)
+ * Chat tokens are accepted here with runId = chatSessionId so agent tools work unchanged.
  *
- * Interactive chat issues:
- *   pm_chat_{base64url(JSON.stringify({ chatSessionId, agentId, companyId, iat }))}
- * which is accepted here with runId = chatSessionId so agent tools work unchanged.
- *
- * Production: replace with JWT + HMAC signature verification.
- * Prototype: decode and trust the payload directly.
+ * `validateRunToken` is pure (signature + expiry, no DB) so it stays usable from edge-ish code.
+ * Route handlers must use `authenticateAgentToken` (lib/auth/agent-token-auth.ts), which also
+ * checks the DB (run is running and matches agent/company; chat agent belongs to the company).
+ * Legacy unsigned tokens are rejected.
  */
-
-import { validateChatToken } from './chat-token';
+import { verifyAgentTokenSignature } from '@tourbillon/shared/agent-token';
 
 export interface RunTokenPayload {
   runId: string;
   agentId: string;
   companyId: string;
   iat: number;
+  /** #110: expiry (unix seconds). */
+  exp?: number;
+  /** #110: which kind of token this came from. */
+  kind?: 'run' | 'chat';
 }
 
 export function validateRunToken(token: string): RunTokenPayload | null {
-  try {
-    if (token.startsWith('pm_chat_')) {
-      const chat = validateChatToken(token);
-      if (!chat) return null;
-      return {
-        runId: chat.chatSessionId,
-        agentId: chat.agentId,
-        companyId: chat.companyId,
-        iat: chat.iat,
-      };
-    }
-    if (!token.startsWith('pm_run_')) return null;
-    const encoded = token.slice('pm_run_'.length);
-    const decoded = Buffer.from(encoded, 'base64url').toString('utf-8');
-    const payload = JSON.parse(decoded) as RunTokenPayload;
-    if (!payload.runId || !payload.agentId || !payload.companyId) return null;
-    // Prototype: no expiry check. Production: check payload.iat + TTL.
-    return payload;
-  } catch {
-    return null;
-  }
+  const claims = verifyAgentTokenSignature(token);
+  if (!claims) return null;
+  return {
+    runId: claims.kind === 'run' ? claims.runId : claims.chatSessionId,
+    agentId: claims.agentId,
+    companyId: claims.companyId,
+    iat: claims.iat,
+    exp: claims.exp,
+    kind: claims.kind,
+  };
 }

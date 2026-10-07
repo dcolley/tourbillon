@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { validateRunToken } from '@/lib/auth/run-token';
+import { authenticateAgentToken } from '@/lib/auth/agent-token-auth';
 import { verifyMobileToken } from '@/lib/mobile-auth';
 import { getActiveCompanyOrNull } from '@/lib/company';
 import { searchCompanyText, type SearchOptions } from '@/lib/search';
@@ -28,7 +28,7 @@ export async function GET(
     const token = authHeader.replace('Bearer ', '');
     
     // Try run token first (agent auth)
-    const runCtx = validateRunToken(token);
+    const runCtx = await authenticateAgentToken(token);
     if (runCtx) {
       authenticatedCompanyId = runCtx.companyId;
     }

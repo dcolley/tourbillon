@@ -32,10 +32,12 @@ import {
   parseCompanySettings,
   createTraceLogger,
   canForceKillHeartbeat,
+  DEFAULT_HEARTBEAT_TIMEOUT_SEC,
 } from '@tourbillon/shared';
 import { durableWakeOutcomeFromTripwire } from './durable-wake-outcome';
 import type { Agent as AgentRecord } from '@tourbillon/db';
 import { randomUUID } from 'crypto';
+import { AgentTokenConfigError, mintRunToken, runTokenTtlSec } from '@tourbillon/shared/agent-token';
 import { runWithHarness, type HarnessRunResult } from './adapters/harness-adapter';
 import { redisPub } from './redis-pub';
 import {
@@ -466,7 +468,23 @@ async function runWake(
     return { runId, status: 'failed', errorText };
   }
 
-  const apiKey = buildRunScopedApiKey(runId, agentId, companyId);
+  // #110: signed, expiring run token. No secret → fail this run cleanly (never mint unsigned).
+  let apiKey: string;
+  try {
+    apiKey = buildRunScopedApiKey(
+      runId,
+      agentId,
+      companyId,
+      (agentRecord.runtimeConfig as AgentRuntimeConfig | null)?.timeout?.heartbeatSec ??
+        DEFAULT_HEARTBEAT_TIMEOUT_SEC,
+    );
+  } catch (err) {
+    const errorText =
+      err instanceof AgentTokenConfigError ? err.message : 'Failed to issue run token';
+    runTracer.error('run token not issued', { reason: errorText });
+    await recordHeartbeatFailure(runId, errorText, companyId, agentId);
+    return { runId, status: 'failed', errorText };
+  }
   const wakeMessage = buildWakeMessage(wake);
   const liveness = resolveHeartbeatLivenessConfig();
   const staleMs = liveness.staleSec * 1000;
@@ -1172,9 +1190,18 @@ async function parkNoProgressIssue(
   });
 }
 
-function buildRunScopedApiKey(runId: string, agentId: string, companyId: string): string {
-  const payload = JSON.stringify({ runId, agentId, companyId, iat: Date.now() });
-  return `pm_run_${Buffer.from(payload).toString('base64url')}`;
+/**
+ * #110: HMAC-signed run token (TOURBILLON_AGENT_TOKEN_SECRET) with exp = run wall-clock timeout
+ * + grace. The web app also requires the run to still be 'running' in heartbeat_runs.
+ * Throws AgentTokenConfigError when the secret is not configured. Never log the result.
+ */
+export function buildRunScopedApiKey(
+  runId: string,
+  agentId: string,
+  companyId: string,
+  timeoutSec?: number | null,
+): string {
+  return mintRunToken({ runId, agentId, companyId }, runTokenTtlSec(timeoutSec));
 }
 
 /** Mark abandoned running rows as failed (DB-only stale sweep). */

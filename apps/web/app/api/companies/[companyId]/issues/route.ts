@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db, issues, companies, agents } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
 import { IssueAssigneeError, resolveIssueAssignees } from '@tourbillon/shared';
-import { validateRunToken } from '@/lib/auth/run-token';
+import { authenticateAgentToken } from '@/lib/auth/agent-token-auth';
 import { validateSchedulerKey } from '@/lib/auth/scheduler-key';
 import { logIssueCreated } from '@/lib/issues';
 import { enqueueHeartbeat } from '@/lib/wake-client';
@@ -15,7 +15,7 @@ export async function POST(
   const token = req.headers.get('authorization')?.replace('Bearer ', '');
   if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  const runCtx = validateRunToken(token);
+  const runCtx = await authenticateAgentToken(token);
   const isScheduler = validateSchedulerKey(token);
 
   if (!runCtx && !isScheduler) {
