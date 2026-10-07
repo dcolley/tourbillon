@@ -45,6 +45,8 @@ export interface LlmProviderRecord {
   apiMode: ModelApiMode;
   isDefault: boolean;
   defaultModelSettings: AgentModelSettings;
+  /** Default model id configured on the provider (null/empty = defer to env). */
+  defaultModel: string | null;
   stickiness: StickinessType;
   stickinessHeaderName: string;
 }
@@ -158,7 +160,8 @@ export function resolveModelProviderConfigFromRecord(
     baseURL: record.baseURL,
     apiKey: record.apiKey ?? '',
     headers: record.headers,
-    defaultModel: modelId ?? envDefaultModel(),
+    defaultModel:
+      modelId ?? (record.defaultModel?.trim() ? record.defaultModel.trim() : envDefaultModel()),
     providerId: record.id,
     providerName: record.name,
     stickiness: record.stickiness,
@@ -401,6 +404,7 @@ export function toLlmProviderRecord(row: {
   apiMode: string;
   isDefault: boolean;
   defaultModelSettings?: unknown;
+  defaultModel?: string | null;
   stickiness?: string;
   stickinessHeaderName?: string;
 }): LlmProviderRecord {
@@ -423,6 +427,10 @@ export function toLlmProviderRecord(row: {
     apiMode,
     isDefault: row.isDefault,
     defaultModelSettings: parseAgentModelSettings(row.defaultModelSettings),
+    defaultModel:
+      typeof row.defaultModel === 'string' && row.defaultModel.trim()
+        ? row.defaultModel.trim()
+        : null,
     stickiness,
     stickinessHeaderName,
   };

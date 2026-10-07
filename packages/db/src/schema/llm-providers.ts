@@ -23,6 +23,8 @@ export const llmProviders = pgTable('llm_providers', {
   headers: jsonb('headers').notNull().default({}),
   apiMode: text('api_mode', { enum: ['chat', 'responses'] }).notNull().default('chat'),
   defaultModelSettings: jsonb('default_model_settings').notNull().default({}),
+  /** Default model *id* for this provider (distinct from defaultModelSettings). */
+  defaultModel: text('default_model'),
   isDefault: boolean('is_default').notNull().default(false),
   stickiness: text('stickiness', { enum: stickinessTypes }).notNull().default('off'),
   stickinessHeaderName: text('stickiness_header_name').notNull().default('x-litellm-session-id'),

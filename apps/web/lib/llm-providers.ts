@@ -40,6 +40,7 @@ export interface LlmProviderPublic {
   apiMode: 'chat' | 'responses';
   isDefault: boolean;
   defaultModelSettings: AgentModelSettings;
+  defaultModel: string | null;
   stickiness: 'off' | 'agent' | 'chat';
   stickinessHeaderName: string;
   createdAt: string;
@@ -55,6 +56,7 @@ export interface CreateLlmProviderInput {
   apiMode?: string;
   isDefault?: boolean;
   defaultModelSettings?: AgentModelSettings;
+  defaultModel?: string | null;
   stickiness?: string;
   stickinessHeaderName?: string;
 }
@@ -69,6 +71,7 @@ export interface UpdateLlmProviderInput {
   isDefault?: boolean;
   clearApiKey?: boolean;
   defaultModelSettings?: AgentModelSettings;
+  defaultModel?: string | null;
   stickiness?: string;
   stickinessHeaderName?: string;
 }
@@ -85,6 +88,7 @@ function toPublic(row: LlmProvider): LlmProviderPublic {
     apiMode: record.apiMode,
     isDefault: record.isDefault,
     defaultModelSettings: record.defaultModelSettings,
+    defaultModel: record.defaultModel,
     stickiness: record.stickiness,
     stickinessHeaderName: record.stickinessHeaderName,
     createdAt: row.createdAt.toISOString(),
@@ -120,6 +124,11 @@ function parseProviderType(type: string): LlmProviderType {
     );
   }
   return parsed;
+}
+
+function normalizeDefaultModel(model?: string | null): string | null {
+  const trimmed = model?.trim();
+  return trimmed ? trimmed : null;
 }
 
 function validateDefaultModelSettings(settings?: AgentModelSettings): AgentModelSettings {
@@ -197,6 +206,7 @@ export async function createLlmProvider(input: CreateLlmProviderInput): Promise<
   const headers = input.headers ?? {};
   const isDefault = input.isDefault ?? false;
   const defaultModelSettings = validateDefaultModelSettings(input.defaultModelSettings);
+  const defaultModel = normalizeDefaultModel(input.defaultModel);
   const stickiness = parseStickinessType(input.stickiness) ?? 'off';
   const stickinessHeaderName = input.stickinessHeaderName?.trim() || 'x-litellm-session-id';
 
@@ -215,6 +225,7 @@ export async function createLlmProvider(input: CreateLlmProviderInput): Promise<
       apiMode,
       isDefault,
       defaultModelSettings,
+      defaultModel,
       stickiness,
       stickinessHeaderName,
     })
@@ -259,6 +270,10 @@ export async function updateLlmProvider(
 
   if (input.defaultModelSettings !== undefined) {
     updates.defaultModelSettings = validateDefaultModelSettings(input.defaultModelSettings);
+  }
+
+  if (input.defaultModel !== undefined) {
+    updates.defaultModel = normalizeDefaultModel(input.defaultModel);
   }
 
   if (input.stickiness !== undefined) {
