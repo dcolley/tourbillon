@@ -59,7 +59,7 @@ let loadAgentOverride: ((id: string) => Promise<unknown>) | null = null;
 
 const COMPANY_A = 'company-a-5c1f';
 const COMPANY_B = 'company-b-93d0';
-const SEARCH_ENV = ['SEARXNG_URL', 'SEARXNG_API_KEY', 'TAVILY_API_KEY', 'OBSERVABILITY_ENABLED', 'PHOENIX_COLLECTOR_ENABLED'];
+const SEARCH_ENV = ['SEARXNG_URL', 'SEARXNG_API_KEY', 'TAVILY_API_KEY', 'NITTER_URL', 'BUFFER_MCP_URL', 'OBSERVABILITY_ENABLED', 'PHOENIX_COLLECTOR_ENABLED'];
 const savedEnv: Record<string, string | undefined> = {};
 const realFetch = globalThis.fetch;
 
@@ -760,5 +760,244 @@ describe('tool permission gate: overhead', () => {
     const p50 = samples[Math.floor(samples.length * 0.5)]!;
     console.log(`[tool-gate overhead] warm-cache p50=${p50.toFixed(4)}ms p95=${p95.toFixed(4)}ms n=${samples.length}`);
     assert.ok(p95 <= 5, `p95 ${p95}ms`);
+  });
+});
+
+describe('tool permission gate: outbound host allow-list', () => {
+  function allowlistCompany(hosts: string[]) {
+    editCompany(COMPANY_A, {
+      settings: { searxngUrl: 'http://searxng.test', toolEgressAllowList: hosts },
+    });
+  }
+
+  for (const surface of ['heartbeat', 'harness', 'chat'] as const) {
+    it(`allows every host by default on ${surface}`, async () => {
+      const a = makeAgent(`agent-egress-open-${surface}`, COMPANY_A, { assignedToolsets: ['web-search'] });
+      editCompany(COMPANY_A, { settings: { searxngUrl: 'http://searxng.test' } });
+      const rc = contextFor(a);
+      const decision = await gate.checkToolPermission({
+        agentId: a.id,
+        companyId: COMPANY_A,
+        surface,
+        toolName: 'searxngSearchTool',
+        requestContext: rc,
+      });
+      assert.deepEqual(decision, { allowed: true });
+    });
+
+    it(`blocks a host off the company list on ${surface}`, async () => {
+      const a = makeAgent(`agent-egress-block-${surface}`, COMPANY_A, { assignedToolsets: ['web-search'] });
+      allowlistCompany(['allowed.example']);
+      const decision = await gate.checkToolPermission({
+        agentId: a.id,
+        companyId: COMPANY_A,
+        surface,
+        toolName: 'searxngSearchTool',
+        requestContext: contextFor(a),
+      });
+      assert.deepEqual(decision, { allowed: false, reason: 'egress_not_allowed', host: 'searxng.test' });
+      await flush();
+      assert.ok(
+        deniedRows.some(
+          (r) => r.agentId === a.id && r.reason === 'egress_not_allowed' && r.host === 'searxng.test' && r.tool === 'searxngSearchTool',
+        ),
+        'agent.tool_denied row with the host',
+      );
+      assert.ok(deniedRows.every((r) => !JSON.stringify(r).includes('http://')), 'no full URL in the denial row');
+    });
+  }
+
+  it('blocks Tavily and Nitter when their hosts are off the list', async () => {
+    const a = makeAgent('agent-egress-tavily', COMPANY_A, {
+      assignedToolsets: ['web-search-tavily', 'nitter'],
+    });
+    allowlistCompany(['allowed.example']);
+    process.env.NITTER_URL = 'https://nitter.example';
+    process.env.TAVILY_API_KEY = 'tvly-test';
+    for (const tool of ['webSearchTavily', 'nitterSearchTweets']) {
+      const decision = await gate.checkToolPermission({
+        agentId: a.id,
+        companyId: COMPANY_A,
+        surface: 'heartbeat',
+        toolName: tool,
+        requestContext: contextFor(a),
+      });
+      assert.equal(decision.allowed, false, tool);
+      assert.equal(decision.reason, 'egress_not_allowed');
+    }
+  });
+
+  it('allows a tool when its configured host is listed', async () => {
+    const a = makeAgent('agent-egress-ok', COMPANY_A, { assignedToolsets: ['web-search'] });
+    allowlistCompany(['searxng.test']);
+    const decision = await gate.checkToolPermission({
+      agentId: a.id,
+      companyId: COMPANY_A,
+      surface: 'heartbeat',
+      toolName: 'searxngSearchTool',
+      requestContext: contextFor(a),
+    });
+    assert.deepEqual(decision, { allowed: true });
+  });
+
+  it('an agent list can only narrow the company list', async () => {
+    const a = makeAgent('agent-egress-narrow', COMPANY_A, {
+      assignedToolsets: ['web-search'],
+      runtimeConfig: { toolEgressAllowList: ['other.example'] },
+    });
+    allowlistCompany(['searxng.test', 'other.example']);
+    const decision = await gate.checkToolPermission({
+      agentId: a.id,
+      companyId: COMPANY_A,
+      surface: 'heartbeat',
+      toolName: 'searxngSearchTool',
+      requestContext: contextFor(a),
+    });
+    assert.deepEqual(decision, { allowed: false, reason: 'egress_not_allowed', host: 'searxng.test' });
+  });
+
+  it('blocks an HTTP MCP server whose host is off the list, allows it when listed', async () => {
+    const a = makeAgent('agent-egress-mcp', COMPANY_A, { mcpServerIds: ['buffer-mcp'] });
+    const input = {
+      agentId: a.id,
+      companyId: COMPANY_A,
+      surface: 'heartbeat' as const,
+      toolName: 'buffer_create_post',
+      requestContext: contextFor(a),
+    };
+    assert.deepEqual(await gate.checkToolPermission(input), { allowed: true }, 'default: allowed');
+    allowlistCompany(['allowed.example']);
+    assert.deepEqual(await gate.checkToolPermission(input), { allowed: false, reason: 'egress_not_allowed', host: 'mcp.buffer.com' });
+    allowlistCompany(['*.buffer.com']);
+    assert.deepEqual(await gate.checkToolPermission(input), { allowed: true });
+  });
+
+  it('local (stdio) MCP servers are not affected by the list', async () => {
+    const a = makeAgent('agent-egress-stdio', COMPANY_A, { mcpServerIds: ['filesystem-local'] });
+    allowlistCompany([]);
+    const decision = await gate.checkToolPermission({
+      agentId: a.id,
+      companyId: COMPANY_A,
+      surface: 'heartbeat',
+      toolName: 'filesystem_read_file',
+      requestContext: contextFor(a),
+    });
+    assert.deepEqual(decision, { allowed: true });
+  });
+
+  it('each covered static tool is checked', async () => {
+    const a = makeAgent('agent-egress-each', COMPANY_A, {
+      assignedToolsets: ['web-search', 'web-search-tavily', 'nitter'],
+    });
+    process.env.NITTER_URL = 'https://nitter.example';
+    process.env.TAVILY_API_KEY = 'tvly-test';
+    const check = (toolName: string) =>
+      gate.checkToolPermission({ agentId: a.id, companyId: COMPANY_A, surface: 'chat', toolName, requestContext: contextFor(a) });
+    const expected: Record<string, string> = {
+      searxngSearchTool: 'searxng.test',
+      searxngNewsSearchTool: 'searxng.test',
+      webSearchTavilyTool: 'api.tavily.com',
+      nitterSearchTweetsTool: 'nitter.example',
+      nitterFeedUserTool: 'nitter.example',
+      nitterSearchUsersTool: 'nitter.example',
+    };
+    allowlistCompany(['unrelated.example']);
+    for (const [tool, host] of Object.entries(expected)) {
+      assert.deepEqual(await check(tool), { allowed: false, reason: 'egress_not_allowed', host }, tool);
+    }
+    allowlistCompany(['searxng.test', 'api.tavily.com', 'nitter.example']);
+    for (const tool of Object.keys(expected)) assert.deepEqual(await check(tool), { allowed: true }, tool);
+    assert.deepEqual(
+      [...shared.TOOL_EGRESS_COVERED_TOOL_IDS].map(shared.toolKeyForId).sort(),
+      Object.keys(expected).sort(),
+      'every covered tool id is exercised',
+    );
+  });
+
+  it('a blocked HTTP MCP server is not connected when tools are built', async () => {
+    const a = makeAgent('agent-egress-build', COMPANY_A, { mcpServerIds: ['buffer-mcp'] });
+    const blockedSettings = { toolEgressAllowList: ['allowed.example'] } as never;
+    const blocked = await mcp.buildMCPTools(a, { companySettings: blockedSettings });
+    assert.deepEqual(Object.keys(blocked), []);
+    const def = (await import('@tourbillon/shared/mcp-registry')).getMcpServerDefinition('buffer-mcp')!;
+    assert.equal(mcp.mcpServerEgressBlockedHost('buffer-mcp', def, shared.resolveToolEgressPolicy(blockedSettings)), 'mcp.buffer.com');
+    assert.equal(mcp.mcpServerEgressBlockedHost('buffer-mcp', def, shared.resolveToolEgressPolicy({ toolEgressAllowList: ['mcp.buffer.com'] })), null);
+  });
+
+  it('MCP client cache keys differ by allow-list and are unchanged without one', () => {
+    const base = { serverId: 'buffer-mcp', companyId: COMPANY_A, apiKey: 'k' };
+    const open = mcp.mcpClientCacheKey(base);
+    assert.equal(mcp.mcpClientCacheKey({ ...base, egressPolicy: {} }), open);
+    const k1 = mcp.mcpClientCacheKey({ ...base, egressPolicy: shared.resolveToolEgressPolicy({ toolEgressAllowList: ['a.example'] }) });
+    const k2 = mcp.mcpClientCacheKey({ ...base, egressPolicy: shared.resolveToolEgressPolicy({ toolEgressAllowList: ['b.example'] }) });
+    assert.equal(new Set([open, k1, k2]).size, 3);
+  });
+
+  it('the MCP HTTP fetch refuses a redirect off the list', async () => {
+    const hops: string[] = [];
+    globalThis.fetch = (async (url: string | URL) => {
+      hops.push(String(url));
+      return new Response(null, { status: 307, headers: { location: 'https://elsewhere.example/mcp' } });
+    }) as typeof fetch;
+    const mcpFetch = mcp.createMcpHttpFetch('k', undefined, shared.resolveToolEgressPolicy({ toolEgressAllowList: ['mcp.buffer.com'] }));
+    await assert.rejects(() => mcpFetch('https://mcp.buffer.com/mcp', { method: 'POST', body: '{}' }), shared.ToolEgressBlockedError);
+    assert.deepEqual(hops, ['https://mcp.buffer.com/mcp']);
+  });
+
+  it('a mid-run list change is seen after the cache window', async () => {
+    const a = makeAgent('agent-egress-window', COMPANY_A, { assignedToolsets: ['web-search'] });
+    editCompany(COMPANY_A, { settings: { searxngUrl: 'http://searxng.test' } });
+    const ctx = { agentId: a.id, companyId: COMPANY_A, surface: 'heartbeat' as const };
+    const rc = contextFor(a);
+    assert.equal((await gate.checkToolPermission({ ...ctx, toolName: 'searxngSearchTool', requestContext: rc })).allowed, true);
+    companyRows.set(COMPANY_A, {
+      ...companyRows.get(COMPANY_A)!,
+      settings: { searxngUrl: 'http://searxng.test', toolEgressAllowList: ['allowed.example'] },
+      updatedAt: new Date(clock + 1),
+    });
+    clock += gate.TOOL_GATE_CACHE_TTL_MS - 1;
+    assert.equal((await gate.checkToolPermission({ ...ctx, toolName: 'searxngSearchTool', requestContext: rc })).allowed, true);
+    clock += 1;
+    const blocked = await gate.checkToolPermission({ ...ctx, toolName: 'searxngSearchTool', requestContext: rc });
+    assert.equal(blocked.allowed, false);
+    assert.equal(blocked.reason, 'egress_not_allowed');
+  });
+
+  it('fails closed when resolving egress targets throws', async () => {
+    const a = makeAgent('agent-egress-err', COMPANY_A, { assignedToolsets: ['web-search'] });
+    allowlistCompany(['allowed.example']);
+    let resolved = 0;
+    gate.setToolGateDepsForTests({
+      loadAgent: async (id) => ({ ...agentRows.get(id)! }),
+      loadCompany: async (id) => ({ ...companyRows.get(id)! }) as never,
+      recordDenied: async (row) => {
+        deniedRows.push({ ...row });
+      },
+      now: () => clock,
+      resolveEgressTargets: () => {
+        resolved += 1;
+        throw new Error('unexpected');
+      },
+    });
+    const decision = await gate.checkToolPermission({
+      agentId: a.id,
+      companyId: COMPANY_A,
+      surface: 'heartbeat',
+      toolName: 'searxngSearchTool',
+      requestContext: contextFor(a),
+    });
+    assert.deepEqual(decision, { allowed: false, reason: 'gate_error' });
+    assert.equal(resolved, 1, 'the egress lookup itself failed (not the row lookup)');
+  });
+
+  it('a denied egress call never runs the tool on the heartbeat agent', async () => {
+    const a = makeAgent('agent-egress-run', COMPANY_A, { assignedToolsets: ['web-search'] });
+    allowlistCompany(['allowed.example']);
+    const durable = await factory.createDurableAgentWithSkills(a, {
+      companySettings: { searxngUrl: 'http://searxng.test', toolEgressAllowList: ['allowed.example'] } as never,
+    });
+    const { outcomes } = await runAgent(durable, scriptedModel([['searxngSearchTool']]), contextFor(a));
+    deniedOutcome(outcomes[0], 'egress_not_allowed');
+    assert.equal(fetchCalls.length, 0);
   });
 });

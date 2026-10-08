@@ -1,4 +1,5 @@
 import { getMcpServerDefinition } from './mcp-registry';
+import { mcpServerUrlFromDefinition } from './tool-egress';
 import type { AgentRuntimeConfig, CompanySettings } from './types';
 
 export interface McpCredentialContext {
@@ -29,7 +30,7 @@ export function resolveMcpServerUrl(serverId: string): URL | null {
   const def = getMcpServerDefinition(serverId);
   if (!def?.url && !def?.urlEnvVar) return null;
 
-  const raw = (def.urlEnvVar ? process.env[def.urlEnvVar]?.trim() : undefined) || def.url;
+  const raw = mcpServerUrlFromDefinition(def);
   if (!raw) return null;
 
   try {

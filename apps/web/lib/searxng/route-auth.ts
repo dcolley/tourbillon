@@ -10,11 +10,15 @@ import {
   getResolvedSearxngBaseUrl,
 } from '@/lib/searxng/config';
 import { SearxngUpstreamError } from '@/lib/searxng/types';
+import { toolEgressPolicyFor } from '@/lib/tool-egress';
+import type { ToolEgressPolicy } from '@tourbillon/shared';
 
 export interface SearxngRouteContext {
   runCtx: RunTokenPayload;
   baseUrl: string;
   apiKey: string | null;
+  agentName: string | null;
+  egressPolicy: ToolEgressPolicy;
 }
 
 export async function authorizeSearxngRequest(
@@ -66,6 +70,8 @@ export async function authorizeSearxngRequest(
     runCtx,
     baseUrl,
     apiKey: getResolvedSearxngAuth(companySettings, runtimeConfig),
+    agentName: agent.name ?? null,
+    egressPolicy: toolEgressPolicyFor(companySettings, runtimeConfig),
   };
 }
 

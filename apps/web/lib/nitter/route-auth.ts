@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db, agents } from '@tourbillon/db';
+import { db, agents, companies } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
 import type { RunTokenPayload } from '@/lib/auth/run-token';
 import { authenticateAgentToken } from '@/lib/auth/agent-token-auth';
 import { getNitterUrl } from '@/lib/nitter/config';
+import { toolEgressPolicyFor } from '@/lib/tool-egress';
+import { parseCompanySettings, type AgentRuntimeConfig, type ToolEgressPolicy } from '@tourbillon/shared';
 import {
   NitterPayloadError,
   NitterRateLimitedError,
@@ -12,6 +14,9 @@ import {
 
 export interface NitterRouteContext {
   runCtx: RunTokenPayload;
+  baseUrl: string;
+  agentName: string | null;
+  egressPolicy: ToolEgressPolicy;
 }
 
 export async function authorizeNitterRequest(
@@ -27,7 +32,8 @@ export async function authorizeNitterRequest(
     return NextResponse.json({ error: 'Invalid token' }, { status: 401 });
   }
 
-  if (!getNitterUrl()) {
+  const baseUrl = getNitterUrl();
+  if (!baseUrl) {
     return NextResponse.json(
       { error: 'Nitter not configured', message: 'Set NITTER_URL in environment' },
       { status: 503 },
@@ -49,7 +55,19 @@ export async function authorizeNitterRequest(
     );
   }
 
-  return { runCtx };
+  const company = await db.query.companies.findFirst({
+    where: eq(companies.id, runCtx.companyId),
+  });
+
+  return {
+    runCtx,
+    baseUrl,
+    agentName: agent.name ?? null,
+    egressPolicy: toolEgressPolicyFor(
+      parseCompanySettings(company?.settings),
+      agent.runtimeConfig as AgentRuntimeConfig,
+    ),
+  };
 }
 
 export function nitterErrorResponse(err: unknown): NextResponse {

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { handleToolEgressError } from '@/lib/tool-egress';
 import { runTavilySearch } from '@/lib/tavily/client';
 import { authorizeTavilyRequest, tavilyErrorResponse } from '@/lib/tavily/route-auth';
 import { tavilySearchSchema } from '@/lib/tavily/schemas';
@@ -29,9 +30,10 @@ export async function POST(req: NextRequest) {
       maxResults: parsed.data.maxResults,
       searchDepth: parsed.data.searchDepth,
       includeAnswer: parsed.data.includeAnswer,
+      egressPolicy: auth.egressPolicy,
     });
     return NextResponse.json(result);
   } catch (err) {
-    return tavilyErrorResponse(err);
+    return (await handleToolEgressError(err, auth, 'webSearchTavily')) ?? tavilyErrorResponse(err);
   }
 }

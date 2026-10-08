@@ -6,6 +6,14 @@ import { MCPClient } from '@mastra/mcp';
 import type { Agent as AgentRecord } from '@tourbillon/db';
 import type { AgentRuntimeConfig, CompanySettings, McpServerDefinition } from '@tourbillon/shared';
 import {
+  checkToolEgressTarget,
+  fetchWithToolEgress,
+  isToolEgressRestricted,
+  resolveToolEgressPolicy,
+  toolEgressPolicyKey,
+  type ToolEgressPolicy,
+} from '@tourbillon/shared/tool-egress';
+import {
   agentNeedsMcpTools,
   getMcpServerDefinition,
   isSpecialMcpServerId,
@@ -33,9 +41,14 @@ export function primeMcpClientCacheForTests(key: string, client: { listTools(): 
   else mcpClientCache.delete(key);
 }
 
-function buildHttpFetch(
+/**
+ * fetch for an HTTP MCP server. With a tool egress allow-list set, every request and redirect hop
+ * must stay on the list (fetchWithToolEgress); without one, plain fetch as before.
+ */
+export function createMcpHttpFetch(
   apiKey: string | undefined,
   extraHeaders?: Record<string, string>,
+  egressPolicy?: ToolEgressPolicy,
 ) {
   return async (url: string | URL, init?: RequestInit) => {
     const headers = new Headers(init?.headers);
@@ -46,6 +59,9 @@ function buildHttpFetch(
     }
     if (apiKey) {
       headers.set('Authorization', `Bearer ${apiKey}`);
+    }
+    if (isToolEgressRestricted(egressPolicy)) {
+      return fetchWithToolEgress(url, { ...init, headers }, egressPolicy);
     }
     return fetch(url, { ...init, headers });
   };
@@ -64,17 +80,22 @@ export function mcpClientCacheKey(options: {
   companyId: string;
   urlKey?: string;
   apiKey?: string;
+  /** Tool egress policy; clients with different allow-lists are never shared. */
+  egressPolicy?: ToolEgressPolicy;
 }): string {
-  const { serverId, companyId, urlKey, apiKey } = options;
+  const { serverId, companyId, urlKey, apiKey, egressPolicy } = options;
   const credential = apiKey ? createHash('sha256').update(apiKey).digest('hex') : 'none';
   const scope = serverId === 'memory-mcp-private' && urlKey ? `${companyId}:${urlKey}` : companyId;
-  return `${serverId}:${scope}:${credential}`;
+  const egressKey = toolEgressPolicyKey(egressPolicy);
+  const egress = egressKey ? `:egress-${createHash('sha256').update(egressKey).digest('hex').slice(0, 16)}` : '';
+  return `${serverId}:${scope}:${credential}${egress}`;
 }
 
 export interface GetMcpClientOptions {
   companyId: string;
   urlKey?: string;
   apiKey?: string;
+  egressPolicy?: ToolEgressPolicy;
 }
 
 async function getSpecialStdioClient(
@@ -135,6 +156,7 @@ function getGenericHttpClient(
   serverId: string,
   def: McpServerDefinition,
   apiKey: string | undefined,
+  egressPolicy: ToolEgressPolicy | undefined,
 ): MCPClient | null {
   const url = resolveMcpServerUrl(serverId);
   if (!url) return null;
@@ -144,7 +166,7 @@ function getGenericHttpClient(
     servers: {
       [serverKeyForClient(serverId)]: {
         url,
-        fetch: buildHttpFetch(apiKey, def.headers),
+        fetch: createMcpHttpFetch(apiKey, def.headers, egressPolicy),
       },
     },
   });
@@ -178,9 +200,9 @@ async function getMCPClient(
   serverId: string,
   options: GetMcpClientOptions,
 ): Promise<MCPClient | null> {
-  const { companyId, urlKey, apiKey } = options;
+  const { companyId, urlKey, apiKey, egressPolicy } = options;
 
-  const cacheKey = mcpClientCacheKey({ serverId, companyId, urlKey, apiKey });
+  const cacheKey = mcpClientCacheKey({ serverId, companyId, urlKey, apiKey, egressPolicy });
 
   if (mcpClientCache.has(cacheKey)) return mcpClientCache.get(cacheKey)!;
 
@@ -192,7 +214,7 @@ async function getMCPClient(
   if (isSpecialMcpServerId(serverId)) {
     client = await getSpecialStdioClient(serverId, options);
   } else if (def.transport === 'http') {
-    client = getGenericHttpClient(serverId, def, apiKey);
+    client = getGenericHttpClient(serverId, def, apiKey, egressPolicy);
   } else if (def.transport === 'stdio') {
     client = getGenericStdioClient(serverId, def);
   }
@@ -204,6 +226,23 @@ async function getMCPClient(
 }
 
 export { resolveAgentMcpServerIds, agentNeedsMcpTools };
+
+/**
+ * Host of an HTTP MCP server that the tool egress allow-list refuses, or null when allowed
+ * (or not an HTTP server). A refused server is never connected.
+ */
+export function mcpServerEgressBlockedHost(
+  serverId: string,
+  def: McpServerDefinition,
+  egressPolicy: ToolEgressPolicy,
+): string | null {
+  if (!isToolEgressRestricted(egressPolicy)) return null;
+  if (isSpecialMcpServerId(serverId) || def.transport !== 'http') return null;
+  const url = resolveMcpServerUrl(serverId);
+  if (!url) return null;
+  const decision = checkToolEgressTarget(egressPolicy, url.href);
+  return decision.allowed ? null : (decision.host ?? 'unknown host');
+}
 
 export interface BuildMCPToolsOptions {
   allowedMcpServerIds?: string[];
@@ -221,10 +260,16 @@ export async function buildMCPTools(
     allowedMcpServerIds: options.allowedMcpServerIds,
     agentRuntime: runtimeConfig,
   });
+  const egressPolicy = resolveToolEgressPolicy(companySettings, runtimeConfig);
 
   for (const serverId of allowed) {
     const def = getMcpServerDefinition(serverId);
     if (!def) continue;
+    const blockedHost = mcpServerEgressBlockedHost(serverId, def, egressPolicy);
+    if (blockedHost) {
+      console.warn(`[mcp-tools] Skipping ${serverId}: host ${blockedHost} is not on the tool allow-list`);
+      continue;
+    }
 
     let apiKey: string | undefined;
     if (def.auth) {
@@ -247,6 +292,7 @@ export async function buildMCPTools(
       companyId: agentRecord.companyId,
       urlKey: agentRecord.urlKey,
       apiKey,
+      egressPolicy,
     });
     if (!client) continue;
 
@@ -304,6 +350,7 @@ export async function listMcpToolsForAgent(
     mcpServerIds: options.mcpServerIds,
     agentRuntime: previewRuntime,
   });
+  const egressPolicy = resolveToolEgressPolicy(companySettings, runtimeConfig);
 
   const results: McpServerToolCatalog[] = [];
 
@@ -326,6 +373,12 @@ export async function listMcpToolsForAgent(
       toolWhitelist: def.toolWhitelist,
       toolBlacklist: def.toolBlacklist,
     };
+
+    const blockedHost = mcpServerEgressBlockedHost(serverId, def, egressPolicy);
+    if (blockedHost) {
+      results.push({ ...base, error: `Host ${blockedHost} is not on the outbound allow-list for agent tools` });
+      continue;
+    }
 
     let apiKey: string | undefined;
     if (def.auth) {
@@ -355,6 +408,7 @@ export async function listMcpToolsForAgent(
         companyId: agentRecord.companyId,
         urlKey: agentRecord.urlKey,
         apiKey,
+        egressPolicy,
       });
       if (!client) {
         results.push({ ...base, error: `Failed to connect to ${def.label}` });

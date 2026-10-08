@@ -6,10 +6,14 @@ import { authenticateAgentToken } from '@/lib/auth/agent-token-auth';
 import type { AgentRuntimeConfig } from '@tourbillon/shared';
 import { getCompanySettingsFromDb, getResolvedTavilyApiKey } from '@/lib/tavily/config';
 import { TavilyUpstreamError } from '@/lib/tavily/types';
+import { toolEgressPolicyFor } from '@/lib/tool-egress';
+import type { ToolEgressPolicy } from '@tourbillon/shared';
 
 export interface TavilyRouteContext {
   runCtx: RunTokenPayload;
   apiKey: string;
+  agentName: string | null;
+  egressPolicy: ToolEgressPolicy;
 }
 
 export async function authorizeTavilyRequest(
@@ -60,6 +64,8 @@ export async function authorizeTavilyRequest(
   return {
     runCtx,
     apiKey,
+    agentName: agent.name ?? null,
+    egressPolicy: toolEgressPolicyFor(companySettings, runtimeConfig),
   };
 }
 

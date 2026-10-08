@@ -99,6 +99,11 @@ export interface AgentRuntimeConfig {
   searxngApiKey?: string;
   /** Per-agent Tavily API key override. */
   tavilyApiKey?: string;
+  /**
+   * Outbound hosts this agent's tools may contact (web search, Nitter, HTTP MCP). Unset = no
+   * agent-level restriction. Applied on top of the company list: a host must match both.
+   */
+  toolEgressAllowList?: string[];
   /** Per-server MCP tool allow/deny lists (agent capabilities UI). */
   mcpToolPolicy?: Record<string, { allow?: string[]; deny?: string[] }>;
   /** Per-agent sandbox overrides for code-execution toolset. */
@@ -222,6 +227,11 @@ export interface CompanySettings {
     commentsMaxChars?: number;
     totalSoftMaxChars?: number;
   };
+  /**
+   * Outbound hosts agent tools may contact (web search, Nitter, HTTP MCP). Unset = every host
+   * (default). See tool-egress.ts for the entry format.
+   */
+  toolEgressAllowList?: string[];
 }
 
 export const DEFAULT_RUNTIME_CONFIG: AgentRuntimeConfig = {

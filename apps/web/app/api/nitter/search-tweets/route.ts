@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { handleToolEgressError } from '@/lib/tool-egress';
 import { NitterClient } from '@/lib/nitter/client';
 import { authorizeNitterRequest, nitterErrorResponse } from '@/lib/nitter/route-auth';
 import { searchTweetsSchema } from '@/lib/nitter/schemas';
@@ -23,10 +24,10 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const client = new NitterClient();
+    const client = new NitterClient(auth.baseUrl, auth.egressPolicy);
     const result = await client.searchTweets(parsed.data);
     return NextResponse.json(result);
   } catch (err) {
-    return nitterErrorResponse(err);
+    return (await handleToolEgressError(err, auth, 'nitterSearchTweets')) ?? nitterErrorResponse(err);
   }
 }

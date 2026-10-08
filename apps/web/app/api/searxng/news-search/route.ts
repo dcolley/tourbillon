@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { handleToolEgressError } from '@/lib/tool-egress';
 import { runSearxngSearch } from '@/lib/searxng/client';
 import { authorizeSearxngRequest, searxngErrorResponse } from '@/lib/searxng/route-auth';
 import { searxngNewsSearchSchema } from '@/lib/searxng/schemas';
@@ -26,6 +27,7 @@ export async function POST(req: NextRequest) {
     const result = await runSearxngSearch({
       baseUrl: auth.baseUrl,
       apiKey: auth.apiKey,
+      egressPolicy: auth.egressPolicy,
       query: parsed.data.query,
       maxResults: parsed.data.maxResults,
       categories: 'news',
@@ -34,6 +36,6 @@ export async function POST(req: NextRequest) {
     });
     return NextResponse.json(result);
   } catch (err) {
-    return searxngErrorResponse(err);
+    return (await handleToolEgressError(err, auth, 'searxngNewsSearch')) ?? searxngErrorResponse(err);
   }
 }
