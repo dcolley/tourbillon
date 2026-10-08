@@ -342,6 +342,10 @@ export async function updateAgentRuntimeConfig(
 ): Promise<Agent> {
   const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
   if (!agent) throw new AgentValidationError('Agent not found.');
+  // Archive agent: an archived agent's heartbeat timer stays off (archiving is permanent).
+  if (agent.status === 'archived' && patch.heartbeat?.enabled) {
+    throw new AgentValidationError('Agent is archived; its heartbeat timer cannot be turned on.');
+  }
 
   const current = agent.runtimeConfig as AgentRuntimeConfig;
   const mergedHeartbeat = patch.heartbeat

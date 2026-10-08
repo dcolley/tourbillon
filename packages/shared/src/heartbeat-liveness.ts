@@ -68,6 +68,13 @@ export function canForceKillHeartbeat(status: string): boolean {
 }
 
 /**
+ * Board 'Archive agent': the agent's in-flight run is stopped and recorded as `cancelled` (not
+ * `failed`) with this code and error text, through the same abort path as the operator force-kill.
+ */
+export const AGENT_ARCHIVED_RUN_CODE = 'agent_archived';
+export const AGENT_ARCHIVED_RUN_ERROR = 'Cancelled: agent archived by the board (agent_archived)';
+
+/**
  * Determines if a failed heartbeat run can be retried via a *new* heartbeat
  * (new runId, empty model context). Only failed runs offer the retry affordance.
  */

@@ -8,7 +8,11 @@ import {
   resolveHeartbeatFailureError,
   operatorForceKillError,
   OPERATOR_FORCE_KILL_REASON,
+  agentArchivedKillError,
+  forceKillTermination,
+  parseForceKillReason,
 } from './heartbeat-abort';
+import { AGENT_ARCHIVED_RUN_ERROR } from '@tourbillon/shared';
 
 describe('isAbortLikeError', () => {
   it('detects undici terminated errors', () => {
@@ -87,5 +91,39 @@ describe('resolveHeartbeatFailureError', () => {
   it('converts non-Error to string', () => {
     const result = resolveHeartbeatFailureError('plain string error', false);
     assert.equal(result, 'plain string error');
+  });
+});
+
+describe('Archive agent: force-kill with reason agent_archived', () => {
+  it('parseForceKillReason: absent → operator kill; agent_archived accepted; anything else refused', () => {
+    assert.deepEqual(parseForceKillReason(undefined), { ok: true });
+    assert.deepEqual(parseForceKillReason(null), { ok: true });
+    assert.deepEqual(parseForceKillReason('agent_archived'), { ok: true, reason: 'agent_archived' });
+    assert.deepEqual(parseForceKillReason('operator'), { ok: false });
+    assert.deepEqual(parseForceKillReason({ reason: 'agent_archived' }), { ok: false });
+  });
+
+  it('forceKillTermination: operator kill unchanged (failed + operator reason)', () => {
+    const t = forceKillTermination();
+    assert.equal(t.status, 'failed');
+    assert.equal(t.errorText, OPERATOR_FORCE_KILL_REASON);
+    assert.equal(t.abortError.message, OPERATOR_FORCE_KILL_REASON);
+  });
+
+  it('forceKillTermination: agent_archived → cancelled with the agent_archived reason', () => {
+    const t = forceKillTermination('agent_archived');
+    assert.equal(t.status, 'cancelled');
+    assert.equal(t.errorText, AGENT_ARCHIVED_RUN_ERROR);
+    assert.match(t.errorText, /agent_archived/);
+    assert.equal(t.abortError.message, AGENT_ARCHIVED_RUN_ERROR);
+  });
+
+  it('a run aborted because its agent was archived reports the archive reason, not a stale/abort error', () => {
+    const controller = new AbortController();
+    controller.abort(agentArchivedKillError());
+    assert.equal(
+      resolveHeartbeatFailureError(new Error('The operation was aborted'), true, controller.signal.reason),
+      AGENT_ARCHIVED_RUN_ERROR,
+    );
   });
 });

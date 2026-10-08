@@ -46,8 +46,8 @@ import {
   heartbeatAbortedError,
   isAbortLikeError,
   resolveHeartbeatFailureError,
-  operatorForceKillError,
-  OPERATOR_FORCE_KILL_REASON,
+  forceKillTermination,
+  type ForceKillReason,
 } from './heartbeat-abort';
 import {
   findIssueToPark,
@@ -174,7 +174,7 @@ interface TokenUsageResult {
 async function publishHeartbeatRunUpdate(
   companyId: string,
   runId: string,
-  status: 'succeeded' | 'failed',
+  status: 'succeeded' | 'failed' | 'cancelled',
   agentId: string,
 ): Promise<void> {
   await redisPub.publish(
@@ -205,6 +205,15 @@ async function recordHeartbeatSuccess(
     await db.update(agents)
       .set({ spentMonthlyTokens: sql`${agents.spentMonthlyTokens} + ${total}` })
       .where(eq(agents.id, agentRecord.id));
+  }
+
+  // A run cancelled mid-flight (agent archived) stays cancelled even if its work then completes.
+  const existing = await db.query.heartbeatRuns.findFirst({
+    where: eq(heartbeatRuns.id, runId),
+    columns: { status: true },
+  });
+  if (existing?.status === 'cancelled') {
+    return;
   }
 
   const runUpdates: { status: 'succeeded'; finishedAt: Date; errorText: null; traceId?: string } = {
@@ -1262,7 +1271,11 @@ export interface ForceKillResult {
  * Force-kill a running heartbeat by operator action.
  * Aborts the in-flight controller (if present), persists terminal status, and releases checkout lock.
  */
-export async function forceKillHeartbeat(runId: string, companyId: string): Promise<ForceKillResult> {
+export async function forceKillHeartbeat(
+  runId: string,
+  companyId: string,
+  opts: { reason?: ForceKillReason } = {},
+): Promise<ForceKillResult> {
   const run = await db.query.heartbeatRuns.findFirst({
     where: and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, companyId)),
   });
@@ -1278,19 +1291,25 @@ export async function forceKillHeartbeat(runId: string, companyId: string): Prom
 
   const controller = runAbortControllers.get(runId);
   const hadController = Boolean(controller);
+  // Operator kill → failed (unchanged). Agent archived → cancelled with reason agent_archived.
+  const termination = forceKillTermination(opts.reason);
 
-  // Abort the signal with operator kill reason if controller is present
+  // Abort the signal with the kill reason if controller is present
   if (controller) {
-    controller.abort(operatorForceKillError());
+    controller.abort(termination.abortError);
     runAbortControllers.delete(runId);
+  }
+  // Archived agent: drop any wake coalesced behind this run (it would be skipped anyway).
+  if (opts.reason === 'agent_archived') {
+    agentFollowUps.delete(run.agentId);
   }
 
   // Persist terminal status regardless of whether controller was present
   await db.update(heartbeatRuns)
     .set({
-      status: 'failed',
+      status: termination.status,
       finishedAt: new Date(),
-      errorText: OPERATOR_FORCE_KILL_REASON,
+      errorText: termination.errorText,
     })
     .where(eq(heartbeatRuns.id, runId));
 
@@ -1299,7 +1318,7 @@ export async function forceKillHeartbeat(runId: string, companyId: string): Prom
   await releaseStaleCheckoutLocksForRun(runId);
 
   // Publish update
-  await publishHeartbeatRunUpdate(companyId, runId, 'failed', run.agentId);
+  await publishHeartbeatRunUpdate(companyId, runId, termination.status, run.agentId);
 
   return { success: true, hadController };
 }

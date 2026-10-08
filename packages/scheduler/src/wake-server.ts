@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import { createTraceLogger, type HeartbeatJobData } from '@tourbillon/shared';
 import { syncAgentTimerSchedule, syncRoutineSchedule, deleteRoutineSchedule } from '@tourbillon/mastra';
 import { startWake, sweepStaleHeartbeatRuns, forceKillHeartbeat } from './wake-runner';
+import { parseForceKillReason } from './heartbeat-abort';
 
 const tracer = createTraceLogger('wake-server', {});
 
@@ -145,12 +146,18 @@ export function startWakeServer(): http.Server {
           return;
         }
         const raw = await readBody(req);
-        const body = JSON.parse(raw) as { companyId?: string };
+        const body = JSON.parse(raw) as { companyId?: string; reason?: unknown };
         if (!body.companyId) {
           json(res, 400, { error: 'companyId required' });
           return;
         }
-        const result = await forceKillHeartbeat(runId, body.companyId);
+        // Optional reason: 'agent_archived' (board Archive agent) → run cancelled, not failed.
+        const parsedReason = parseForceKillReason(body.reason);
+        if (!parsedReason.ok) {
+          json(res, 400, { error: 'unknown reason' });
+          return;
+        }
+        const result = await forceKillHeartbeat(runId, body.companyId, { reason: parsedReason.reason });
         if (!result.success) {
           const status = result.errorText === 'Run already finished' ? 409 : 404;
           tracer.info('force-kill attempt', { runId, status, hadController: result.hadController });
@@ -159,7 +166,12 @@ export function startWakeServer(): http.Server {
           });
           return;
         }
-        tracer.info('force-kill attempt', { runId, status: 200, hadController: result.hadController });
+        tracer.info('force-kill attempt', {
+          runId,
+          status: 200,
+          hadController: result.hadController,
+          reason: parsedReason.reason ?? 'operator',
+        });
         json(res, 200, { killed: true, hadController: result.hadController });
         return;
       }

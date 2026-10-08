@@ -17,6 +17,22 @@ export interface ResolvedHeartbeatSchedule {
   metadata: Record<string, unknown>;
 }
 
+/**
+ * Agent timer schedule: an archived agent never has an active timer, whatever its heartbeat
+ * config says (board 'Archive agent' turns the config off too; this also covers agents archived
+ * before that, and is what the scheduler applies on sync and boot reconcile).
+ */
+export function resolveAgentTimerSchedule(agent: {
+  status?: string | null;
+  heartbeat: HeartbeatConfig | null | undefined;
+}): ResolvedHeartbeatSchedule {
+  const resolved = resolveHeartbeatSchedule(agent.heartbeat);
+  if (agent.status === 'archived') {
+    return { active: false, cron: '', scheduleMode: resolved.scheduleMode, metadata: {} };
+  }
+  return resolved;
+}
+
 /** Convert intervalSec to a 5-field cron. Minimum interval: 60 seconds. */
 export function intervalSecToCron(intervalSec: number): string {
   const sec = Math.max(60, Math.floor(intervalSec));
