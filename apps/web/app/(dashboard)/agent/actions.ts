@@ -12,6 +12,7 @@ import { triggerAgentHeartbeat, retryFailedHeartbeat } from '@/lib/heartbeat';
 import { getHeartbeatRun, getInFlightHeartbeatRun } from '@/lib/heartbeats';
 import { actionError, actionSuccess, type ActionResult } from '@/lib/action-result';
 import { requireBoardSession } from '@/lib/company';
+import { requireSchedulerApiKey } from '@tourbillon/shared/scheduler-key';
 import type { AgentActiveToggleResult } from './[urlKey]/agent-active-chip-logic';
 
 export async function triggerAgentHeartbeatAction(formData: FormData) {
@@ -152,9 +153,12 @@ export async function forceKillHeartbeatAction(formData: FormData) {
   }
 
   const schedulerUrl = process.env.SCHEDULER_WAKE_URL ?? 'http://127.0.0.1:3003';
-  const apiKey = process.env.SCHEDULER_API_KEY;
-
-  if (!apiKey) {
+  // Shared helper: unset, whitespace-padded, placeholder, non-printable-ASCII or short keys are refused before any
+  // request is sent (the error names the setting only, never the value).
+  let apiKey: string;
+  try {
+    apiKey = requireSchedulerApiKey();
+  } catch {
     redirect(`${returnPath}?error=${encodeURIComponent('SCHEDULER_API_KEY not configured')}`);
   }
 

@@ -25,7 +25,7 @@ Edit `.env` at the **repo root** (not inside `apps/web`). Important values:
 | `REDIS_URL` | Redis (SSE pub/sub) | `redis://localhost:6379` |
 | `BETTER_AUTH_URL` | Auth callback base URL | `http://localhost:3002` |
 | `INTERNAL_API_URL` | Scheduler → Next.js API | `http://localhost:3002` |
-| `SCHEDULER_API_KEY` | Wake/schedule sync + internal issue create | `dev-scheduler-key` (match in `.env`) |
+| `SCHEDULER_API_KEY` | Wake/schedule sync + internal issue create | required, ≥32 chars, printable ASCII only (no spaces), no placeholder, no leading/trailing whitespace: `openssl rand -base64 32` |
 | `SCHEDULER_WAKE_PORT` | WakeRunner HTTP port | `3003` |
 | `SCHEDULER_WAKE_URL` | Web → scheduler base URL | `http://127.0.0.1:3003` |
 | `LM_STUDIO_BASE_URL` | LLM API endpoint | `http://localhost:1234/v1` |

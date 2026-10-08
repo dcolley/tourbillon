@@ -3,6 +3,7 @@
  */
 import type { HeartbeatJobData } from '@tourbillon/shared';
 import { formatTrace } from '@tourbillon/shared';
+import { requireSchedulerApiKey } from '@tourbillon/shared/scheduler-key';
 import { enrichHeartbeatJob } from './wake-payload';
 
 function schedulerWakeBaseUrl(): string {
@@ -13,11 +14,14 @@ function schedulerWakeBaseUrl(): string {
 }
 
 async function schedulerFetch(path: string, body: unknown): Promise<Response> {
+  // Throws SchedulerKeyConfigError (reason only, never the value) when SCHEDULER_API_KEY is unset,
+  // a placeholder or too short, instead of sending an empty or undefined bearer header.
+  const apiKey = requireSchedulerApiKey();
   return fetch(`${schedulerWakeBaseUrl()}${path}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${process.env.SCHEDULER_API_KEY ?? ''}`,
+      Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify(body),
   });

@@ -8,11 +8,13 @@ import {
   getMastraInstance,
 } from '@tourbillon/mastra';
 import { createTraceLogger } from '@tourbillon/shared';
+import { requireSchedulerApiKey } from '@tourbillon/shared/scheduler-key';
 import { triggerWake } from './wake-runner';
 
 const tracer = createTraceLogger('schedule-boot', {});
 
-async function fireRoutineIssue(meta: Record<string, unknown>): Promise<{
+/** Routine fire → internal issue create on the web app. Exported for tests. */
+export async function fireRoutineIssue(meta: Record<string, unknown>): Promise<{
   issueId?: string;
   companyId: string;
   agentId: string;
@@ -30,7 +32,7 @@ async function fireRoutineIssue(meta: Record<string, unknown>): Promise<{
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${process.env.SCHEDULER_API_KEY}`,
+      Authorization: `Bearer ${requireSchedulerApiKey()}`,
     },
     body: JSON.stringify({
       ...taskTemplate,

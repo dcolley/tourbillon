@@ -2,8 +2,11 @@ import { getMastraInstance, sweepStaleEgressSockets } from '@tourbillon/mastra';
 import { createTraceLogger, isObservabilityEnabled, isPhoenixCollectorEnabled } from '@tourbillon/shared';
 import { startWakeServer, startStaleSweepInterval } from './wake-server';
 import { bootMastraSchedules } from './schedule-boot';
+import { assertSchedulerApiKeyAtStartup } from './scheduler-auth';
 
 async function main(): Promise<void> {
+  // Refuse to start without a usable SCHEDULER_API_KEY (logs the reason, never the value).
+  assertSchedulerApiKeyAtStartup(createTraceLogger('scheduler', {}));
   // Defence-in-depth: unlink dead egress proxy socks left by prior crashes.
   // Live listeners are connect-probed and never removed.
   await sweepStaleEgressSockets().catch(() => undefined);
