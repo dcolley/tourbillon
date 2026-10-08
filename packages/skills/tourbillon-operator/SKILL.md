@@ -24,7 +24,7 @@ Prefer MCP when the tool exists. Prefer REST with a company token when MCP lacks
 ## Auth
 
 1. **Company JWT** (`X-Company-Token`): mint with `POST /api/mobile/companies` body `{ "companyId": "<uuid>" }`. Header name is `X-Company-Token`, not `Authorization`. Payload `{ companyId }`. Same secret as mobile (`BETTER_AUTH_SECRET`). Token identifies the operator; `company_id` on MCP tools identifies the tenant. Isolation: `company_id` must be one `company_list` would return.
-2. **Agent run token** (`Authorization: Bearer`): `validateRunToken`. Required by issue PATCH/create, many `/api/companies/:id/*` writes. Company JWT gets **401 Unauthorized** here. Do not treat that as "TEST is down".
+2. **Agent run token** (`Authorization: Bearer`): signed `pm_run_`/`pm_chat_` token checked by `authenticateAgentToken` (HMAC signature, expiry, live run/agent in the DB). Required by issue PATCH/create, many `/api/companies/:id/*` writes. Company JWT gets **401 Unauthorized** here. Do not treat that as "TEST is down".
 3. **Cookie** `getActiveCompany`: web UI only. MCP must not use cookies.
 4. **HITLy**: human/board gate on halted issues. Decide in-app at `/approval` (or HITLy HTTP if the company toggle is on). MCP currently cannot decide.
 

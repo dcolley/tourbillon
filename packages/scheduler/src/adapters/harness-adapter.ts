@@ -18,6 +18,7 @@ import {
 import type { HeartbeatJobData, AgentRuntimeConfig } from '@tourbillon/shared';
 import {
   buildWakeMessage,
+  effectiveHeartbeatTimeoutSec,
   isHarnessAdapter,
   isMastraTracingEnabled,
   isObservabilityEnabled,
@@ -142,7 +143,8 @@ export async function runWithHarness(
 
   const runtimeConfig = agentRecord.runtimeConfig as AgentRuntimeConfig;
   const maxSteps = runtimeConfig.heartbeat?.maxSteps ?? 30;
-  const timeoutSec = runtimeConfig.timeout?.heartbeatSec ?? 300;
+  // Default 300s if unset; <=0 (no limit) or >23h capped at 23h so every run has a wall clock.
+  const timeoutSec = effectiveHeartbeatTimeoutSec(runtimeConfig.timeout?.heartbeatSec);
 
   // Create per-wake tripwire detector armed with heartbeat runId BEFORE driveSessionHeadless
   // Filter by heartbeatRunId from construction (no "accept any" fallback - prevents collision)

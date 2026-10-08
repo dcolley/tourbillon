@@ -13,6 +13,7 @@
  * Never log tokens. This module logs nothing.
  */
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { effectiveHeartbeatTimeoutSec } from './timeout-config';
 
 export const AGENT_TOKEN_SECRET_ENV = 'TOURBILLON_AGENT_TOKEN_SECRET';
 export const AGENT_TOKEN_SECRET_MIN_LENGTH = 32;
@@ -20,7 +21,7 @@ export const RUN_TOKEN_PREFIX = 'pm_run_';
 export const CHAT_TOKEN_PREFIX = 'pm_chat_';
 /** Added to the run's wall-clock timeout so a run that is just finishing can still call home. */
 export const RUN_TOKEN_GRACE_SEC = 15 * 60;
-/** Upper bound for run tokens (also used when the run has no wall-clock timeout). */
+/** Hard upper bound for run tokens. Wall clocks are capped at 23h, so timeout + grace always fits. */
 export const RUN_TOKEN_MAX_TTL_SEC = 24 * 60 * 60;
 /** Chat tokens are short-lived; the web app re-mints them per request when near expiry. */
 export const CHAT_TOKEN_TTL_SEC = 2 * 60 * 60;
@@ -86,10 +87,13 @@ function mint(prefix: string, claims: Record<string, unknown>, ttlSec: number): 
   return `${body}.${sign(key, body)}`;
 }
 
-/** TTL for a run token: the run's wall-clock timeout + grace, capped (no timeout → cap). */
-export function runTokenTtlSec(timeoutSec: number | null | undefined): number {
-  if (!timeoutSec || timeoutSec <= 0) return RUN_TOKEN_MAX_TTL_SEC;
-  return Math.min(Math.floor(timeoutSec) + RUN_TOKEN_GRACE_SEC, RUN_TOKEN_MAX_TTL_SEC);
+/** TTL for a run token: the effective wall-clock timeout (≤ 23h) + 15 min grace. */
+export function runTokenTtlSec(timeoutSec: unknown): number {
+  // Same effective timeout the scheduler enforces (unset → 300s, <=0 or >23h → 23h).
+  return Math.min(
+    Math.floor(effectiveHeartbeatTimeoutSec(timeoutSec)) + RUN_TOKEN_GRACE_SEC,
+    RUN_TOKEN_MAX_TTL_SEC,
+  );
 }
 
 export function mintRunToken(

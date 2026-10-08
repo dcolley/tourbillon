@@ -1,5 +1,7 @@
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
+import { MAX_HEARTBEAT_TIMEOUT_SEC } from './timeout-config';
 import {
   AgentTokenConfigError,
   CHAT_TOKEN_TTL_SEC,
@@ -67,10 +69,25 @@ describe('#110 agent-token (shared)', () => {
     assert.throws(() => mintChatToken({ chatSessionId: 'x', agentId: 'a', companyId: 'c' }), AgentTokenConfigError);
   });
 
-  it('run TTL = timeout + grace, capped; no timeout → cap', () => {
+  it('prefix is bound into the signature on its own (valid sig, only the prefix changed)', () => {
+    const run = mintRunToken(RUN, 600);
+    const chat = mintChatToken({ chatSessionId: 'chat-a1', agentId: 'a1', companyId: 'c1' });
+    assert.equal(verifyAgentTokenSignature(run.replace(/^pm_run_/, 'pm_chat_')), null);
+    assert.equal(verifyAgentTokenSignature(chat.replace(/^pm_chat_/, 'pm_run_')), null);
+    // A signature computed over the payload WITHOUT the prefix must not verify either.
+    const payload = run.slice('pm_run_'.length, run.lastIndexOf('.'));
+    const sigNoPrefix = createHmac('sha256', SECRET).update(payload).digest('base64url');
+    assert.equal(verifyAgentTokenSignature(`pm_run_${payload}.${sigNoPrefix}`), null);
+    assert.equal(verifyAgentTokenSignature(`pm_chat_${payload}.${sigNoPrefix}`), null);
+  });
+
+  it('run TTL = effective wall clock (unset → 300s, <=0 or >23h → 23h) + grace, always under the 24h cap', () => {
     assert.equal(runTokenTtlSec(300), 300 + RUN_TOKEN_GRACE_SEC);
-    assert.equal(runTokenTtlSec(0), RUN_TOKEN_MAX_TTL_SEC);
-    assert.equal(runTokenTtlSec(undefined), RUN_TOKEN_MAX_TTL_SEC);
-    assert.equal(runTokenTtlSec(10 * RUN_TOKEN_MAX_TTL_SEC), RUN_TOKEN_MAX_TTL_SEC);
+    assert.equal(runTokenTtlSec(undefined), 300 + RUN_TOKEN_GRACE_SEC);
+    assert.equal(runTokenTtlSec(0), MAX_HEARTBEAT_TIMEOUT_SEC + RUN_TOKEN_GRACE_SEC);
+    assert.equal(runTokenTtlSec(-1), MAX_HEARTBEAT_TIMEOUT_SEC + RUN_TOKEN_GRACE_SEC);
+    assert.equal(runTokenTtlSec(85_500), MAX_HEARTBEAT_TIMEOUT_SEC + RUN_TOKEN_GRACE_SEC);
+    assert.equal(runTokenTtlSec(10 * RUN_TOKEN_MAX_TTL_SEC), MAX_HEARTBEAT_TIMEOUT_SEC + RUN_TOKEN_GRACE_SEC);
+    assert.ok(MAX_HEARTBEAT_TIMEOUT_SEC + RUN_TOKEN_GRACE_SEC < RUN_TOKEN_MAX_TTL_SEC);
   });
 });

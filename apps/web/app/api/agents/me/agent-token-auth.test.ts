@@ -149,6 +149,14 @@ describe('#110 agent token auth (GET /api/agents/me)', () => {
     assert.equal((await call(legacy({ chatSessionId: 'chat-agent-b', agentId: 'agent-b', companyId: 'company-b' }, 'pm_chat_'))).status, 401);
   });
 
+  it('chat token for an archived agent → 401 (same token is 200 while the agent is active)', async () => {
+    const token = signed('pm_chat_', { chatSessionId: 'chat-agent-a', agentId: 'agent-a', companyId: 'company-a' });
+    assert.equal((await call(token)).status, 200);
+    store.agents[0].status = 'archived';
+    assert.equal((await call(token)).status, 401);
+    assert.equal((await call(legacy({ chatSessionId: 'chat-agent-a', agentId: 'agent-a', companyId: 'company-a' }, 'pm_chat_'))).status, 401);
+  });
+
   it('no secret configured (production) → fails closed, even for a correctly signed token', async () => {
     const token = signed('pm_run_', RUN_A);
     delete env.TOURBILLON_AGENT_TOKEN_SECRET;

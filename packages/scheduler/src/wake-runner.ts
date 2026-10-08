@@ -32,7 +32,7 @@ import {
   parseCompanySettings,
   createTraceLogger,
   canForceKillHeartbeat,
-  DEFAULT_HEARTBEAT_TIMEOUT_SEC,
+  effectiveHeartbeatTimeoutSec,
 } from '@tourbillon/shared';
 import { durableWakeOutcomeFromTripwire } from './durable-wake-outcome';
 import type { Agent as AgentRecord } from '@tourbillon/db';
@@ -475,8 +475,7 @@ async function runWake(
       runId,
       agentId,
       companyId,
-      (agentRecord.runtimeConfig as AgentRuntimeConfig | null)?.timeout?.heartbeatSec ??
-        DEFAULT_HEARTBEAT_TIMEOUT_SEC,
+      (agentRecord.runtimeConfig as AgentRuntimeConfig | null)?.timeout?.heartbeatSec,
     );
   } catch (err) {
     const errorText =
@@ -685,7 +684,7 @@ async function runWake(
  * Enforce wall-clock timeout from agent config and race stream with abort.
  * 
  * This function:
- * 1. Reads timeout.heartbeatSec from runtimeConfig (default 300)
+ * 1. Reads timeout.heartbeatSec from runtimeConfig (default 300; <=0 or >23h capped at 23h)
  * 2. Registers abortController in runAbortControllers map (for forceKillHeartbeat)
  * 3. Arms wall-clock timer that aborts with timeout error
  * 4. Races stream with abort signal and tripwire
@@ -704,8 +703,8 @@ export async function enforceHeartbeatWallClock<T extends { runId: string; outpu
 }): Promise<{ runId: string; timeoutSec: number }> {
   const { runId, runtimeConfig, abortController, streamFn, tripwireDetector, onStreamResult } = params;
   
-  // Read timeout from agent config (default 300s if unset)
-  const timeoutSec = runtimeConfig.timeout?.heartbeatSec ?? 300;
+  // Read timeout from agent config (default 300s if unset; <=0 or >23h capped at 23h)
+  const timeoutSec = effectiveHeartbeatTimeoutSec(runtimeConfig.timeout?.heartbeatSec);
   
   // Register for operator force-kill (same map forceKillHeartbeat reads)
   runAbortControllers.set(runId, abortController);
@@ -1199,7 +1198,7 @@ export function buildRunScopedApiKey(
   runId: string,
   agentId: string,
   companyId: string,
-  timeoutSec?: number | null,
+  timeoutSec?: unknown,
 ): string {
   return mintRunToken({ runId, agentId, companyId }, runTokenTtlSec(timeoutSec));
 }
