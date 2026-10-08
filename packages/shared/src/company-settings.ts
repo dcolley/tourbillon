@@ -81,7 +81,20 @@ export function parseCompanySettings(raw: unknown): CompanySettings {
       typeof record.tavilyApiKey === 'string' ? record.tavilyApiKey.trim() || undefined : undefined,
     observationalMemory: parseObservationalMemorySettings(record.observationalMemory),
     hitlyGate: parseHitlyGateSettings(record.hitlyGate),
+    ...(typeof record.wakeContextV2 === 'boolean' ? { wakeContextV2: record.wakeContextV2 } : {}),
+    ...parseWakeContextBudgets(record.wakeContextBudgets),
   };
+}
+
+function parseWakeContextBudgets(raw: unknown): Pick<CompanySettings, 'wakeContextBudgets'> {
+  if (!raw || typeof raw !== 'object') return {};
+  const record = raw as Record<string, unknown>;
+  const out: NonNullable<CompanySettings['wakeContextBudgets']> = {};
+  for (const key of ['headerMaxChars', 'commentsMaxChars', 'totalSoftMaxChars'] as const) {
+    const v = record[key];
+    if (typeof v === 'number' && Number.isFinite(v) && v > 0) out[key] = v;
+  }
+  return Object.keys(out).length > 0 ? { wakeContextBudgets: out } : {};
 }
 
 export function mergeCompanySettings(

@@ -214,6 +214,14 @@ export interface CompanySettings {
   tavilyApiKey?: string;
   observationalMemory?: ObservationalMemorySettings;
   hitlyGate?: HitlyGateSettings;
+  /** Wake compression (WC1–6): live-state header + compacted comments. Overrides the env default. */
+  wakeContextV2?: boolean;
+  /** Per-company wake budgets (chars); unset fields use the shared defaults. */
+  wakeContextBudgets?: {
+    headerMaxChars?: number;
+    commentsMaxChars?: number;
+    totalSoftMaxChars?: number;
+  };
 }
 
 export const DEFAULT_RUNTIME_CONFIG: AgentRuntimeConfig = {

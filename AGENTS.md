@@ -294,6 +294,7 @@ All variables live in `.env` at the repo root. Key ones:
 | `PHOENIX_COLLECTOR_ENDPOINT` | Phoenix OTLP traces URL | `http://localhost:6006/v1/traces` |
 | `PHOENIX_PROJECT_NAME` | Phoenix project name | `tourbillon` |
 | `PHOENIX_API_KEY` | Optional Phoenix auth key | — |
+| `TOURBILLON_WAKE_CONTEXT_V2` | Scheduler: live-state header + compacted comments in task wakes (company `settings.wakeContextV2` overrides) | off |
 
 ---
 
