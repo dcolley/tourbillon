@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db, approvals, issues, activityLog, type IssueStatus } from '@tourbillon/db';
-import { and, eq, inArray } from 'drizzle-orm';
+import { db, approvals, approvalResumeTokens, issues, activityLog, type Approval, type IssueStatus } from '@tourbillon/db';
+import { and, eq, gt, inArray, isNull } from 'drizzle-orm';
 import { enqueueApprovalWake } from '@/lib/wake-client';
 import { addIssueComment } from '@/lib/issue-comments';
 import type { HitlyResumePayload } from '@/lib/hitly/client';
+import { hashResumeToken, readResumeCredential, resumeTokenMatches } from '@/lib/hitly/resume-token';
 
 type ApprovalPayload = Record<string, unknown> & {
   title?: string;
@@ -12,22 +13,30 @@ type ApprovalPayload = Record<string, unknown> & {
   hitlyResumeToken?: string;
 };
 
+class ResumeConflict extends Error {}
+
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ approvalId: string }> }
 ) {
   const { approvalId } = await params;
 
-  // This route is called by HITLy via the resumeUrl callback (unsigned POST)
-  // Token is in query string, not Authorization header
-  const { searchParams } = new URL(req.url);
-  const token = searchParams.get('token');
-
-  if (!token) {
-    return NextResponse.json({ error: 'Missing token' }, { status: 400 });
+  // Called by HITLy via the resumeUrl given at ingest (see lib/hitly/resume-token.ts).
+  // TODO: drop the ?token= query form once the HITLy http plugin signs resume callbacks (header/HMAC).
+  const credential = readResumeCredential(req);
+  if (!credential.ok) {
+    return NextResponse.json({ error: credential.error }, { status: credential.status });
   }
+  const token = credential.token;
 
-  const body = (await req.json()) as HitlyResumePayload;
+  let body: HitlyResumePayload;
+  try {
+    const parsed = (await req.json()) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
+    body = parsed as HitlyResumePayload;
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+  }
   const { decision, metadata, id: hitlyId } = body;
 
   // Load approval
@@ -39,18 +48,28 @@ export async function POST(
     return NextResponse.json({ error: 'Approval not found' }, { status: 404 });
   }
 
-  if (approval.status !== 'pending') {
-    // Already decided — idempotent success
-    return NextResponse.json({ status: 'ok', alreadyDecided: true });
-  }
-
-  // Validate resume token
   const payload = (approval.payload ?? {}) as ApprovalPayload;
-  const storedToken = payload.hitlyResumeToken;
 
-  if (!storedToken || storedToken !== token) {
-    console.error('[hitly-resume] Invalid or missing resume token', { approvalId, hitlyId });
-    return NextResponse.json({ error: 'Invalid resume token' }, { status: 400 });
+  // Validate resume token: digest bound to this approval, constant-time compare.
+  const stored = await db.query.approvalResumeTokens.findFirst({
+    where: eq(approvalResumeTokens.approvalId, approvalId),
+  });
+  if (!stored) {
+    if (typeof payload.hitlyResumeToken === 'string') {
+      // Issued before digests were stored: no longer honoured; decide in Tourbillon instead.
+      return NextResponse.json({ error: 'Resume link expired' }, { status: 410 });
+    }
+    return NextResponse.json({ error: 'Invalid resume token' }, { status: 401 });
+  }
+  if (!resumeTokenMatches(approvalId, token, stored.tokenHash)) {
+    console.error('[hitly-resume] Invalid resume token', { approvalId });
+    return NextResponse.json({ error: 'Invalid resume token' }, { status: 401 });
+  }
+  if (stored.usedAt) {
+    return NextResponse.json({ error: 'Resume token already used' }, { status: 409 });
+  }
+  if (!(stored.expiresAt instanceof Date) || stored.expiresAt.getTime() <= Date.now()) {
+    return NextResponse.json({ error: 'Resume link expired' }, { status: 410 });
   }
 
   // Validate HITLy approval id if provided
@@ -93,65 +112,95 @@ export async function POST(
   const priorStatuses = payload.priorStatuses ?? {};
   const issueIds = approval.issueIds ?? [];
 
-  const updated = await db.transaction(async (tx) => {
-    const [row] = await tx
-      .update(approvals)
-      .set({
-        status: tourbillonStatus,
-        note,
-        decidedAt: new Date(),
-        decidedByUserId: 'hitly',
-        updatedAt: new Date(),
-      })
-      .where(eq(approvals.id, approvalId))
-      .returning();
-
-    if (issueIds.length > 0) {
-      const linked = await tx
-        .select({ id: issues.id, status: issues.status, boardApprovalId: issues.boardApprovalId })
-        .from(issues)
-        .where(and(eq(issues.companyId, approval.companyId), inArray(issues.id, issueIds)));
-
+  const tokenHash = hashResumeToken(approvalId, token);
+  let updated: Approval | undefined;
+  try {
+    updated = await db.transaction(async (tx) => {
+      // Single use: only one request can flip used_at for a live, matching digest.
       const now = new Date();
-      for (const issue of linked) {
-        // Only clear halt for issues still bound to this approval
-        if (issue.boardApprovalId && issue.boardApprovalId !== approvalId) continue;
+      const consumed = await tx
+        .update(approvalResumeTokens)
+        .set({ usedAt: now })
+        .where(
+          and(
+            eq(approvalResumeTokens.approvalId, approvalId),
+            eq(approvalResumeTokens.tokenHash, tokenHash),
+            isNull(approvalResumeTokens.usedAt),
+            gt(approvalResumeTokens.expiresAt, now),
+          ),
+        )
+        .returning();
+      if (consumed.length === 0) throw new ResumeConflict('Resume token already used');
 
-        const restoreStatus =
-          tourbillonStatus === 'approved'
-            ? (priorStatuses[issue.id] ?? (issue.status === 'blocked' ? 'todo' : issue.status))
-            : 'blocked';
+      const [row] = await tx
+        .update(approvals)
+        .set({
+          status: tourbillonStatus,
+          note,
+          decidedAt: now,
+          decidedByUserId: 'hitly',
+          updatedAt: now,
+        })
+        .where(and(eq(approvals.id, approvalId), eq(approvals.status, 'pending')))
+        .returning();
+      // Already decided in Tourbillon: the token is spent, nothing else changes.
+      if (!row) return undefined;
 
-        await tx
-          .update(issues)
-          .set({
-            status: restoreStatus,
-            boardApprovalId: null,
-            updatedAt: now,
-          })
-          .where(eq(issues.id, issue.id));
+      if (issueIds.length > 0) {
+        const linked = await tx
+          .select({ id: issues.id, status: issues.status, boardApprovalId: issues.boardApprovalId })
+          .from(issues)
+          .where(and(eq(issues.companyId, approval.companyId), inArray(issues.id, issueIds)));
 
-        await tx.insert(activityLog).values({
-          companyId: approval.companyId,
-          actorType: 'system',
-          actorId: 'hitly',
-          actorName: 'HITLy',
-          action: 'issue.updated',
-          entityType: 'issue',
-          entityId: issue.id,
-          details: {
-            status: restoreStatus,
-            boardApprovalId: null,
-            approvalId,
-            decision: tourbillonStatus,
-            note,
-          },
-        });
+        for (const issue of linked) {
+          // Only clear halt for issues still bound to this approval
+          if (issue.boardApprovalId && issue.boardApprovalId !== approvalId) continue;
+
+          const restoreStatus =
+            tourbillonStatus === 'approved'
+              ? (priorStatuses[issue.id] ?? (issue.status === 'blocked' ? 'todo' : issue.status))
+              : 'blocked';
+
+          await tx
+            .update(issues)
+            .set({
+              status: restoreStatus,
+              boardApprovalId: null,
+              updatedAt: now,
+            })
+            .where(eq(issues.id, issue.id));
+
+          await tx.insert(activityLog).values({
+            companyId: approval.companyId,
+            actorType: 'system',
+            actorId: 'hitly',
+            actorName: 'HITLy',
+            action: 'issue.updated',
+            entityType: 'issue',
+            entityId: issue.id,
+            details: {
+              status: restoreStatus,
+              boardApprovalId: null,
+              approvalId,
+              decision: tourbillonStatus,
+              note,
+            },
+          });
+        }
       }
-    }
 
-    return row;
-  });
+      return row;
+    });
+  } catch (err) {
+    if (err instanceof ResumeConflict) {
+      return NextResponse.json({ error: err.message }, { status: 409 });
+    }
+    throw err;
+  }
+
+  if (!updated) {
+    return NextResponse.json({ status: 'ok', alreadyDecided: true });
+  }
 
   const decisionLabel = tourbillonStatus === 'approved' ? 'Approved' : 'Rejected';
   const title = typeof payload.title === 'string' ? payload.title : approval.type;
