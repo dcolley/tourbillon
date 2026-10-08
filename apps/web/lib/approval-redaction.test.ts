@@ -278,3 +278,100 @@ describe('approval redaction: key=value pairs with secret-looking key names (PM)
     assert.ok(Date.now() - t0 < 1000);
   });
 });
+
+/**
+ * Every rule must stay linear in the text length. A rule that is retried from every position of a
+ * long run takes seconds on these 200k inputs; the linear rules take a few ms. The budget is
+ * generous so a loaded machine doesn't flake, and still far below the slow case.
+ */
+const SPEED_BUDGET_MS = 400;
+const LONG = 200_000;
+const run = (unit: string) => unit.repeat(Math.ceil(LONG / unit.length)).slice(0, LONG);
+function assertFast(r: ReturnType<typeof createApprovalRedactor>, input: string, label: string) {
+  r.text('warm up a.b-c+d://x token=y');
+  const t0 = performance.now();
+  r.text(input);
+  const ms = performance.now() - t0;
+  assert.ok(ms < SPEED_BUDGET_MS, `${label}: ${ms.toFixed(0)} ms`);
+}
+
+describe('approval redaction: speed on long runs (#130 B4)', () => {
+  const r = createApprovalRedactor(['known-vault-value-123']);
+  for (const unit of ['a.', 'a-', 'a+', 'sk-', 'ab.cd-ef+gh', 'word.dotted.', 'eyJ-', 'xoxb-', 'a.b:', 'x://', 'a:a@']) {
+    it(`200k-char "${unit}" run`, () => assertFast(r, run(unit), unit));
+  }
+  it('a 100 KB dotted value inside a whole approval stays fast', () => {
+    const t0 = performance.now();
+    r.deep({ title: 'x', summary: run('a.').slice(0, 100_000), nested: { note: run('sk-').slice(0, 100_000) } });
+    assert.ok(performance.now() - t0 < SPEED_BUDGET_MS);
+  });
+  it('URL passwords are still found after a long or unusual scheme', () => {
+    const long = `${'a.'.repeat(40)}db://app:long-scheme-pw-0001@db.example.test/x`;
+    assert.ok(!r.text(long).includes('long-scheme-pw-0001'), r.text(long).slice(-60));
+    assert.equal(r.text('1postgres://app:digit-pw-0002@db.example.test'), '1postgres://app:[redacted]@db.example.test');
+  });
+});
+
+describe('approval redaction: speed of key=value scanning on long key-like runs (#130 B4/B5)', () => {
+  const r = createApprovalRedactor();
+  for (const unit of ['a', 'a-', 'a.', '--a', 'a=', 'a:', 'a ', 'a\t=\t', '-a=', 'a=b/', '"k": "', 'token="', 'token="\\', 'password=', '?token=a', 'max_tokens=1 ', 'Authorization: Token ']) {
+    it(`200k-char "${unit}" run`, () => assertFast(r, run(unit), unit));
+  }
+  it('one 200k-char key before a separator', () => assertFast(r, `${'k'.repeat(LONG)}_token=value-0001`, 'long key'));
+});
+
+describe('approval redaction: key=value pairs, more forms (#130 B5)', () => {
+  const r = createApprovalRedactor();
+  const masked = (input: string, expected: string) => assert.equal(r.text(input), expected);
+
+  it('a harmless pair right before a secret one does not hide it', () => {
+    masked('go redirect=/cb?token=b5a-0001 now', 'go redirect=/cb?token=[redacted] now');
+    masked('next:/x?api_key=b5a-0002', 'next:/x?api_key=[redacted]');
+    masked('user:password=b5a-0003', 'user:password=[redacted]');
+    masked('feed wss://h.example.test/p?token=b5a-0004', 'feed wss://h.example.test/p?token=[redacted]');
+    masked('a=b/token=b5a-0005', 'a=b/token=[redacted]');
+    masked('{"note": "use password=b5a-0006 here"}', '{"note": "use password=[redacted] here"}');
+  });
+
+  it('keys after -, -- or . are judged on their name', () => {
+    masked('run --password=b5b-0001 --verbose', 'run --password=[redacted] --verbose');
+    masked('--db-password=b5b-0002', '--db-password=[redacted]');
+    masked('cfg .secret=b5b-0003', 'cfg .secret=[redacted]');
+    masked('-token: b5b-0004', '-token: [redacted]');
+    masked('cli --api-key=b5b-0005 -v=1', 'cli --api-key=[redacted] -v=1');
+    masked('-p=1 --name=x', '-p=1 --name=x');
+  });
+
+  it('plural *_tokens keys keep numbers only', () => {
+    masked('auth_tokens="b5c-0001"', 'auth_tokens="[redacted]"');
+    masked('api_tokens=b5c-0002', 'api_tokens=[redacted]');
+    masked("refresh_tokens: 'b5c-0003'", "refresh_tokens: '[redacted]'");
+    const counts = 'max_tokens=4096 "input_tokens": 12 token_count=5 tokenLimit=9 auth_tokens=3 maxTokens: 100';
+    assert.equal(r.text(counts), counts);
+  });
+
+  it('escaped quotes stay inside a quoted value; an unterminated quote runs to the end of the line', () => {
+    masked('{"password": "ab\\" cd", "n": 1}', '{"password": "[redacted]", "n": 1}');
+    masked("secret='it\\'s b5d-0001' ok", "secret='[redacted]' ok");
+    masked('{"token": "ends in backslash\\\\", "n": 2}', '{"token": "[redacted]", "n": 2}');
+    masked('password="b5d-0002 no close\nnext line', 'password="[redacted]\nnext line');
+  });
+
+  it('the key is the whole run before the separator, whatever its length or start', () => {
+    masked('xtoken=mid-0001 mytoken: mid-0002', 'xtoken=[redacted] mytoken: [redacted]');
+    masked(`${'x'.repeat(100)}_token=long-0001`, `${'x'.repeat(100)}_token=[redacted]`);
+    masked(`token_${'x'.repeat(100)}=long-0002`, `token_${'x'.repeat(100)}=[redacted]`);
+    masked(`a.${'b-'.repeat(60)}secret=long-0003`, `a.${'b-'.repeat(60)}secret=[redacted]`);
+    const plain = `passport=AB12 bypass=1 compass:north abc.def=v ${'x'.repeat(100)}=v keyId=k1`;
+    assert.equal(r.text(plain), plain);
+  });
+
+  it('Authorization with another scheme word masks the credential (Test S8)', () => {
+    masked('Authorization: Token s8-cred-0001', 'Authorization: Token [redacted]');
+    masked('authorization=ApiKey s8-cred-0002, x=1', 'authorization=ApiKey [redacted], x=1');
+    masked('auth=s8-cred-0003 next', 'auth=[redacted] next');
+    const bearer = r.text('Authorization: Bearer s8-cred-0004');
+    assert.equal(bearer, 'Authorization: Bearer [redacted]');
+    assert.equal(r.text(bearer), bearer);
+  });
+});
