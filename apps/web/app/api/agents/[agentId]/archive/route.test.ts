@@ -30,6 +30,8 @@ let agents: MockAgent[];
 let archiveCalls: Array<[string, string]>;
 let impactCalls: Array<[string, string]>;
 let revalidated: string[];
+/** S3: make the mocked archive throw (a driver-like error carrying query parameters). */
+let archiveFailure: Error | null = null;
 const reqState: { cookies: Record<string, string>; headers: Record<string, string> } = { cookies: {}, headers: {} };
 
 function sessionToken() {
@@ -104,6 +106,7 @@ describe('Archive agent: board-only route + server action', () => {
           // Mirrors lib/agent-archive.ts: lookup by id or urlKey inside companyId only.
           archiveAgent: async (key: string, companyId: string) => {
             archiveCalls.push([key, companyId]);
+            if (archiveFailure) throw archiveFailure;
             const agent = agents.find((a) => a.companyId === companyId && (a.id === key || a.urlKey === key));
             if (!agent) return null;
             const changed = agent.status !== 'archived';
@@ -143,6 +146,7 @@ describe('Archive agent: board-only route + server action', () => {
     archiveCalls = [];
     impactCalls = [];
     revalidated = [];
+    archiveFailure = null;
   });
 
   async function get(who: Who, agentId: string) {
@@ -199,6 +203,27 @@ describe('Archive agent: board-only route + server action', () => {
     assert.equal(againBody.archived, true);
     assert.equal(againBody.changed, false);
     assert.deepEqual([againBody.approvalsRejected, againBody.issuesUnassigned], [0, 0]);
+  });
+
+  it('route: a failed archive → 500 and one server log line (agent, company, error message; never query parameters)', async () => {
+    archiveFailure = Object.assign(new Error('db down'), { parameters: ['fake-param-value-xyz'] });
+    const logged: unknown[][] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args);
+    };
+    let res: Response;
+    try {
+      res = await post('boardA', 'agent-a1');
+    } finally {
+      console.error = originalError;
+    }
+    assert.equal(res.status, 500);
+    assert.deepEqual(await res.json(), { error: 'Failed to archive agent' });
+    const lines = logged.filter((args) => args[0] === '[agent-archive] archive failed');
+    assert.equal(lines.length, 1);
+    assert.deepEqual(lines[0][1], { agentId: 'agent-a1', companyId: 'company-a', error: 'Error: db down' });
+    assert.doesNotMatch(JSON.stringify(logged), /fake-param-value-xyz/);
   });
 
   it('GET counts: anonymous 401, agent bearer 403, other company 404, board → counts (read only)', async () => {

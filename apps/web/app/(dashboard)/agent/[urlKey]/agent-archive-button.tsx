@@ -48,6 +48,21 @@ export function ArchiveImpactSummary({ impact }: { impact: ArchiveImpactState })
 }
 
 /**
+ * Only the latest dialog open may show its counts: closing (or reopening) supersedes an earlier
+ * impact fetch, so a slow response from a previous open can't overwrite the current counts.
+ */
+export function createLatestRequestGate() {
+  let latest = 0;
+  return {
+    begin: () => ++latest,
+    isLatest: (request: number) => request === latest,
+    cancel: () => {
+      latest += 1;
+    },
+  };
+}
+
+/**
  * Board 'Archive agent' (Danger zone). Confirms first, with the counts of what will change:
  * archiving is permanent (no unarchive), stops the current run, turns heartbeats off, rejects the
  * agent's pending approvals and unassigns its open issues. Already archived → a read-only note.
@@ -67,6 +82,7 @@ export function AgentArchiveButton({
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
   const [impact, setImpact] = useState<ArchiveImpactState>({ state: 'loading' });
+  const [impactGate] = useState(createLatestRequestGate);
 
   if (status === 'archived') {
     return (
@@ -78,18 +94,26 @@ export function AgentArchiveButton({
   }
 
   async function openDialog() {
+    const request = impactGate.begin();
     setImpact({ state: 'loading' });
     setOpen(true);
     try {
       const result = await getArchiveImpactAction(agentId);
+      if (!impactGate.isLatest(request)) return;
       setImpact(
         result.ok
           ? { state: 'ready', pendingApprovals: result.pendingApprovals, openIssues: result.openIssues }
           : { state: 'error', error: result.error },
       );
     } catch {
+      if (!impactGate.isLatest(request)) return;
       setImpact({ state: 'error', error: 'Failed to load what archiving would change.' });
     }
+  }
+
+  function closeDialog() {
+    impactGate.cancel();
+    setOpen(false);
   }
 
   async function confirmArchive() {
@@ -100,7 +124,7 @@ export function AgentArchiveButton({
         toast.error(result.error);
         return;
       }
-      setOpen(false);
+      closeDialog();
       const runs =
         result.runsStopped > 0
           ? ` Stopped ${result.runsStopped === 1 ? 'the current run' : `${result.runsStopped} runs`}.`
@@ -131,7 +155,7 @@ export function AgentArchiveButton({
           Archive agent
         </Button>
       </div>
-      <Dialog open={open} onOpenChange={(next) => !pending && setOpen(next)}>
+      <Dialog open={open} onOpenChange={(next) => !pending && !next && closeDialog()}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Archive {agentName}?</DialogTitle>
@@ -142,7 +166,7 @@ export function AgentArchiveButton({
           </DialogHeader>
           <ArchiveImpactSummary impact={impact} />
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)} disabled={pending}>
+            <Button variant="outline" onClick={closeDialog} disabled={pending}>
               Cancel
             </Button>
             <Button

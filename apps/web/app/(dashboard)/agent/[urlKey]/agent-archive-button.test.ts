@@ -42,6 +42,7 @@ describe('Archive agent dialog markup', () => {
   type Mod = typeof import('./agent-archive-button');
   let ArchiveImpactSummary: Mod['ArchiveImpactSummary'];
   let AgentArchiveButton: Mod['AgentArchiveButton'];
+  let createLatestRequestGate: Mod['createLatestRequestGate'];
 
   before(async () => {
     (globalThis as { React?: unknown }).React = React;
@@ -60,7 +61,7 @@ describe('Archive agent dialog markup', () => {
       }
       return originalRequire.apply(this, arguments as unknown as [string]);
     };
-    ({ ArchiveImpactSummary, AgentArchiveButton } = await import('./agent-archive-button'));
+    ({ ArchiveImpactSummary, AgentArchiveButton, createLatestRequestGate } = await import('./agent-archive-button'));
   });
 
   it('the open dialog shows the counts before confirming', () => {
@@ -100,5 +101,27 @@ describe('Archive agent dialog markup', () => {
     assert.match(source, /async function openDialog\(\)[\s\S]*getArchiveImpactAction\(agentId\)/);
     assert.match(source, /<ArchiveImpactSummary impact=\{impact\} \/>/);
     assert.match(source, /disabled=\{pending \|\| impact\.state !== 'ready'\}/);
+  });
+
+  it('reopened quickly: only the latest open sets the counts (a slow earlier fetch is ignored)', async () => {
+    const gate = createLatestRequestGate();
+    const first = gate.begin();
+    gate.cancel(); // closed
+    const second = gate.begin(); // reopened
+    assert.equal(gate.isLatest(first), false);
+    assert.equal(gate.isLatest(second), true);
+    gate.cancel(); // closed again: nothing in flight may set the counts
+    assert.equal(gate.isLatest(second), false);
+    // Two opens without a close in between: the later one wins.
+    const a = gate.begin();
+    const b = gate.begin();
+    assert.deepEqual([gate.isLatest(a), gate.isLatest(b)], [false, true]);
+    // The dialog checks the gate before setting the counts, on success and on failure, and every
+    // close goes through closeDialog (which cancels the gate).
+    const source = await readFile(path.join(__dirname, 'agent-archive-button.tsx'), 'utf-8');
+    assert.match(source, /const request = impactGate\.begin\(\);[\s\S]*getArchiveImpactAction\(agentId\);\s*if \(!impactGate\.isLatest\(request\)\) return;\s*setImpact\(/);
+    assert.match(source, /catch \{\s*if \(!impactGate\.isLatest\(request\)\) return;/);
+    assert.match(source, /function closeDialog\(\) \{\s*impactGate\.cancel\(\);\s*setOpen\(false\);/);
+    assert.doesNotMatch(source, /setOpen\(false\)[\s\S]*setOpen\(false\)/);
   });
 });

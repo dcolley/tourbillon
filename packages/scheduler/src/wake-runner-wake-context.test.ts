@@ -60,12 +60,28 @@ describe('WC6 wake-runner records contextSnapshot.wakeContext', () => {
       }),
       insert: (t: { __table: string }) => ({ values: async (row: Row) => { (store[t.__table] ??= []).push({ ...row }); } }),
       update: (t: { __table: string }) => ({
-        set: (patch: Row) => ({ where: async (where: Cond) => { for (const r of store[t.__table] ?? []) if (match(r, where)) Object.assign(r, patch); } }),
+        set: (patch: Row) => ({
+          where: (where: Cond) => {
+            const hit = (store[t.__table] ?? []).filter((r) => match(r, where));
+            for (const r of hit) Object.assign(r, patch);
+            return Object.assign(Promise.resolve(), { returning: async () => hit.map((r) => ({ ...r })) });
+          },
+        }),
       }),
-      select: () => ({ from: () => ({ where: async () => [] }) }),
+      // Plain selects return nothing (as before); the run insert's agent-row lock (heartbeat-run-rows:
+      // SELECT … FOR UPDATE in a tx) reads the stored row.
+      select: () => ({
+        from: (t: { __table: string }) => ({
+          where: (where: Cond) =>
+            Object.assign(Promise.resolve([]), {
+              for: async () => (store[t.__table] ?? []).filter((r) => match(r, where)).map((r) => ({ ...r })),
+            }),
+        }),
+      }),
+      transaction: async <T>(fn: (tx: unknown) => Promise<T>): Promise<T> => fn(fakeDb),
     };
     Module.prototype.require = function (this: { filename?: string }, id: string) {
-      if (!this?.filename?.endsWith('wake-runner.ts')) return originalRequire.apply(this, arguments as unknown as [string]);
+      if (!this?.filename?.endsWith('wake-runner.ts') && !this?.filename?.endsWith('heartbeat-run-rows.ts')) return originalRequire.apply(this, arguments as unknown as [string]);
       if (id === '@tourbillon/db') return { db: fakeDb, ...tables, getLlmProviderRowById: async () => null };
       if (id === 'drizzle-orm') {
         return {

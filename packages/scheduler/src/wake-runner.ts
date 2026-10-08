@@ -49,6 +49,7 @@ import {
   forceKillTermination,
   type ForceKillReason,
 } from './heartbeat-abort';
+import { insertHeartbeatRunUnlessArchived, markHeartbeatRunSucceeded } from './heartbeat-run-rows';
 import {
   findIssueToPark,
   hasMaterialWork,
@@ -207,15 +208,6 @@ async function recordHeartbeatSuccess(
       .where(eq(agents.id, agentRecord.id));
   }
 
-  // A run cancelled mid-flight (agent archived) stays cancelled even if its work then completes.
-  const existing = await db.query.heartbeatRuns.findFirst({
-    where: eq(heartbeatRuns.id, runId),
-    columns: { status: true },
-  });
-  if (existing?.status === 'cancelled') {
-    return;
-  }
-
   const runUpdates: { status: 'succeeded'; finishedAt: Date; errorText: null; traceId?: string } = {
     status: 'succeeded',
     finishedAt: new Date(),
@@ -225,7 +217,11 @@ async function recordHeartbeatSuccess(
     runUpdates.traceId = usage.traceId;
   }
 
-  await db.update(heartbeatRuns).set(runUpdates).where(eq(heartbeatRuns.id, runId));
+  // Only a still-running row becomes succeeded: a run cancelled mid-flight (agent archived) or
+  // force-killed keeps its terminal status even if its work then completes.
+  if (!(await markHeartbeatRunSucceeded(db, runId, runUpdates))) {
+    return;
+  }
   await publishHeartbeatRunUpdate(companyId, runId, 'succeeded', agentRecord.id);
 
   if (isMastraTracingEnabled()) {
@@ -471,7 +467,9 @@ async function runWake(
     repo: () => createDrizzleWakeContextRepo({ db, issues, approvals, activityLog, agents }),
   });
 
-  await db.insert(heartbeatRuns).values({
+  // Archive race: the status check above ran well before this insert. The insert re-checks it under
+  // a lock on the agent row, so an agent archived in between gets no run.
+  const created = await insertHeartbeatRunUnlessArchived(db, {
     id: runId,
     agentId,
     companyId,
@@ -496,6 +494,11 @@ async function runWake(
     startedAt: runStartedAt,
     lastSeenAt: runStartedAt,
   });
+  if (!created) {
+    agentTracer.warn('skipped: agent archived');
+    opts.onRunCreated?.('');
+    return { runId: '', status: 'skipped', errorText: 'agent status archived' };
+  }
   runTracer.info('heartbeat run created');
   opts.onRunCreated?.(runId);
 
@@ -862,15 +865,14 @@ async function recordHarnessResult(
   result: HarnessRunResult,
 ): Promise<void> {
   if (result.finishReason === 'suspended') {
-    await db.update(heartbeatRuns)
-      .set({
-        status: 'succeeded',
-        finishedAt: new Date(),
-        errorText: null,
-        traceId: result.traceId ?? undefined,
-        harnessRunId: result.harnessRunId ?? undefined,
-      })
-      .where(eq(heartbeatRuns.id, runId));
+    // Same still-running guard as recordHeartbeatSuccess (a cancelled run stays cancelled).
+    await markHeartbeatRunSucceeded(db, runId, {
+      status: 'succeeded',
+      finishedAt: new Date(),
+      errorText: null,
+      traceId: result.traceId ?? undefined,
+      harnessRunId: result.harnessRunId ?? undefined,
+    });
 
     if (isMastraTracingEnabled()) {
       await flushObservability();

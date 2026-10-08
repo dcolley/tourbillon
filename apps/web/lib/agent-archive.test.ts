@@ -18,7 +18,8 @@ type Row = Record<string, any>;
 type Cond =
   | { op: 'eq' | 'ne'; c: string; val: unknown }
   | { op: 'and' | 'or'; xs: Cond[] }
-  | { op: 'in'; c: string; vals: unknown[] };
+  | { op: 'in' | 'nin'; c: string; vals: unknown[] }
+  | { op: 'isNull'; c: string };
 const store: Record<string, Row[]> = {};
 function table(name: string) {
   return new Proxy({ __table: name } as Record<string, unknown>, {
@@ -32,18 +33,31 @@ function match(row: Row, cond?: Cond): boolean {
     case 'eq': return row[cond.c] === cond.val;
     case 'ne': return row[cond.c] !== cond.val;
     case 'in': return cond.vals.includes(row[cond.c]);
+    case 'nin': return !cond.vals.includes(row[cond.c]);
+    case 'isNull': return row[cond.c] == null;
     case 'and': return cond.xs.every((x) => match(row, x));
     case 'or': return cond.xs.some((x) => match(row, x));
   }
 }
 /** Every write, as [table, payload], to assert "no write" / write order. */
 let writes: Array<[string, Row]>;
+/**
+ * Race hook: runs once, right after the next agents read returns its (now stale) row and before
+ * the caller writes, i.e. a concurrent request that commits between that read and that write.
+ */
+let interleaveAfterAgentRead: (() => Promise<unknown>) | null = null;
 const fakeDb = {
   query: new Proxy({}, {
     get: (_t, name: string) => ({
       findFirst: async ({ where }: { where?: Cond } = {}) => {
         const row = (store[name] ?? []).find((r) => match(r, where));
-        return row ? structuredClone(row) : undefined;
+        const read = row ? structuredClone(row) : undefined;
+        if (name === 'agents' && interleaveAfterAgentRead) {
+          const concurrent = interleaveAfterAgentRead;
+          interleaveAfterAgentRead = null;
+          await concurrent();
+        }
+        return read;
       },
     }),
   }),
@@ -204,6 +218,8 @@ describe('Archive agent (lib/agent-archive)', () => {
           eq: (col: { c: string }, val: unknown) => ({ op: 'eq', c: col.c, val }),
           ne: (col: { c: string }, val: unknown) => ({ op: 'ne', c: col.c, val }),
           inArray: (col: { c: string }, vals: unknown[]) => ({ op: 'in', c: col.c, vals }),
+          notInArray: (col: { c: string }, vals: unknown[]) => ({ op: 'nin', c: col.c, vals }),
+          isNull: (col: { c: string }) => ({ op: 'isNull', c: col.c }),
           and: (...xs: Cond[]) => ({ op: 'and', xs: xs.filter(Boolean) }),
           or: (...xs: Cond[]) => ({ op: 'or', xs: xs.filter(Boolean) }),
         };
@@ -241,6 +257,7 @@ describe('Archive agent (lib/agent-archive)', () => {
     syncCalls = [];
     approvalWakes = [];
     failInTx = null;
+    interleaveAfterAgentRead = null;
   });
 
   it('archives: status archived, heartbeat timer off (rest of the config kept), activity row, chat dropped', async () => {
@@ -394,7 +411,8 @@ describe('Archive agent (lib/agent-archive)', () => {
       const a = approvalRow(id);
       assert.equal(a.status, 'rejected', id);
       assert.equal(a.note, 'Requesting agent archived');
-      assert.equal(a.decidedByUserId, 'board');
+      // S4: same as a board decide (null decider → labelled "Board"), not the raw 'board' id.
+      assert.equal(a.decidedByUserId, null);
       assert.ok(a.decidedAt instanceof Date && a.decidedAt.getTime() >= before);
       const rows = activity('approval.decided', id);
       assert.equal(rows.length, 1, id);
@@ -519,5 +537,236 @@ describe('Archive agent (lib/agent-archive)', () => {
     assert.deepEqual(store.approvals, snapshot.approvals);
     assert.deepEqual(store.issues, snapshot.issues);
     assert.deepEqual(store.activityLog, snapshot.activityLog);
+  });
+
+  // ---- races (B1) -----------------------------------------------------------------------------
+  it('B1 race: an activate toggle that read the agent before a concurrent archive is refused, not written', async () => {
+    let archived: Awaited<ReturnType<typeof archiveAgent>> = null;
+    interleaveAfterAgentRead = async () => {
+      archived = await archiveAgent(AGENT, COMPANY, schedulerDeps());
+    };
+    await assert.rejects(() => agentsLib.setAgentActiveWithOutcome(AGENT, true), {
+      name: 'AgentValidationError',
+      message: 'Agent is archived and cannot be activated.',
+    });
+    assert.equal(archived!.changed, true, 'the archive ran inside the toggle window');
+    assert.equal(agentRow().status, 'archived');
+    assert.equal(writes.filter(([t, v]) => t === 'agents' && v.status && v.status !== 'archived').length, 0);
+    // A second archive afterwards is a no-op: no second agent.archived row, no side effects again.
+    const again = await archiveAgent(AGENT, COMPANY, schedulerDeps());
+    assert.equal(again!.changed, false);
+    assert.equal(activity('agent.archived').length, 1);
+    for (const id of ['ap-1', 'ap-2']) assert.equal(activity('approval.decided', id).length, 1, id);
+  });
+
+  it('B1 race: a deactivate toggle overlapping the archive reports the archived no-op and leaves it archived', async () => {
+    interleaveAfterAgentRead = () => archiveAgent(AGENT, COMPANY, schedulerDeps());
+    const outcome = await agentsLib.setAgentActiveWithOutcome(AGENT, false);
+    assert.deepEqual([outcome.changed, outcome.reason, outcome.agent.status], [false, 'archived', 'archived']);
+    assert.equal(agentRow().status, 'archived');
+  });
+
+  it('B1 race: no overlap → the toggle still writes as before (active ↔ paused)', async () => {
+    const off = await agentsLib.setAgentActiveWithOutcome(AGENT, false);
+    assert.deepEqual([off.changed, off.agent.status, agentRow().status], [true, 'paused', 'paused']);
+    const on = await agentsLib.setAgentActiveWithOutcome(AGENT, true);
+    assert.deepEqual([on.changed, on.agent.status, agentRow().status], [true, 'active', 'active']);
+  });
+
+  it('B1 race: heartbeat-on overlapping the archive is refused; the archived agent keeps the timer off', async () => {
+    agentRow().runtimeConfig.heartbeat.enabled = false;
+    interleaveAfterAgentRead = () => archiveAgent(AGENT, COMPANY, schedulerDeps());
+    await assert.rejects(() => agentsLib.updateAgentRuntimeConfig(AGENT, { heartbeat: { enabled: true } }), {
+      name: 'AgentValidationError',
+      message: 'Agent is archived; its heartbeat timer cannot be turned on.',
+    });
+    assert.equal(agentRow().status, 'archived');
+    assert.equal(agentRow().runtimeConfig.heartbeat.enabled, false);
+  });
+
+  it('B1 race: another runtime-config change read before the archive can\'t restore the timer; the change itself is kept', async () => {
+    // The stale read has heartbeat.enabled true; the archive turns it off in between.
+    interleaveAfterAgentRead = () => archiveAgent(AGENT, COMPANY, schedulerDeps());
+    const updated = await agentsLib.updateAgentRuntimeConfig(AGENT, { timeout: { heartbeatSec: 600 } });
+    assert.equal(updated.status, 'archived');
+    assert.equal(agentRow().runtimeConfig.heartbeat.enabled, false);
+    assert.equal(agentRow().runtimeConfig.timeout.heartbeatSec, 600);
+  });
+
+  it('archived agent with a legacy timer left on: any runtime-config write stores it off', async () => {
+    Object.assign(agentRow(), { status: 'archived' });
+    const updated = await agentsLib.updateAgentRuntimeConfig(AGENT, { timeout: { heartbeatSec: 120 } });
+    assert.equal((updated.runtimeConfig as { heartbeat: { enabled: boolean } }).heartbeat.enabled, false);
+    assert.equal(agentRow().runtimeConfig.heartbeat.enabled, false);
+  });
+
+  it('race: two concurrent archives → one does the work, the other writes nothing (one agent.archived row)', async () => {
+    let inner: Awaited<ReturnType<typeof archiveAgent>> = null;
+    interleaveAfterAgentRead = async () => {
+      inner = await archiveAgent(AGENT, COMPANY, schedulerDeps());
+    };
+    const outer = await archiveAgent(AGENT, COMPANY, schedulerDeps());
+    assert.deepEqual([inner!.changed, outer!.changed], [true, false]);
+    assert.deepEqual([outer!.approvalsRejected, outer!.issuesUnassigned], [0, 0]);
+    assert.equal(activity('agent.archived').length, 1);
+    for (const id of ['ap-1', 'ap-2']) assert.equal(activity('approval.decided', id).length, 1, id);
+    for (const id of ['is-progress', 'is-todo', 'is-halted']) {
+      assert.equal(activity('issue.commented', id).filter((r) => r.details.body === 'Unassigned: agent archived').length, 1, id);
+    }
+    assert.equal(killCalls.filter((k) => k.runId === 'run-live').length, 1);
+  });
+
+  // ---- post-commit sweep (PM): agent writes still in flight when the archive commits -------------
+  /** Scheduler stub whose first kill also lets `window` run: requests landing after the commit. */
+  function depsWithWindow(window: () => void): Deps {
+    const base = schedulerDeps();
+    let ran = false;
+    return {
+      ...base,
+      killRun: async (runId, companyId) => {
+        const outcome = await base.killRun(runId, companyId);
+        if (!ran) {
+          ran = true;
+          window();
+        }
+        return outcome;
+      },
+    };
+  }
+
+  it('sweep: an approval the agent created mid-archive is rejected like the others', async () => {
+    const result = await archiveAgent(
+      AGENT,
+      COMPANY,
+      depsWithWindow(() => {
+        store.approvals.push({ id: 'ap-late', companyId: COMPANY, type: 'request_board_approval', status: 'pending', requestedByAgentId: AGENT, issueIds: ['is-late-halt'], payload: { title: 'Late ask' }, note: null, decidedAt: null, decidedByUserId: null });
+        store.issues.push({ id: 'is-late-halt', companyId: COMPANY, status: 'blocked', assigneeAgentId: null, boardApprovalId: 'ap-late', checkoutRunId: null, executionLockedAt: null, executionAgentNameKey: null });
+      }),
+    );
+    const late = approvalRow('ap-late');
+    assert.deepEqual([late.status, late.note, late.decidedByUserId], ['rejected', 'Requesting agent archived', null]);
+    assert.equal(activity('approval.decided', 'ap-late').length, 1);
+    assert.equal(issueRow('is-late-halt').boardApprovalId, null);
+    assert.ok(activity('issue.commented', 'is-late-halt').some((r) => /^\*\*Board Rejected:\*\* Late ask/.test(r.details.body)));
+    assert.equal(result!.approvalsRejected, 3);
+    // Earlier approvals are not decided twice; still one agent.archived row (with step 1's counts).
+    for (const id of ['ap-1', 'ap-2']) assert.equal(activity('approval.decided', id).length, 1, id);
+    assert.equal(activity('agent.archived').length, 1);
+  });
+
+  it('sweep: a heartbeat run that started mid-archive is stopped too (once; the first run is not killed twice)', async () => {
+    const result = await archiveAgent(
+      AGENT,
+      COMPANY,
+      depsWithWindow(() => {
+        store.heartbeatRuns.push({ id: 'run-late', agentId: AGENT, companyId: COMPANY, status: 'running', errorText: null, finishedAt: null });
+      }),
+    );
+    assert.deepEqual(
+      killCalls.map((k) => [k.runId, k.agentStatusAtKill]),
+      [['run-live', 'archived'], ['run-late', 'archived']],
+    );
+    assert.equal(runRow('run-late').status, 'cancelled');
+    assert.equal(runRow('run-late').errorText, AGENT_ARCHIVED_RUN_ERROR);
+    assert.deepEqual(result!.runs, [{ runId: 'run-live', outcome: 'aborted' }, { runId: 'run-late', outcome: 'aborted' }]);
+    assert.equal(runRow('run-peer').status, 'running');
+  });
+
+  it('sweep: a run the first pass already handled is not force-killed again (even when its row is still in flight)', async () => {
+    // The first pass saw the run and got 'already_finished' without terminalising the row (e.g. the
+    // abort was already in flight). Without skipRunIds the sweep would kill it a second time.
+    let kills = 0;
+    await archiveAgent(AGENT, COMPANY, schedulerDeps({
+      killRun: async (runId, companyId) => {
+        kills += 1;
+        killCalls.push({ runId, companyId, agentStatusAtKill: agentRow().status });
+        return 'already_finished';
+      },
+    }));
+    assert.equal(kills, 1);
+    assert.equal(runRow('run-live').status, 'running');
+  });
+
+  it('sweep: a run that started mid-archive with the scheduler unreachable is recorded cancelled here', async () => {
+    let first = true;
+    await archiveAgent(AGENT, COMPANY, schedulerDeps({
+      killRun: async () => {
+        if (first) {
+          first = false;
+          store.heartbeatRuns.push({ id: 'run-late', agentId: AGENT, companyId: COMPANY, status: 'queued', errorText: null, finishedAt: null });
+        }
+        return 'unreachable';
+      },
+    }));
+    assert.deepEqual([runRow('run-live').status, runRow('run-late').status], ['cancelled', 'cancelled']);
+    assert.deepEqual(releasedLocks, ['run-live', 'run-late']);
+  });
+
+  it('sweep: issues moved to in_progress mid-archive (status update, checkout) go back to todo with no lock; no second comment', async () => {
+    await archiveAgent(
+      AGENT,
+      COMPANY,
+      depsWithWindow(() => {
+        // A status update that read the issue before the unassign: only its changed field lands.
+        issueRow('is-todo').status = 'in_progress';
+        // A checkout that overlapped the unassign: in_progress with the run's lock.
+        Object.assign(issueRow('is-backlog'), { status: 'in_progress', checkoutRunId: 'run-live', executionLockedAt: new Date(), executionAgentNameKey: AGENT });
+      }),
+    );
+    for (const id of ['is-todo', 'is-backlog']) {
+      const i = issueRow(id);
+      assert.deepEqual(
+        [i.status, i.assigneeAgentId, i.checkoutRunId, i.executionLockedAt, i.executionAgentNameKey],
+        ['todo', null, null, null, null],
+        id,
+      );
+      const swept = activity('issue.updated', id).filter((r) => r.details.previousStatus === 'in_progress' && r.details.status === 'todo');
+      assert.equal(swept.length, 1, id);
+      assert.deepEqual([swept[0].actorType, swept[0].details.reason], ['system', 'agent_archived']);
+      assert.equal(activity('issue.commented', id).filter((r) => r.details.body === 'Unassigned: agent archived').length, 1, id);
+    }
+  });
+
+  it('sweep: an issue (re)assigned to the agent mid-archive is unassigned; a re-assigned one is not commented twice', async () => {
+    const result = await archiveAgent(
+      AGENT,
+      COMPANY,
+      depsWithWindow(() => {
+        Object.assign(issueRow('is-review'), { assigneeAgentId: AGENT }); // already unassigned once
+        store.issues.push({ id: 'is-new', companyId: COMPANY, status: 'in_progress', assigneeAgentId: AGENT, boardApprovalId: null, checkoutRunId: null, executionLockedAt: null, executionAgentNameKey: null });
+      }),
+    );
+    for (const id of ['is-review', 'is-new']) assert.equal(issueRow(id).assigneeAgentId, null, id);
+    assert.equal(issueRow('is-new').status, 'todo');
+    const unassignComments = (id: string) =>
+      activity('issue.commented', id).filter((r) => r.details.body === 'Unassigned: agent archived').length;
+    assert.deepEqual([unassignComments('is-review'), unassignComments('is-new')], [1, 1]);
+    assert.equal(result!.issuesUnassigned, 7, 'six in step 1 plus the new one');
+  });
+
+  it("sweep: leaves alone what isn't the archived agent's (a user-assigned in_progress issue, peers, other companies)", async () => {
+    await archiveAgent(
+      AGENT,
+      COMPANY,
+      depsWithWindow(() => {
+        // The board picked an issue up for a person right after the archive: not the agent's.
+        Object.assign(issueRow('is-todo'), { status: 'in_progress', assigneeUserId: 'user-1' });
+      }),
+    );
+    assert.deepEqual([issueRow('is-todo').status, issueRow('is-todo').assigneeUserId], ['in_progress', 'user-1']);
+    assert.deepEqual([issueRow('is-peer').status, issueRow('is-peer').assigneeAgentId], ['in_progress', 'agent-a2']);
+    assert.equal(approvalRow('ap-peer').status, 'pending');
+    assert.equal(approvalRow('ap-other').status, 'pending');
+    assert.equal(runRow('run-peer').status, 'running');
+  });
+
+  it('sweep is idempotent: after it, a repeat archive writes nothing', async () => {
+    await archiveAgent(AGENT, COMPANY, depsWithWindow(() => {
+      store.approvals.push({ id: 'ap-late', companyId: COMPANY, type: 'hire_agent', status: 'pending', requestedByAgentId: AGENT, issueIds: [], payload: {}, note: null, decidedAt: null, decidedByUserId: null });
+    }));
+    writes = [];
+    const again = await archiveAgent(AGENT, COMPANY, schedulerDeps());
+    assert.deepEqual([again!.changed, again!.approvalsRejected, again!.issuesUnassigned], [false, 0, 0]);
+    assert.deepEqual(writes, []);
   });
 });

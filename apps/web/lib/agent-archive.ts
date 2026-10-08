@@ -22,9 +22,16 @@
  *    checkout locks released). If the scheduler can't be reached, the row is recorded cancelled
  *    here with the same reason and its checkout locks are released; the run's token already 401s.
  *
- * Idempotent: archiving an already-archived agent writes nothing (no second activity row, no
- * approval or issue changes) and reports `changed: false` with zero counts; the timer/run clean-up
- * is re-run, which is a no-op when there is nothing left to stop.
+ * 4. Post-commit sweep (once, after the runs are stopped): an agent request already past auth when
+ *    the archive committed can still land. So the sweep stops any run that started in that window,
+ *    rejects any approval the agent created in it, unassigns any issue assigned to it in it, and
+ *    puts back to todo an issue the archive unassigned that a late write moved to in_progress
+ *    (no assignee left). Same rows, actors and comments as step 1; nothing is written twice.
+ *
+ * Idempotent: archiving an already-archived agent writes no second `agent.archived` row (the
+ * archived status is set by a conditional update, so of two concurrent archives only one does
+ * step 1) and reports `changed: false`; the timer/run clean-up and the sweep are re-run, which
+ * write nothing when there is nothing left to stop.
  *
  * Archiving is permanent: there is no unarchive.
  */
@@ -40,7 +47,7 @@ import {
   type Agent,
   type IssueStatus,
 } from '@tourbillon/db';
-import { and, eq, inArray, ne, or } from 'drizzle-orm';
+import { and, eq, inArray, isNull, ne, notInArray, or } from 'drizzle-orm';
 import {
   AGENT_ARCHIVED_RUN_CODE,
   AGENT_ARCHIVED_RUN_ERROR,
@@ -119,6 +126,8 @@ export async function archiveAgent(
   let changed = false;
   let approvalsRejected = 0;
   let issuesUnassigned = 0;
+  /** Issues step 1 unassigned (and commented on): the sweep re-checks them and never re-comments. */
+  let unassignedIssueIds: string[] = [];
 
   if (agent.status !== 'archived') {
     const runtimeConfig = (agent.runtimeConfig ?? {}) as AgentRuntimeConfig;
@@ -135,7 +144,7 @@ export async function archiveAgent(
         .returning();
       if (!updated) return null;
       const rejected = await rejectPendingApprovals(tx, agent.id, companyId);
-      const unassigned = await unassignOpenIssues(tx, agent.id, companyId);
+      const unassigned = await unassignOpenIssues(tx, agent.id, companyId, new Set());
       await tx.insert(activityLog).values({
         companyId,
         ...BOARD_ACTOR,
@@ -146,7 +155,7 @@ export async function archiveAgent(
           previousStatus: agent.status,
           heartbeatWasEnabled: Boolean(runtimeConfig.heartbeat?.enabled),
           approvalsRejected: rejected,
-          issuesUnassigned: unassigned,
+          issuesUnassigned: unassigned.length,
         },
       });
       return { updated, rejected, unassigned };
@@ -156,7 +165,8 @@ export async function archiveAgent(
       current = done.updated;
       changed = true;
       approvalsRejected = done.rejected;
-      issuesUnassigned = done.unassigned;
+      issuesUnassigned = done.unassigned.length;
+      unassignedIssueIds = done.unassigned;
       deps.invalidateChat(agent.id);
     } else {
       current =
@@ -173,14 +183,45 @@ export async function archiveAgent(
     timerSync = 'deferred';
   }
 
+  const runs = await stopInFlightRuns(agent.id, companyId, deps, []);
+
+  // 4. Post-commit sweep, once (only once the agent is archived; a concurrent toggle can no longer
+  // undo that, see setAgentActiveWithOutcome).
+  if (current.status === 'archived') {
+    const lateRuns = await stopInFlightRuns(agent.id, companyId, deps, runs.map((r) => r.runId));
+    runs.push(...lateRuns);
+    const swept = await db.transaction(async (tx) => {
+      const rejected = await rejectPendingApprovals(tx, agent.id, companyId);
+      const unassigned = await unassignOpenIssues(tx, agent.id, companyId, new Set(unassignedIssueIds));
+      await resetLateInProgress(tx, agent.id, companyId, unassignedIssueIds);
+      return { rejected, unassigned };
+    });
+    approvalsRejected += swept.rejected;
+    issuesUnassigned += swept.unassigned.filter((id) => !unassignedIssueIds.includes(id)).length;
+  }
+
+  return { agent: current, changed, timerSync, runs, approvalsRejected, issuesUnassigned };
+}
+
+/**
+ * Stop the agent's queued/running runs (except `skipRunIds`, already handled) through the
+ * scheduler's force-kill; if the scheduler can't be reached, record them cancelled here.
+ */
+async function stopInFlightRuns(
+  agentId: string,
+  companyId: string,
+  deps: ArchiveAgentDeps,
+  skipRunIds: string[],
+): Promise<ArchivedRunOutcome[]> {
   const inFlight = await db
     .select({ id: heartbeatRuns.id, status: heartbeatRuns.status })
     .from(heartbeatRuns)
     .where(
       and(
-        eq(heartbeatRuns.agentId, agent.id),
+        eq(heartbeatRuns.agentId, agentId),
         eq(heartbeatRuns.companyId, companyId),
         inArray(heartbeatRuns.status, ['queued', 'running']),
+        skipRunIds.length > 0 ? notInArray(heartbeatRuns.id, skipRunIds) : undefined,
       ),
     );
 
@@ -193,8 +234,7 @@ export async function archiveAgent(
     }
     runs.push({ runId: run.id, outcome: await recordRunCancelled(run.id) });
   }
-
-  return { agent: current, changed, timerSync, runs, approvalsRejected, issuesUnassigned };
+  return runs;
 }
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -226,7 +266,8 @@ async function rejectPendingApprovals(tx: Tx, agentId: string, companyId: string
         status: 'rejected',
         note: ARCHIVE_REJECT_REASON,
         decidedAt: now,
-        decidedByUserId: BOARD_ACTOR.actorId,
+        // Same as a board decide (decide route): no per-user decider yet, so the label reads "Board".
+        decidedByUserId: null,
         updatedAt: now,
       })
       .where(and(eq(approvals.id, approval.id), eq(approvals.companyId, companyId), eq(approvals.status, 'pending')))
@@ -306,9 +347,15 @@ async function rejectPendingApprovals(tx: Tx, agentId: string, companyId: string
 
 /**
  * Unassign the agent's open issues inside the archive transaction: in_progress → todo, other
- * statuses kept, checkout lock cleared, an `issue.updated` row and a system comment each.
+ * statuses kept, checkout lock cleared, an `issue.updated` row and a system comment each (no second
+ * comment on an issue in `alreadyCommented`). Returns the ids unassigned.
  */
-async function unassignOpenIssues(tx: Tx, agentId: string, companyId: string): Promise<number> {
+async function unassignOpenIssues(
+  tx: Tx,
+  agentId: string,
+  companyId: string,
+  alreadyCommented: Set<string>,
+): Promise<string[]> {
   const open = await tx
     .select({ id: issues.id, status: issues.status, checkoutRunId: issues.checkoutRunId })
     .from(issues)
@@ -320,7 +367,7 @@ async function unassignOpenIssues(tx: Tx, agentId: string, companyId: string): P
       ),
     );
 
-  let unassigned = 0;
+  const unassigned: string[] = [];
   const now = new Date();
   for (const issue of open) {
     const status: IssueStatus = issue.status === 'in_progress' ? 'todo' : issue.status;
@@ -330,7 +377,7 @@ async function unassignOpenIssues(tx: Tx, agentId: string, companyId: string): P
       .where(and(eq(issues.id, issue.id), eq(issues.companyId, companyId), eq(issues.assigneeAgentId, agentId)))
       .returning({ id: issues.id });
     if (!row) continue;
-    unassigned += 1;
+    unassigned.push(issue.id);
     await tx.insert(activityLog).values({
       companyId,
       ...SYSTEM_ACTOR,
@@ -345,6 +392,7 @@ async function unassignOpenIssues(tx: Tx, agentId: string, companyId: string): P
         reason: 'agent_archived',
       },
     });
+    if (alreadyCommented.has(issue.id)) continue;
     await tx.insert(activityLog).values({
       companyId,
       ...SYSTEM_ACTOR,
@@ -355,6 +403,49 @@ async function unassignOpenIssues(tx: Tx, agentId: string, companyId: string): P
     });
   }
   return unassigned;
+}
+
+/**
+ * Sweep: an issue step 1 unassigned that a late write (a checkout or status update already in
+ * flight) then moved to in_progress is left in_progress with nobody on it. Put it back to todo with
+ * the lock cleared and an `issue.updated` row (it already has its unassign comment).
+ */
+async function resetLateInProgress(
+  tx: Tx,
+  agentId: string,
+  companyId: string,
+  unassignedIssueIds: string[],
+): Promise<void> {
+  if (unassignedIssueIds.length === 0) return;
+  const now = new Date();
+  const rows = await tx
+    .update(issues)
+    .set({ status: 'todo', ...CHECKOUT_LOCK_CLEAR_FIELDS, updatedAt: now })
+    .where(
+      and(
+        eq(issues.companyId, companyId),
+        inArray(issues.id, unassignedIssueIds),
+        eq(issues.status, 'in_progress'),
+        isNull(issues.assigneeAgentId),
+        isNull(issues.assigneeUserId),
+      ),
+    )
+    .returning({ id: issues.id });
+  for (const row of rows) {
+    await tx.insert(activityLog).values({
+      companyId,
+      ...SYSTEM_ACTOR,
+      action: 'issue.updated',
+      entityType: 'issue',
+      entityId: row.id,
+      details: {
+        status: 'todo',
+        previousStatus: 'in_progress',
+        previousAssigneeAgentId: agentId,
+        reason: 'agent_archived',
+      },
+    });
+  }
 }
 
 /**

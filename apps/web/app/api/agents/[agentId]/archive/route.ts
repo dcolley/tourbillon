@@ -19,12 +19,18 @@ export async function GET(
 ): Promise<NextResponse> {
   const guard = await requireBoardCompany(req);
   if (!guard.ok) return guard.response;
+  let agentId: string | undefined;
   try {
-    const { agentId } = await context.params;
+    ({ agentId } = await context.params);
     const impact = await getArchiveImpact(agentId, guard.value.id);
     if (!impact) return NextResponse.json({ error: 'Agent not found' }, { status: 404 });
     return NextResponse.json(impact);
-  } catch {
+  } catch (err) {
+    console.error('[agent-archive] impact failed', {
+      agentId,
+      companyId: guard.value.id,
+      error: err instanceof Error ? `${err.name}: ${err.message}` : 'unknown error',
+    });
     return NextResponse.json({ error: 'Failed to load archive impact' }, { status: 500 });
   }
 }
@@ -36,8 +42,9 @@ export async function POST(
   const guard = await requireBoardCompany(req);
   if (!guard.ok) return guard.response;
 
+  let agentId: string | undefined;
   try {
-    const { agentId } = await context.params;
+    ({ agentId } = await context.params);
     const result = await archiveAgent(agentId, guard.value.id);
     if (!result) return NextResponse.json({ error: 'Agent not found' }, { status: 404 });
     return NextResponse.json({
@@ -54,7 +61,13 @@ export async function POST(
       approvalsRejected: result.approvalsRejected,
       issuesUnassigned: result.issuesUnassigned,
     });
-  } catch {
+  } catch (err) {
+    // Error name/message only: a driver error object can carry the query's parameters.
+    console.error('[agent-archive] archive failed', {
+      agentId,
+      companyId: guard.value.id,
+      error: err instanceof Error ? `${err.name}: ${err.message}` : 'unknown error',
+    });
     return NextResponse.json({ error: 'Failed to archive agent' }, { status: 500 });
   }
 }
