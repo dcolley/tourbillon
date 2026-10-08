@@ -1,6 +1,6 @@
 import type { Agent as AgentRecord, Routine } from '@tourbillon/db';
 import type { AgentRuntimeConfig } from '@tourbillon/shared';
-import { createTraceLogger, resolveHeartbeatSchedule } from '@tourbillon/shared';
+import { createTraceLogger, resolveAgentTimerSchedule } from '@tourbillon/shared';
 import {
   ensureMastraAgentRegistered,
   getMastraInstance,
@@ -66,7 +66,8 @@ async function upsertAgentSchedule(input: {
 
 export async function syncAgentTimerSchedule(agent: AgentRecord): Promise<string | null> {
   const hb = (agent.runtimeConfig as AgentRuntimeConfig | null)?.heartbeat;
-  const resolved = resolveHeartbeatSchedule(hb);
+  // Archived agents never keep a timer (paused/removed here on sync and on boot reconcile).
+  const resolved = resolveAgentTimerSchedule({ status: agent.status, heartbeat: hb });
   const scheduleId = agentTimerScheduleId(agent.id);
 
   if (!resolved.active) {

@@ -43,7 +43,7 @@ describe('UX-2 setAgentActive writes status only', () => {
           },
         };
       }
-      if (id === 'drizzle-orm' && fromAgents) return { eq: () => ({}), and: () => ({}) };
+      if (id === 'drizzle-orm' && fromAgents) return { eq: () => ({}), ne: () => ({}), and: () => ({}) };
       if (id === '@tourbillon/mastra' && fromAgents) return { clearIdleThreadOnRuntimeSwitch: async () => {} };
       if ((id === './chat' || id === './llm-providers' || id === './company') && fromAgents) {
         return { invalidateChatControllerForAgent: () => {}, getDefaultLlmProviderRecord: async () => null, getActiveCompany: async () => ({}) };

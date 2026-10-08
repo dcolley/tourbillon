@@ -1,4 +1,9 @@
-import { heartbeatStaleErrorText, resolveHeartbeatLivenessConfig } from '@tourbillon/shared';
+import {
+  AGENT_ARCHIVED_RUN_CODE,
+  AGENT_ARCHIVED_RUN_ERROR,
+  heartbeatStaleErrorText,
+  resolveHeartbeatLivenessConfig,
+} from '@tourbillon/shared';
 
 export const HEARTBEAT_ABORTED = 'Heartbeat aborted';
 export const OPERATOR_FORCE_KILL_REASON = 'Force-killed by operator';
@@ -9,6 +14,38 @@ export function heartbeatAbortedError(): Error {
 
 export function operatorForceKillError(): Error {
   return new Error(OPERATOR_FORCE_KILL_REASON);
+}
+
+/** Board 'Archive agent' stops the agent's in-flight run through the same force-kill path. */
+export function agentArchivedKillError(): Error {
+  return new Error(AGENT_ARCHIVED_RUN_ERROR);
+}
+
+/** Why a run is force-killed. Absent = operator force-kill (unchanged behaviour). */
+export type ForceKillReason = typeof AGENT_ARCHIVED_RUN_CODE;
+
+/** Parse the optional `reason` of POST /internal/force-kill/:runId. Unknown values are refused. */
+export function parseForceKillReason(
+  raw: unknown,
+): { ok: true; reason?: ForceKillReason } | { ok: false } {
+  if (raw === undefined || raw === null) return { ok: true };
+  if (raw === AGENT_ARCHIVED_RUN_CODE) return { ok: true, reason: AGENT_ARCHIVED_RUN_CODE };
+  return { ok: false };
+}
+
+/**
+ * Abort reason and terminal row for a force-kill. Operator kill: `failed` + OPERATOR_FORCE_KILL_REASON
+ * (as before). Agent archived: `cancelled` + AGENT_ARCHIVED_RUN_ERROR.
+ */
+export function forceKillTermination(reason?: ForceKillReason): {
+  status: 'failed' | 'cancelled';
+  errorText: string;
+  abortError: Error;
+} {
+  if (reason === AGENT_ARCHIVED_RUN_CODE) {
+    return { status: 'cancelled', errorText: AGENT_ARCHIVED_RUN_ERROR, abortError: agentArchivedKillError() };
+  }
+  return { status: 'failed', errorText: OPERATOR_FORCE_KILL_REASON, abortError: operatorForceKillError() };
 }
 
 export function isAbortLikeError(err: unknown): boolean {
@@ -110,6 +147,9 @@ export function resolveHeartbeatFailureError(
     abortReason.message === OPERATOR_FORCE_KILL_REASON
   ) {
     return OPERATOR_FORCE_KILL_REASON;
+  }
+  if (abortReason instanceof Error && abortReason.message === AGENT_ARCHIVED_RUN_ERROR) {
+    return AGENT_ARCHIVED_RUN_ERROR;
   }
   
   // Check for wall-clock timeout in abort reason

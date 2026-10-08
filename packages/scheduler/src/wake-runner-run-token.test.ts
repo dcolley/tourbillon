@@ -54,15 +54,27 @@ describe('#110 wake-runner run token', () => {
       }),
       update: (t: { __table: string }) => ({
         set: (patch: Row) => ({
-          where: async (where: Cond) => {
-            for (const r of store[t.__table] ?? []) if (match(r, where)) Object.assign(r, patch);
+          where: (where: Cond) => {
+            const hit = (store[t.__table] ?? []).filter((r) => match(r, where));
+            for (const r of hit) Object.assign(r, patch);
+            return Object.assign(Promise.resolve(), { returning: async () => hit.map((r) => ({ ...r })) });
           },
         }),
       }),
+      // The run insert locks the agent row first (heartbeat-run-rows: SELECT … FOR UPDATE in a tx).
+      select: () => ({
+        from: (t: { __table: string }) => ({
+          where: (where: Cond) =>
+            Object.assign(Promise.resolve([]), {
+              for: async () => (store[t.__table] ?? []).filter((r) => match(r, where)).map((r) => ({ ...r })),
+            }),
+        }),
+      }),
+      transaction: async <T>(fn: (tx: unknown) => Promise<T>): Promise<T> => fn(fakeDb),
     };
     Module.prototype.require = function (this: { filename?: string }, id: string) {
       // Only wake-runner itself sees the fakes; everything else loads the real modules.
-      if (!this?.filename?.endsWith('wake-runner.ts')) {
+      if (!this?.filename?.endsWith('wake-runner.ts') && !this?.filename?.endsWith('heartbeat-run-rows.ts')) {
         return originalRequire.apply(this, arguments as unknown as [string]);
       }
       if (id === '@tourbillon/db') {

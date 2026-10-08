@@ -162,6 +162,32 @@ export async function requestAgentTimerScheduleSync(agentId: string): Promise<vo
   }
 }
 
+export type SchedulerForceKillOutcome = 'aborted' | 'already_finished' | 'unreachable';
+
+/**
+ * Board 'Archive agent': stop an in-flight run through the scheduler's force-kill (aborts the
+ * run's AbortController, persists the terminal row, releases checkout locks). With reason
+ * 'agent_archived' the run is recorded as cancelled. Never throws: a down scheduler or an error
+ * response is 'unreachable' so the caller can record the cancellation itself.
+ */
+export async function requestHeartbeatForceKill(
+  runId: string,
+  companyId: string,
+  reason: 'agent_archived',
+): Promise<SchedulerForceKillOutcome> {
+  try {
+    const res = await schedulerFetch(`/internal/force-kill/${encodeURIComponent(runId)}`, {
+      companyId,
+      reason,
+    });
+    if (res.ok) return 'aborted';
+    if (res.status === 409) return 'already_finished';
+    return 'unreachable';
+  } catch {
+    return 'unreachable';
+  }
+}
+
 /** Ask the scheduler process to upsert/pause/delete a routine Mastra schedule. */
 export async function requestRoutineScheduleSync(
   routineId: string,

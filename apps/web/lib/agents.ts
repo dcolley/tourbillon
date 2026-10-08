@@ -1,5 +1,5 @@
 import { db, agents, companies, activityLog, type Agent } from '@tourbillon/db';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, ne } from 'drizzle-orm';
 import {
   ROLE_DEFAULT_TOOLSETS,
   ROLE_DEFAULT_ASSIGNED_TOOLS,
@@ -331,17 +331,31 @@ export async function cloneAgent(input: CloneAgentInput): Promise<Agent> {
   return created;
 }
 
+type AgentRuntimeConfigPatch = {
+  heartbeat?: Partial<AgentRuntimeConfig['heartbeat']>;
+  timeout?: Partial<AgentRuntimeConfig['timeout']>;
+  model?: AgentRuntimeConfig['model'];
+  mail?: AgentRuntimeConfig['mail'];
+};
+
 export async function updateAgentRuntimeConfig(
   agentId: string,
-  patch: {
-    heartbeat?: Partial<AgentRuntimeConfig['heartbeat']>;
-    timeout?: Partial<AgentRuntimeConfig['timeout']>;
-    model?: AgentRuntimeConfig['model'];
-    mail?: AgentRuntimeConfig['mail'];
-  }
+  patch: AgentRuntimeConfigPatch,
+): Promise<Agent> {
+  return writeAgentRuntimeConfig(agentId, patch, true);
+}
+
+async function writeAgentRuntimeConfig(
+  agentId: string,
+  patch: AgentRuntimeConfigPatch,
+  retryIfArchived: boolean,
 ): Promise<Agent> {
   const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
   if (!agent) throw new AgentValidationError('Agent not found.');
+  // Archive agent: an archived agent's heartbeat timer stays off (archiving is permanent).
+  if (agent.status === 'archived' && patch.heartbeat?.enabled) {
+    throw new AgentValidationError('Agent is archived; its heartbeat timer cannot be turned on.');
+  }
 
   const current = agent.runtimeConfig as AgentRuntimeConfig;
   const mergedHeartbeat = patch.heartbeat
@@ -359,12 +373,26 @@ export async function updateAgentRuntimeConfig(
     const heartbeatError = validateHeartbeatSchedule(runtimeConfig.heartbeat);
     if (heartbeatError) throw new AgentValidationError(heartbeatError);
   }
+  // An archived agent never stores its heartbeat timer on (also clears a legacy 'on' left behind).
+  if (agent.status === 'archived' && runtimeConfig.heartbeat?.enabled) {
+    runtimeConfig.heartbeat = { ...runtimeConfig.heartbeat, enabled: false };
+  }
 
+  // Archive race: this config was merged from a read that may predate a concurrent archive. A write
+  // that stores the timer on is conditional on the agent still not being archived, so it can't
+  // turn an archived agent's timer back on.
+  const heartbeatOn = Boolean(runtimeConfig.heartbeat?.enabled);
   const [updated] = await db
     .update(agents)
     .set({ runtimeConfig, updatedAt: new Date() })
-    .where(eq(agents.id, agentId))
+    .where(heartbeatOn ? and(eq(agents.id, agentId), ne(agents.status, 'archived')) : eq(agents.id, agentId))
     .returning();
+  if (!updated) {
+    // Archived between the read and the write: redo it once on the archived row (heartbeat-on is
+    // then refused above; any other change is kept with the timer off).
+    if (retryIfArchived) return writeAgentRuntimeConfig(agentId, patch, false);
+    throw new AgentValidationError('Agent not found.');
+  }
 
   if (patch.heartbeat) {
     try {
@@ -809,23 +837,33 @@ export async function setAgentActiveWithOutcome(
   // chat tokens (agent-token-auth refuses only archived agents), so it is refused. Deactivating
   // an archived agent is a no-op: it is already not active, and writing 'paused' would
   // un-archive it one step short of active.
-  if (agent.status === 'archived') {
-    if (active) {
-      throw new AgentValidationError('Agent is archived and cannot be activated.');
-    }
-    return { agent, changed: false, reason: 'archived' };
-  }
+  if (agent.status === 'archived') return archivedActiveOutcome(agent, active);
 
   const previousStatus = agent.status;
   const status = active ? 'active' : 'paused';
 
+  // Archive race: the write itself refuses an archived row, so a toggle that read the agent before
+  // a concurrent archive committed can't overwrite 'archived' (0 rows = archived in between).
   const [updated] = await db
     .update(agents)
     .set({ status, updatedAt: new Date() })
-    .where(eq(agents.id, agentId))
+    .where(and(eq(agents.id, agentId), ne(agents.status, 'archived')))
     .returning();
+  if (!updated) {
+    const latest = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+    if (!latest || latest.status !== 'archived') throw new AgentValidationError('Agent not found.');
+    return archivedActiveOutcome(latest, active);
+  }
 
   return { agent: updated, changed: updated.status !== previousStatus };
+}
+
+/** Archived: activating is refused; deactivating is a reported no-op (never a write). */
+function archivedActiveOutcome(agent: Agent, active: boolean): SetAgentActiveOutcome {
+  if (active) {
+    throw new AgentValidationError('Agent is archived and cannot be activated.');
+  }
+  return { agent, changed: false, reason: 'archived' };
 }
 
 export async function updateAgentRole(agentId: string, roleInput: string): Promise<Agent> {

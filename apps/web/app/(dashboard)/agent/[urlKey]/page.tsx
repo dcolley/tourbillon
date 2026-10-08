@@ -32,6 +32,7 @@ import { AgentCodeExecutionForm } from './agent-code-execution-form';
 import { AgentHeartbeatForm } from './agent-heartbeat-form';
 import { AgentHeartbeatHeaderActions } from './agent-heartbeat-header-actions';
 import { AgentActiveChip } from './agent-active-chip';
+import { AgentArchiveButton } from './agent-archive-button';
 import { canToggleAgentChip } from './agent-active-chip-logic';
 import { AgentQueryToast } from './agent-query-toast';
 import { AgentRoutineToggle } from './agent-routine-toggle';
@@ -1040,8 +1041,18 @@ export default async function AgentDetailPage({
             }
             danger={
               <section className="border border-destructive/30 rounded-lg p-4 space-y-4">
-                <div>
+                <div className="space-y-2">
                   <h2 className="text-sm font-semibold text-destructive">Danger zone</h2>
+                  <h3 className="text-sm font-medium">Archive agent</h3>
+                  <AgentArchiveButton
+                    agentId={agent.id}
+                    agentName={agent.name}
+                    urlKey={agent.urlKey}
+                    status={agent.status}
+                  />
+                </div>
+                <div>
+                  <h3 className="text-sm font-medium">Delete agent</h3>
                   <p className="text-xs text-muted-foreground mt-1">
                     Permanently deletes this agent and cascades heartbeat, cost, and routine history.
                     Assigned issues, goals, and projects become unassigned.
