@@ -1,5 +1,6 @@
 /**
- * Board 'Archive agent': POST /api/agents/:agentId/archive and archiveAgentAction (agent page).
+ * Board 'Archive agent': POST/GET /api/agents/:agentId/archive, archiveAgentAction and
+ * getArchiveImpactAction (agent page confirm dialog counts).
  * Auth and company scoping only; the archive itself (status, timer, run kill, idempotency) is
  * covered by lib/agent-archive.test.ts. Real proxy.ts, board-route-auth, company, board-auth and
  * mobile-auth; next/headers, @tourbillon/db and @/lib/agent-archive are mocked. All values are fakes.
@@ -27,6 +28,7 @@ const companies = new Map([
 type MockAgent = { id: string; urlKey: string; companyId: string; status: string };
 let agents: MockAgent[];
 let archiveCalls: Array<[string, string]>;
+let impactCalls: Array<[string, string]>;
 let revalidated: string[];
 const reqState: { cookies: Record<string, string>; headers: Record<string, string> } = { cookies: {}, headers: {} };
 
@@ -65,7 +67,9 @@ async function setRequest(who: Who): Promise<Record<string, string>> {
 
 describe('Archive agent: board-only route + server action', () => {
   let POST: (req: NextRequest, c: { params: Promise<{ agentId: string }> }) => Promise<Response>;
+  let GET: (req: NextRequest, c: { params: Promise<{ agentId: string }> }) => Promise<Response>;
   let archiveAgentAction: typeof import('../../../../(dashboard)/agent/archive-action').archiveAgentAction;
+  let getArchiveImpactAction: typeof import('../../../../(dashboard)/agent/archive-action').getArchiveImpactAction;
   let proxy: typeof import('../../../../../proxy').proxy;
 
   before(async () => {
@@ -109,14 +113,25 @@ describe('Archive agent: board-only route + server action', () => {
               changed,
               timerSync: 'synced',
               runs: changed ? [{ runId: 'run-1', outcome: 'aborted' }] : [],
+              approvalsRejected: changed ? 2 : 0,
+              issuesUnassigned: changed ? 3 : 0,
             };
+          },
+          // Mirrors getArchiveImpact: same scoped lookup; zeros once archived.
+          getArchiveImpact: async (key: string, companyId: string) => {
+            impactCalls.push([key, companyId]);
+            const agent = agents.find((a) => a.companyId === companyId && (a.id === key || a.urlKey === key));
+            if (!agent) return null;
+            const archived = agent.status === 'archived';
+            return { agentId: agent.id, archived, pendingApprovals: archived ? 0 : 2, openIssues: archived ? 0 : 3 };
           },
         };
       }
       return originalRequire.apply(this, arguments as unknown as [string]);
     };
     ({ POST } = await import('./route'));
-    ({ archiveAgentAction } = await import('../../../../(dashboard)/agent/archive-action'));
+    ({ archiveAgentAction, getArchiveImpactAction } = await import('../../../../(dashboard)/agent/archive-action'));
+    ({ GET } = await import('./route'));
     ({ proxy } = await import('../../../../../proxy'));
   });
 
@@ -126,8 +141,15 @@ describe('Archive agent: board-only route + server action', () => {
       { id: 'agent-b1', urlKey: 'other', companyId: 'company-b', status: 'active' },
     ];
     archiveCalls = [];
+    impactCalls = [];
     revalidated = [];
   });
+
+  async function get(who: Who, agentId: string) {
+    const headers = await setRequest(who);
+    const req = new NextRequest(`http://localhost/api/agents/${agentId}/archive`, { headers });
+    return GET(req, { params: Promise.resolve({ agentId }) });
+  }
 
   async function post(who: Who, agentId: string) {
     const headers = await setRequest(who);
@@ -169,12 +191,46 @@ describe('Archive agent: board-only route + server action', () => {
     assert.equal(body.changed, true);
     assert.equal(body.heartbeatTimerActive, false);
     assert.deepEqual(body.runs, [{ runId: 'run-1', outcome: 'aborted' }]);
+    assert.deepEqual([body.approvalsRejected, body.issuesUnassigned], [2, 3]);
     assert.deepEqual(archiveCalls, [['agent-a1', 'company-a']]);
     const again = await post('jwtA', 'worker');
     assert.equal(again.status, 200);
     const againBody = await again.json();
     assert.equal(againBody.archived, true);
     assert.equal(againBody.changed, false);
+    assert.deepEqual([againBody.approvalsRejected, againBody.issuesUnassigned], [0, 0]);
+  });
+
+  it('GET counts: anonymous 401, agent bearer 403, other company 404, board → counts (read only)', async () => {
+    assert.equal((await get('anon', 'agent-a1')).status, 401);
+    for (const token of [RUN_TOKEN, CHAT_TOKEN]) {
+      assert.equal((await get({ agentBearer: token }, 'agent-a1')).status, 403);
+    }
+    assert.equal((await get('jwtB', 'agent-a1')).status, 404);
+    assert.equal((await get('boardA', 'other')).status, 404);
+    const res = await get('boardA', 'worker');
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { agentId: 'agent-a1', archived: false, pendingApprovals: 2, openIssues: 3 });
+    assert.deepEqual(impactCalls, [['agent-a1', 'company-b'], ['other', 'company-a'], ['worker', 'company-a']]);
+    assert.deepEqual(archiveCalls, []);
+    assert.equal(agents[0].status, 'active');
+    // The counts the dialog showed are what the archive reports.
+    const archived = await (await post('jwtA', 'agent-a1')).json();
+    assert.deepEqual([archived.approvalsRejected, archived.issuesUnassigned], [2, 3]);
+  });
+
+  it('counts action: board session in the active company only; agent bearer refused; read only', async () => {
+    await setRequest('anon');
+    await assert.rejects(() => getArchiveImpactAction('agent-a1'), { name: 'BoardSessionRequiredError' });
+    await setRequest({ agentBearer: RUN_TOKEN });
+    await assert.rejects(() => getArchiveImpactAction('agent-a1'), { name: 'BoardSessionRequiredError' });
+    await setRequest('boardA');
+    assert.deepEqual(await getArchiveImpactAction('agent-b1'), { ok: false, status: 404, error: 'Agent not found.' });
+    assert.deepEqual(await getArchiveImpactAction('agent-a1'), { ok: true, archived: false, pendingApprovals: 2, openIssues: 3 });
+    assert.deepEqual(await getArchiveImpactAction(' '), { ok: false, status: 400, error: 'Agent ID is required.' });
+    delete reqState.cookies.active_company_id;
+    assert.deepEqual(await getArchiveImpactAction('agent-a1'), { ok: false, status: 401, error: 'Unauthorized' });
+    assert.deepEqual(archiveCalls, []);
   });
 
   it('action: agent bearer + board session → 401 from the proxy before the action runs', async () => {
@@ -203,11 +259,18 @@ describe('Archive agent: board-only route + server action', () => {
     assert.deepEqual(await archiveAgentAction('agent-b1'), { ok: false, status: 404, error: 'Agent not found.' });
     assert.equal(agents[1].status, 'active');
     const res = await archiveAgentAction('agent-a1', 'worker');
-    assert.deepEqual(res, { ok: true, changed: true, runsStopped: 1, timerSync: 'synced' });
+    assert.deepEqual(res, { ok: true, changed: true, runsStopped: 1, timerSync: 'synced', approvalsRejected: 2, issuesUnassigned: 3 });
     assert.deepEqual(archiveCalls, [['agent-b1', 'company-a'], ['agent-a1', 'company-a']]);
-    assert.deepEqual(revalidated, ['/agent', '/agent/worker']);
+    assert.deepEqual(revalidated, ['/agent', '/agent/worker', '/approval', '/issue']);
     // Idempotent: archiving again is a no-op success.
-    assert.deepEqual(await archiveAgentAction('agent-a1', 'worker'), { ok: true, changed: false, runsStopped: 0, timerSync: 'synced' });
+    assert.deepEqual(await archiveAgentAction('agent-a1', 'worker'), {
+      ok: true,
+      changed: false,
+      runsStopped: 0,
+      timerSync: 'synced',
+      approvalsRejected: 0,
+      issuesUnassigned: 0,
+    });
   });
 
   it('action: board session without an active company → 401; blank id → 400', async () => {

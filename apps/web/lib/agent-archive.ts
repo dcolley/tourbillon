@@ -1,11 +1,20 @@
 /**
  * Board 'Archive agent' (permanent).
  *
- * 1. agents.status → 'archived' and runtimeConfig.heartbeat.enabled → false in one company-scoped
- *    write, plus an `agent.archived` activity row. From then on #119's rule refuses any
- *    reactivation (setAgentActive*), #120/#123 refuses the agent's run/chat tokens (401), the
- *    scheduler skips every wake (status !== 'active') and never keeps its timer (archived →
- *    resolveAgentTimerSchedule inactive).
+ * 1. One transaction, company-scoped:
+ *    - agents.status → 'archived' and runtimeConfig.heartbeat.enabled → false, plus an
+ *      `agent.archived` activity row (with the counts below). From then on #119's rule refuses any
+ *      reactivation (setAgentActive*), #120/#123 refuses the agent's run/chat tokens (401), the
+ *      scheduler skips every wake (status !== 'active') and never keeps its timer (archived →
+ *      resolveAgentTimerSchedule inactive).
+ *    - Every PENDING approval the agent requested is rejected the way a board reject does it
+ *      (decide route): status rejected, note ARCHIVE_REJECT_REASON, decided by the board, an
+ *      `approval.decided` row, linked issues still bound to it → blocked with an `issue.updated`
+ *      row and the board's "Board Rejected" comment. The approval wake is NOT sent (the agent is
+ *      archived and would never run it).
+ *    - Every open issue assigned to the agent (any status but done/cancelled) is unassigned:
+ *      in_progress → todo, other statuses kept, checkout lock cleared, an `issue.updated` row and
+ *      a system comment ARCHIVE_UNASSIGN_COMMENT.
  * 2. Timer: ask the scheduler to re-sync the agent's Mastra timer schedule, which pauses it.
  *    Best effort: if the scheduler is down, its boot reconcile pauses it (the config is off).
  * 3. In-flight run(s) (queued/running): stopped through the scheduler's force-kill with reason
@@ -13,17 +22,23 @@
  *    checkout locks released). If the scheduler can't be reached, the row is recorded cancelled
  *    here with the same reason and its checkout locks are released; the run's token already 401s.
  *
- * Idempotent: archiving an already-archived agent writes nothing to the agent (no second
- * activity row) and reports `changed: false`; the timer/run clean-up is re-run, which is a no-op
- * when there is nothing left to stop.
+ * Idempotent: archiving an already-archived agent writes nothing (no second activity row, no
+ * approval or issue changes) and reports `changed: false` with zero counts; the timer/run clean-up
+ * is re-run, which is a no-op when there is nothing left to stop.
+ *
+ * Archiving is permanent: there is no unarchive.
  */
 import {
   db,
   agents,
   activityLog,
+  approvals,
+  issues,
   heartbeatRuns,
   releaseStaleCheckoutLocksForRun,
+  CHECKOUT_LOCK_CLEAR_FIELDS,
   type Agent,
+  type IssueStatus,
 } from '@tourbillon/db';
 import { and, eq, inArray, ne, or } from 'drizzle-orm';
 import {
@@ -38,6 +53,20 @@ import {
   requestHeartbeatForceKill,
   type SchedulerForceKillOutcome,
 } from './wake-client';
+import type { ArchiveImpact } from './agent-archive-copy';
+
+export type { ArchiveImpact } from './agent-archive-copy';
+
+/** Note on every approval auto-rejected by an archive (sent nowhere: the agent is archived). */
+export const ARCHIVE_REJECT_REASON = 'Requesting agent archived';
+/** System comment on every issue unassigned by an archive. */
+export const ARCHIVE_UNASSIGN_COMMENT = 'Unassigned: agent archived';
+/** Issue statuses an archive unassigns (everything but done/cancelled). */
+export const ARCHIVE_OPEN_ISSUE_STATUSES: IssueStatus[] = ['backlog', 'todo', 'in_progress', 'in_review', 'blocked'];
+/** The board has no per-user identity yet (#107): same shared operator actor as a board decide. */
+const BOARD_ACTOR = { actorType: 'user' as const, actorId: 'board', actorName: 'Board' };
+const SYSTEM_ACTOR = { actorType: 'system' as const, actorId: 'system', actorName: 'System' };
+
 
 export type ArchivedRunOutcome = {
   runId: string;
@@ -52,6 +81,9 @@ export interface ArchiveAgentResult {
   /** 'synced': scheduler paused the timer now; 'deferred': scheduler down, boot reconcile pauses it. */
   timerSync: 'synced' | 'deferred';
   runs: ArchivedRunOutcome[];
+  /** What this archive did (zero when `changed` is false). */
+  approvalsRejected: number;
+  issuesUnassigned: number;
 }
 
 export interface ArchiveAgentDeps {
@@ -85,6 +117,8 @@ export async function archiveAgent(
 
   let current: Agent = agent;
   let changed = false;
+  let approvalsRejected = 0;
+  let issuesUnassigned = 0;
 
   if (agent.status !== 'archived') {
     const runtimeConfig = (agent.runtimeConfig ?? {}) as AgentRuntimeConfig;
@@ -92,29 +126,37 @@ export async function archiveAgent(
       ...runtimeConfig,
       heartbeat: { ...(runtimeConfig.heartbeat ?? DEFAULT_RUNTIME_CONFIG.heartbeat), enabled: false },
     };
-    // Guarded on status so a concurrent archive can't write twice.
-    const [updated] = await db
-      .update(agents)
-      .set({ status: 'archived', runtimeConfig: nextRuntimeConfig, updatedAt: new Date() })
-      .where(and(eq(agents.id, agent.id), eq(agents.companyId, companyId), ne(agents.status, 'archived')))
-      .returning();
-
-    if (updated) {
-      current = updated;
-      changed = true;
-      await db.insert(activityLog).values({
+    const done = await db.transaction(async (tx) => {
+      // Guarded on status so a concurrent archive can't write twice (the loser writes nothing).
+      const [updated] = await tx
+        .update(agents)
+        .set({ status: 'archived', runtimeConfig: nextRuntimeConfig, updatedAt: new Date() })
+        .where(and(eq(agents.id, agent.id), eq(agents.companyId, companyId), ne(agents.status, 'archived')))
+        .returning();
+      if (!updated) return null;
+      const rejected = await rejectPendingApprovals(tx, agent.id, companyId);
+      const unassigned = await unassignOpenIssues(tx, agent.id, companyId);
+      await tx.insert(activityLog).values({
         companyId,
-        actorType: 'user',
-        actorId: 'dashboard',
-        actorName: 'Dashboard',
+        ...BOARD_ACTOR,
         action: 'agent.archived',
         entityType: 'agent',
         entityId: agent.id,
         details: {
           previousStatus: agent.status,
           heartbeatWasEnabled: Boolean(runtimeConfig.heartbeat?.enabled),
+          approvalsRejected: rejected,
+          issuesUnassigned: unassigned,
         },
       });
+      return { updated, rejected, unassigned };
+    });
+
+    if (done) {
+      current = done.updated;
+      changed = true;
+      approvalsRejected = done.rejected;
+      issuesUnassigned = done.unassigned;
       deps.invalidateChat(agent.id);
     } else {
       current =
@@ -152,8 +194,213 @@ export async function archiveAgent(
     runs.push({ runId: run.id, outcome: await recordRunCancelled(run.id) });
   }
 
-  return { agent: current, changed, timerSync, runs };
+  return { agent: current, changed, timerSync, runs, approvalsRejected, issuesUnassigned };
 }
+
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/**
+ * Reject the agent's pending approvals inside the archive transaction, mirroring the board
+ * decide route's reject (apps/web/app/api/approvals/[approvalId]/decide/route.ts): approval row,
+ * linked issues still bound to it → blocked, `issue.updated` rows and the "Board Rejected"
+ * comment. No approval wake: the requesting agent is archived. Returns the number rejected.
+ */
+async function rejectPendingApprovals(tx: Tx, agentId: string, companyId: string): Promise<number> {
+  const pending = await tx
+    .select()
+    .from(approvals)
+    .where(
+      and(
+        eq(approvals.companyId, companyId),
+        eq(approvals.requestedByAgentId, agentId),
+        eq(approvals.status, 'pending'),
+      ),
+    );
+
+  let rejected = 0;
+  const now = new Date();
+  for (const approval of pending) {
+    const [row] = await tx
+      .update(approvals)
+      .set({
+        status: 'rejected',
+        note: ARCHIVE_REJECT_REASON,
+        decidedAt: now,
+        decidedByUserId: BOARD_ACTOR.actorId,
+        updatedAt: now,
+      })
+      .where(and(eq(approvals.id, approval.id), eq(approvals.companyId, companyId), eq(approvals.status, 'pending')))
+      .returning();
+    if (!row) continue;
+    rejected += 1;
+
+    const issueIds = approval.issueIds ?? [];
+    await tx.insert(activityLog).values({
+      companyId,
+      ...BOARD_ACTOR,
+      action: 'approval.decided',
+      entityType: 'approval',
+      entityId: approval.id,
+      details: {
+        approvalId: approval.id,
+        type: approval.type,
+        decision: 'rejected',
+        status: 'rejected',
+        note: ARCHIVE_REJECT_REASON,
+        issueIds,
+        reason: 'agent_archived',
+      },
+    });
+
+    if (issueIds.length === 0) continue;
+    const payload = (approval.payload ?? {}) as { title?: unknown };
+    const title = typeof payload.title === 'string' ? payload.title : approval.type;
+    const comment = [
+      `**Board Rejected:** ${title}`,
+      `Note: ${ARCHIVE_REJECT_REASON}`,
+      'Linked issues remain blocked. Triage, revise the request, or cancel as appropriate.',
+    ].join('\n');
+
+    const linked = await tx
+      .select({ id: issues.id, status: issues.status, boardApprovalId: issues.boardApprovalId })
+      .from(issues)
+      .where(and(eq(issues.companyId, companyId), inArray(issues.id, issueIds)));
+    for (const issue of linked) {
+      // Same rule as the decide route: only issues still halted by this approval change status.
+      if (!issue.boardApprovalId || issue.boardApprovalId === approval.id) {
+        await tx
+          .update(issues)
+          .set({ status: 'blocked', boardApprovalId: null, updatedAt: now })
+          .where(and(eq(issues.id, issue.id), eq(issues.companyId, companyId)))
+          .returning({ id: issues.id });
+        await tx.insert(activityLog).values({
+          companyId,
+          actorType: 'system',
+          actorId: 'board',
+          actorName: 'Board',
+          action: 'issue.updated',
+          entityType: 'issue',
+          entityId: issue.id,
+          details: {
+            status: 'blocked',
+            boardApprovalId: null,
+            approvalId: approval.id,
+            decision: 'rejected',
+            note: ARCHIVE_REJECT_REASON,
+          },
+        });
+      }
+      // The decide route comments on every linked issue.
+      await tx.insert(activityLog).values({
+        companyId,
+        ...BOARD_ACTOR,
+        action: 'issue.commented',
+        entityType: 'issue',
+        entityId: issue.id,
+        details: { body: comment, comment },
+      });
+    }
+  }
+  return rejected;
+}
+
+/**
+ * Unassign the agent's open issues inside the archive transaction: in_progress → todo, other
+ * statuses kept, checkout lock cleared, an `issue.updated` row and a system comment each.
+ */
+async function unassignOpenIssues(tx: Tx, agentId: string, companyId: string): Promise<number> {
+  const open = await tx
+    .select({ id: issues.id, status: issues.status, checkoutRunId: issues.checkoutRunId })
+    .from(issues)
+    .where(
+      and(
+        eq(issues.companyId, companyId),
+        eq(issues.assigneeAgentId, agentId),
+        inArray(issues.status, ARCHIVE_OPEN_ISSUE_STATUSES),
+      ),
+    );
+
+  let unassigned = 0;
+  const now = new Date();
+  for (const issue of open) {
+    const status: IssueStatus = issue.status === 'in_progress' ? 'todo' : issue.status;
+    const [row] = await tx
+      .update(issues)
+      .set({ assigneeAgentId: null, status, ...CHECKOUT_LOCK_CLEAR_FIELDS, updatedAt: now })
+      .where(and(eq(issues.id, issue.id), eq(issues.companyId, companyId), eq(issues.assigneeAgentId, agentId)))
+      .returning({ id: issues.id });
+    if (!row) continue;
+    unassigned += 1;
+    await tx.insert(activityLog).values({
+      companyId,
+      ...SYSTEM_ACTOR,
+      action: 'issue.updated',
+      entityType: 'issue',
+      entityId: issue.id,
+      details: {
+        assigneeAgentId: null,
+        previousAssigneeAgentId: agentId,
+        ...(status !== issue.status ? { status, previousStatus: issue.status } : {}),
+        ...(issue.checkoutRunId ? { previousCheckoutRunId: issue.checkoutRunId } : {}),
+        reason: 'agent_archived',
+      },
+    });
+    await tx.insert(activityLog).values({
+      companyId,
+      ...SYSTEM_ACTOR,
+      action: 'issue.commented',
+      entityType: 'issue',
+      entityId: issue.id,
+      details: { body: ARCHIVE_UNASSIGN_COMMENT, comment: ARCHIVE_UNASSIGN_COMMENT },
+    });
+  }
+  return unassigned;
+}
+
+/**
+ * What archiving would do now (confirm dialog / GET route): the agent's pending approvals and
+ * open issues, inside `companyId` only. Null when the agent isn't in that company. An already
+ * archived agent reports zeros (a repeat archive changes nothing).
+ */
+export async function getArchiveImpact(
+  agentIdOrUrlKey: string,
+  companyId: string,
+): Promise<(ArchiveImpact & { agentId: string; archived: boolean }) | null> {
+  const key = agentIdOrUrlKey?.trim();
+  if (!key || !companyId) return null;
+  const agent = await db.query.agents.findFirst({
+    where: and(eq(agents.companyId, companyId), or(eq(agents.id, key), eq(agents.urlKey, key))),
+    columns: { id: true, status: true },
+  });
+  if (!agent) return null;
+  if (agent.status === 'archived') {
+    return { agentId: agent.id, archived: true, pendingApprovals: 0, openIssues: 0 };
+  }
+  const [pending, open] = await Promise.all([
+    db
+      .select({ id: approvals.id })
+      .from(approvals)
+      .where(
+        and(
+          eq(approvals.companyId, companyId),
+          eq(approvals.requestedByAgentId, agent.id),
+          eq(approvals.status, 'pending'),
+        ),
+      ),
+    db
+      .select({ id: issues.id })
+      .from(issues)
+      .where(
+        and(
+          eq(issues.companyId, companyId),
+          eq(issues.assigneeAgentId, agent.id),
+          inArray(issues.status, ARCHIVE_OPEN_ISSUE_STATUSES),
+        ),
+      ),
+  ]);
+  return { agentId: agent.id, archived: false, pendingApprovals: pending.length, openIssues: open.length };
+}
+
 
 /** Scheduler unreachable: record the cancellation (only if the row is still in flight). */
 async function recordRunCancelled(runId: string): Promise<ArchivedRunOutcome['outcome']> {
