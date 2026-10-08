@@ -1,13 +1,23 @@
 import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 
+/** Row shape the route selects (session joined with user); tests vary sessionExpiresAt. */
+type SessionRow = {
+  sessionId: string;
+  sessionToken: string;
+  sessionExpiresAt: Date | null | undefined;
+  userId: string;
+  userEmail: string;
+  userName: string;
+};
+
 // Mock dependencies BEFORE importing the route
 const mockDb = {
   select: mock.fn(() => mockDb),
   from: mock.fn(() => mockDb),
   innerJoin: mock.fn(() => mockDb),
   where: mock.fn(() => mockDb),
-  limit: mock.fn(() => Promise.resolve([])),
+  limit: mock.fn((): Promise<SessionRow[]> => Promise.resolve([])),
 };
 
 const mockAuth = {
