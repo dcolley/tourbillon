@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import {
   createLlmProvider,
   LlmProviderValidationError,
+  llmProviderErrorBody,
   listLlmProvidersPublic,
 } from '@/lib/llm-providers';
 import { requireBoardIdentity } from '@/lib/board-route-auth';
@@ -54,7 +55,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ provider }, { status: 201 });
   } catch (err) {
     if (err instanceof LlmProviderValidationError) {
-      return NextResponse.json({ error: err.message }, { status: 400 });
+      const { body, status } = llmProviderErrorBody(err);
+      return NextResponse.json(body, { status });
     }
     const message = err instanceof Error ? err.message : 'Failed to create provider';
     return NextResponse.json({ error: message }, { status: 500 });

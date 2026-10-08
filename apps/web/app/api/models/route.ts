@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db, agents } from '@tourbillon/db';
 import { and, eq } from 'drizzle-orm';
-import { getLlmProviderRecordById } from '@/lib/llm-providers';
+import { getDefaultLlmProviderRecord, getLlmProviderRecordById } from '@/lib/llm-providers';
 import {
   listProviderModelsForAgent,
   listProviderModelsForRecord,
 } from '@/lib/model-catalog';
 import { defaultProviderModelsResponse } from '@/lib/default-provider-models';
+import { ProviderConfigError, redactUrlsInText } from '@/lib/provider-safety';
 import { requireBoardCompany, requireBoardIdentity } from '@/lib/board-route-auth';
 
 export async function GET(req: NextRequest) {
@@ -37,9 +38,11 @@ export async function GET(req: NextRequest) {
         return NextResponse.json({ error: 'Agent not found' }, { status: 404 });
       }
 
-      const providerRecord = agent.providerId
-        ? await getLlmProviderRecordById(agent.providerId)
-        : null;
+      // #121 S7: same order as the default path: the agent's provider, else the registry
+      // default, and env only when the registry has no default.
+      const providerRecord =
+        (agent.providerId ? await getLlmProviderRecordById(agent.providerId) : null) ??
+        (await getDefaultLlmProviderRecord());
 
       const result = await listProviderModelsForAgent(
         agent.adapterType,
@@ -54,7 +57,10 @@ export async function GET(req: NextRequest) {
     // errors instead of a bare 502 (see lib/default-provider-models.ts).
     return await defaultProviderModelsResponse();
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Failed to list models';
+    if (err instanceof ProviderConfigError) {
+      return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
+    }
+    const message = redactUrlsInText(err instanceof Error ? err.message : 'Failed to list models');
     return NextResponse.json({ error: message }, { status: 502 });
   }
 }

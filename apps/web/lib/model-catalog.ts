@@ -10,6 +10,19 @@ import {
   type ModelProviderOverrides,
   type ModelReasoningCapabilities,
 } from '@tourbillon/shared';
+import {
+  assertNoBaseURLCredentials,
+  fetchWithoutCrossHostRedirects,
+  providerEndpoint,
+  providerSecretValues,
+  readBodyCapped,
+  readJsonCapped,
+  redactBaseURL,
+  scrubProviderSecrets,
+  PROVIDER_ERROR_BODY_MAX_BYTES,
+  PROVIDER_ERROR_SNIPPET_CHARS,
+  PROVIDER_MODELS_BODY_MAX_BYTES,
+} from './provider-safety';
 
 export interface ListedModel {
   id: string;
@@ -40,14 +53,21 @@ interface LmStudioNativeModel {
 function resultFromConfig(config: ModelProviderConfig): Omit<ListProviderModelsResult, 'models'> {
   return {
     provider: config.provider,
-    baseURL: config.baseURL,
+    // S2: never echo userinfo or query strings (a key in `?api_key=` is a secret too).
+    baseURL: redactBaseURL(config.baseURL),
     providerId: config.providerId,
     providerName: config.providerName,
   };
 }
 
 function lmStudioNativeBaseUrl(baseURL: string): string {
-  return baseURL.replace(/\/v1\/?$/, '').replace(/\/$/, '');
+  try {
+    const u = new URL(baseURL.trim());
+    u.pathname = u.pathname.replace(/\/v1\/?$/, '').replace(/\/$/, '');
+    return u.toString();
+  } catch {
+    return baseURL.replace(/\/v1\/?$/, '').replace(/\/$/, '');
+  }
 }
 
 function collectLmStudioModelIds(entry: LmStudioNativeModel): string[] {
@@ -72,15 +92,18 @@ async function fetchLmStudioNativeModels(
     return capabilitiesById;
   }
 
-  const url = `${lmStudioNativeBaseUrl(config.baseURL)}/api/v1/models`;
+  const url = providerEndpoint(lmStudioNativeBaseUrl(config.baseURL), 'api/v1/models');
   try {
-    const res = await fetch(url, {
+    const res = await fetchWithoutCrossHostRedirects(url, {
       headers: buildProviderRequestHeaders(config),
       signal: AbortSignal.timeout(10_000),
     });
-    if (!res.ok) return capabilitiesById;
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => {});
+      return capabilitiesById;
+    }
 
-    const body = (await res.json()) as { models?: LmStudioNativeModel[] };
+    const body = await readJsonCapped<{ models?: LmStudioNativeModel[] }>(res, PROVIDER_MODELS_BODY_MAX_BYTES);
     for (const entry of body.models ?? []) {
       if (entry.type && entry.type !== 'llm') continue;
       const reasoning = reasoningCapabilitiesFromNative(
@@ -130,24 +153,30 @@ export async function listProviderModelsFromConfig(
   if (!config.baseURL.trim()) {
     throw new Error('No model provider base URL is configured.');
   }
+  // S2: fetch can never use user:pass@ and would echo the URL in its error; refuse up front (409).
+  assertNoBaseURLCredentials(config.baseURL);
 
   const nativeCapabilities =
     config.provider === 'lmstudio' ? await fetchLmStudioNativeModels(config) : new Map();
 
-  const url = `${config.baseURL.replace(/\/$/, '')}/models`;
-  const res = await fetch(url, {
-    headers: buildProviderRequestHeaders(config),
+  const requestHeaders = buildProviderRequestHeaders(config);
+  const res = await fetchWithoutCrossHostRedirects(providerEndpoint(config.baseURL, 'models'), {
+    headers: requestHeaders,
     signal: AbortSignal.timeout(10_000),
   });
 
   if (!res.ok) {
-    const detail = await res.text();
+    // S4: bounded read; S1: scrub key, header values and Bearer strings before the snippet is cut.
+    const { text } = await readBodyCapped(res, PROVIDER_ERROR_BODY_MAX_BYTES);
+    const detail = scrubProviderSecrets(text, providerSecretValues(config, requestHeaders))
+      .trim()
+      .slice(0, PROVIDER_ERROR_SNIPPET_CHARS);
     throw new Error(
-      `Could not list models from ${config.provider} (${res.status})${detail ? `: ${detail.slice(0, 200)}` : ''}`,
+      `Could not list models from ${config.provider} (${res.status})${detail ? `: ${detail}` : ''}`,
     );
   }
 
-  const body = (await res.json()) as { data?: Array<{ id?: string }> };
+  const body = await readJsonCapped<{ data?: Array<{ id?: string }> }>(res, PROVIDER_MODELS_BODY_MAX_BYTES);
   const models = (body.data ?? [])
     .map((entry) => entry.id)
     .filter((id): id is string => typeof id === 'string' && id.length > 0)

@@ -22,12 +22,36 @@ import {
   type LlmProviderRecord,
   type LlmProviderType,
 } from '@tourbillon/shared';
+import { envProviderConfigured } from './env-provider';
+import {
+  BASE_URL_CREDENTIALS_MESSAGE,
+  baseURLHasCredentials,
+  redactBaseURL,
+  sameCredentialBoundary,
+} from './provider-safety';
 
+export type LlmProviderErrorCode =
+  | 'llm_provider_base_url_credentials'
+  | 'llm_provider_secrets_reentry_required';
+
+/** Validation failure. `status` defaults to 400; some carry a 409 and a machine-readable code. */
 export class LlmProviderValidationError extends Error {
-  constructor(message: string) {
+  readonly status: number;
+  readonly code?: LlmProviderErrorCode;
+  constructor(message: string, options?: { status?: number; code?: LlmProviderErrorCode }) {
     super(message);
     this.name = 'LlmProviderValidationError';
+    this.status = options?.status ?? 400;
+    this.code = options?.code;
   }
+}
+
+/** JSON body + status for a LlmProviderValidationError (used by the provider API routes). */
+export function llmProviderErrorBody(err: LlmProviderValidationError): {
+  body: { error: string; code?: LlmProviderErrorCode };
+  status: number;
+} {
+  return { body: { error: err.message, ...(err.code ? { code: err.code } : {}) }, status: err.status };
 }
 
 export interface LlmProviderPublic {
@@ -133,7 +157,9 @@ function toPublic(row: LlmProvider): LlmProviderPublic {
     id: record.id,
     name: record.name,
     type: record.type,
-    baseURL: record.baseURL,
+    // #121 S2: userinfo/query/fragment never leave the server (a `?api_key=` is a secret).
+    // On update, submitting this redacted form back keeps the stored URL (see updateLlmProvider).
+    baseURL: redactBaseURL(record.baseURL),
     hasApiKey: Boolean(record.apiKey),
     headers: redactHeaderValues(record.headers),
     headerNames: Object.keys(record.headers),
@@ -157,13 +183,21 @@ function validateName(name: string): string {
 function validateBaseURL(baseURL: string): string {
   const trimmed = baseURL.trim();
   if (!trimmed) throw new LlmProviderValidationError('Base URL is required.');
+  let parsed: URL;
   try {
-    const parsed = new URL(trimmed);
-    if (!['http:', 'https:'].includes(parsed.protocol)) {
-      throw new LlmProviderValidationError('Base URL must use http or https.');
-    }
+    parsed = new URL(trimmed);
   } catch {
     throw new LlmProviderValidationError('Base URL must be a valid URL.');
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    throw new LlmProviderValidationError('Base URL must use http or https.');
+  }
+  // #121 S2: fetch can never use user:pass@, and the URL is echoed back; refuse it (409).
+  if (baseURLHasCredentials(trimmed)) {
+    throw new LlmProviderValidationError(BASE_URL_CREDENTIALS_MESSAGE, {
+      status: 409,
+      code: 'llm_provider_base_url_credentials',
+    });
   }
   return trimmed.replace(/\/$/, '') === trimmed ? trimmed : trimmed.replace(/\/$/, '');
 }
@@ -205,23 +239,63 @@ async function clearOtherDefaults(exceptId?: string): Promise<void> {
   }
 }
 
-/** Seed a default provider from env when the registry is empty. */
+/**
+ * Seed a default provider from env when the registry is empty.
+ * #121 S5: only when the env actually configures one (LLM_PROVIDER or a base-URL var for the
+ * resolved kind, trimmed and non-blank) and the resolved base URL is non-blank and has no
+ * user:pass@. Otherwise nothing is created, so a fresh install with no env gets the 409
+ * "not configured" answer instead of a phantom localhost LM Studio default.
+ */
 export async function ensureDefaultLlmProviders(): Promise<void> {
   const existing = await listLlmProviderRows();
   if (existing.length > 0) return;
 
   const envConfig = resolveModelProviderConfigFromEnv();
+  if (!envProviderConfigured(envConfig)) return;
+  const baseURL = envConfig.baseURL.trim().replace(/\/$/, '');
+  if (!baseURL || baseURLHasCredentials(baseURL)) return;
+
   const type = parseLlmProviderType(envConfig.provider) ?? 'lmstudio';
+  const apiKey = envConfig.apiKey?.trim();
 
   await db.insert(llmProviders).values({
     name: defaultProviderSeedName(type),
     type,
-    baseURL: envConfig.baseURL,
-    apiKey: envConfig.apiKey || null,
+    baseURL,
+    apiKey: apiKey || null,
     headers: envConfig.headers,
     apiMode: envConfig.apiMode,
     isDefault: true,
   });
+}
+
+/**
+ * When an update moves the provider to another host (or downgrades https → http), stored
+ * secrets must not silently follow it: the API key and the value of every stored header that is
+ * kept must be re-entered in the same request. Returns the names of what is missing.
+ */
+export function missingSecretsForHostChange(
+  existing: { apiKey: string | null; headers: Record<string, string> },
+  input: Pick<UpdateLlmProviderInput, 'apiKey' | 'clearApiKey' | 'headers'>,
+): string[] {
+  const missing: string[] = [];
+  if (existing.apiKey && !input.clearApiKey && !(typeof input.apiKey === 'string' && input.apiKey.trim())) {
+    missing.push('the API key');
+  }
+  const storedNames = Object.keys(existing.headers);
+  if (storedNames.length > 0) {
+    if (input.headers === undefined) {
+      // Headers not submitted → all stored values would be carried over.
+      missing.push(...storedNames.map((n) => `header "${n}"`));
+    } else {
+      for (const [name, value] of Object.entries(input.headers)) {
+        if (Object.hasOwn(existing.headers, name) && isBlankHeaderValue(value)) {
+          missing.push(`header "${name}"`);
+        }
+      }
+    }
+  }
+  return missing;
 }
 
 export async function listLlmProvidersPublic(): Promise<LlmProviderPublic[]> {
@@ -320,13 +394,39 @@ export async function updateLlmProvider(
 
   if (input.name !== undefined) updates.name = validateName(input.name);
   if (input.type !== undefined) updates.type = parseProviderType(input.type);
-  if (input.baseURL !== undefined) updates.baseURL = validateBaseURL(input.baseURL);
+  if (input.baseURL !== undefined) {
+    // The UI gets the redacted URL (toPublic); getting exactly that back means "unchanged".
+    const submitted = input.baseURL.trim();
+    // (Not when the stored URL has user:pass@: then the stripped form is saved, cleaning it up.)
+    const keepStored =
+      submitted !== '' &&
+      submitted !== existing.baseURL &&
+      submitted === redactBaseURL(existing.baseURL) &&
+      !baseURLHasCredentials(existing.baseURL);
+    if (!keepStored) updates.baseURL = validateBaseURL(input.baseURL);
+  }
   if (input.headers !== undefined) {
     const storedHeaders = parseHeaders(existing.headers);
     // New/renamed names need a value; blank values for stored names keep the stored value.
     const submitted = validateHeadersInput(input.headers); // null → 400
     assertNewHeaderValues(storedHeaders, submitted);
     updates.headers = mergeWriteOnlyHeaders(storedHeaders, submitted);
+  }
+  // Host change: stored key/header values are not carried to the new host (checked after the
+  // headers are validated, before any write).
+  if (updates.baseURL !== undefined && !sameCredentialBoundary(existing.baseURL, updates.baseURL)) {
+    const missing = missingSecretsForHostChange(
+      { apiKey: existing.apiKey, headers: parseHeaders(existing.headers) },
+      input,
+    );
+    if (missing.length > 0) {
+      throw new LlmProviderValidationError(
+        `The base URL now points at a different host (${redactBaseURL(existing.baseURL)} → ` +
+          `${redactBaseURL(updates.baseURL)}), so stored secrets are not carried over. ` +
+          `Re-enter ${missing.join(', ')} (or clear ${missing.length === 1 ? 'it' : 'them'}) in the same save.`,
+        { status: 409, code: 'llm_provider_secrets_reentry_required' },
+      );
+    }
   }
   if (input.apiMode !== undefined) {
     const apiMode = parseModelApiMode(input.apiMode);

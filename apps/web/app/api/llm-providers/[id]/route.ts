@@ -3,6 +3,7 @@ import {
   deleteLlmProvider,
   getLlmProviderPublic,
   LlmProviderValidationError,
+  llmProviderErrorBody,
   updateLlmProvider,
 } from '@/lib/llm-providers';
 import { requireBoardIdentity } from '@/lib/board-route-auth';
@@ -54,7 +55,8 @@ export async function PATCH(
     return NextResponse.json({ provider });
   } catch (err) {
     if (err instanceof LlmProviderValidationError) {
-      return NextResponse.json({ error: err.message }, { status: 400 });
+      const { body, status } = llmProviderErrorBody(err);
+      return NextResponse.json(body, { status });
     }
     const message = err instanceof Error ? err.message : 'Failed to update provider';
     return NextResponse.json({ error: message }, { status: 500 });
@@ -73,7 +75,8 @@ export async function DELETE(
     return NextResponse.json({ ok: true });
   } catch (err) {
     if (err instanceof LlmProviderValidationError) {
-      return NextResponse.json({ error: err.message }, { status: 400 });
+      const { body, status } = llmProviderErrorBody(err);
+      return NextResponse.json(body, { status });
     }
     const message = err instanceof Error ? err.message : 'Failed to delete provider';
     return NextResponse.json({ error: message }, { status: 500 });

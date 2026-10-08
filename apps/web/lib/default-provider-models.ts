@@ -8,6 +8,7 @@
  *    if the env actually names a provider or base URL. Built-in localhost defaults don't count.
  * 3. Neither: 409 `llm_provider_not_configured` with a message saying what to set.
  *
+ * A base URL with user:pass@ → 409 `llm_provider_base_url_credentials` (no upstream call).
  * Upstream failures get a JSON error that names the provider instead of a bare 502:
  * unreachable (network error/timeout) → 503 `llm_provider_unreachable`;
  * reachable but answered with an error → 502 `llm_provider_error`.
@@ -17,41 +18,26 @@ import {
   resolveModelProviderConfigFromEnv,
   resolveModelProviderConfigFromRecord,
   type ModelProviderConfig,
-  type ModelProviderKind,
 } from '@tourbillon/shared';
+import { envProviderConfigured } from './env-provider';
 import { getDefaultLlmProviderRecord } from './llm-providers';
 import { listProviderModelsFromConfig } from './model-catalog';
+import {
+  ProviderConfigError,
+  assertNoBaseURLCredentials,
+  redactBaseURL,
+  redactUrlsInText,
+} from './provider-safety';
+
+export { envProviderConfigured };
 
 export type DefaultProviderSource = 'registry' | 'env';
 
 export type DefaultModelsErrorCode =
   | 'llm_provider_not_configured'
   | 'llm_provider_unreachable'
-  | 'llm_provider_error';
-
-/** Env vars that set the base URL for each provider kind (mirrors envBaseURL in @tourbillon/shared). */
-const BASE_URL_ENV: Record<ModelProviderKind, readonly string[]> = {
-  lmstudio: ['LM_STUDIO_BASE_URL', 'LLM_BASE_URL'],
-  ollama: ['OLLAMA_BASE_URL', 'LLM_BASE_URL'],
-  vllm: ['LLM_BASE_URL'],
-  openai: ['OPENAI_BASE_URL', 'LLM_BASE_URL'],
-  'openai-compatible': ['LLM_BASE_URL', 'OPENAI_BASE_URL'],
-};
-
-function envSet(name: string): boolean {
-  const value = process.env[name];
-  return typeof value === 'string' && value.trim() !== '';
-}
-
-/**
- * True when the env explicitly configures a provider: LLM_PROVIDER is set, or a base-URL var for
- * the resolved provider kind is set. With neither, env resolution only yields the built-in
- * localhost default, which is not "configured".
- */
-export function envProviderConfigured(config: Pick<ModelProviderConfig, 'provider'>): boolean {
-  if (envSet('LLM_PROVIDER')) return true;
-  return (BASE_URL_ENV[config.provider] ?? []).some((name) => envSet(name));
-}
+  | 'llm_provider_error'
+  | 'llm_provider_base_url_credentials';
 
 /** Network failure or timeout from fetch (as opposed to an HTTP error response). */
 export function isUnreachableError(err: unknown): boolean {
@@ -75,7 +61,7 @@ function causeDetail(err: unknown): string {
 }
 
 function describeProvider(config: ModelProviderConfig, source: DefaultProviderSource): string {
-  const where = `${config.provider} at ${config.baseURL}`;
+  const where = `${config.provider} at ${redactBaseURL(config.baseURL)}`;
   return source === 'registry'
     ? `default LLM provider "${config.providerName ?? config.providerId ?? 'unnamed'}" (${where})`
     : `env-configured LLM provider (${where})`;
@@ -96,7 +82,7 @@ function errorResponse(
       ...(config
         ? {
             provider: config.provider,
-            baseURL: config.baseURL,
+            baseURL: redactBaseURL(config.baseURL),
             ...(config.providerId ? { providerId: config.providerId } : {}),
             ...(config.providerName ? { providerName: config.providerName } : {}),
           }
@@ -131,13 +117,18 @@ export async function defaultProviderModelsResponse(): Promise<NextResponse> {
 
   const { config, source } = resolved;
   try {
+    // S2: a URL with user:pass@ (registry row saved before the check, or env) is a config error.
+    assertNoBaseURLCredentials(config.baseURL);
     return NextResponse.json(await listProviderModelsFromConfig(config));
   } catch (err) {
     const who = describeProvider(config, source);
-    if (isUnreachableError(err)) {
-      return errorResponse(503, 'llm_provider_unreachable', `Could not reach the ${who}: ${causeDetail(err)}.`, config, source);
+    if (err instanceof ProviderConfigError) {
+      return errorResponse(err.status, err.code, `The ${who} is misconfigured: ${err.message}`, config, source);
     }
-    const detail = err instanceof Error ? err.message : 'Failed to list models';
+    if (isUnreachableError(err)) {
+      return errorResponse(503, 'llm_provider_unreachable', `Could not reach the ${who}: ${redactUrlsInText(causeDetail(err))}.`, config, source);
+    }
+    const detail = redactUrlsInText(err instanceof Error ? err.message : 'Failed to list models');
     return errorResponse(502, 'llm_provider_error', `The ${who} returned an error: ${detail}`, config, source);
   }
 }
