@@ -1,21 +1,26 @@
-import { NextRequest, NextResponse } from 'next/server';
+import type { NextRequest } from 'next/server';
 import { db } from '@tourbillon/db';
 import { vaultSecrets } from '@tourbillon/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { encryptCredential } from '@tourbillon/shared/vault-encryption';
 import { getActiveCompany } from '@/lib/company';
 import type { OAuthTokens } from '@tourbillon/db/schema';
-import { createHmac } from 'crypto';
+import {
+  OAUTH_NOT_CONFIGURED_ERROR,
+  isOAuthStateSecretConfigured,
+  logOAuthStateSecretMissing,
+  settingsRedirect,
+  verifyOAuthState,
+} from '@/lib/vault-oauth-state';
 
-function verifyOAuthState(payload: string, signature: string): boolean {
-  const secret = process.env.BETTER_AUTH_SECRET || 'change-me-in-production';
-  const hmac = createHmac('sha256', secret);
-  hmac.update(payload);
-  const expected = hmac.digest('hex');
-  return signature === expected;
-}
 
 export async function GET(req: NextRequest) {
+  // #112: fail closed. Without a real BETTER_AUTH_SECRET no state can be trusted.
+  if (!isOAuthStateSecretConfigured()) {
+    logOAuthStateSecretMissing('finish');
+    return settingsRedirect(`/settings?oauth_error=${OAUTH_NOT_CONFIGURED_ERROR}`);
+  }
+
   try {
     const { searchParams } = new URL(req.url);
     const code = searchParams.get('code');
@@ -23,24 +28,22 @@ export async function GET(req: NextRequest) {
     const error = searchParams.get('error');
     
     if (error) {
-      return NextResponse.redirect(
-        `/settings?oauth_error=${encodeURIComponent(error)}`
-      );
+      return settingsRedirect(`/settings?oauth_error=${encodeURIComponent(error)}`);
     }
     
     if (!code || !state) {
-      return NextResponse.redirect('/settings?oauth_error=missing_parameters');
+      return settingsRedirect('/settings?oauth_error=missing_parameters');
     }
     
     let stateData: { payload: string; signature: string };
     try {
       stateData = JSON.parse(Buffer.from(state, 'base64').toString('utf8'));
     } catch {
-      return NextResponse.redirect('/settings?oauth_error=invalid_state');
+      return settingsRedirect('/settings?oauth_error=invalid_state');
     }
     
     if (!verifyOAuthState(stateData.payload, stateData.signature)) {
-      return NextResponse.redirect('/settings?oauth_error=invalid_state_signature');
+      return settingsRedirect('/settings?oauth_error=invalid_state_signature');
     }
     
     const { serverId, scope, userId, agentId } = JSON.parse(stateData.payload);
@@ -52,7 +55,7 @@ export async function GET(req: NextRequest) {
       const clientSecret = process.env.GITHUB_OAUTH_CLIENT_SECRET;
       
       if (!clientId || !clientSecret) {
-        return NextResponse.redirect('/settings?oauth_error=not_configured');
+        return settingsRedirect('/settings?oauth_error=not_configured');
       }
       
       const baseUrl = process.env.BETTER_AUTH_URL || 'http://localhost:3002';
@@ -73,15 +76,13 @@ export async function GET(req: NextRequest) {
       });
       
       if (!tokenResponse.ok) {
-        return NextResponse.redirect('/settings?oauth_error=token_exchange_failed');
+        return settingsRedirect('/settings?oauth_error=token_exchange_failed');
       }
       
       const tokenData = await tokenResponse.json();
       
       if (tokenData.error) {
-        return NextResponse.redirect(
-          `/settings?oauth_error=${encodeURIComponent(tokenData.error)}`
-        );
+        return settingsRedirect(`/settings?oauth_error=${encodeURIComponent(tokenData.error)}`);
       }
       
       const tokens: OAuthTokens = {
@@ -136,12 +137,12 @@ export async function GET(req: NextRequest) {
         });
       }
       
-      return NextResponse.redirect(`/settings?connected=${serverId}`);
+      return settingsRedirect(`/settings?connected=${encodeURIComponent(serverId)}`);
     }
     
-    return NextResponse.redirect('/settings?oauth_error=unsupported_provider');
+    return settingsRedirect('/settings?oauth_error=unsupported_provider');
   } catch (error) {
     console.error('Error in OAuth callback:', error);
-    return NextResponse.redirect('/settings?oauth_error=callback_failed');
+    return settingsRedirect('/settings?oauth_error=callback_failed');
   }
 }
