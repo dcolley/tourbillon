@@ -53,4 +53,23 @@ describe('checkDecisionReason (S2)', () => {
     // Approve over the cap is also refused (same field).
     assert.equal(checkDecisionReason('approved', over).ok, false);
   });
+
+  it('only invisible characters count as no reason (shared set)', () => {
+    for (const raw of ['\u00AD', '\u180E', '\u200E\u200F', '\u202A\u202E', '\u2066\u2069', '\u3164', '\u2800', ' \u061C\uFFA0 ']) {
+      const r = checkDecisionReason('rejected', raw);
+      assert.equal(r.ok, false, JSON.stringify(raw));
+      if (!r.ok) assert.equal(r.code, 'reason_required');
+      assert.deepEqual(checkDecisionReason('approved', raw), { ok: true, reason: undefined });
+    }
+    assert.deepEqual(checkDecisionReason('rejected', '\u200E\u2800 Too risky \u3164'), { ok: true, reason: 'Too risky' });
+  });
+
+  it('cap counts code points (as the MCP schema does), not UTF-16 units', () => {
+    const emoji = '😀'.repeat(REJECT_REASON_MAX_CHARS);
+    assert.equal(emoji.length, REJECT_REASON_MAX_CHARS * 2);
+    assert.deepEqual(checkDecisionReason('rejected', emoji), { ok: true, reason: emoji });
+    const r = checkDecisionReason('rejected', `${emoji}😀`);
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.equal(r.code, 'reason_too_long');
+  });
 });

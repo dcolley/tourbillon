@@ -2,14 +2,14 @@
  * Decision reason (approval note) rules, shared by the board form, the board JSON API and MCP
  * decide_approval:
  * - must be a string when given (null/undefined count as not given);
- * - trimmed (whitespace and zero-width characters at either end);
- * - required to reject: empty, whitespace-only or zero-width-only is refused;
- * - at most REJECT_REASON_MAX_CHARS characters after trimming: longer is refused, never cut.
+ * - trimmed (whitespace and invisible characters at either end; one shared set, ./edge-blank);
+ * - required to reject: empty, or only whitespace/invisible characters, is refused;
+ * - at most REJECT_REASON_MAX_CHARS code points after trimming (as the MCP schema's maxLength
+ *   counts): longer is refused, never cut.
  */
-export const REJECT_REASON_MAX_CHARS = 2_000;
+import { codePointLength, trimEdgeBlank } from './edge-blank';
 
-/** Whitespace plus U+200B–U+200D, U+2060 and U+FEFF. */
-const EDGE_BLANK_RE = /^[\s\u200B-\u200D\u2060\uFEFF]+|[\s\u200B-\u200D\u2060\uFEFF]+$/g;
+export const REJECT_REASON_MAX_CHARS = 2_000;
 
 export type DecisionReasonError = 'reason_not_string' | 'reason_required' | 'reason_too_long';
 
@@ -28,8 +28,8 @@ const fail = (code: DecisionReasonError): DecisionReasonResult => ({ ok: false, 
 /** Validate and normalise a decision reason. `reason` is the trimmed text, or undefined if none. */
 export function checkDecisionReason(decision: 'approved' | 'rejected', raw: unknown): DecisionReasonResult {
   if (raw !== undefined && raw !== null && typeof raw !== 'string') return fail('reason_not_string');
-  const trimmed = typeof raw === 'string' ? raw.replace(EDGE_BLANK_RE, '') : '';
+  const trimmed = typeof raw === 'string' ? trimEdgeBlank(raw) : '';
   if (!trimmed) return decision === 'rejected' ? fail('reason_required') : { ok: true, reason: undefined };
-  if (trimmed.length > REJECT_REASON_MAX_CHARS) return fail('reason_too_long');
+  if (codePointLength(trimmed) > REJECT_REASON_MAX_CHARS) return fail('reason_too_long');
   return { ok: true, reason: trimmed };
 }
