@@ -55,7 +55,8 @@ describe('checkDecisionReason (S2)', () => {
   });
 
   it('only invisible characters count as no reason (shared set)', () => {
-    for (const raw of ['\u00AD', '\u180E', '\u200E\u200F', '\u202A\u202E', '\u2066\u2069', '\u3164', '\u2800', ' \u061C\uFFA0 ']) {
+    const each = ['\u00AD', '\u180E', '\u200E', '\u200F', '\u202A', '\u202B', '\u202C', '\u202D', '\u202E', '\u2066', '\u2067', '\u2068', '\u2069', '\u3164', '\u2800', '\u061C', '\u115F', '\uFFA0', '\u034F'];
+    for (const raw of [...each, each.join(''), ` ${each.join(' ')}\u200B\n`]) {
       const r = checkDecisionReason('rejected', raw);
       assert.equal(r.ok, false, JSON.stringify(raw));
       if (!r.ok) assert.equal(r.code, 'reason_required');

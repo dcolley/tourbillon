@@ -2,14 +2,30 @@
  * Decision reason (approval note) rules, shared by the board form, the board JSON API and MCP
  * decide_approval:
  * - must be a string when given (null/undefined count as not given);
- * - trimmed (whitespace and invisible characters at either end; one shared set, ./edge-blank);
+ * - trimmed (whitespace and invisible characters at either end);
  * - required to reject: empty, or only whitespace/invisible characters, is refused;
  * - at most REJECT_REASON_MAX_CHARS code points after trimming (as the MCP schema's maxLength
  *   counts): longer is refused, never cut.
  */
-import { codePointLength, trimEdgeBlank } from './edge-blank';
-
 export const REJECT_REASON_MAX_CHARS = 2_000;
+
+/**
+ * Whitespace plus invisible characters: zero-width U+200B–U+200D, U+2060, U+FEFF; soft hyphen
+ * U+00AD; U+180E; LRM/RLM U+200E/U+200F; ALM U+061C; bidi embeddings/overrides U+202A–U+202E and
+ * isolates U+2066–U+2069; fillers U+115F, U+3164, U+FFA0, U+2800; U+034F.
+ * TODO: import trimEdgeBlank from the shared lib/edge-blank helper (#142) once it is on the merge
+ * base, and drop this copy; the set here is meant to stay identical to it until then.
+ */
+const INVISIBLE = '\\s\\u00AD\\u034F\\u061C\\u115F\\u180E\\u200B-\\u200F\\u202A-\\u202E\\u2060\\u2066-\\u2069\\u2800\\u3164\\uFEFF\\uFFA0';
+const EDGE_BLANK_RE = new RegExp(`^[${INVISIBLE}]+|[${INVISIBLE}]+$`, 'g');
+const trimEdgeBlank = (value: string) => value.replace(EDGE_BLANK_RE, '');
+
+/** Length in code points (what the MCP schema's maxLength counts), not UTF-16 units. */
+function codePointLength(value: string): number {
+  let n = 0;
+  for (const _ of value) n++;
+  return n;
+}
 
 export type DecisionReasonError = 'reason_not_string' | 'reason_required' | 'reason_too_long';
 
