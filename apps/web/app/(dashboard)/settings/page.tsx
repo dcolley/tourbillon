@@ -19,6 +19,7 @@ import {
   resolveObservationalMemoryModel,
 } from '@tourbillon/shared';
 import { LlmProvidersSettings } from '@/components/llm-providers-settings';
+import { PasswordInput } from '@/components/ui/password-input';
 import { ObservationalMemorySettingsForm } from '@/components/observational-memory-settings-form';
 import { listLlmProvidersPublic } from '@/lib/llm-providers';
 import { actionError, actionSuccess, type ActionResult } from '@/lib/action-result';
@@ -389,10 +390,9 @@ function IntegrationsTab({
           <label htmlFor="searxngApiKey" className="text-sm font-medium">
             SearXNG API key (optional)
           </label>
-          <input
+          <PasswordInput
             id="searxngApiKey"
             name="searxngApiKey"
-            type="password"
             placeholder={integrationSettings.searxngApiKey ? '••••••••' : 'Optional — SEARXNG_API_KEY env'}
             className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
           />
@@ -415,10 +415,9 @@ function IntegrationsTab({
               {tavilyConfigured ? 'Configured' : 'Not configured'}
             </span>
           </div>
-          <input
+          <PasswordInput
             id="tavilyApiKey"
             name="tavilyApiKey"
-            type="password"
             placeholder={integrationSettings.tavilyApiKey ? '••••••••' : 'TAVILY_API_KEY env'}
             className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
           />
@@ -544,10 +543,9 @@ function HitlyTab({
           <label htmlFor="hitlyApiKey" className="text-sm font-medium">
             HITLy API key
           </label>
-          <input
+          <PasswordInput
             id="hitlyApiKey"
             name="apiKey"
-            type="password"
             placeholder={integrationSettings.hitlyGate?.apiKey ? '••••••••' : 'Project API key'}
             className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
           />
