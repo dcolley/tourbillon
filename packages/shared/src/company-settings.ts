@@ -83,7 +83,21 @@ export function parseCompanySettings(raw: unknown): CompanySettings {
     hitlyGate: parseHitlyGateSettings(record.hitlyGate),
     ...(typeof record.wakeContextV2 === 'boolean' ? { wakeContextV2: record.wakeContextV2 } : {}),
     ...parseWakeContextBudgets(record.wakeContextBudgets),
+    ...parseToolEgressAllowList(record.toolEgressAllowList),
   };
+}
+
+/** Stored tool egress allow-list, preserving "set but malformed" (which allows nothing). */
+export function readStoredToolEgressAllowList(raw: unknown): string[] | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((v): v is string => typeof v === 'string');
+}
+
+/** Kept as stored (validated on save); a malformed value stays set and allows nothing. */
+function parseToolEgressAllowList(raw: unknown): Pick<CompanySettings, 'toolEgressAllowList'> {
+  const list = readStoredToolEgressAllowList(raw);
+  return list === undefined ? {} : { toolEgressAllowList: list };
 }
 
 function parseWakeContextBudgets(raw: unknown): Pick<CompanySettings, 'wakeContextBudgets'> {
@@ -123,6 +137,9 @@ export function mergeCompanySettings(
     } else {
       delete next.mcpCredentials;
     }
+  }
+  if (patch.toolEgressAllowList !== undefined) {
+    next.toolEgressAllowList = [...patch.toolEgressAllowList];
   }
   if (patch.observationalMemory !== undefined) {
     const om = patch.observationalMemory;

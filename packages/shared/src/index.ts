@@ -21,6 +21,7 @@ export * from './egress-allow-list';
 export * from './observability';
 export * from './tool-catalog';
 export * from './tool-permissions';
+export * from './tool-egress';
 export * from './company-settings';
 export * from './mcp-types';
 export * from './mcp-builtin-catalog';

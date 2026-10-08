@@ -29,6 +29,7 @@
     "./observability": "./src/observability.ts",
     "./tool-catalog": "./src/tool-catalog.ts",
     "./tool-permissions": "./src/tool-permissions.ts",
+    "./tool-egress": "./src/tool-egress.ts",
     "./company-settings": "./src/company-settings.ts",
     "./mcp-registry": "./src/mcp-registry.ts",
     "./mcp-builtin-catalog": "./src/mcp-builtin-catalog.ts",
@@ -44,6 +45,7 @@
   "dependencies": {
     "croner": "^10.0.1",
     "drizzle-orm": "catalog:",
+    "tldts": "^7.4.18",
     "zod": "catalog:"
   },
   "devDependencies": {

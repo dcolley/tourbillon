@@ -18,6 +18,7 @@ import {
   parseAgentModelSettings,
   normalizeHeartbeatConfig,
   validateHeartbeatSchedule,
+  resolveToolEgressAllowListInput,
   type AgentModelSettings,
   type AgentModelSettingsPatch,
   type AgentRuntimeConfig,
@@ -597,6 +598,42 @@ export async function updateAgentCapabilities(
     .returning();
 
   // Cached chat controllers hold a tool snapshot; rebuild on next chat.
+  invalidateChatControllerForAgent(agentId);
+
+  return updated;
+}
+
+/**
+ * Agent-level outbound host allow-list for tools. Applied on top of the company list (a host must
+ * match both), so it can only narrow. mode 'off' clears it; mode 'list' stores validated entries.
+ * The only writer of runtimeConfig.toolEgressAllowList: input is validated before any read or
+ * write, and bad input throws AgentValidationError with a clear message.
+ */
+export async function updateAgentToolEgressAllowList(
+  agentId: string,
+  input: { mode: unknown; entries: unknown },
+): Promise<Agent> {
+  let list: string[] | null;
+  try {
+    list = resolveToolEgressAllowListInput(input?.mode, input?.entries);
+  } catch (err) {
+    throw new AgentValidationError(err instanceof Error ? err.message : 'Invalid outbound host allow-list.');
+  }
+
+  const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+  if (!agent) throw new AgentValidationError('Agent not found.');
+
+  const runtimeConfig: AgentRuntimeConfig = { ...(agent.runtimeConfig as AgentRuntimeConfig) };
+  if (list === null) delete runtimeConfig.toolEgressAllowList;
+  else runtimeConfig.toolEgressAllowList = list;
+
+  const [updated] = await db
+    .update(agents)
+    .set({ runtimeConfig, updatedAt: new Date() })
+    .where(eq(agents.id, agentId))
+    .returning();
+
+  // Cached chat controllers hold MCP clients built for the old list; rebuild on next chat.
   invalidateChatControllerForAgent(agentId);
 
   return updated;

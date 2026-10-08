@@ -5,8 +5,11 @@ import {
   updateCompanyIntegrations,
   updateCompanyObservationalMemory,
   updateCompanyHitlyGate,
+  updateCompanyToolEgressAllowList,
   requireBoardSession,
 } from '@/lib/company';
+import { ToolEgressAllowListFields } from '@/components/tool-egress-allow-list-fields';
+import { parseToolEgressFormData, toolEgressSavedMessage } from '@/lib/tool-egress-form';
 import { getVaultCredentialStatus } from '@/lib/vault';
 import { invalidateChatControllersForCompany } from '@/lib/chat';
 import {
@@ -74,6 +77,26 @@ async function saveIntegrations(
     return actionSuccess('Integration settings saved.');
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Failed to save integrations.';
+    return actionError(message);
+  }
+}
+
+async function saveToolEgressAllowList(
+  _prev: ActionResult | null,
+  formData: FormData,
+): Promise<ActionResult> {
+  'use server';
+  await requireBoardSession();
+
+  const company = await getActiveCompany();
+
+  try {
+    const updated = await updateCompanyToolEgressAllowList(company.id, parseToolEgressFormData(formData));
+    // MCP clients are keyed by the list; rebuild cached chat controllers.
+    invalidateChatControllersForCompany(company.id);
+    return actionSuccess(toolEgressSavedMessage(parseCompanySettings(updated.settings).toolEgressAllowList));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to save the outbound host allow-list.';
     return actionError(message);
   }
 }
@@ -237,6 +260,7 @@ export default async function SettingsPage() {
             bufferConfigured={bufferConfigured}
             bufferVaultStatus={bufferVaultStatus}
             saveIntegrations={saveIntegrations}
+            saveToolEgressAllowList={saveToolEgressAllowList}
           />
         }
         hitly={
@@ -347,6 +371,7 @@ function IntegrationsTab({
   bufferConfigured,
   bufferVaultStatus,
   saveIntegrations,
+  saveToolEgressAllowList,
 }: {
   companyId: string;
   integrationSettings: any;
@@ -355,6 +380,7 @@ function IntegrationsTab({
   bufferConfigured: boolean;
   bufferVaultStatus: { configured: boolean; needsReauth: boolean; authType?: 'api_key' | 'oauth' };
   saveIntegrations: (prev: ActionResult | null, formData: FormData) => Promise<ActionResult>;
+  saveToolEgressAllowList: (prev: ActionResult | null, formData: FormData) => Promise<ActionResult>;
 }) {
   const ActionForm = require('@/components/action-form').ActionForm;
   const ActionSubmitButton = require('@/components/action-form').ActionSubmitButton;
@@ -449,6 +475,18 @@ function IntegrationsTab({
         />
 
         <ActionSubmitButton label="Save integrations" />
+      </ActionForm>
+
+      <ActionForm action={saveToolEgressAllowList} className="space-y-4 border rounded-lg p-4">
+        <div>
+          <h3 className="text-sm font-medium">Outbound hosts for agent tools</h3>
+          <p className="text-xs text-muted-foreground mt-1">
+            Tool-host allow-list: the hosts agent tools may contact, matched by host name. It is not
+            an internal-network or DNS guard. Code execution has its own sandbox allow-list per agent.
+          </p>
+        </div>
+        <ToolEgressAllowListFields list={integrationSettings.toolEgressAllowList} scope="company" />
+        <ActionSubmitButton label="Save outbound hosts" />
       </ActionForm>
     </section>
   );

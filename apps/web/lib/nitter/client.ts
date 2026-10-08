@@ -1,4 +1,10 @@
 import { getNitterUrlOrDefault } from './config';
+import {
+  checkToolEgressTarget,
+  fetchWithToolEgress,
+  ToolEgressBlockedError,
+  type ToolEgressPolicy,
+} from '@tourbillon/shared/tool-egress';
 import { parseRssFeed, type ParsedRssFeed } from './parsers/rss';
 import { parseUsersSearchHtml, type ParsedUserSearchPage } from './parsers/users-html';
 import { createUrlRewriter, rewriteUrlsDeep } from './rewrite-urls';
@@ -92,9 +98,11 @@ function applyFilters(
 export class NitterClient {
   private readonly baseUrl: string;
   private readonly rewriteString: (value: string) => string;
+  private readonly egressPolicy: ToolEgressPolicy | undefined;
 
-  constructor(baseUrl?: string) {
+  constructor(baseUrl?: string, egressPolicy?: ToolEgressPolicy) {
     this.baseUrl = baseUrl ?? getNitterUrlOrDefault();
+    this.egressPolicy = egressPolicy;
     this.rewriteString = createUrlRewriter(this.baseUrl);
   }
 
@@ -189,19 +197,26 @@ export class NitterClient {
     params: URLSearchParams,
     expectedPayload: 'rss' | 'html',
   ): Promise<FetchResult> {
+    // Check the configured base URL as written (URL parsing would normalise its host).
+    const base = checkToolEgressTarget(this.egressPolicy, this.baseUrl);
+    if (!base.allowed) throw new ToolEgressBlockedError(base.host);
     const url = new URL(path, this.baseUrl);
     for (const [key, value] of params.entries()) {
       url.searchParams.set(key, value);
     }
 
-    const response = await fetch(url.toString(), {
-      headers: {
-        accept:
-          expectedPayload === 'rss'
-            ? 'application/rss+xml,application/xml,text/xml'
-            : 'text/html,application/xhtml+xml',
+    const response = await fetchWithToolEgress(
+      url.toString(),
+      {
+        headers: {
+          accept:
+            expectedPayload === 'rss'
+              ? 'application/rss+xml,application/xml,text/xml'
+              : 'text/html,application/xhtml+xml',
+        },
       },
-    });
+      this.egressPolicy,
+    );
 
     const text = await response.text();
     const snippet = extractSnippet(text);

@@ -3,8 +3,7 @@
   "compilerOptions": {
     "module": "ESNext",
     "moduleResolution": "Bundler",
-    "noEmit": true,
-    "rootDir": "src"
+    "noEmit": true
   },
   "include": ["src/**/*.ts"]
 }

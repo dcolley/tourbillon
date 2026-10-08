@@ -9,8 +9,9 @@
  *      only ever runs for the agent it was built for.
  *
  * A denied call returns a structured tool result to the model (the run continues) and writes
- * an `agent.tool_denied` activity row (tool name + reason only, never arguments). The gate
- * fails closed: an exception, a slow lookup or missing request context denies the call.
+ * an `agent.tool_denied` activity row (tool name + reason only, never arguments; outbound-host
+ * denials add the host). The gate fails closed: an exception, a slow lookup or missing request
+ * context denies the call.
  *
  * A name the agent does not hold at all never reaches the hook: Mastra answers it with a
  * `ToolNotFoundError` tool result first. An agent-level output processor
@@ -32,7 +33,16 @@ import {
   owningMcpNamespace,
   parseCompanySettings,
   resolveAllowedToolNames,
+  resolveToolEgressPolicy,
+  resolveToolEgressTargets,
+  checkToolEgressTarget,
+  isToolEgressRestricted,
+  malformedToolEgressAllowListWarning,
+  type AgentRuntimeConfig,
   type AllowedToolNames,
+  type CompanySettings,
+  type ToolEgressPolicy,
+  type ToolEgressTargetContext,
   type ToolSurface,
 } from '@tourbillon/shared';
 import {
@@ -66,11 +76,14 @@ export type ToolGateReason =
   | 'not_in_toolset'
   | 'mcp_policy_denied'
   | 'mcp_server_not_allowed'
+  | 'egress_not_allowed'
   | 'not_allowed'
   /** The model called a name the agent does not hold (Mastra answered `ToolNotFoundError`). */
   | 'unknown_tool';
 
-export type ToolGateDecision = { allowed: true } | { allowed: false; reason: ToolGateReason };
+export type ToolGateDecision =
+  | { allowed: true }
+  | { allowed: false; reason: ToolGateReason; /** Outbound host (egress denials only). */ host?: string };
 
 export interface ToolNotAllowedResult {
   error: 'tool_not_allowed';
@@ -95,6 +108,8 @@ export interface ToolDeniedActivity {
   threadId?: string;
   tool: string | null;
   reason: ToolGateReason | 'limit_reached';
+  /** Outbound host for egress denials (host only, never a URL). */
+  host?: string;
   summary?: boolean;
 }
 
@@ -105,6 +120,10 @@ export interface ToolGateDeps {
   /** MCP server definition lookup (registry); injectable for tests. */
   getMcpServer(serverId: string): McpServerDefinition | undefined;
   listMcpServers(): McpServerDefinition[];
+  /** Outbound URLs a tool call will contact (from configuration); injectable for tests. */
+  resolveEgressTargets(names: string[], ctx: ToolEgressTargetContext): string[];
+  /** Server warning line (malformed stored allow-list); injectable for tests. */
+  warn(line: string): void;
   now(): number;
 }
 
@@ -149,6 +168,7 @@ const defaultDeps: ToolGateDeps = {
       details: {
         tool: row.tool,
         reason: row.reason,
+        ...(row.host ? { host: row.host } : {}),
         surface: row.surface,
         ...(row.runId ? { runId: row.runId } : {}),
         ...(row.threadId ? { threadId: row.threadId } : {}),
@@ -166,10 +186,21 @@ const defaultDeps: ToolGateDeps = {
   },
   getMcpServer: getMcpServerDefinition,
   listMcpServers: listMcpServerDefinitions,
+  resolveEgressTargets: resolveToolEgressTargets,
+  warn: (line) => console.warn(line),
   now: () => Date.now(),
 };
 
 let deps: ToolGateDeps = defaultDeps;
+
+interface GateEgress {
+  policy: ToolEgressPolicy;
+  companySettings: CompanySettings;
+  agentRuntime: AgentRuntimeConfig;
+  mcpServers: McpServerDefinition[];
+  /** Diagnostic line (ids only) when a stored list is malformed; logged once per cache refresh. */
+  malformedWarning: string | null;
+}
 
 interface GateState {
   agent: ToolGateAgentRow;
@@ -179,6 +210,7 @@ interface GateState {
    * refreshes while both rows' `updatedAt` are unchanged (see loadState).
    */
   allowed: AllowedToolNames;
+  egress: GateEgress;
   loadedAt: number;
 }
 
@@ -206,6 +238,7 @@ const MESSAGES: Partial<Record<ToolGateReason, string>> = {
   agent_pending_approval: 'This agent is pending board approval; tools are disabled.',
   agent_paused: 'This agent is paused; tools are disabled.',
   company_inactive: 'This company is not active; tools are disabled.',
+  egress_not_allowed: "This tool's outbound host is not on the allow-list for agent tools; the tool was not run.",
 };
 
 export function toolNotAllowedResult(tool: string, reason: ToolGateReason): ToolNotAllowedResult {
@@ -227,7 +260,10 @@ function updatedAtMs(value: unknown): number {
   return NaN;
 }
 
-function computeAllowed(agent: ToolGateAgentRow, company: ToolGateCompanyRow): AllowedToolNames {
+function computeAllowed(
+  agent: ToolGateAgentRow,
+  company: ToolGateCompanyRow,
+): { allowed: AllowedToolNames; egress: GateEgress } {
   const serverIds = resolveAgentMcpServerIds(agent, {
     allowedMcpServerIds: company.allowedMcpServerIds ?? [],
     agentRuntime: agent.runtimeConfig,
@@ -235,11 +271,28 @@ function computeAllowed(agent: ToolGateAgentRow, company: ToolGateCompanyRow): A
   const mcpServers = serverIds
     .map((id) => deps.getMcpServer(id))
     .filter((def): def is McpServerDefinition => Boolean(def));
-  return resolveAllowedToolNames(
-    agent,
-    { settings: parseCompanySettings(company.settings) },
-    { mcpServers, knownMcpServerIds: deps.listMcpServers().map((def) => def.id) },
-  );
+  const companySettings = parseCompanySettings(company.settings);
+  const agentRuntime = (agent.runtimeConfig ?? {}) as AgentRuntimeConfig;
+  const egress: GateEgress = {
+    policy: resolveToolEgressPolicy(companySettings, agentRuntime),
+    companySettings,
+    agentRuntime,
+    mcpServers,
+    malformedWarning: malformedToolEgressAllowListWarning({
+      companyId: company.id,
+      companyList: (company.settings as Record<string, unknown> | null | undefined)?.toolEgressAllowList,
+      agentId: agent.id,
+      agentList: agentRuntime.toolEgressAllowList,
+    }),
+  };
+  return {
+    allowed: resolveAllowedToolNames(
+      agent,
+      { settings: companySettings },
+      { mcpServers, knownMcpServerIds: deps.listMcpServers().map((def) => def.id) },
+    ),
+    egress,
+  };
 }
 
 async function loadState(ctx: ToolGateContext): Promise<GateState | ToolGateReason> {
@@ -265,14 +318,17 @@ async function loadState(ctx: ToolGateContext): Promise<GateState | ToolGateReas
       cached &&
       updatedAtMs(cached.agent.updatedAt) === updatedAtMs(agent.updatedAt) &&
       updatedAtMs(cached.company.updatedAt) === updatedAtMs(company.updatedAt);
+    const derived = sameRows ? { allowed: cached.allowed, egress: cached.egress } : computeAllowed(agent, company);
     const state: GateState = {
       agent,
       company,
-      allowed: sameRows ? cached.allowed : computeAllowed(agent, company),
+      allowed: derived.allowed,
+      egress: derived.egress,
       loadedAt: deps.now(),
     };
     if (stateCache.size >= MAX_CACHED_AGENTS) stateCache.delete(stateCache.keys().next().value as string);
     stateCache.set(key, state);
+    if (state.egress.malformedWarning) deps.warn(state.egress.malformedWarning);
     return state;
   })();
   inflight.set(key, load);
@@ -289,11 +345,29 @@ function matchesAnyRegisteredMcpServer(names: string[]): boolean {
 }
 
 /**
- * Tool-side network egress policy slot (web search, nitter, HTTP MCP). There is no tool-side
- * egress allow-list today (the sandbox egress allow-list governs code execution only), so this
- * allows; a tool egress policy plugs in here.
+ * Outbound host allow-list for tools (company and agent `toolEgressAllowList`). No list set →
+ * allowed. Otherwise every host the tool will contact (SearXNG, Tavily, Nitter, HTTP MCP server;
+ * taken from configuration, never from arguments) must be on the list(s). Redirects are checked
+ * where the request is made (fetchWithToolEgress). The sandbox allow-list governs code execution.
  */
-function checkToolEgress(_state: GateState, _names: string[]): ToolGateDecision {
+function checkToolEgress(state: GateState, names: string[]): ToolGateDecision {
+  const { policy, companySettings, agentRuntime, mcpServers } = state.egress;
+  if (!isToolEgressRestricted(policy)) return { allowed: true };
+  const servers = mcpServers.map((def) => ({
+    namespace: mcpServerToolNamespace(def.id),
+    transport: def.transport,
+    url: def.url,
+    urlEnvVar: def.urlEnvVar,
+  }));
+  const targets = deps.resolveEgressTargets(names, { companySettings, agentRuntime, mcpServers: servers });
+  for (const url of targets) {
+    const decision = checkToolEgressTarget(policy, url);
+    if (!decision.allowed) {
+      return decision.host
+        ? { allowed: false, reason: 'egress_not_allowed', host: decision.host }
+        : { allowed: false, reason: 'egress_not_allowed' };
+    }
+  }
   return { allowed: true };
 }
 
@@ -379,7 +453,7 @@ export function denialCapKey(agentId: string, surface: ToolGateSurface, scope: D
   return `${agentId}:${scope.runId ?? surface}:${scope.threadId ?? ''}`;
 }
 
-function recordDenial(input: CheckInput, reason: ToolGateReason, scope: DenialScope): void {
+function recordDenial(input: CheckInput, reason: ToolGateReason, scope: DenialScope, host?: string): void {
   const { runId, threadId } = scope;
   const runKey = denialCapKey(input.agentId, input.surface, scope);
   const count = (deniedCounts.get(runKey) ?? 0) + 1;
@@ -394,6 +468,7 @@ function recordDenial(input: CheckInput, reason: ToolGateReason, scope: DenialSc
     formatTrace('tool-gate', { agentId: input.agentId, companyId: input.companyId, runId }, 'tool call denied', {
       tool,
       reason,
+      ...(host ? { host } : {}),
       surface: input.surface,
     }),
   );
@@ -404,7 +479,7 @@ function recordDenial(input: CheckInput, reason: ToolGateReason, scope: DenialSc
   const base = { companyId: input.companyId, agentId: input.agentId, agentName, surface: input.surface, runId, ...(threadId ? { threadId } : {}) };
   const row: ToolDeniedActivity = summary
     ? { ...base, tool: null, reason: 'limit_reached', summary: true }
-    : { ...base, tool, reason };
+    : { ...base, tool, reason, ...(host ? { host } : {}) };
   void Promise.resolve()
     .then(() => deps.recordDenied(row))
     .catch((err) => {
@@ -433,7 +508,7 @@ export async function checkToolPermission(input: CheckInput): Promise<ToolGateDe
     );
     decision = { allowed: false, reason: 'gate_error' };
   }
-  if (!decision.allowed) recordDenial(input, decision.reason, denialScope(input.requestContext));
+  if (!decision.allowed) recordDenial(input, decision.reason, denialScope(input.requestContext), decision.host);
   return decision;
 }
 

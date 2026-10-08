@@ -1,3 +1,8 @@
+import {
+  fetchWithToolEgress,
+  isToolEgressBlockedError,
+  type ToolEgressPolicy,
+} from '@tourbillon/shared/tool-egress';
 import { SEARXNG_SEARCH_TIMEOUT_MS } from './config';
 import type {
   SearxngResult,
@@ -16,6 +21,8 @@ export interface SearxngSearchParams {
   language?: string;
   timeRange?: string;
   safesearch?: number;
+  /** Company/agent tool egress allow-list; unset = every host. */
+  egressPolicy?: ToolEgressPolicy;
 }
 
 function normalizeResults(results: SearxngResult[], maxResults: number): SearxngSearchResultItem[] {
@@ -55,11 +62,15 @@ export async function callSearxngSearch(params: SearxngSearchParams): Promise<Se
       ? AbortSignal.timeout(SEARXNG_SEARCH_TIMEOUT_MS)
       : undefined;
 
-  const res = await fetch(url, {
-    method: 'GET',
-    headers,
-    ...(signal ? { signal } : {}),
-  });
+  const res = await fetchWithToolEgress(
+    url,
+    {
+      method: 'GET',
+      headers,
+      ...(signal ? { signal } : {}),
+    },
+    params.egressPolicy,
+  );
 
   if (!res.ok) {
     const body = await res.text();
@@ -92,6 +103,8 @@ export async function runSearxngSearch(params: SearxngSearchParams): Promise<Sea
         : undefined,
     };
   } catch (err) {
+    // Allow-list refusals are handled by the route (403 + activity row), not as a search failure.
+    if (isToolEgressBlockedError(err)) throw err;
     const message = err instanceof Error ? err.message : String(err);
     return { success: false, results: [], error: message };
   }

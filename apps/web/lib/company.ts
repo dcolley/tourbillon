@@ -1,6 +1,12 @@
 import { cookies, headers } from 'next/headers';
 import { db, companies, type Company } from '@tourbillon/db';
-import { ensureCompanyWorkspace, mergeCompanySettings, parseCompanySettings, type CompanySettings } from '@tourbillon/shared';
+import {
+  ensureCompanyWorkspace,
+  mergeCompanySettings,
+  parseCompanySettings,
+  resolveToolEgressAllowListInput,
+  type CompanySettings,
+} from '@tourbillon/shared';
 import { asc, eq } from 'drizzle-orm';
 import { deriveIssuePrefix, slugifyCompanySlug } from './company-utils';
 import { BOARD_SESSION_COOKIE, hasAgentToken, verifyBoardSessionToken } from './board-auth';
@@ -382,6 +388,35 @@ export async function updateCompanyHitlyGate(
       types: input.types && input.types.length > 0 ? input.types : undefined,
     },
   });
+
+  const [updated] = await db
+    .update(companies)
+    .set({ settings, updatedAt: new Date() })
+    .where(eq(companies.id, companyId))
+    .returning();
+
+  if (!updated) throw new Error('Company not found.');
+  return updated;
+}
+
+/**
+ * Outbound host allow-list for agent tools. mode 'off' clears it (every host allowed, the
+ * default); mode 'list' stores the validated entries (an empty list allows no outbound host).
+ * The only writer of companies.settings.toolEgressAllowList: input is validated before any read
+ * or write, and bad input throws ToolEgressAllowListValidationError with a clear message.
+ */
+export async function updateCompanyToolEgressAllowList(
+  companyId: string,
+  input: { mode: unknown; entries: unknown },
+): Promise<Company> {
+  const list = resolveToolEgressAllowListInput(input?.mode, input?.entries);
+
+  const company = await db.query.companies.findFirst({ where: eq(companies.id, companyId) });
+  if (!company) throw new Error('Company not found.');
+
+  const settings = mergeCompanySettings(company.settings, list === null ? {} : { toolEgressAllowList: list });
+  // Off: remove the field so every host is allowed again (the default).
+  if (list === null) delete settings.toolEgressAllowList;
 
   const [updated] = await db
     .update(companies)

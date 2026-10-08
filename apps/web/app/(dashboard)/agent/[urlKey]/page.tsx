@@ -5,7 +5,9 @@ import { db, agents, heartbeatRuns } from '@tourbillon/db';
 import { eq, desc } from 'drizzle-orm';
 import type { AgentRuntimeConfig, ObservationalMemorySettings } from '@tourbillon/shared';
 import { modelProviderOverridesFromAgent, resolveModelProviderConfig, isAgentBudgetEnforced, isAgentBudgetExceeded, agentRuntimeLabel, agentRuntimeFromAdapter, resolveAssignedTools, modelSettingsFromFormData, isCodeExecutionAvailable, formatExecutionWorkspacePathPreview, parseCompanySettings } from '@tourbillon/shared';
-import { AgentValidationError, AGENT_ROLE_OPTIONS, getAgentByUrlKey, listAgentsByUrlKey, updateAgentRuntimeConfig, updateAgentCapabilities, updateAgentBudget, updateAgentInstructions, updateAgentModel, updateAgentModelSettings, updateAgentProfile, updateAgentCodeExecution, cloneAgent, suggestCloneUrlKey } from '@/lib/agents';
+import { AgentValidationError, AGENT_ROLE_OPTIONS, getAgentByUrlKey, listAgentsByUrlKey, updateAgentRuntimeConfig, updateAgentCapabilities, updateAgentBudget, updateAgentInstructions, updateAgentModel, updateAgentModelSettings, updateAgentProfile, updateAgentCodeExecution, updateAgentToolEgressAllowList, cloneAgent, suggestCloneUrlKey } from '@/lib/agents';
+import { ToolEgressAllowListFields } from '@/components/tool-egress-allow-list-fields';
+import { parseToolEgressFormData, toolEgressSavedMessage } from '@/lib/tool-egress-form';
 import { parseCodeExecutionFormData } from '@/lib/code-execution-config';
 import { actionError, actionSuccess, type ActionResult } from '@/lib/action-result';
 import { AgentDisambiguation } from '@/components/agent-disambiguation';
@@ -226,6 +228,27 @@ async function updateCodeExecution(
   return actionSuccess(
     "Code & execution settings saved. Changes apply on the agent's next heartbeat.",
   );
+}
+
+async function updateToolEgressConfig(
+  _prev: ActionResult | null,
+  formData: FormData,
+): Promise<ActionResult> {
+  'use server';
+  await requireBoardSession();
+
+  const agentId = formData.get('agentId') as string;
+  let saved: string[] | undefined;
+  try {
+    const updated = await updateAgentToolEgressAllowList(agentId, parseToolEgressFormData(formData));
+    saved = (updated.runtimeConfig as AgentRuntimeConfig | null)?.toolEgressAllowList;
+  } catch (err) {
+    return actionError(
+      err instanceof AgentValidationError ? err.message : 'Failed to save the outbound host allow-list.',
+    );
+  }
+
+  return actionSuccess(toolEgressSavedMessage(saved));
 }
 
 async function updateBudgetConfig(
@@ -943,6 +966,22 @@ export default async function AgentDetailPage({
                       When disabled, <code className="text-xs">sendToAgent</code> is removed from this agent&apos;s toolset.
                     </p>
                     <ActionSubmitButton label="Save DM settings" />
+                  </ActionForm>
+                </section>
+
+                <section className="border rounded-lg p-4 space-y-4">
+                  <div>
+                    <h2 className="text-sm font-semibold">Outbound hosts for tools</h2>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Tool-host allow-list: narrow the hosts this agent&apos;s tools may contact,
+                      matched by host name (not an internal-network or DNS guard).
+                    </p>
+                  </div>
+                  <ActionForm action={updateToolEgressConfig} className="space-y-4">
+                    <input type="hidden" name="agentId" value={agent.id} />
+                    {/* Raw stored value: a malformed one renders with a warning and can be saved over. */}
+                    <ToolEgressAllowListFields list={runtime.toolEgressAllowList} scope="agent" />
+                    <ActionSubmitButton label="Save outbound hosts" />
                   </ActionForm>
                 </section>
               </>

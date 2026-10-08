@@ -1,3 +1,8 @@
+import {
+  fetchWithToolEgress,
+  isToolEgressBlockedError,
+  type ToolEgressPolicy,
+} from '@tourbillon/shared/tool-egress';
 import { TAVILY_SEARCH_TIMEOUT_MS } from './config';
 import type {
   TavilyResult,
@@ -13,6 +18,8 @@ export interface TavilySearchParams {
   maxResults: number;
   searchDepth?: 'basic' | 'advanced';
   includeAnswer?: boolean;
+  /** Company/agent tool egress allow-list; unset = every host. */
+  egressPolicy?: ToolEgressPolicy;
 }
 
 function normalizeResults(results: TavilyResult[], maxResults: number): TavilySearchResultItem[] {
@@ -33,21 +40,27 @@ export async function callTavilySearch(params: TavilySearchParams): Promise<Tavi
       ? AbortSignal.timeout(TAVILY_SEARCH_TIMEOUT_MS)
       : undefined;
 
-  const res = await fetch('https://api.tavily.com/search', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
+  const res = await fetchWithToolEgress(
+    'https://api.tavily.com/search',
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({
+        api_key: params.apiKey,
+        query: params.query.slice(0, 400),
+        max_results: params.maxResults,
+        search_depth: params.searchDepth ?? 'basic',
+        include_answer: params.includeAnswer ?? true,
+      }),
+      ...(signal ? { signal } : {}),
     },
-    body: JSON.stringify({
-      api_key: params.apiKey,
-      query: params.query.slice(0, 400),
-      max_results: params.maxResults,
-      search_depth: params.searchDepth ?? 'basic',
-      include_answer: params.includeAnswer ?? true,
-    }),
-    ...(signal ? { signal } : {}),
-  });
+    params.egressPolicy,
+    // The API key travels in the body: never re-send it to another origin on a redirect.
+    { credentialBodyKeys: ['api_key'] },
+  );
 
   if (!res.ok) {
     const body = await res.text();
@@ -74,6 +87,8 @@ export async function runTavilySearch(params: TavilySearchParams): Promise<Tavil
       results,
     };
   } catch (err) {
+    // Allow-list refusals are handled by the route (403 + activity row), not as a search failure.
+    if (isToolEgressBlockedError(err)) throw err;
     const message = err instanceof Error ? err.message : String(err);
     return { success: false, results: [], error: message };
   }

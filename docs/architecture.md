@@ -184,6 +184,22 @@ Two orthogonal agent settings:
 
 Workspace tools are separate from execution sandbox (shared docs vs ephemeral scratch).
 
+## Outbound hosts for agent tools
+
+A **tool-host allow-list**: companies (and optionally agents) can limit which hosts agent tools may contact, matched by host name. Unset = every host allowed (default). Stored as `companies.settings.toolEgressAllowList` and `agents.runtimeConfig.toolEgressAllowList` (JSON; no schema change). An agent list can only narrow the company list: a host must match both when both are set.
+
+**Covered:** SearXNG, Tavily, Nitter, and HTTP MCP servers (e.g. Buffer). The gate checks the configured host before the tool runs; each request and redirect hop is checked where it is made. Code-execution sandbox egress is separate (its own allow-list).
+
+**Not covered:** Platform integrations such as HITLy (board-configured, not a tool host). Local (stdio) MCP servers are not enforced; the settings UI notes this next to the list.
+
+**Entries:** exact host, leading `*.domain` (subdomains only — does not match the apex), or dotted-decimal IPv4, each with an optional `:port`. Case-insensitive; IDN → punycode. A wildcard may not cover a whole public suffix (public suffix list, ICANN and private sections: `*.com`, `*.co.uk`, `*.github.io`), a single-label name, or `localhost` (`*.localhost`); such entries are refused on save. Exact hosts, including internal names and IPv4 addresses, are allowed. While a list is set: refuse userinfo, non-http(s), IPv6 literals (allowed under allow-all), other IPv4 notations, trailing-dot and percent-encoded hosts. IPv4 entries match that exact address only.
+
+**Host names, not addresses:** matching uses the host name in the URL only; there is no DNS resolution. A listed name may resolve to any address, including an internal one. This is a tool-host allow-list, not an internal-network or DNS guard.
+
+**Redirects:** when a redirect changes origin, credentials are not re-sent: Authorization, Proxy-Authorization, Cookie, every configured MCP server header, and the Tavily API key in the request body.
+
+**Fail-closed:** "Only these hosts" with an empty list allows no outbound host (UI warns). A malformed stored value still restricts (unreadable entries match no host; a value that is not a list allows no host). The settings pages show a warning and the board can save a fresh list over it. One server warning line naming the company or agent id is written on gate cache refresh. Bad input is refused on every write with a clear error. Blocked MCP redirects write one server warning with the MCP server name and blocked host only.
+
 ## Governance and Approvals
 
 Three distinct approval paths:
