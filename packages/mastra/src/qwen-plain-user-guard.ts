@@ -272,7 +272,9 @@ export class PinPlainUserAfterTrimProcessor
     if (countPlainUserMessages(next) === 0) {
       const pinned = state[PIN_STATE_KEY] as GuardPromptMessage | undefined;
       if (!pinned) {
-        abort(ZERO_PLAIN_USER_TRIPWIRE, {
+        // abort() is typed `never` (it throws a TripWire). `return` makes that visible to
+        // control-flow narrowing, which ignores never-returning calls through destructured params.
+        return abort(ZERO_PLAIN_USER_TRIPWIRE, {
           metadata: {
             code: 'ZERO_PLAIN_USER_AFTER_TRIM',
             stepNumber,
