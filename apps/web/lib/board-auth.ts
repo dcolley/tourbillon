@@ -14,6 +14,7 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { SignJWT, jwtVerify } from 'jose';
 import { validateRunToken } from './auth/run-token';
+import { isPlaceholderSecret } from './secret-placeholder';
 
 /** Env var holding the operator secret. Unset → minting/unlock fail closed. */
 export const BOARD_SECRET_ENV = 'TOURBILLON_BOARD_SECRET';
@@ -33,10 +34,6 @@ export const BOARD_SESSION_COOKIE = 'tourbillon_board_session';
 export const BOARD_SESSION_TTL_SEC = 12 * 60 * 60;
 
 const SESSION_TYP = 'tourbillon_board_session';
-const KNOWN_DEFAULT_JWT_SECRETS = new Set([
-  'change-me-in-production',
-  'change-me-in-production-use-openssl-rand-base64-32',
-]);
 
 function isProduction(): boolean {
   return process.env.NODE_ENV === 'production';
@@ -119,10 +116,10 @@ export function hasAgentToken(authorization: string | null | undefined): boolean
   return bearer.startsWith('pm_run_') || bearer.startsWith('pm_chat_') || validateRunToken(bearer) !== null;
 }
 
-/** True when BETTER_AUTH_SECRET is unset or one of the public default strings. */
+/** True when BETTER_AUTH_SECRET is unset or a known placeholder (lib/secret-placeholder.ts). */
 export function isDefaultOrUnsetJwtSecret(): boolean {
   const secret = process.env.BETTER_AUTH_SECRET?.trim();
-  return !secret || KNOWN_DEFAULT_JWT_SECRETS.has(secret);
+  return !secret || isPlaceholderSecret(secret);
 }
 
 /**
@@ -133,7 +130,7 @@ export function isDefaultOrUnsetJwtSecret(): boolean {
  */
 export function boardJwtKey(headers?: BoardRequestHeaders): Uint8Array | null {
   const secret = process.env.BETTER_AUTH_SECRET?.trim();
-  if (secret && !KNOWN_DEFAULT_JWT_SECRETS.has(secret)) {
+  if (secret && !isPlaceholderSecret(secret)) {
     return new TextEncoder().encode(secret);
   }
   if (!isInsecureDevBoardAuth(headers)) return null;

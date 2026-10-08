@@ -9,7 +9,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { auth } from '@/lib/auth';
+import { getAuth } from '@/lib/auth';
 import { z } from 'zod';
 
 const loginSchema = z.object({
@@ -45,7 +45,7 @@ export async function POST(req: NextRequest) {
     });
 
     // Attempt to sign in with better-auth
-    const authResponse = await auth.handler(authRequest);
+    const authResponse = await getAuth(req.headers).handler(authRequest);
 
     // Parse the response
     const result = await authResponse.json();
