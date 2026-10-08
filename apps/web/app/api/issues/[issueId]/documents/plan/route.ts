@@ -3,7 +3,7 @@ import { db, issues } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
 import { z } from 'zod';
-import { validateRunToken } from '@/lib/auth/run-token';
+import { authenticateAgentToken } from '@/lib/auth/agent-token-auth';
 import { logAgentApiRequest, logAgentApiResponse, summarizeBody } from '@/lib/agent-api-trace';
 
 const putPlanSchema = z.object({
@@ -39,7 +39,7 @@ export async function GET(
   const { issueId } = await params;
   const token = _req.headers.get('authorization')?.replace('Bearer ', '');
   if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  const runCtx = validateRunToken(token);
+  const runCtx = await authenticateAgentToken(token);
   if (!runCtx) return NextResponse.json({ error: 'Invalid token' }, { status: 401 });
 
   logAgentApiRequest(`/api/issues/${issueId}/documents/plan`, 'GET', runCtx, { issueId });
@@ -71,7 +71,7 @@ export async function PUT(
   const { issueId } = await params;
   const token = req.headers.get('authorization')?.replace('Bearer ', '');
   if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  const runCtx = validateRunToken(token);
+  const runCtx = await authenticateAgentToken(token);
   if (!runCtx) return NextResponse.json({ error: 'Invalid token' }, { status: 401 });
 
   const raw = await req.json();

@@ -33,10 +33,12 @@ import {
   parseCompanySettings,
   createTraceLogger,
   canForceKillHeartbeat,
+  effectiveHeartbeatTimeoutSec,
 } from '@tourbillon/shared';
 import { durableWakeOutcomeFromTripwire } from './durable-wake-outcome';
 import type { Agent as AgentRecord } from '@tourbillon/db';
 import { randomUUID } from 'crypto';
+import { AgentTokenConfigError, mintRunToken, runTokenTtlSec } from '@tourbillon/shared/agent-token';
 import { runWithHarness, type HarnessRunResult } from './adapters/harness-adapter';
 import { redisPub } from './redis-pub';
 import {
@@ -484,7 +486,22 @@ async function runWake(
     return { runId, status: 'failed', errorText };
   }
 
-  const apiKey = buildRunScopedApiKey(runId, agentId, companyId);
+  // #110: signed, expiring run token. No secret → fail this run cleanly (never mint unsigned).
+  let apiKey: string;
+  try {
+    apiKey = buildRunScopedApiKey(
+      runId,
+      agentId,
+      companyId,
+      (agentRecord.runtimeConfig as AgentRuntimeConfig | null)?.timeout?.heartbeatSec,
+    );
+  } catch (err) {
+    const errorText =
+      err instanceof AgentTokenConfigError ? err.message : 'Failed to issue run token';
+    runTracer.error('run token not issued', { reason: errorText });
+    await recordHeartbeatFailure(runId, errorText, companyId, agentId);
+    return { runId, status: 'failed', errorText };
+  }
   const wakeMessage = buildWakeMessage(wake);
   const liveness = resolveHeartbeatLivenessConfig();
   const staleMs = liveness.staleSec * 1000;
@@ -685,7 +702,7 @@ async function runWake(
  * Enforce wall-clock timeout from agent config and race stream with abort.
  * 
  * This function:
- * 1. Reads timeout.heartbeatSec from runtimeConfig (default 300)
+ * 1. Reads timeout.heartbeatSec from runtimeConfig (default 300; <=0 or >23h capped at 23h)
  * 2. Registers abortController in runAbortControllers map (for forceKillHeartbeat)
  * 3. Arms wall-clock timer that aborts with timeout error
  * 4. Races stream with abort signal and tripwire
@@ -704,8 +721,8 @@ export async function enforceHeartbeatWallClock<T extends { runId: string; outpu
 }): Promise<{ runId: string; timeoutSec: number }> {
   const { runId, runtimeConfig, abortController, streamFn, tripwireDetector, onStreamResult } = params;
   
-  // Read timeout from agent config (default 300s if unset)
-  const timeoutSec = runtimeConfig.timeout?.heartbeatSec ?? 300;
+  // Read timeout from agent config (default 300s if unset; <=0 or >23h capped at 23h)
+  const timeoutSec = effectiveHeartbeatTimeoutSec(runtimeConfig.timeout?.heartbeatSec);
   
   // Register for operator force-kill (same map forceKillHeartbeat reads)
   runAbortControllers.set(runId, abortController);
@@ -1190,9 +1207,18 @@ async function parkNoProgressIssue(
   });
 }
 
-function buildRunScopedApiKey(runId: string, agentId: string, companyId: string): string {
-  const payload = JSON.stringify({ runId, agentId, companyId, iat: Date.now() });
-  return `pm_run_${Buffer.from(payload).toString('base64url')}`;
+/**
+ * #110: HMAC-signed run token (TOURBILLON_AGENT_TOKEN_SECRET) with exp = run wall-clock timeout
+ * + grace. The web app also requires the run to still be 'running' in heartbeat_runs.
+ * Throws AgentTokenConfigError when the secret is not configured. Never log the result.
+ */
+export function buildRunScopedApiKey(
+  runId: string,
+  agentId: string,
+  companyId: string,
+  timeoutSec?: unknown,
+): string {
+  return mintRunToken({ runId, agentId, companyId }, runTokenTtlSec(timeoutSec));
 }
 
 /** Mark abandoned running rows as failed (DB-only stale sweep). */

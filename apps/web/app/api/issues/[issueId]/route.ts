@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db, issues, activityLog, agents } from '@tourbillon/db';
 import { and, eq } from 'drizzle-orm';
 import { IssueAssigneeError, resolveIssueAssignees } from '@tourbillon/shared';
-import { validateRunToken } from '@/lib/auth/run-token';
+import { authenticateAgentToken } from '@/lib/auth/agent-token-auth';
 import { logAgentApiRequest, logAgentApiResponse, summarizeBody } from '@/lib/agent-api-trace';
 import { enqueueHeartbeat } from '@/lib/wake-client';
 import { statusesThatReleaseCheckoutLock, CHECKOUT_LOCK_CLEAR_FIELDS } from '@/lib/checkout-lock';
@@ -15,7 +15,7 @@ export async function PATCH(
   const { issueId } = await params;
   const token = req.headers.get('authorization')?.replace('Bearer ', '');
   if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  const runCtx = validateRunToken(token);
+  const runCtx = await authenticateAgentToken(token);
   if (!runCtx) return NextResponse.json({ error: 'Invalid token' }, { status: 401 });
 
   const runId = req.headers.get('x-paperclip-run-id');

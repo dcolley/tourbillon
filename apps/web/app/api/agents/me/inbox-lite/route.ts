@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db, issues, agents, type IssueStatus } from '@tourbillon/db';
 import { eq, and, inArray, isNull } from 'drizzle-orm';
-import { validateRunToken } from '@/lib/auth/run-token';
+import { authenticateAgentToken } from '@/lib/auth/agent-token-auth';
 import { logAgentApiRequest, logAgentApiResponse } from '@/lib/agent-api-trace';
 import { sortInboxIssues } from '@tourbillon/shared/inbox-sort';
 
@@ -9,7 +9,7 @@ export async function GET(req: NextRequest) {
   const token = req.headers.get('authorization')?.replace('Bearer ', '');
   if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  const runCtx = validateRunToken(token);
+  const runCtx = await authenticateAgentToken(token);
   if (!runCtx) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   logAgentApiRequest('/api/agents/me/inbox-lite', 'GET', runCtx);

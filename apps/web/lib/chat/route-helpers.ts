@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { ActiveCompanyError } from '@/lib/company';
 import { ChatAgentError } from '@/lib/chat';
+import { agentTokenConfigErrorResponse, isAgentTokenConfigError } from '@/lib/auth/agent-token-config';
 
 export function chatErrorResponse(err: unknown): NextResponse {
   if (err instanceof ChatAgentError) {
@@ -8,6 +9,10 @@ export function chatErrorResponse(err: unknown): NextResponse {
   }
   if (err instanceof ActiveCompanyError) {
     return NextResponse.json({ error: err.message }, { status: 400 });
+  }
+  // #110: no/short TOURBILLON_AGENT_TOKEN_SECRET → 401 + server log (same as agent API routes).
+  if (isAgentTokenConfigError(err)) {
+    return agentTokenConfigErrorResponse('chat');
   }
   console.error('[chat-api]', err);
   const message = err instanceof Error ? err.message : String(err);

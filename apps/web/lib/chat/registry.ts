@@ -14,7 +14,11 @@ import {
 import { parseCompanySettings, type AgentRuntimeConfig } from '@tourbillon/shared';
 import { and, eq } from 'drizzle-orm';
 import { getActiveCompany } from '@/lib/company';
-import { buildChatScopedApiKey } from '@/lib/auth/chat-token';
+import { buildChatScopedApiKey, validateChatToken } from '@/lib/auth/chat-token';
+import { chatSessionIdForAgent } from '@tourbillon/shared/agent-token';
+
+/** #110: re-mint chat tokens with less than this many seconds left. */
+const CHAT_TOKEN_REFRESH_SEC = 60 * 60;
 
 export type TourbillonChatController = AgentController<ChatControllerState>;
 export type TourbillonChatSession = Session<ChatControllerState>;
@@ -151,13 +155,30 @@ export async function getOrCreateChatController(
   }
 }
 
-/** Stable chat API key for tool calls for this agent (issued once per process). */
+/**
+ * Chat API key for tool calls for this agent.
+ * #110: tokens are signed and short-lived (CHAT_TOKEN_TTL_SEC), so the cached key is re-minted
+ * once it has less than CHAT_TOKEN_REFRESH_SEC left. Every chat request builds a fresh request
+ * context, so a turn always starts with at least that much validity.
+ * Throws AgentTokenConfigError when TOURBILLON_AGENT_TOKEN_SECRET is not configured.
+ */
 export function getOrCreateChatApiKey(agentRecord: Agent): string {
   const cache = apiKeyCache();
   const existing = cache.get(agentRecord.id);
-  if (existing) return existing;
-  const chatSessionId = `chat-${agentRecord.id}`;
-  const key = buildChatScopedApiKey(chatSessionId, agentRecord.id, agentRecord.companyId);
+  const claims = existing ? validateChatToken(existing) : null;
+  if (
+    existing &&
+    claims &&
+    claims.companyId === agentRecord.companyId &&
+    claims.exp - Math.floor(Date.now() / 1000) > CHAT_TOKEN_REFRESH_SEC
+  ) {
+    return existing;
+  }
+  const key = buildChatScopedApiKey(
+    chatSessionIdForAgent(agentRecord.id),
+    agentRecord.id,
+    agentRecord.companyId,
+  );
   cache.set(agentRecord.id, key);
   return key;
 }

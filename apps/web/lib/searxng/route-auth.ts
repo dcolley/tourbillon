@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db, agents, companies } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
-import { validateRunToken, type RunTokenPayload } from '@/lib/auth/run-token';
+import type { RunTokenPayload } from '@/lib/auth/run-token';
+import { authenticateAgentToken } from '@/lib/auth/agent-token-auth';
 import type { AgentRuntimeConfig } from '@tourbillon/shared';
 import {
   getCompanySettingsFromDb,
@@ -24,7 +25,7 @@ export async function authorizeSearxngRequest(
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const runCtx = validateRunToken(token);
+  const runCtx = await authenticateAgentToken(token);
   if (!runCtx) {
     return NextResponse.json({ error: 'Invalid token' }, { status: 401 });
   }

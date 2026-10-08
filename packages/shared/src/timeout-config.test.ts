@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { parseHeartbeatTimeoutSec, validateTimeoutConfig } from './timeout-config';
+import {
+  MAX_HEARTBEAT_TIMEOUT_SEC,
+  effectiveHeartbeatTimeoutSec,
+  parseHeartbeatTimeoutSec,
+  validateTimeoutConfig,
+} from './timeout-config';
 
 describe('parseHeartbeatTimeoutSec', () => {
   it('returns default when input is null or undefined', () => {
@@ -91,5 +96,35 @@ describe('validateTimeoutConfig', () => {
   it('rejects negative timeout', () => {
     const error = validateTimeoutConfig({ heartbeatSec: -10, graceSec: 30 });
     assert.ok(error?.includes('60'));
+  });
+});
+
+describe('heartbeat timeout upper bound (23h)', () => {
+  it('MAX_HEARTBEAT_TIMEOUT_SEC is 23h', () => {
+    assert.equal(MAX_HEARTBEAT_TIMEOUT_SEC, 82_800);
+  });
+
+  it('parseHeartbeatTimeoutSec clamps to the max', () => {
+    assert.equal(parseHeartbeatTimeoutSec('82800'), 82_800);
+    assert.equal(parseHeartbeatTimeoutSec('86400'), 82_800);
+    assert.equal(parseHeartbeatTimeoutSec(1e9), 82_800);
+  });
+
+  it('validateTimeoutConfig rejects values above the max', () => {
+    assert.equal(validateTimeoutConfig({ heartbeatSec: 82_800, graceSec: 30 }), null);
+    assert.ok(validateTimeoutConfig({ heartbeatSec: 82_801, graceSec: 30 })?.includes('82800'));
+  });
+
+  it('effectiveHeartbeatTimeoutSec: unset → 300, <=0 / above max → max, otherwise unchanged', () => {
+    assert.equal(effectiveHeartbeatTimeoutSec(undefined), 300);
+    assert.equal(effectiveHeartbeatTimeoutSec(null), 300);
+    assert.equal(effectiveHeartbeatTimeoutSec('nope'), 300);
+    assert.equal(effectiveHeartbeatTimeoutSec(Number.NaN), 300);
+    assert.equal(effectiveHeartbeatTimeoutSec(0), 82_800);
+    assert.equal(effectiveHeartbeatTimeoutSec(-5), 82_800);
+    assert.equal(effectiveHeartbeatTimeoutSec(85_500), 82_800);
+    assert.equal(effectiveHeartbeatTimeoutSec(1), 1);
+    assert.equal(effectiveHeartbeatTimeoutSec(600), 600);
+    assert.equal(effectiveHeartbeatTimeoutSec('600'), 600);
   });
 });
