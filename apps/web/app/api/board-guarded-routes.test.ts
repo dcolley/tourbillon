@@ -8,8 +8,15 @@ import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import { SignJWT } from 'jose';
 import { NextRequest } from 'next/server';
+import { mintChatToken, mintRunToken } from '@tourbillon/shared/agent-token';
+import { validateRunToken } from '../../lib/auth/run-token';
 
 const BOARD_SECRET = 'test-operator-secret-106';
+// #108 refuses the public default BETTER_AUTH_SECRET whatever NODE_ENV is, so board JWTs are
+// signed with a dedicated non-default test secret (>= 32 chars).
+const JWT_SECRET = 'test-better-auth-secret-106-board-jwt-0123456789';
+// #110/#111 signed agent tokens (>= 32 chars).
+const AGENT_TOKEN_SECRET = 'test-agent-token-secret-106-0123456789abcdef';
 const env = process.env as Record<string, string | undefined>;
 
 // ---- in-memory db ---------------------------------------------------------------------------
@@ -64,10 +71,41 @@ function sessionToken() {
 }
 function boardJwt(companyId: string) {
   return new SignJWT({ companyId }).setProtectedHeader({ alg: 'HS256' }).setIssuedAt().setExpirationTime('1h')
-    .sign(new TextEncoder().encode('change-me-in-production'));
+    .sign(new TextEncoder().encode(JWT_SECRET));
 }
 const agentToken = (companyId: string) =>
   `pm_run_${Buffer.from(JSON.stringify({ runId: 'run-a', agentId: 'agent-a', companyId, iat: 1 })).toString('base64url')}`;
+/** Bearer used by the 'agent' caller; defaults to the legacy unsigned pm_run_ token. */
+let agentBearer: string | null = null;
+
+/** Agent-token variants built with #111's real minting helpers. */
+function withEnv<T>(name: string, value: string, fn: () => T): T {
+  const prev = env[name];
+  env[name] = value;
+  try {
+    return fn();
+  } finally {
+    if (prev === undefined) delete env[name];
+    else env[name] = prev;
+  }
+}
+function minted(kind: 'run' | 'chat', variant: 'signed' | 'forged' | 'expired'): string {
+  const ids = { agentId: 'agent-a', companyId: 'company-a' };
+  const mint = () =>
+    kind === 'run' ? mintRunToken({ runId: 'run-a', ...ids }, 3600) : mintChatToken({ chatSessionId: 'chat-agent-a', ...ids }, 3600);
+  if (variant === 'signed') return withEnv('TOURBILLON_AGENT_TOKEN_SECRET', AGENT_TOKEN_SECRET, mint);
+  if (variant === 'forged') {
+    return withEnv('TOURBILLON_AGENT_TOKEN_SECRET', 'attacker-guessed-secret-0123456789abcdef', mint);
+  }
+  // expired: correctly signed, minted two hours ago with a one-hour TTL
+  const realNow = Date.now;
+  Date.now = () => realNow() - 2 * 3600 * 1000;
+  try {
+    return withEnv('TOURBILLON_AGENT_TOKEN_SECRET', AGENT_TOKEN_SECRET, mint);
+  } finally {
+    Date.now = realNow;
+  }
+}
 
 type Who = 'anon' | 'agent' | 'boardA' | 'jwtA';
 async function request(who: Who, url: string, init: { method?: string; body?: unknown; headers?: Record<string, string> } = {}) {
@@ -79,7 +117,7 @@ async function request(who: Who, url: string, init: { method?: string; body?: un
     cookies.active_company_id = 'company-a';
   }
   if (who === 'agent') {
-    headers.authorization = `Bearer ${agentToken('company-a')}`;
+    headers.authorization = `Bearer ${agentBearer ?? agentToken('company-a')}`;
     headers['x-company-token'] = await boardJwt('company-a');
   }
   if (who === 'jwtA') headers['x-company-token'] = await boardJwt('company-a');
@@ -182,7 +220,9 @@ describe('#106 board-guarded routes', () => {
   beforeEach(() => {
     env.TOURBILLON_BOARD_SECRET = BOARD_SECRET;
     env.GITHUB_OAUTH_CLIENT_ID = 'test-client-id';
-    delete env.BETTER_AUTH_SECRET;
+    env.BETTER_AUTH_SECRET = JWT_SECRET;
+    env.TOURBILLON_AGENT_TOKEN_SECRET = AGENT_TOKEN_SECRET;
+    agentBearer = null;
     store.companies = [{ id: 'company-a', name: 'A', settings: {}, allowedMcpServerIds: [] }, { id: 'company-b', name: 'B', settings: {}, allowedMcpServerIds: [] }];
     store.agents = [
       { id: 'agent-a', companyId: 'company-a', urlKey: 'alice', adapterType: 'lmstudio', adapterConfig: {}, modelId: 'm', providerId: null },
@@ -311,5 +351,38 @@ describe('#106 board-guarded routes', () => {
       assert.equal((await models('boardA', '?agentId=agent-a')).status, 200);
       assert.equal((await models('jwtA')).status, 200);
     });
+  });
+
+  // ---------------------------------------------------------------- agent token variants (#110/#111)
+  describe('signed, forged and expired pm_run_/pm_chat_ tokens are never board', () => {
+    // Every guarded route, called as an agent that ALSO carries a valid board session + board JWT.
+    const calls: Array<[string, () => Promise<Response>]> = [
+      ['decide', async () => routes.decide.POST(await request('agent', '/api/approvals/appr-a/decide', { method: 'POST', body: { decision: 'approved' } }), ctx({ approvalId: 'appr-a' }))],
+      ['sse', async () => routes.sse.GET(await request('agent', '/api/sse/company-a'), ctx({ companyId: 'company-a' }))],
+      ['mcp-tools', async () => routes.mcpTools.GET(await request('agent', '/api/agents/agent-a/mcp-tools'), ctx({ agentId: 'agent-a' }))],
+      ['knowledge-graph', async () => routes.kg.GET(await request('agent', '/api/agents/agent-a/knowledge-graph'), ctx({ agentId: 'agent-a' }))],
+      ['jobs live', async () => routes.live.GET(await request('agent', '/api/jobs/heartbeat/run-a/live'), ctx({ queue: 'heartbeat', jobId: 'run-a' }))],
+      ['vault authorize', async () => routes.vault.GET(await request('agent', '/api/vault/oauth/authorize?serverId=github-mcp&scope=company'), ctx({}))],
+      ['llm-providers list', async () => routes.providers.GET(await request('agent', '/api/llm-providers'), ctx({}))],
+      ['llm-providers PATCH', async () => routes.provider.PATCH(await request('agent', '/api/llm-providers/prov-1', { method: 'PATCH', body: { baseURL: 'http://evil' } }), ctx({ id: 'prov-1' }))],
+      ['models', async () => routes.models.GET(await request('agent', '/api/models?providerId=prov-1'), ctx({}))],
+    ];
+
+    for (const kind of ['run', 'chat'] as const) {
+      for (const variant of ['signed', 'forged', 'expired'] as const) {
+        it(`pm_${kind}_ ${variant} → 403 on every guarded route; approval untouched`, async () => {
+          agentBearer = minted(kind, variant);
+          assert.ok(agentBearer.startsWith(`pm_${kind}_`));
+          // The variant really is what it claims under the configured secret.
+          assert.equal(validateRunToken(agentBearer) !== null, variant === 'signed', `${variant} token validity`);
+          for (const [name, call] of calls) {
+            const res = await call();
+            assert.equal(res.status, 403, `${name} with pm_${kind}_ ${variant}`);
+            await res.body?.cancel();
+          }
+          assert.equal(store.approvals.find((a) => a.id === 'appr-a')?.status, 'pending');
+        });
+      }
+    }
   });
 });

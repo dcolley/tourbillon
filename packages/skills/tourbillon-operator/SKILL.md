@@ -89,7 +89,7 @@ Agent run tokens (#110) are HMAC-signed `pm_run_`/`pm_chat_` tokens (`TOURBILLON
 
 ## REST that needs board auth
 
-- `POST /api/approvals/:approvalId/decide` — board only. Agents can never decide: an agent run token gets 403, no board identity gets 401, and an approval from another company gets 404. Decide in the UI at `/approval` or with a board session.
+- `POST /api/approvals/:approvalId/decide` — board only. Agents can never decide: an agent run token gets 403, no board identity gets 401, and an approval from another company gets 404. Decide in the UI at `/approval` (board session), or over REST with a board JWT in `X-Company-Token` or a board session cookie.
 
 ## Operating rules
 
