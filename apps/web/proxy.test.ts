@@ -155,6 +155,21 @@ describe('#105 proxy board gate', () => {
     }
   });
 
+  it('approval details page (/approval/<id> and legacy /approval?id=): board only', async () => {
+    const token = await createBoardSessionToken();
+    for (const path of ['/approval/a0000001-0000-4000-8000-000000000001', '/approval?id=a0000001-0000-4000-8000-000000000001']) {
+      const anon = await proxy(req(path));
+      assert.equal(anon.status, 307, path);
+      assert.match(anon.headers.get('location') ?? '', /\/unlock\?next=/);
+      const agent = await proxy(
+        req(path, { headers: { cookie: `tourbillon_board_session=${token}`, authorization: `Bearer ${AGENT_TOKEN}` } }),
+      );
+      assert.equal(agent.status, 307, `${path} agent bearer`);
+      const board = await proxy(req(path, { headers: { cookie: `tourbillon_board_session=${token}` } }));
+      assert.equal(board.headers.get('x-middleware-next'), '1', `${path} board`);
+    }
+  });
+
   it('agent run token + valid session cookie → not board', async () => {
     const token = await createBoardSessionToken();
     const res = await proxy(

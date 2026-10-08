@@ -205,6 +205,23 @@ describe('#106 board-guarded routes', () => {
           llmProviderErrorBody: (err: Error) => ({ body: { error: err.message }, status: 400 }),
         };
       }
+      if (is(id, 'approval-detail-repo')) {
+        // Unscoped on purpose (finds by id only): the route + loader must refuse other companies.
+        const byId = (name: string, rid: string) => (store[name] ?? []).find((r) => r.id === rid) ?? null;
+        return {
+          createApprovalDetailRepo: () => ({
+            getApproval: async (_c: string, rid: string) => byId('approvals', rid),
+            getAgent: async (_c: string, rid: string) => byId('agents', rid),
+            getIssues: async (_c: string, ids: string[]) => (store.issues ?? []).filter((r) => ids.includes(r.id as string)),
+            getActivity: async (_c: string, aid: string) =>
+              (store.activityLog ?? []).filter((r) => {
+                const d = (r.details ?? {}) as Row;
+                return r.entityId === aid || d.boardApprovalId === aid || d.approvalId === aid;
+              }),
+            getCompanySettings: async () => ({}),
+          }),
+        };
+      }
       if (is(id, 'default-provider-models')) {
         return { defaultProviderModelsResponse: async () => Response.json({ models: [{ id: 'm1' }] }) };
       }
@@ -212,6 +229,7 @@ describe('#106 board-guarded routes', () => {
     };
 
     routes.decide = await import('./approvals/[approvalId]/decide/route');
+    routes.approval = await import('./approvals/[approvalId]/route');
     routes.mcpTools = await import('./agents/[agentId]/mcp-tools/route');
     routes.kg = await import('./agents/[agentId]/knowledge-graph/route');
     routes.sse = await import('./sse/[companyId]/route');
@@ -266,6 +284,67 @@ describe('#106 board-guarded routes', () => {
     });
     it('board JWT decides own company approval → 200', async () => {
       assert.equal((await decide('jwtA', 'appr-a')).status, 200);
+    });
+  });
+
+  // ---------------------------------------------------------------- approvals/[id] (details)
+  describe('GET /api/approvals/:id (approval details)', () => {
+    const get = async (who: Who, approvalId: string) =>
+      routes.approval.GET(await request(who, `/api/approvals/${approvalId}`), ctx({ approvalId }));
+    const withHistory = () => {
+      const t = (m: number) => new Date(Date.UTC(2026, 9, 8, 9, m));
+      Object.assign(store.approvals[0], {
+        status: 'approved', note: 'Go.', decidedAt: t(30), decidedByUserId: null, createdAt: t(0), updatedAt: t(30),
+        requestedByAgentId: 'agent-a', issueIds: ['issue-a1'], hitlyApprovalId: null, hitlyError: null,
+        payload: { title: 'Hire', hitlyResumeToken: 'resume-token-abcdefghijkl' },
+      });
+      store.agents[0].name = 'Alice';
+      store.issues = [
+        { id: 'issue-a1', companyId: 'company-a', identifier: 'TOUR-1', title: 'A', status: 'todo', boardApprovalId: null },
+      ];
+      store.activityLog = [
+        { id: 'l2', companyId: 'company-a', actorType: 'system', actorId: 'board', actorName: 'Board', action: 'issue.updated',
+          entityType: 'issue', entityId: 'issue-a1', details: { approvalId: 'appr-a', decision: 'approved', status: 'todo' }, createdAt: t(30) },
+        { id: 'l1', companyId: 'company-a', actorType: 'agent', actorId: 'agent-a', actorName: null, action: 'issue.updated',
+          entityType: 'issue', entityId: 'issue-a1', details: { boardApprovalId: 'appr-a', status: 'blocked' }, createdAt: t(1) },
+      ];
+    };
+
+    it('anonymous → 401', async () => assert.equal((await get('anon', 'appr-a')).status, 401));
+    it('agent bearer (even with board cookie + JWT) → 403', async () => {
+      const res = await get('agent', 'appr-a');
+      assert.equal(res.status, 403);
+      assert.ok(!(await res.text()).includes('appr-a'));
+    });
+    it('unknown id → 404', async () => assert.equal((await get('boardA', 'appr-zzz')).status, 404));
+    it("another company's id → 404 (board session and board JWT), body says nothing about it", async () => {
+      store.approvals[1].payload = { title: 'Company B secret plan' };
+      for (const who of ['boardA', 'jwtA'] as const) {
+        const res = await get(who, 'appr-b');
+        assert.equal(res.status, 404);
+        const text = await res.text();
+        assert.ok(!text.includes('Company B'), text);
+      }
+    });
+    it('board, own company → 200 with redacted payload and chronological history', async () => {
+      withHistory();
+      for (const who of ['boardA', 'jwtA'] as const) {
+        const res = await get(who, 'appr-a');
+        assert.equal(res.status, 200);
+        const body = (await res.json()) as {
+          approval: { id: string; title: string; payload: Record<string, unknown> };
+          requester: { urlKey: string };
+          decidedBy: string;
+          history: Array<{ kind: string; at: string }>;
+        };
+        assert.equal(body.approval.id, 'appr-a');
+        assert.equal(body.approval.title, 'Hire');
+        assert.equal(body.approval.payload.hitlyResumeToken, '[redacted]');
+        assert.equal(body.requester.urlKey, 'alice');
+        assert.equal(body.decidedBy, 'Board');
+        assert.deepEqual(body.history.map((e) => e.kind), ['created', 'issue_halted', 'decided', 'issue_released']);
+        assert.deepEqual(body.history.map((e) => e.at), [...body.history.map((e) => e.at)].sort());
+      }
     });
   });
 
@@ -362,6 +441,7 @@ describe('#106 board-guarded routes', () => {
   describe('signed, forged and expired pm_run_/pm_chat_ tokens are never board', () => {
     // Every guarded route, called as an agent that ALSO carries a valid board session + board JWT.
     const calls: Array<[string, () => Promise<Response>]> = [
+      ['approval details', async () => routes.approval.GET(await request('agent', '/api/approvals/appr-a'), ctx({ approvalId: 'appr-a' }))],
       ['decide', async () => routes.decide.POST(await request('agent', '/api/approvals/appr-a/decide', { method: 'POST', body: { decision: 'approved' } }), ctx({ approvalId: 'appr-a' }))],
       ['sse', async () => routes.sse.GET(await request('agent', '/api/sse/company-a'), ctx({ companyId: 'company-a' }))],
       ['mcp-tools', async () => routes.mcpTools.GET(await request('agent', '/api/agents/agent-a/mcp-tools'), ctx({ agentId: 'agent-a' }))],

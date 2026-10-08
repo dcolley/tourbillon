@@ -8,6 +8,7 @@ import {
   type WorkspaceEntry,
 } from '@tourbillon/shared/company-workspace';
 import path from 'path';
+import { approvalDetailHref } from './approval-links';
 
 export interface SearchHit {
   type: 'issue' | 'comment' | 'document' | 'approval';
@@ -346,7 +347,7 @@ async function searchApprovals(
       snippet,
       status: approval.status,
       updatedAt: approval.updatedAt.toISOString(),
-      href: `/approval?id=${approval.id}`,
+      href: approvalDetailHref(approval.id),
       relevance,
       timestamp: approval.updatedAt,
     };
