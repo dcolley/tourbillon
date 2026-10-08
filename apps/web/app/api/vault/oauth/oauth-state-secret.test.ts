@@ -15,6 +15,7 @@ const DEFAULTS = ['change-me-in-production', 'change-me-in-production-use-openss
 const NOT_CONFIGURED = '/settings?oauth_error=oauth_state_secret_not_configured';
 
 let companyLookups = 0;
+const nonces = new Set<string>();
 let errors: string[] = [];
 const realConsoleError = console.error;
 
@@ -34,7 +35,19 @@ describe('#112 vault OAuth state secret fails closed', () => {
     const originalRequire = Module.prototype.require;
     Module.prototype.require = function (id: string) {
       if (id === '@/lib/board-route-auth' || id.endsWith('/lib/board-route-auth')) {
-        return { requireBoardCompany: async () => ({ ok: true, value: { id: 'company-a' } }) };
+        return {
+          requireBoardCompany: async () => {
+            companyLookups++;
+            return { ok: true, value: { id: 'company-a' } };
+          },
+        };
+      }
+      if (id === '@/lib/vault-oauth-nonce-store' || id.endsWith('/lib/vault-oauth-nonce-store')) {
+        // #112 single-use store, in memory (the real one is covered by state-binding.test.ts).
+        return {
+          recordOAuthNonce: async (nonce: string) => void nonces.add(nonce),
+          consumeOAuthNonce: async (nonce: string) => nonces.delete(nonce),
+        };
       }
       if (id === '@tourbillon/db') return { db: { query: {} }, agents: {} };
       if (id === '@tourbillon/db/schema') return { vaultSecrets: {} };
@@ -70,8 +83,12 @@ describe('#112 vault OAuth state secret fails closed', () => {
 
   const start = () =>
     authorize(new NextRequest('http://localhost:3002/api/vault/oauth/authorize?serverId=github-mcp&scope=company'));
-  const finish = (state: string) =>
-    callback(new NextRequest(`http://localhost:3002/api/vault/oauth/callback?code=c&state=${encodeURIComponent(state)}`));
+  const finish = (state: string, nonce?: string) =>
+    callback(
+      new NextRequest(`http://localhost:3002/api/vault/oauth/callback?code=c&state=${encodeURIComponent(state)}`, {
+        headers: nonce ? { cookie: `tourbillon_vault_oauth_nonce=${nonce}` } : {},
+      }),
+    );
 
   function assertRefusedAndLogged(res: Response, stage: 'start' | 'finish', leaked: string[]) {
     assert.equal(res.status, 307);
@@ -97,6 +114,7 @@ describe('#112 vault OAuth state secret fails closed', () => {
       env.BETTER_AUTH_SECRET = def;
       assertRefusedAndLogged(await start(), 'start', [def]);
       errors = [];
+      companyLookups = 0;
       const forged = stateSignedWith(def);
       assertRefusedAndLogged(await finish(forged), 'finish', [def, forged]);
       assert.equal(companyLookups, 0);
@@ -110,8 +128,12 @@ describe('#112 vault OAuth state secret fails closed', () => {
     const location = new URL(res.headers.get('location') ?? '');
     assert.equal(location.origin + location.pathname, 'https://github.com/login/oauth/authorize');
     const state = location.searchParams.get('state') ?? '';
+    // #112: authorize also sets the nonce cookie the callback needs.
+    const nonce = /tourbillon_vault_oauth_nonce=([^;]+)/.exec(res.headers.get('set-cookie') ?? '')?.[1];
+    assert.ok(nonce, 'authorize sets the nonce cookie');
+    companyLookups = 0;
     // Signature verifies → reaches provider handling (no client secret here → not_configured).
-    const done = await finish(state);
+    const done = await finish(state, nonce);
     assert.equal(done.headers.get('location'), '/settings?oauth_error=not_configured');
     assert.equal(companyLookups, 1);
     // A state forged with the public default is not accepted under a real secret.
