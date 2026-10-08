@@ -1,9 +1,10 @@
 import { db, issues, agents } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
-import type { HeartbeatJobData, WakePayload } from '@tourbillon/shared';
+import { DEFAULT_WAKE_MAX_COMMENTS, type HeartbeatJobData, type WakePayload } from '@tourbillon/shared';
 import { listIssueComments } from './issue-comments';
 
-const DEFAULT_MAX_COMMENTS = 10;
+/** WC1 AC5: fetch the last 20; the wake budget decides how many are shown. */
+const DEFAULT_MAX_COMMENTS = DEFAULT_WAKE_MAX_COMMENTS;
 
 export interface BuildAssignmentWakePayloadOptions {
   maxComments?: number;

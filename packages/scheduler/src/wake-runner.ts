@@ -1,4 +1,4 @@
-import { db, agents, heartbeatRuns, companies, costEvents, issues, activityLog, getLlmProviderRowById } from '@tourbillon/db';
+import { db, agents, heartbeatRuns, companies, costEvents, issues, activityLog, approvals, getLlmProviderRowById } from '@tourbillon/db';
 import { eq, and, sql, lt } from 'drizzle-orm';
 import {
   createDurableAgentWithSkills,
@@ -29,13 +29,13 @@ import {
   isAgentBudgetExceeded,
   isMastraTracingEnabled,
   isHarnessAdapter,
-  buildWakeMessage,
   parseCompanySettings,
   createTraceLogger,
   canForceKillHeartbeat,
   effectiveHeartbeatTimeoutSec,
 } from '@tourbillon/shared';
 import { durableWakeOutcomeFromTripwire } from './durable-wake-outcome';
+import { buildRunWakeMessage, createDrizzleWakeContextRepo } from './wake-context';
 import type { Agent as AgentRecord } from '@tourbillon/db';
 import { randomUUID } from 'crypto';
 import { AgentTokenConfigError, mintRunToken, runTokenTtlSec } from '@tourbillon/shared/agent-token';
@@ -448,6 +448,20 @@ async function runWake(
     providerRecord,
   );
 
+  // WC1–6: wake message built at run start. With the live context on, the header is read from the
+  // DB now (fresher than the enqueue-time payload); if that read fails the run continues on the
+  // T1-only message (newest-first comments) and logs wake_context_failed.
+  const { wakeMessage, wakeContextSnapshot } = await buildRunWakeMessage(wake, {
+    agentId,
+    companyId,
+    agentName: agentRecord.name,
+    agentUrlKey: agentRecord.urlKey,
+    companySettings: company.settings,
+    runStartedAt,
+    tracer: agentTracer,
+    repo: () => createDrizzleWakeContextRepo({ db, issues, approvals, activityLog, agents }),
+  });
+
   await db.insert(heartbeatRuns).values({
     id: runId,
     agentId,
@@ -457,6 +471,7 @@ async function runWake(
     contextSnapshot: {
       wakeReason,
       wakePayloadJson: wake.wakePayloadJson,
+      wakeContext: wakeContextSnapshot,
       taskId: wake.taskId,
       agentName: agentRecord.name,
       agentUrlKey: agentRecord.urlKey,
@@ -502,7 +517,6 @@ async function runWake(
     await recordHeartbeatFailure(runId, errorText, companyId, agentId);
     return { runId, status: 'failed', errorText };
   }
-  const wakeMessage = buildWakeMessage(wake);
   const liveness = resolveHeartbeatLivenessConfig();
   const staleMs = liveness.staleSec * 1000;
   const runStartedMs = Date.now();
@@ -570,6 +584,7 @@ async function runWake(
             agentRecord,
             {
               wake,
+              wakeMessage,
               runId,
               apiKey,
               goalId: issueForTask?.goalId ?? undefined,

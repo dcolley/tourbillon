@@ -14,6 +14,7 @@ import { ChatPageContext } from '@/components/chat/chat-page-context';
 import { HeartbeatRunHeaderActions } from './heartbeat-run-header-actions';
 import { HeartbeatRunQueryToast } from './heartbeat-run-query-toast';
 import { requireBoardSession } from '@/lib/company';
+import { wakeContextSummary } from '@/lib/wake-context-summary';
 
 async function dismissHeartbeatAction(_formData: FormData) {
   'use server';
@@ -41,6 +42,7 @@ export default async function HeartbeatRunPage({
   const { run, agent } = detail;
   const taskId = getHeartbeatTaskId(run);
   const listState = heartbeatJobListState(run) as JobState;
+  const wakeContextLine = wakeContextSummary(run.contextSnapshot);
 
   return (
     <div className="p-6 space-y-6 max-w-6xl">
@@ -111,6 +113,11 @@ export default async function HeartbeatRunPage({
 
       <section className="space-y-2">
         <h2 className="text-sm font-semibold">Context</h2>
+        {wakeContextLine && (
+          <p className="text-xs text-muted-foreground" data-testid="wake-context-summary">
+            {wakeContextLine}
+          </p>
+        )}
         <pre className="border rounded-lg p-4 text-xs font-mono overflow-x-auto bg-muted/30">
           {JSON.stringify(run.contextSnapshot, null, 2)}
         </pre>
