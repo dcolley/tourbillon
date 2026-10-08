@@ -268,7 +268,11 @@ export async function loadApprovalDetail(
     issueIds.length ? repo.getIssues(companyId, issueIds) : Promise.resolve([]),
     repo.getActivity(companyId, approval.id, issueIds),
     repo.getCompanySettings(companyId),
-    repo.getSecretValues(companyId),
+    // B3: if the secret values can't be loaded at all (query error…), hide free text; never a 500.
+    repo.getSecretValues(companyId).catch((): KnownSecretValues => {
+      console.warn('[approval redaction] secret values unavailable', { reason: 'load_failed' });
+      return { values: [], vaultUnavailable: true };
+    }),
   ]);
   const requester = agent && agent.companyId === companyId ? agent : null;
   const issuesById = new Map(
