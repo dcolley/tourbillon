@@ -7,6 +7,7 @@ import {
 } from './constants';
 import { formatWakeTime, truncateEnd } from './format';
 import { noteRemainder, sharedRulingPrefix } from './ruling';
+import { flattenInline, neutraliseSystemMarkers } from './sanitize';
 import type { WakeApprovalRef, WakeLiveContext } from './types';
 
 export const LIVE_STATE_TRUST_TEXT = 'trust this over anything said in comments';
@@ -78,7 +79,19 @@ export function renderLiveStateHeader(ctx: WakeLiveContext, input: RenderHeaderI
     return days.size === 1 ? [...days][0] : null;
   })();
 
-  const shown = new Set([ctx.task.identifier, ctx.parent?.identifier, ...ctx.blockers.map((b) => b.identifier)]);
+  // S6: each blocker once, and never the task itself.
+  const blockerList = (() => {
+    const seen = new Set<string>([ctx.task.identifier]);
+    return (ctx.blockers ?? []).filter((b) => {
+      if (!b || seen.has(b.identifier)) return false;
+      seen.add(b.identifier);
+      return true;
+    });
+  })();
+  // The task title is the only issue-written free text in this block: one line, no system markers.
+  const taskTitle = neutraliseSystemMarkers(flattenInline(ctx.task.title ?? ''));
+
+  const shown = new Set([ctx.task.identifier, ctx.parent?.identifier, ...blockerList.map((b) => b.identifier)]);
   const statusByIdentifier = new Map(ctx.referencedIssues.map((i) => [i.identifier, i.status]));
   const otherIssues = input.citedIdentifiers
     .filter((id) => !shown.has(id) && statusByIdentifier.has(id))
@@ -93,7 +106,7 @@ export function renderLiveStateHeader(ctx: WakeLiveContext, input: RenderHeaderI
   const render = (s: Shape): string => {
     const L: string[] = [];
     L.push(`LIVE STATE (from the database at ${when(ref)} today; ${LIVE_STATE_TRUST_TEXT})`);
-    const title = s.titleChars >= ctx.task.title.length ? ctx.task.title : truncateEnd(ctx.task.title, s.titleChars);
+    const title = s.titleChars >= taskTitle.length ? taskTitle : truncateEnd(taskTitle, s.titleChars);
     L.push(`- Task ${ctx.task.identifier}: ${title}`);
     const a = ctx.task.assignee;
     const assignee =
@@ -106,9 +119,9 @@ export function renderLiveStateHeader(ctx: WakeLiveContext, input: RenderHeaderI
             : 'unassigned';
     L.push(`  status ${ctx.task.status}, priority ${ctx.task.priority}, assignee: ${assignee}`);
     if (ctx.parent) L.push(`- Parent ${ctx.parent.identifier}: ${ctx.parent.status}`);
-    const blockers = ctx.blockers.slice(0, WAKE_HEADER_MAX_BLOCKERS);
+    const blockers = blockerList.slice(0, WAKE_HEADER_MAX_BLOCKERS);
     for (const b of blockers) L.push(`- Blocked by ${b.identifier}: ${b.status}`);
-    if (ctx.blockers.length > blockers.length) L.push(`- Blocked by: +${ctx.blockers.length - blockers.length} more`);
+    if (blockerList.length > blockers.length) L.push(`- Blocked by: +${blockerList.length - blockers.length} more`);
 
     if (approvals.length === 0) {
       L.push('- Approvals referenced on this issue: none');
@@ -124,12 +137,10 @@ export function renderLiveStateHeader(ctx: WakeLiveContext, input: RenderHeaderI
         const status = r.status.toUpperCase();
         const time = r.status === 'pending' ? ` (filed ${when(r.createdAt)})` : r.decidedAt ? ` ${when(r.decidedAt)}` : '';
         let text = '';
-        if (s.noteChars > 0) {
-          const raw = r.note?.trim()
-            ? noteRemainder(r.note, useRuling ? ruling.prefix : null)
-            : r.title?.trim()
-              ? `re: ${r.title.trim().replace(/\s+/g, ' ')}`
-              : '';
+        // B2: only the Board's decision note appears here. The approval title (r.title) is written
+        // by whoever filed the request (often an agent), so it never enters this trusted block.
+        if (s.noteChars > 0 && r.note?.trim()) {
+          const raw = noteRemainder(r.note, useRuling ? ruling.prefix : null);
           if (raw) text = `: ${truncateEnd(raw, s.noteChars)}`;
         }
         L.push(`  - ${shortId(r.id)} ${status}${time}${text}`);
@@ -181,7 +192,7 @@ export function renderLiveStateHeader(ctx: WakeLiveContext, input: RenderHeaderI
   }
   // 4. last resort: title, then a hard cut
   if (text.length > maxChars) {
-    shape.titleChars = Math.max(20, ctx.task.title.length - (text.length - maxChars));
+    shape.titleChars = Math.max(20, taskTitle.length - (text.length - maxChars));
     text = render(shape);
   }
   if (text.length > maxChars) text = truncateEnd(text, maxChars);

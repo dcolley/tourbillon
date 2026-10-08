@@ -63,7 +63,8 @@ describe('WC2 live-state header', () => {
     approvals.push(appr('eeeeeee1', { linked: true, status: 'pending', decidedAt: null, note: null, title: 'Hire a CFO' }));
     const h = renderLiveStateHeader(ctx({ approvals }), { citedApprovalIds: none, citedIdentifiers: [] }).text;
     const rows = h.split('\n').filter((l) => l.startsWith('  - '));
-    assert.equal(rows[0], '  - eeeeeee1 PENDING (filed Oct 7 10:00Z): re: Hire a CFO');
+    // #122 follow-up B2: the (agent-written) approval title is not shown in the trusted header.
+    assert.equal(rows[0], '  - eeeeeee1 PENDING (filed Oct 7 10:00Z)');
     assert.ok(rows[1].startsWith('  - d000000b APPROVED 07:21Z'));
     assert.ok(rows[2].startsWith('  - d000000a APPROVED 07:20Z'));
     assert.equal(rows.length, 11);

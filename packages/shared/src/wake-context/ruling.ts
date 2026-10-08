@@ -1,3 +1,9 @@
+/** Candidate prefixes end within the first RULING_SCAN_CHARS of a note. */
+export const RULING_SCAN_CHARS = 600;
+const RULING_MEMO_MAX = 32;
+/** The header renders 2–3 times per wake with mostly the same notes: compute once. */
+const rulingMemo = new Map<string, { prefix: string; count: number } | null>();
+
 /**
  * WC4 AC2: the shared, sentence-terminated prefix that 2+ Board decision notes start with.
  * Among candidate prefixes (each ends at `.`, `!` or `?` followed by whitespace or the end of the
@@ -8,11 +14,17 @@ export function sharedRulingPrefix(
   notes: Array<string | null | undefined>,
   minChars = 40,
 ): { prefix: string; count: number } | null {
-  const texts = notes.map((n) => (n ?? '').trim()).filter(Boolean);
+  const texts = notes.map((n) => (typeof n === 'string' ? n : '').trim()).filter(Boolean);
   if (texts.length < 2) return null;
+  // Only the scanned head (+1 char, for the `p ` / `p\n` checks) affects the result.
+  const memoKey = `${minChars}\u0000${texts.map((t) => t.slice(0, RULING_SCAN_CHARS + 1)).join('\u0001')}`;
+  const memo = rulingMemo.get(memoKey);
+  if (memo !== undefined) return memo;
   const candidates = new Set<string>();
   for (const t of texts) {
-    for (let i = 0; i < t.length; i++) {
+    // S2: a shared ruling is a lead sentence or two; only the head of each note is scanned.
+    const scan = Math.min(t.length, RULING_SCAN_CHARS);
+    for (let i = 0; i < scan; i++) {
       const ch = t[i];
       if ((ch === '.' || ch === '!' || ch === '?') && (i + 1 === t.length || /\s/.test(t[i + 1]))) {
         if (i + 1 >= minChars) candidates.add(t.slice(0, i + 1));
@@ -28,7 +40,10 @@ export function sharedRulingPrefix(
       best = { prefix: p, count, score };
     }
   }
-  return best ? { prefix: best.prefix, count: best.count } : null;
+  const result = best ? { prefix: best.prefix, count: best.count } : null;
+  if (rulingMemo.size >= RULING_MEMO_MAX) rulingMemo.clear();
+  rulingMemo.set(memoKey, result);
+  return result;
 }
 
 /** A note with the shared prefix (and a leading `Decision:`) removed. */

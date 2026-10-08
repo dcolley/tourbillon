@@ -54,11 +54,19 @@ export interface WakeContextBudgets {
   totalSoftMaxChars: number;
 }
 
+/** Which renderer failed: v2 → T1 was used; t1 → the minimal message was used. */
+export type WakeRenderFallback = 'v2_render_failed' | 't1_render_failed';
+
 /** Recorded as contextSnapshot.wakeContext (WC6 AC2). */
 export interface WakeContextStats {
   version: number;
-  /** 'v2' = live header + T1–T7; 't1' = newest-first fill only (flag off, no task, or build failed). */
-  mode: 'v2' | 't1';
+  /**
+   * 'v2' = live header + T1–T7; 't1' = newest-first fill only (flag off, no task, or build failed);
+   * 'minimal' = wake reason + task id only (both renderers failed; #122 follow-up B1).
+   */
+  mode: 'v2' | 't1' | 'minimal';
+  /** Set when a renderer threw and a simpler layout was used instead (never set on success). */
+  fallback?: WakeRenderFallback;
   headerChars: number;
   commentChars: number;
   totalChars: number;

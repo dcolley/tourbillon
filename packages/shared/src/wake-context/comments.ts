@@ -4,6 +4,12 @@ import { WAKE_P1_COMMENT_CAP, WAKE_P2_COMMENT_CAP } from './constants';
 import { isNearDuplicate, shingles } from './dedupe';
 import { formatWakeClock, formatWakeTime, truncateEnd } from './format';
 import { classifyPriority, isCheckedOutNotice } from './priority';
+import {
+  flattenInline,
+  indentContinuationLines,
+  neutraliseSystemMarkers,
+  sanitizeWakeComments,
+} from './sanitize';
 
 export interface WakeCommentInput {
   id?: string;
@@ -80,7 +86,12 @@ export function renderCommentSectionV2(
 ): CommentSectionResult {
   const p1Cap = opts.p1Cap ?? WAKE_P1_COMMENT_CAP;
   const p2Cap = opts.p2Cap ?? WAKE_P2_COMMENT_CAP;
-  const all = chronological(comments);
+  // B1: never throw on malformed input. S1: comment text can't carry system markers.
+  const all = chronological(sanitizeWakeComments(comments)).map((c) => ({
+    ...c,
+    body: neutraliseSystemMarkers(c.body),
+    authorName: neutraliseSystemMarkers(flattenInline(c.authorName)) || 'unknown',
+  }));
   const n = all.length;
   const empty: CommentSectionResult = {
     text: '', considered: n, shown: 0, hidden: 0, dropped: 0, deduped: 0, condensed: 0, annotated: 0,
@@ -208,7 +219,14 @@ export function renderCommentSectionT1(
   opts: { budget: number; p1Cap?: number },
 ): CommentSectionResult {
   const p1Cap = opts.p1Cap ?? WAKE_P1_COMMENT_CAP;
-  const all = chronological(comments);
+  // B1: never throw on malformed input. S1: no system markers, and continuation lines indented
+  // so a comment can't start a line that poses as a header (this layout has no LIVE STATE).
+  const all = chronological(sanitizeWakeComments(comments)).map((c) => ({
+    ...c,
+    body: indentContinuationLines(neutraliseSystemMarkers(c.body)),
+    authorName: neutraliseSystemMarkers(flattenInline(c.authorName)),
+    createdAt: flattenInline(c.createdAt),
+  }));
   const n = all.length;
   const res: CommentSectionResult = {
     text: '', considered: n, shown: 0, hidden: 0, dropped: 0, deduped: 0, condensed: 0, annotated: 0,

@@ -12,6 +12,14 @@ export function wakeContextSummary(contextSnapshot: unknown): string | null {
   let line =
     `Wake context: header ${n(w.headerChars)} chars, comments ${n(w.commentChars)} chars, ` +
     `${annotations} annotation${annotations === 1 ? '' : 's'}`;
-  if (w.mode === 't1') line += typeof w.error === 'string' ? ' (live state unavailable; newest comments only)' : ' (newest comments only)';
+  if (w.mode === 'minimal') return 'Wake context: minimal message (the wake details could not be rendered)';
+  if (w.mode === 't1') {
+    line +=
+      w.fallback === 'v2_render_failed'
+        ? ' (compressed view failed to render; newest comments only)'
+        : typeof w.error === 'string'
+          ? ' (live state unavailable; newest comments only)'
+          : ' (newest comments only)';
+  }
   return line;
 }

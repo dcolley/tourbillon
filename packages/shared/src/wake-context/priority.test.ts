@@ -9,9 +9,9 @@ describe('WC3 classifyPriority', () => {
     assert.equal(classifyPriority({ ...base, authorType: 'user', authorName: 'Board', body: 'ok' }), 1);
   });
   it('"Board answered … APPROVED" body is P1', () => {
-    assert.equal(classifyPriority({ ...base, body: 'Board answered 686ede6c (APPROVED, option i).' }), 1);
+    assert.equal(classifyPriority({ ...base, body: 'Board answered a0000006 (APPROVED, option i).' }), 1);
     assert.equal(classifyPriority({ ...base, body: 'Board ruling: descope.' }), 1);
-    assert.equal(classifyPriority({ ...base, body: '23a36ba8 was REJECTED' }), 1);
+    assert.equal(classifyPriority({ ...base, body: 'a0000002 was REJECTED' }), 1);
   });
   it('a plain agent status note is P2', () => {
     assert.equal(classifyPriority({ ...base, body: 'Parked: still pending on approval; approved-ish wording in lower case.' }), 2);

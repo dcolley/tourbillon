@@ -17,6 +17,21 @@ describe('WC6 run detail line', () => {
     assert.match(wakeContextSummary({ wakeContext: { mode: 't1', commentChars: 900 } })!, /header 0 chars, comments 900 chars, 0 annotations \(newest comments only\)$/);
     assert.match(wakeContextSummary({ wakeContext: { mode: 't1', error: 'db down' } })!, /\(live state unavailable; newest comments only\)$/);
   });
+  it('#122 follow-up B1: render fallbacks are named (v2 → T1, and the minimal message)', () => {
+    assert.match(
+      wakeContextSummary({ wakeContext: { mode: 't1', fallback: 'v2_render_failed', commentChars: 5 } })!,
+      /\(compressed view failed to render; newest comments only\)$/,
+    );
+    assert.equal(
+      wakeContextSummary({ wakeContext: { mode: 'minimal', fallback: 't1_render_failed' } }),
+      'Wake context: minimal message (the wake details could not be rendered)',
+    );
+    // S5: the error is a short code; the summary never prints it.
+    assert.doesNotMatch(
+      wakeContextSummary({ wakeContext: { mode: 't1', error: 'wake_context_query_failed' } })!,
+      /wake_context_query_failed/,
+    );
+  });
   it('older runs without wakeContext show nothing', () => {
     assert.equal(wakeContextSummary({ wakeReason: 'timer' }), null);
     assert.equal(wakeContextSummary(null), null);
