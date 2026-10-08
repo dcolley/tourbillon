@@ -8,7 +8,7 @@
  */
 import { describe, it, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { runCapTiming } from './run-cap';
+import { runCapTiming, warnDroppedDeferredWakes } from './run-cap';
 
 const env = process.env as Record<string, string | undefined>;
 
@@ -252,19 +252,121 @@ describe('company concurrent-run cap (wake-runner)', () => {
     assert.equal(rowsFor('a1').length, 0);
   });
 
-  it('further wakes for a deferred agent coalesce behind it (one follow-up, no extra waiters)', async () => {
+  const wakeOf = (agentId: string, companyId: string, wakeReason: string, extra: Row = {}) =>
+    ({ agentId, companyId, invocationSource: wakeReason, wakeReason, ...extra }) as never;
+  const runOrder = () => store.heartbeatRuns.filter((r) => r.id !== 'r1').map((r) => r.agentId);
+  const waitFor = async (pred: () => boolean) => {
+    for (let i = 0; i < 300 && !pred(); i++) await sleep(10);
+  };
+
+  it('FIFO across agents: when slots free, the oldest deferred wake starts first', async () => {
+    setCap('company-a', 1);
+    store.heartbeatRuns.push(running('r1', 'a1', 'company-a'));
+    const order = ['a3', 'a4', 'a2'];
+    const starts = [];
+    for (const id of order) {
+      const s = await startWake(wakeOf(id, 'company-a', 'on_demand'));
+      assert.equal(s.deferred, true);
+      starts.push(s);
+    }
+    store.heartbeatRuns[0].status = 'succeeded';
+    await Promise.all(starts.map((s) => s.done));
+    assert.deepEqual(runOrder(), order);
+    assert.ok((maxRunning['company-a'] ?? 0) <= 1);
+  });
+
+  it('coalescing: further wakes for a deferred agent merge into ONE entry; a non-timer wake wins over timers', async () => {
     setCap('company-a', 1);
     store.heartbeatRuns.push(running('r1', 'a2', 'company-a'));
-    const first = await startWake(wake('a1', 'company-a'));
+    const first = await startWake(wakeOf('a1', 'company-a', 'timer'));
     assert.equal(first.deferred, true);
-    const second = await startWake(wake('a1', 'company-a'));
-    assert.equal(second.status, 'queued');
-    assert.notEqual(second.deferred, true, 'queued behind the per-agent lock, not a second cap waiter');
+    const later = await startWake(wakeOf('a3', 'company-a', 'on_demand')); // queued behind a1
+    const dupes = [
+      await startWake(wakeOf('a1', 'company-a', 'on_demand')),
+      await startWake(wakeOf('a1', 'company-a', 'timer')),
+      await startWake(wakeOf('a1', 'company-a', 'on_demand')),
+    ];
+    for (const d of dupes) {
+      assert.equal(d.status, 'queued');
+      assert.equal(d.deferred, true);
+      assert.match(d.errorText ?? '', /coalesced into deferred wake/);
+    }
     store.heartbeatRuns[0].status = 'succeeded';
     await first.done;
-    for (let i = 0; i < 100 && rowsFor('a1').length < 2; i++) await sleep(10);
+    await later.done;
+    await sleep(60); // no follow-up run appears for the coalesced wakes
+    assert.equal(rowsFor('a1').length, 1, 'one run for a1');
+    const snap = rowsFor('a1')[0].contextSnapshot as Row;
+    assert.equal(snap.wakeReason, 'on_demand', 'the on-demand wake ran, not the timer');
+    assert.deepEqual(runOrder(), ['a1', 'a3'], 'a1 kept its (earliest) place ahead of a3');
+  });
+
+  it('different targets are not merged: an assignment for another task still runs as a follow-up', async () => {
+    setCap('company-a', 1);
+    store.heartbeatRuns.push(running('r1', 'a2', 'company-a'));
+    const first = await startWake(wakeOf('a1', 'company-a', 'on_demand'));
+    assert.equal(first.deferred, true);
+    const second = await startWake(wakeOf('a1', 'company-a', 'assignment', { taskId: 'task-9' }));
+    assert.equal(second.status, 'queued');
+    assert.notEqual(second.deferred, true, 'kept as the per-agent follow-up, not merged');
+    store.heartbeatRuns[0].status = 'succeeded';
+    await first.done;
+    await waitFor(() => rowsFor('a1').length >= 2);
     assert.equal(rowsFor('a1').length, 2, 'the deferred wake ran, then its follow-up');
     assert.ok((maxRunning['company-a'] ?? 0) <= 1);
+  });
+
+  it('no starvation: repeated timer wakes never jump an older deferred wake, even right after a slot frees', async () => {
+    setCap('company-a', 1);
+    runCapTiming.baseMs = 150; // the deferred wake has not retried yet when the timers arrive
+    runCapTiming.maxMs = 150;
+    store.heartbeatRuns.push(running('r1', 'a2', 'company-a'));
+    const onDemand = await startWake(wakeOf('a1', 'company-a', 'on_demand'));
+    assert.equal(onDemand.deferred, true);
+    store.heartbeatRuns[0].status = 'succeeded'; // slot is free, a1 is still sleeping
+    const timers = [];
+    for (let i = 0; i < 5; i++) {
+      timers.push(await startWake(wakeOf('a3', 'company-a', 'timer')));
+      await sleep(5);
+    }
+    assert.ok(timers.every((t) => t.deferred), 'every timer wake deferred behind a1');
+    assert.equal(rowsFor('a3').length, 0, 'no timer run jumped the queue');
+    await onDemand.done;
+    await Promise.all(timers.map((t) => t.done));
+    await waitFor(() => rowsFor('a3').length >= 1);
+    assert.deepEqual(runOrder(), ['a1', 'a3'], 'a1 first, then ONE coalesced timer run');
+  });
+
+  it('shutdown: ONE warning line with the count, agentId + wake type of non-timer drops, timers counted; no payloads', async () => {
+    setCap('company-a', 1);
+    store.heartbeatRuns.push(running('r1', 'a2', 'company-a'));
+    const silent: unknown[] = [];
+    assert.equal(warnDroppedDeferredWakes({ warn: (...args) => silent.push(args) }), false);
+    assert.equal(silent.length, 0, 'nothing deferred → no line');
+
+    const starts = [
+      await startWake(wakeOf('a1', 'company-a', 'on_demand', { wakePayloadJson: { note: 'sk-secret-123' } })),
+      await startWake(wakeOf('a3', 'company-a', 'timer')),
+      await startWake(wakeOf('a4', 'company-a', 'assignment', { taskId: 'task-secret-id' })),
+    ];
+    assert.ok(starts.every((s) => s.deferred));
+    const lines: Array<[string, Record<string, unknown> | undefined]> = [];
+    assert.equal(warnDroppedDeferredWakes({ warn: (m, d) => lines.push([m, d]) }), true);
+    assert.equal(lines.length, 1, 'exactly one line');
+    assert.match(lines[0][0], /shutdown/);
+    assert.deepEqual(lines[0][1], {
+      count: 3,
+      timerCount: 1,
+      dropped: [
+        { agentId: 'a1', wakeType: 'on_demand' },
+        { agentId: 'a4', wakeType: 'assignment' },
+      ],
+    });
+    const text = JSON.stringify(lines);
+    assert.doesNotMatch(text, /sk-secret|task-secret|a3/);
+
+    store.heartbeatRuns[0].status = 'succeeded'; // drain so later tests start with an empty queue
+    await Promise.all(starts.map((s) => s.done));
   });
 
   it('a burst over the cap never exceeds it; every deferred wake eventually runs', async () => {

@@ -2,6 +2,7 @@ import { getMastraInstance, sweepStaleEgressSockets } from '@tourbillon/mastra';
 import { createTraceLogger, isObservabilityEnabled, isPhoenixCollectorEnabled } from '@tourbillon/shared';
 import { startWakeServer, startStaleSweepInterval } from './wake-server';
 import { bootMastraSchedules } from './schedule-boot';
+import { warnDroppedDeferredWakes } from './run-cap';
 
 async function main(): Promise<void> {
   // Defence-in-depth: unlink dead egress proxy socks left by prior crashes.
@@ -11,7 +12,12 @@ async function main(): Promise<void> {
   const staleSweep = startStaleSweepInterval();
   await bootMastraSchedules();
 
+  let shuttingDown = false;
   async function shutdown(): Promise<void> {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    // Deferred (over-cap) wakes are in memory only: say what is dropped, never silently.
+    warnDroppedDeferredWakes(createTraceLogger('scheduler', {}));
     clearInterval(staleSweep);
     await getMastraInstance().stopWorkers();
     await new Promise<void>((resolve) => {

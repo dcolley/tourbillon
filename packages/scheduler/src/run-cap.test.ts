@@ -6,6 +6,11 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  coalesceIntoDeferredWake,
+  deferredWakeForAgent,
+  deferredWakesAhead,
+  enqueueDeferredWake,
+  removeDeferredWake,
   notifyRunSlotFreed,
   runCapBackoffMs,
   runCapTiming,
@@ -124,6 +129,58 @@ describe('deferred-wake slot waiting', () => {
       assert.equal(runCapBackoffMs(50, () => 0.999999), 18000);
     } finally {
       Object.assign(runCapTiming, saved);
+    }
+  });
+});
+
+describe('deferred-wake FIFO queue', () => {
+  const w = (agentId: string, wakeReason: string, extra: Record<string, string> = {}) => ({
+    agentId,
+    companyId: 'q-co',
+    wakeReason,
+    ...extra,
+  });
+
+  it('orders per company, counts entries ahead, and a fresh wake sees all of them ahead', () => {
+    const a = enqueueDeferredWake(w('qa', 'on_demand'), 1);
+    const b = enqueueDeferredWake(w('qb', 'timer'), 2);
+    try {
+      assert.equal(deferredWakesAhead('q-co', a), 0);
+      assert.equal(deferredWakesAhead('q-co', b), 1);
+      assert.equal(deferredWakesAhead('q-co'), 2);
+      assert.equal(deferredWakesAhead('other-co'), 0);
+      assert.equal(enqueueDeferredWake(w('qa', 'timer'), 9), a, 'one entry per agent');
+    } finally {
+      removeDeferredWake(a);
+      removeDeferredWake(b);
+    }
+    assert.equal(deferredWakesAhead('q-co'), 0);
+    assert.equal(deferredWakeForAgent('qa'), undefined);
+  });
+
+  it('removing an entry wakes the company waiters so the next oldest tries now', async () => {
+    const a = enqueueDeferredWake(w('qc', 'on_demand'));
+    let woke = false;
+    const waiting = waitForRunSlot('q-co', 60_000).then(() => (woke = true));
+    removeDeferredWake(a);
+    await waiting;
+    assert.equal(woke, true);
+  });
+
+  it('coalesce: keeps earliest enqueue time, non-timer replaces timer, reasons merged once', () => {
+    const e = enqueueDeferredWake(w('qd', 'timer'), 100);
+    try {
+      assert.equal(coalesceIntoDeferredWake(e, w('qd', 'timer')), true);
+      assert.equal(coalesceIntoDeferredWake(e, w('qd', 'assignment', { taskId: 't1' })), true);
+      assert.equal(e.wake.wakeReason, 'assignment');
+      assert.equal(coalesceIntoDeferredWake(e, w('qd', 'timer')), true);
+      assert.equal(e.wake.wakeReason, 'assignment', 'a later timer does not replace it');
+      assert.equal(coalesceIntoDeferredWake(e, w('qd', 'assignment', { taskId: 't1' })), true, 'same target merges');
+      assert.equal(coalesceIntoDeferredWake(e, w('qd', 'assignment', { taskId: 't2' })), false, 'other task stays separate');
+      assert.equal(e.enqueuedAt, 100);
+      assert.deepEqual(e.reasons, ['timer', 'assignment']);
+    } finally {
+      removeDeferredWake(e);
     }
   });
 });
