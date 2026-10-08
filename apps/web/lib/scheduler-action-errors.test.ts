@@ -277,6 +277,11 @@ describe('scheduler action errors: fixed messages, redacted logs', () => {
     const kill = await helpers.forceKillRedirect('run-1', 'company-a', '/heartbeat/run-1', async () => {
       throw raw;
     });
+    const retry = await helpers.retryHeartbeatRedirect(failedRun as never, '/heartbeat/run-failed', async () => {
+      throw raw;
+    });
+    assert.equal(retry, `/heartbeat/run-failed?error=${encodeURIComponent(helpers.RETRY_HEARTBEAT_ERROR_MESSAGE)}`);
+    assertRedactedLog(/\[scheduler\] retry heartbeat failed/);
     assert.equal(kill, `/heartbeat/run-1?error=${encodeURIComponent(helpers.FORCE_KILL_ERROR_MESSAGE)}`);
     assertRedactedLog(/\[scheduler\] run heartbeat failed/);
     assertRedactedLog(/\[scheduler\] force-kill failed/);
@@ -391,6 +396,89 @@ describe('scheduler action errors: fixed messages, redacted logs', () => {
     const msg = mcp.mcpToolErrorMessage(new Error(`upstream said Authorization: Bearer ${FAKE_SECRET}`));
     assertNoSecret(msg, 'MCP tool error');
     assert.equal(mcp.mcpToolErrorMessage(new errors.SchedulerRequestError('bad_status', 500)), mcp.MCP_SCHEDULER_ERROR_MESSAGE);
+  });
+
+  // --- 409 skip reasons: fixed enum only --------------------------------------------------------
+  const skipFetch = (reason: unknown) =>
+    (async () =>
+      new Response(JSON.stringify({ accepted: false, agentId: 'agent-1', status: 'skipped', error: reason }), {
+        status: 409,
+      })) as typeof fetch;
+  const UNKNOWN_SKIP = `Company company-a not found; Authorization: Bearer ${FAKE_SECRET}\nX-Injected: 1`;
+
+  it('409 skip: known scheduler reasons map to fixed client strings', async () => {
+    process.env.SCHEDULER_API_KEY = GOOD_KEY;
+    const cases: Array<[string, string, string]> = [
+      ['agent status paused', 'agent_paused', 'Agent is paused.'],
+      ['agent status archived', 'agent_archived', 'Agent is archived.'],
+      ['agent status pending_approval', 'agent_pending_approval', 'Agent is pending approval.'],
+      ['company status paused', 'company_paused', 'Company is paused.'],
+      ['company status archived', 'company_archived', 'Company is archived.'],
+      ['over token budget', 'over_budget', 'Agent is over its token budget.'],
+      ['coalesced behind in-flight wake', 'wake_in_flight', 'A wake is already in flight for this agent.'],
+    ];
+    for (const [reason, code, message] of cases) {
+      globalThis.fetch = skipFetch(reason);
+      const r = await wake.enqueueHeartbeat({ agentId: 'agent-1', agentName: 'One', companyId: 'company-a', invocationSource: 'on_demand', wakeReason: 'on_demand' });
+      assert.deepEqual(r, { jobId: '', runId: '', outcome: 'skipped', skipReason: message, skipCode: code });
+      const url = await redirectOf(() =>
+        actions.triggerAgentHeartbeatAction(form({ agentId: 'agent-1', companyId: 'company-a', urlKey: 'one' })),
+      );
+      assert.equal(url, `/agent/one?error=${encodeURIComponent(message)}`);
+    }
+  });
+
+  it('409 skip: an unknown reason carrying a fake header value comes out as the generic string only', async () => {
+    process.env.SCHEDULER_API_KEY = GOOD_KEY;
+    const generic = errors.WAKE_SKIP_MESSAGES.unknown;
+    assert.equal(generic, 'Wake skipped.');
+    const logged: string[] = [];
+    const realLog = console.log;
+    console.log = (...args: unknown[]) => { logged.push(args.map(String).join(' ')); };
+    try {
+      for (const reason of [UNKNOWN_SKIP, `agent status ${GOOD_KEY}`, ` over token budget ${GOOD_KEY}`, 'agent status terminated', 42, null, undefined]) {
+        globalThis.fetch = skipFetch(reason);
+        const r = await wake.enqueueHeartbeat({ agentId: 'agent-1', agentName: 'One', companyId: 'company-a', invocationSource: 'on_demand', wakeReason: 'on_demand' });
+        assert.deepEqual(r, { jobId: '', runId: '', outcome: 'skipped', skipReason: generic, skipCode: 'unknown' });
+
+        const run = await redirectOf(() =>
+          actions.triggerAgentHeartbeatAction(form({ agentId: 'agent-1', companyId: 'company-a', urlKey: 'one' })),
+        );
+        assert.equal(run, `/agent/one?error=${encodeURIComponent(generic)}`);
+        const retry = await redirectOf(() =>
+          actions.retryFailedHeartbeatAction(form({ runId: failedRun.id, companyId: 'company-a' })),
+        );
+        assert.equal(retry, `/heartbeat/${failedRun.id}?error=${encodeURIComponent(generic)}`);
+
+        const res = await mcpCall('wake_agent', { company_id: 'company-a', agent_id: 'agent-1' });
+        assert.equal(res.body.error, undefined);
+        const out = JSON.parse((res.body.result as { content: Array<{ text: string }> }).content[0].text);
+        assert.deepEqual(out, { runId: '', jobId: '', outcome: 'skipped', skipReason: generic, skipCode: 'unknown' });
+        assertNoSecret(res.text, 'MCP response');
+      }
+    } finally {
+      console.log = realLog;
+    }
+    // Logs keep the (redacted) scheduler text for operators; the key itself never appears.
+    assert.ok(logged.some((l) => l.includes('Authorization: [redacted]')), JSON.stringify(logged));
+    for (const l of [...logged, ...logs]) assert.ok(!l.includes(FAKE_SECRET), `server log must not contain the key: ${l}`);
+  });
+
+  it('409 skip: actions and MCP take the text from the code, not from skipReason', async () => {
+    const leaky = async () => ({
+      jobId: '',
+      runId: '',
+      outcome: 'skipped' as const,
+      skipReason: `raw Authorization: Bearer ${FAKE_SECRET}`,
+      skipCode: 'nonsense' as never,
+    });
+    const url = await helpers.runHeartbeatRedirect('agent-1', 'company-a', '/agent', leaky);
+    assert.equal(url, `/agent?error=${encodeURIComponent('Wake skipped.')}`);
+    const retry = await helpers.retryHeartbeatRedirect(failedRun as never, '/heartbeat/run-failed', leaky);
+    assert.equal(retry, `/heartbeat/run-failed?error=${encodeURIComponent('Wake skipped.')}`);
+    const out = await mcp.wakeAgentForMcp('agent-1', 'company-a', leaky);
+    assert.equal(out.skipReason, 'Wake skipped.');
+    assertNoSecret(JSON.stringify(out), 'MCP result');
   });
 
   // --- redaction ------------------------------------------------------------------------------

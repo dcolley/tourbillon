@@ -1,11 +1,12 @@
 /**
  * Redirect targets for the dashboard heartbeat actions (run heartbeat, retry, force-kill).
+ * Skipped wakes use fixed text from the skip code (WAKE_SKIP_MESSAGES), never scheduler text.
  *
  * A scheduler failure redirects with a fixed ?error= message. The thrown error's text never
  * reaches the URL (it can carry request detail); it is logged server-side, redacted.
  */
-import { triggerAgentHeartbeat } from '@/lib/heartbeat';
-import { logSchedulerError } from '@/lib/scheduler-errors';
+import { retryFailedHeartbeat, triggerAgentHeartbeat } from '@/lib/heartbeat';
+import { logSchedulerError, wakeSkipMessage } from '@/lib/scheduler-errors';
 import { requestForceKill, type ForceKillOutcome } from '@/lib/wake-client';
 
 export const RUN_HEARTBEAT_ERROR_MESSAGE = 'Could not queue the heartbeat. Try again shortly.';
@@ -50,9 +51,33 @@ export async function runHeartbeatRedirect(
   if (!result?.jobId) {
     const message =
       result?.outcome === 'skipped'
-        ? (result.skipReason ?? 'Agent cannot be woken right now.')
+        ? wakeSkipMessage(result.skipCode)
         : 'Heartbeat was not queued — a wake may already be in flight for this agent.';
     return errorRedirect(errorBase, message);
+  }
+
+  return `/heartbeat/${result.jobId}`;
+}
+
+/** Retry a failed run: /heartbeat/{newRunId} on success, else `returnPath?error=…` (fixed text). */
+export async function retryHeartbeatRedirect(
+  failedRun: Parameters<typeof retryFailedHeartbeat>[0],
+  returnPath: string,
+  retry: typeof retryFailedHeartbeat = retryFailedHeartbeat,
+): Promise<string> {
+  let result: Awaited<ReturnType<typeof retryFailedHeartbeat>>;
+  try {
+    result = await retry(failedRun);
+  } catch (err) {
+    return schedulerActionErrorRedirect(returnPath, 'retry heartbeat', err, RETRY_HEARTBEAT_ERROR_MESSAGE);
+  }
+
+  if (!result?.jobId) {
+    const message =
+      result?.outcome === 'skipped'
+        ? wakeSkipMessage(result.skipCode)
+        : 'Retry was not queued — a wake may already be in flight for this agent.';
+    return errorRedirect(returnPath, message);
   }
 
   return `/heartbeat/${result.jobId}`;

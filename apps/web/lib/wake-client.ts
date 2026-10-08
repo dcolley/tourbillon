@@ -9,6 +9,9 @@ import {
   WAKE_IN_FLIGHT_MESSAGE,
   logSchedulerError,
   logSchedulerResponseError,
+  redactSchedulerErrorDetail,
+  wakeSkipReason,
+  type WakeSkipCode,
 } from './scheduler-errors';
 
 function schedulerWakeBaseUrl(): string {
@@ -55,8 +58,13 @@ export interface EnqueueHeartbeatResult {
   jobId: string;
   runId: string;
   outcome: EnqueueOutcome;
-  /** Set when outcome is `skipped` (paused agent, budget, inactive company, etc.). */
+  /**
+   * Set when outcome is `skipped`: fixed client text from WAKE_SKIP_MESSAGES (paused agent,
+   * budget, inactive company, …). Never the scheduler's response text.
+   */
   skipReason?: string;
+  /** Fixed code for skipReason. */
+  skipCode?: WakeSkipCode;
 }
 
 /** Triggers WakeRunner on the scheduler — not BullMQ. Returns real heartbeat_runs.id. */
@@ -95,14 +103,17 @@ export async function enqueueHeartbeat(
             wakeReason: enriched.wakeReason,
           },
           'wake skipped by scheduler',
-          { error: json.error },
+          { error: redactSchedulerErrorDetail(String(json.error ?? '')) },
         ),
       );
+      // Scheduler skip text → fixed client enum; unknown reasons → generic "Wake skipped."
+      const skip = wakeSkipReason(json.error);
       return {
         jobId: '',
         runId: '',
         outcome: 'skipped',
-        skipReason: json.error ?? 'wake skipped',
+        skipReason: skip.message,
+        skipCode: skip.code,
       };
     }
     logSchedulerResponseError('wake', res.status, bodyText || 'unknown error');
@@ -125,7 +136,7 @@ export async function enqueueHeartbeat(
             wakeReason: enriched.wakeReason,
           },
           'wake coalesced or deferred',
-          { status: json.status, error: json.error },
+          { status: json.status, error: redactSchedulerErrorDetail(String(json.error ?? '')) },
         ),
       );
       return { jobId: '', runId: '', outcome: 'deduplicated' };

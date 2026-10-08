@@ -8,12 +8,10 @@ import {
   setAgentActive,
   updateAgentRole,
 } from '@/lib/agents';
-import { retryFailedHeartbeat } from '@/lib/heartbeat';
 import {
-  RETRY_HEARTBEAT_ERROR_MESSAGE,
   forceKillRedirect,
+  retryHeartbeatRedirect,
   runHeartbeatRedirect,
-  schedulerActionErrorRedirect,
 } from '@/lib/heartbeat-actions';
 import { getHeartbeatRun, getInFlightHeartbeatRun } from '@/lib/heartbeats';
 import { actionError, actionSuccess, type ActionResult } from '@/lib/action-result';
@@ -173,30 +171,6 @@ export async function retryFailedHeartbeatAction(formData: FormData) {
     );
   }
 
-  let failedTarget: string | null = null;
-  let result: Awaited<ReturnType<typeof retryFailedHeartbeat>> | undefined;
-  try {
-    result = await retryFailedHeartbeat(detail.run);
-  } catch (err) {
-    failedTarget = schedulerActionErrorRedirect(
-      returnPath,
-      'retry heartbeat',
-      err,
-      RETRY_HEARTBEAT_ERROR_MESSAGE,
-    );
-  }
-
-  if (failedTarget) {
-    redirect(failedTarget);
-  }
-
-  if (!result?.jobId) {
-    const message =
-      result?.outcome === 'skipped'
-        ? (result.skipReason ?? 'Retry was not queued — a wake may already be in flight for this agent.')
-        : 'Retry was not queued — a wake may already be in flight for this agent.';
-    redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
-  }
-
-  redirect(`/heartbeat/${result.jobId}`);
+  // Scheduler failures and skips redirect with fixed text; the detail is logged, redacted.
+  redirect(await retryHeartbeatRedirect(detail.run, returnPath));
 }

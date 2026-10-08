@@ -81,3 +81,52 @@ export function logSchedulerResponseError(context: string, status: number, body:
     `[scheduler] ${context} failed (${status}): ${redactSchedulerErrorDetail(body.slice(0, 2000))}`,
   );
 }
+
+/** Fixed client codes for a wake the scheduler skipped (HTTP 409, status "skipped"). */
+export type WakeSkipCode =
+  | 'agent_paused'
+  | 'agent_archived'
+  | 'agent_pending_approval'
+  | 'company_paused'
+  | 'company_archived'
+  | 'over_budget'
+  | 'wake_in_flight'
+  | 'unknown';
+
+/** Fixed client text per skip code. Never scheduler response text. */
+export const WAKE_SKIP_MESSAGES: Readonly<Record<WakeSkipCode, string>> = {
+  agent_paused: 'Agent is paused.',
+  agent_archived: 'Agent is archived.',
+  agent_pending_approval: 'Agent is pending approval.',
+  company_paused: 'Company is paused.',
+  company_archived: 'Company is archived.',
+  over_budget: 'Agent is over its token budget.',
+  wake_in_flight: 'A wake is already in flight for this agent.',
+  unknown: 'Wake skipped.',
+};
+
+/**
+ * Exact scheduler skip texts (packages/scheduler wake-runner) → client code. Matched as whole
+ * strings only; anything else, including unknown agent/company statuses, is `unknown`.
+ */
+const KNOWN_SCHEDULER_SKIP_TEXTS: ReadonlyMap<string, WakeSkipCode> = new Map([
+  ['agent status paused', 'agent_paused'],
+  ['agent status archived', 'agent_archived'],
+  ['agent status pending_approval', 'agent_pending_approval'],
+  ['company status paused', 'company_paused'],
+  ['company status archived', 'company_archived'],
+  ['over token budget', 'over_budget'],
+  ['coalesced behind in-flight wake', 'wake_in_flight'],
+]);
+
+/** Map a scheduler skip reason to a fixed client code + message. */
+export function wakeSkipReason(raw: unknown): { code: WakeSkipCode; message: string } {
+  const code =
+    (typeof raw === 'string' && KNOWN_SCHEDULER_SKIP_TEXTS.get(raw.trim())) || 'unknown';
+  return { code, message: WAKE_SKIP_MESSAGES[code] };
+}
+
+/** Client text for a skipped wake, derived from the fixed code only (never free text). */
+export function wakeSkipMessage(code: WakeSkipCode | undefined): string {
+  return (code && Object.hasOwn(WAKE_SKIP_MESSAGES, code) && WAKE_SKIP_MESSAGES[code]) || WAKE_SKIP_MESSAGES.unknown;
+}
