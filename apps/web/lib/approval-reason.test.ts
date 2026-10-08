@@ -73,4 +73,16 @@ describe('checkDecisionReason (S2)', () => {
     assert.equal(r.ok, false);
     if (!r.ok) assert.equal(r.code, 'reason_too_long');
   });
+
+  it('linear trim: 100k reason with a long blank run finishes quickly', () => {
+    // Inner blank run must not make the pre-cap trim quadratic (regex `[...]+$` did).
+    const raw = 'a' + ' '.repeat(100_000) + 'b';
+    const t0 = Date.now();
+    const r = checkDecisionReason('rejected', raw);
+    const ms = Date.now() - t0;
+    // Trim keeps the inner blanks; the value then exceeds the 2,000 code-point cap.
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.equal(r.code, 'reason_too_long');
+    assert.ok(ms < 500, `trim took ${ms}ms (budget 500ms)`);
+  });
 });

@@ -16,9 +16,27 @@ export const REJECT_REASON_MAX_CHARS = 2_000;
  * TODO: import trimEdgeBlank from the shared lib/edge-blank helper (#142) once it is on the merge
  * base, and drop this copy; the set here is meant to stay identical to it until then.
  */
-const INVISIBLE = '\\s\\u00AD\\u034F\\u061C\\u115F\\u180E\\u200B-\\u200F\\u202A-\\u202E\\u2060\\u2066-\\u2069\\u2800\\u3164\\uFEFF\\uFFA0';
-const EDGE_BLANK_RE = new RegExp(`^[${INVISIBLE}]+|[${INVISIBLE}]+$`, 'g');
-const trimEdgeBlank = (value: string) => value.replace(EDGE_BLANK_RE, '');
+const EDGE_BLANK_CLASS =
+  '\\s\\u00AD\\u034F\\u061C\\u115F\\u180E\\u200B-\\u200F\\u202A-\\u202E\\u2060\\u2066-\\u2069\\u2800\\u3164\\uFEFF\\uFFA0';
+
+const EDGE_BLANK_CHAR_RE = new RegExp(`[${EDGE_BLANK_CLASS}]`);
+
+/** True when the single UTF-16 unit `ch` is in the shared blank/invisible set. */
+function isEdgeBlankChar(ch: string): boolean {
+  return ch.length === 1 && EDGE_BLANK_CHAR_RE.test(ch);
+}
+
+/**
+ * Trim whitespace and invisible characters from both ends.
+ * Linear scan (no `[...]+$` regex, which slows sharply on long blank runs).
+ */
+function trimEdgeBlank(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && isEdgeBlankChar(value[start])) start++;
+  while (end > start && isEdgeBlankChar(value[end - 1])) end--;
+  return start === 0 && end === value.length ? value : value.slice(start, end);
+}
 
 /** Length in code points (what the MCP schema's maxLength counts), not UTF-16 units. */
 function codePointLength(value: string): number {
