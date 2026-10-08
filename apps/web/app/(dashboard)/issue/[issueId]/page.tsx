@@ -17,6 +17,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { getCompanyById } from '@/lib/company';
 import { STICKY_TOOLBAR_ROOT_ATTR } from '@/lib/sticky-toolbar';
 import { ChatPageContext } from '@/components/chat/chat-page-context';
+import { approvalDetailHref } from '@/lib/approval-links';
 
 export default async function IssueDetailPage({
   params,
@@ -115,8 +116,11 @@ export default async function IssueDetailPage({
           <p className="font-medium">Pending board approval</p>
           <p className="mt-1 text-amber-900">
             This issue is halted until the board decides.{' '}
-            <Link href="/approval" className="underline underline-offset-2 hover:text-amber-800">
-              Open approvals
+            <Link
+              href={approvalDetailHref(issue.boardApprovalId)}
+              className="underline underline-offset-2 hover:text-amber-800"
+            >
+              Open approval
             </Link>
             <span className="ml-1 font-mono text-xs text-amber-800">
               ({issue.boardApprovalId.slice(0, 8)}…)

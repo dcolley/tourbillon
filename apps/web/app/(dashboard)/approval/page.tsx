@@ -1,15 +1,22 @@
 import Link from 'next/link';
 import { db, approvals, agents, issues } from '@tourbillon/db';
 import { desc, eq, inArray } from 'drizzle-orm';
+import { redirect } from 'next/navigation';
 import { PageHeader } from '@/components/page-header';
-import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
-import { Label } from '@/components/ui/label';
-import { Textarea } from '@/components/ui/textarea';
 import { StatusBadge } from '@/lib/status-badges';
 import { getActiveCompanyOrNull } from '@/lib/company';
+import { approvalDetailHref, legacyApprovalRedirect } from '@/lib/approval-links';
+import { ApprovalDecisionForm } from './approval-decision-form';
 
-export default async function ApprovalsPage() {
+export default async function ApprovalsPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  // Old links (search results, bookmarks) use /approval?id=<uuid>: send them to the details page.
+  const legacy = legacyApprovalRedirect(await searchParams);
+  if (legacy) redirect(legacy);
   const company = await getActiveCompanyOrNull();
   if (!company) return null;
   const pendingApprovals = await db
@@ -78,7 +85,9 @@ export default async function ApprovalsPage() {
                   <div key={approval.id} className="flex items-center justify-between gap-4 p-4">
                     <div className="min-w-0">
                       <p className="text-sm font-medium">
-                        {(approval.payload as { title?: string })?.title ?? approval.type}
+                        <Link href={approvalDetailHref(approval.id)} className="hover:underline">
+                          {(approval.payload as { title?: string })?.title ?? approval.type}
+                        </Link>
                       </p>
                       <p className="text-xs text-muted-foreground">
                         Requested by {agent?.name ?? 'Unknown'}
@@ -135,7 +144,11 @@ function ApprovalCard({
       <CardContent className="space-y-3 p-4">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <p className="font-medium">{payload?.title ?? approval.type}</p>
+            <p className="font-medium">
+              <Link href={approvalDetailHref(approval.id)} className="hover:underline">
+                {payload?.title ?? approval.type}
+              </Link>
+            </p>
             <p className="mt-0.5 text-sm text-muted-foreground">
               Requested by {agent?.name ?? 'Unknown agent'} ·{' '}
               {new Date(approval.createdAt).toLocaleDateString()}
@@ -174,26 +187,7 @@ function ApprovalCard({
             </ul>
           </div>
         )}
-        <form action={`/api/approvals/${approval.id}/decide`} method="POST" className="space-y-3">
-          <div className="space-y-2">
-            <Label htmlFor={`approval-note-${approval.id}`}>Reason</Label>
-            <Textarea
-              id={`approval-note-${approval.id}`}
-              name="note"
-              rows={3}
-              placeholder="Optional reason (posted to linked issues)"
-              className="resize-y"
-            />
-          </div>
-          <div className="flex gap-2">
-            <Button type="submit" name="decision" value="approved" size="sm">
-              Approve
-            </Button>
-            <Button type="submit" name="decision" value="rejected" size="sm" variant="destructive">
-              Reject
-            </Button>
-          </div>
-        </form>
+        <ApprovalDecisionForm approvalId={approval.id} />
       </CardContent>
     </Card>
   );
