@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
-  agentChipActionLabel,
+  agentChipAccessibleName,
   agentChipLabel,
   canToggleAgentChip,
   isAgentChipActive,
@@ -83,8 +83,8 @@ describe('UX-2 chip logic', () => {
     assert.equal(isAgentChipActive('paused'), false);
     assert.equal(agentChipLabel(true), 'Active');
     assert.equal(agentChipLabel(false), 'Inactive');
-    assert.equal(agentChipActionLabel(true), 'Deactivate agent');
-    assert.equal(agentChipActionLabel(false), 'Activate agent');
+    assert.equal(agentChipAccessibleName(true), 'Active, deactivate agent');
+    assert.equal(agentChipAccessibleName(false), 'Inactive, activate agent');
     assert.equal(canToggleAgentChip('active'), true);
     assert.equal(canToggleAgentChip('paused'), true);
     assert.equal(canToggleAgentChip('archived'), false);
@@ -115,16 +115,27 @@ describe('UX-2 chip markup', () => {
       React.createElement(AgentActiveChip, { agentId: 'a1', urlKey: 'a', initialStatus, inFlightHeartbeat }),
     );
 
-  it('active agent: "Active" button (type=button) whose accessible name is the action, "Deactivate agent"', () => {
+  it('active agent: "Active" button (type=button) named "Active, deactivate agent"', () => {
     const html = render('active');
-    assert.match(html, /<button[^>]*type="button"[^>]*aria-label="Deactivate agent"[^>]*>Active<\/button>/);
+    assert.match(html, /<button[^>]*type="button"[^>]*aria-label="Active, deactivate agent"[^>]*>Active<\/button>/);
     assert.doesNotMatch(html, /aria-pressed/);
   });
 
-  it('paused agent: "Inactive" button named "Activate agent"; the confirm dialog is closed by default', () => {
+  it('paused agent: "Inactive" button named "Inactive, activate agent"; the confirm dialog is closed by default', () => {
     const html = render('paused', { id: 'r1', status: 'running' });
-    assert.match(html, /<button[^>]*aria-label="Activate agent"[^>]*>Inactive<\/button>/);
+    assert.match(html, /<button[^>]*aria-label="Inactive, activate agent"[^>]*>Inactive<\/button>/);
     assert.doesNotMatch(html, /aria-pressed/);
     assert.doesNotMatch(html, /Make this agent inactive\?/);
+  });
+
+  it('label in name (WCAG 2.5.3): the accessible name starts with the visible text, for both states', () => {
+    for (const status of ['active', 'paused']) {
+      const html = render(status);
+      const m = html.match(/<button[^>]*aria-label="([^"]+)"[^>]*>([^<]+)<\/button>/);
+      assert.ok(m, `chip button rendered for ${status}`);
+      const [, name, visible] = m;
+      assert.ok(name.startsWith(`${visible},`), `"${name}" starts with the visible text "${visible}"`);
+      assert.match(name, /(de)?activate agent$/, 'and still says what a click does');
+    }
   });
 });

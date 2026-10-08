@@ -14,7 +14,7 @@ import {
   AgentValidationError,
   deleteAgent,
   getAgentByUrlKey,
-  setAgentActive,
+  setAgentActiveWithOutcome,
   updateAgentAssignedToolsets,
   updateAgentBudget,
   updateAgentCapabilities,
@@ -237,9 +237,15 @@ export async function PATCH(
           temperature: typeof body.temperature === 'number' ? body.temperature : undefined,
         });
         break;
-      case 'active':
-        updated = await setAgentActive(agent.id, body.active === true);
-        break;
+      case 'active': {
+        const outcome = await setAgentActiveWithOutcome(agent.id, body.active === true);
+        // #119 soft: report whether anything changed; deactivating an archived agent is a no-op.
+        return NextResponse.json({
+          agent: toJson(serializeAgent(outcome.agent)),
+          changed: outcome.changed,
+          ...(outcome.reason ? { reason: outcome.reason } : {}),
+        });
+      }
       case 'delete':
         await deleteAgent(agent.id, String(body.confirmUrlKey ?? ''));
         return NextResponse.json({ deleted: true });

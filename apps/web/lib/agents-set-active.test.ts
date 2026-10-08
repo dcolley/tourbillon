@@ -13,6 +13,7 @@ let setPayloads: Array<Record<string, unknown>>;
 
 describe('UX-2 setAgentActive writes status only', () => {
   let setAgentActive: typeof import('./agents').setAgentActive;
+  let setAgentActiveWithOutcome: typeof import('./agents').setAgentActiveWithOutcome;
 
   before(async () => {
     const Module = require('module');
@@ -49,7 +50,7 @@ describe('UX-2 setAgentActive writes status only', () => {
       }
       return originalRequire.apply(this, arguments as unknown as [string]);
     };
-    ({ setAgentActive } = await import('./agents'));
+    ({ setAgentActive, setAgentActiveWithOutcome } = await import('./agents'));
   });
 
   beforeEach(() => {
@@ -87,6 +88,23 @@ describe('UX-2 setAgentActive writes status only', () => {
     assert.equal(result.status, 'archived');
     assert.deepEqual(setPayloads, []);
     assert.equal(row.status, 'archived');
+  });
+
+  it('#119 soft: outcome reports the archived no-op as { changed: false, reason: "archived" }', async () => {
+    row = { id: 'agent-1', status: 'archived', runtimeConfig: { heartbeat: { enabled: true, intervalSec: 300 } } };
+    const outcome = await setAgentActiveWithOutcome('agent-1', false);
+    assert.equal(outcome.changed, false);
+    assert.equal(outcome.reason, 'archived');
+    assert.equal(outcome.agent.status, 'archived');
+    assert.deepEqual(setPayloads, []);
+    await assert.rejects(() => setAgentActiveWithOutcome('agent-1', true), { name: 'AgentValidationError' });
+  });
+
+  it('#119 soft: outcome.changed is true for a real status change and false when already in that state', async () => {
+    const off = await setAgentActiveWithOutcome('agent-1', false);
+    assert.deepEqual([off.changed, off.reason, off.agent.status], [true, undefined, 'paused']);
+    const again = await setAgentActiveWithOutcome('agent-1', false);
+    assert.deepEqual([again.changed, again.reason, again.agent.status], [false, undefined, 'paused']);
   });
 
   it('pending_approval → active is still refused, no write', async () => {
