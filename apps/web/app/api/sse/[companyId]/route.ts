@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server';
 import { getSseSubscribers } from '@/lib/sse';
+import { requireBoardCompany } from '@/lib/board-route-auth';
 
 /**
  * Server-Sent Events endpoint for real-time dashboard updates.
@@ -11,6 +12,13 @@ export async function GET(
   { params }: { params: Promise<{ companyId: string }> }
 ) {
   const { companyId } = await params;
+
+  // #106: board only, and only the board's own company stream (another company → 403).
+  const auth = await requireBoardCompany(req);
+  if (!auth.ok) return auth.response;
+  if (auth.value.id !== companyId) {
+    return Response.json({ error: 'Forbidden' }, { status: 403 });
+  }
 
   const stream = new ReadableStream({
     start(controller) {

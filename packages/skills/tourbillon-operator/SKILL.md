@@ -82,11 +82,14 @@ Sidebar (company-scoped): Dashboard, Approvals (`/approval`), Issues (`/issue`),
 - `POST /api/companies/:companyId/issues`
 - `PATCH /api/issues/:issueId` (status, assignee, comment)
 - `POST /api/companies/:companyId/goals` and project writes
-- `POST /api/approvals/:approvalId/decide`
 
 Do not keep retrying these with the company JWT.
 
 Agent run tokens (#110) are HMAC-signed `pm_run_`/`pm_chat_` tokens (`TOURBILLON_AGENT_TOKEN_SECRET`), checked against the DB (run still `running`, agent in that company) and expiring with the run. Only the scheduler and web chat can mint them; an operator cannot hand-craft one.
+
+## REST that needs board auth
+
+- `POST /api/approvals/:approvalId/decide` — board only. Agents can never decide: an agent run token gets 403, no board identity gets 401, and an approval from another company gets 404. Decide in the UI at `/approval` (board session), or over REST with a board JWT in `X-Company-Token` or a board session cookie.
 
 ## Operating rules
 

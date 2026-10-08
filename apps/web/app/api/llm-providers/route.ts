@@ -4,8 +4,12 @@ import {
   LlmProviderValidationError,
   listLlmProvidersPublic,
 } from '@/lib/llm-providers';
+import { requireBoardIdentity } from '@/lib/board-route-auth';
 
-export async function GET() {
+// #106: provider config is instance-global and steers all agent LLM traffic: board only.
+export async function GET(req: NextRequest) {
+  const auth = await requireBoardIdentity(req);
+  if (!auth.ok) return auth.response;
   try {
     const providers = await listLlmProvidersPublic();
     return NextResponse.json({ providers });
@@ -16,6 +20,8 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  const auth = await requireBoardIdentity(req);
+  if (!auth.ok) return auth.response;
   try {
     const body = (await req.json()) as {
       name?: string;

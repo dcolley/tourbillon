@@ -4,6 +4,7 @@ import { and, eq, inArray } from 'drizzle-orm';
 import { enqueueApprovalWake } from '@/lib/wake-client';
 import { addIssueComment } from '@/lib/issue-comments';
 import { publicOriginFromRequest } from '@tourbillon/shared';
+import { requireBoardCompany } from '@/lib/board-route-auth';
 
 type ApprovalPayload = Record<string, unknown> & {
   title?: string;
@@ -34,8 +35,11 @@ export async function POST(
   { params }: { params: Promise<{ approvalId: string }> }
 ) {
   const { approvalId } = await params;
-  // This route is called by human board members from the dashboard.
-  // In production, add session-based auth check here.
+  // #106: board only (dashboard session or board JWT). Agents can never decide approvals,
+  // including their own; another company's approval is 404.
+  const auth = await requireBoardCompany(req);
+  if (!auth.ok) return auth.response;
+  const company = auth.value;
   const body = await parseDecisionBody(req);
 
   const decision = body.decision as 'approved' | 'rejected';
@@ -46,7 +50,7 @@ export async function POST(
   }
 
   const approval = await db.query.approvals.findFirst({
-    where: eq(approvals.id, approvalId),
+    where: and(eq(approvals.id, approvalId), eq(approvals.companyId, company.id)),
   });
 
   if (!approval) return NextResponse.json({ error: 'Not found' }, { status: 404 });
@@ -60,7 +64,7 @@ export async function POST(
     const [row] = await tx
       .update(approvals)
       .set({ status: decision, note, decidedAt: new Date(), updatedAt: new Date() })
-      .where(eq(approvals.id, approvalId))
+      .where(and(eq(approvals.id, approvalId), eq(approvals.companyId, company.id)))
       .returning();
 
     if (issueIds.length > 0) {
