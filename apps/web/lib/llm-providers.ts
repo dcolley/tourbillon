@@ -86,20 +86,45 @@ export function redactHeaderValues(headers: Record<string, string>): Record<stri
   return Object.fromEntries(Object.keys(headers).map((name) => [name, '']));
 }
 
+/** Blank = empty or whitespace-only (a header value can't meaningfully be whitespace). */
+function isBlankHeaderValue(value: unknown): boolean {
+  return typeof value !== 'string' || value.trim() === '';
+}
+
+/**
+ * Submitted headers must be a plain object mapping names to string values. Anything else
+ * (null, an array, a string, non-string values) is a 400, not a 500.
+ */
+export function validateHeadersInput(value: unknown): Record<string, string> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new LlmProviderValidationError('Headers must be an object of header names to string values.');
+  }
+  for (const v of Object.values(value)) {
+    if (typeof v !== 'string') {
+      throw new LlmProviderValidationError('Header values must be strings.');
+    }
+  }
+  return value as Record<string, string>;
+}
+
 /**
  * #106: headers are write-only, so the UI round-trips blank values for headers it did not
- * change. A blank value for an existing header keeps the stored value; headers left out are
- * removed; non-blank values replace.
+ * change. A blank (empty or whitespace-only) value for an existing header keeps the stored
+ * value; headers left out are removed; non-blank values replace.
+ * Own-property checks only: names like `constructor`, `toString` or `__proto__` are ordinary
+ * header names, never inherited object members. Object.fromEntries keeps `__proto__` as an
+ * own key.
  */
 export function mergeWriteOnlyHeaders(
   existing: Record<string, string>,
   submitted: Record<string, string>,
 ): Record<string, string> {
-  const merged: Record<string, string> = {};
-  for (const [name, value] of Object.entries(submitted)) {
-    merged[name] = value === '' && name in existing ? existing[name] : value;
-  }
-  return merged;
+  return Object.fromEntries(
+    Object.entries(submitted).map(([name, value]) => [
+      name,
+      isBlankHeaderValue(value) && Object.hasOwn(existing, name) ? existing[name] : value,
+    ]),
+  );
 }
 
 function toPublic(row: LlmProvider): LlmProviderPublic {
@@ -234,7 +259,7 @@ export function assertNewHeaderValues(
   submitted: Record<string, string>,
 ): void {
   const missing = Object.entries(submitted)
-    .filter(([name, value]) => !(name in existing) && (typeof value !== 'string' || value.trim() === ''))
+    .filter(([name, value]) => !Object.hasOwn(existing, name) && isBlankHeaderValue(value))
     .map(([name]) => name);
   if (missing.length > 0) {
     throw new LlmProviderValidationError(
@@ -250,7 +275,7 @@ export async function createLlmProvider(input: CreateLlmProviderInput): Promise<
   const type = parseProviderType(input.type);
   const baseURL = validateBaseURL(input.baseURL || defaultBaseURLForProviderType(type));
   const apiMode = parseModelApiMode(input.apiMode) ?? 'chat';
-  const headers = input.headers ?? {};
+  const headers = input.headers == null ? {} : validateHeadersInput(input.headers);
   assertNewHeaderValues({}, headers);
   const isDefault = input.isDefault ?? false;
   const defaultModelSettings = validateDefaultModelSettings(input.defaultModelSettings);
@@ -299,8 +324,9 @@ export async function updateLlmProvider(
   if (input.headers !== undefined) {
     const storedHeaders = parseHeaders(existing.headers);
     // New/renamed names need a value; blank values for stored names keep the stored value.
-    assertNewHeaderValues(storedHeaders, input.headers);
-    updates.headers = mergeWriteOnlyHeaders(storedHeaders, input.headers);
+    const submitted = validateHeadersInput(input.headers); // null → 400
+    assertNewHeaderValues(storedHeaders, submitted);
+    updates.headers = mergeWriteOnlyHeaders(storedHeaders, submitted);
   }
   if (input.apiMode !== undefined) {
     const apiMode = parseModelApiMode(input.apiMode);
