@@ -11,7 +11,7 @@ import { NextRequest } from 'next/server';
 import { mintChatToken, mintRunToken } from '@tourbillon/shared/agent-token';
 import { validateRunToken } from '../../lib/auth/run-token';
 import type { ApprovalDetailRepo } from '../../lib/approval-detail';
-import { PLANTED_VALUES, plantedRepo } from '../../lib/approval-detail-secrets.fixture';
+import { PLANTED, PLANTED_VALUES, plantedRepo } from '../../lib/approval-detail-secrets.fixture';
 
 const BOARD_SECRET = 'test-operator-secret-106';
 // #108 refuses the public default BETTER_AUTH_SECRET whatever NODE_ENV is, so board JWTs are
@@ -223,7 +223,7 @@ describe('#106 board-guarded routes', () => {
                 return r.entityId === aid || d.boardApprovalId === aid || d.approvalId === aid;
               }),
             getCompanySettings: async () => ({}),
-            getSecretValues: async () => [],
+            getSecretValues: async () => ({ values: [], vaultUnavailable: false }),
           }),
         };
       }
@@ -371,6 +371,34 @@ describe('#106 board-guarded routes', () => {
           assert.match(text, /Retry with \[redacted\]/);
           assert.match(text, /Use vault \[redacted\]/);
         }
+      } finally {
+        approvalRepoOverride = null;
+      }
+    });
+
+    it('vault values unavailable: still 200, free text hidden, status/dates/ids kept, no planted value (#130 B3)', async () => {
+      approvalRepoOverride = {
+        ...plantedRepo(),
+        // Only the provider value is known: the vault-only values must not show anywhere.
+        getSecretValues: async () => ({ values: [PLANTED.provider], vaultUnavailable: true }),
+      };
+      try {
+        const res = await routes.approval.GET(await request('boardA', '/api/approvals/appr-a'), ctx({ approvalId: 'appr-a' }));
+        assert.equal(res.status, 200);
+        const text = await res.text();
+        assert.deepEqual(PLANTED_VALUES.filter((v) => text.includes(v) || text.includes(encodeURIComponent(v))), []);
+        const body = JSON.parse(text) as {
+          redactionUnavailable: boolean;
+          approval: Record<string, unknown>;
+          linkedIssues: Array<{ id: string; identifier: string; title: string }>;
+        };
+        const H = 'hidden: redaction unavailable';
+        assert.equal(body.redactionUnavailable, true);
+        for (const f of ['payload', 'title', 'summary', 'note', 'hitlyError']) assert.equal(body.approval[f], H, f);
+        assert.deepEqual(body.linkedIssues.map((i) => [i.id, i.identifier, i.title]), [['issue-a1', 'TOUR-1', H]]);
+        assert.equal(body.approval.id, 'appr-a');
+        assert.equal(body.approval.status, 'rejected');
+        assert.equal(body.approval.decidedAt, '2026-10-08T10:30:00.000Z');
       } finally {
         approvalRepoOverride = null;
       }

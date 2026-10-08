@@ -14,11 +14,71 @@
  * - Optionally caps size and depth (payload display; Test S1).
  *
  * Known secret values are only ever held in memory here: never logged, never returned.
+ *
+ * Vault values (#130 B3): when the company's vault rows can't all be decrypted (key unset, wrong
+ * or rotated, or a corrupt row), the redactor can't know every value to remove, so every free-text
+ * field that could echo one is replaced with REDACTION_UNAVAILABLE (`redactor.freeText`). Status,
+ * dates, actors and ids still render; key-name, Bearer and URL scrubbing still run on everything.
  */
 import { SECRET_VALUE_MIN_LENGTH } from '@tourbillon/shared';
+import { decryptCredential } from '@tourbillon/shared/vault-encryption';
 import { REDACTED, scrubProviderSecrets } from './provider-safety';
 
 export { REDACTED };
+
+/** Shown instead of free text when the vault values needed to scrub it can't be loaded. */
+export const REDACTION_UNAVAILABLE = 'hidden: redaction unavailable';
+
+/** Known secret values for one company, plus whether the vault part is complete. */
+export interface KnownSecretValues {
+  values: string[];
+  /** True when one or more vault rows (or the vault key) could not be used: hide free text. */
+  vaultUnavailable: boolean;
+}
+
+/**
+ * Policy for a vault where SOME rows decrypt and others don't. `false` (default): any row that
+ * can't be decrypted hides free text, like a missing or wrong key. Set to `true` to skip just the
+ * bad rows and keep rendering with the rest. A missing key, or every row failing (wrong/rotated
+ * key), always hides free text whatever this says.
+ */
+export const SKIP_UNDECRYPTABLE_VAULT_ROWS: boolean = false;
+
+/**
+ * Plain strings from a company's vault rows (API-key strings, OAuth access/refresh tokens), for
+ * redaction only. Never throws. Logs only counts and row ids (never values or ciphertext).
+ */
+export function vaultValuesForRedaction(
+  rows: ReadonlyArray<{ id: string; encryptedValue: string }>,
+  opts: { skipUndecryptableRows?: boolean; log?: (msg: string, meta: Record<string, unknown>) => void } = {},
+): KnownSecretValues {
+  const skipBadRows = opts.skipUndecryptableRows ?? SKIP_UNDECRYPTABLE_VAULT_ROWS;
+  const log = opts.log ?? ((msg, meta) => console.warn(msg, meta));
+  if (rows.length === 0) return { values: [], vaultUnavailable: false };
+  const keyMissing = !process.env.VAULT_ENCRYPTION_KEY;
+  const values: string[] = [];
+  const failedRowIds: string[] = [];
+  for (const row of rows) {
+    try {
+      const v = decryptCredential(row.encryptedValue);
+      if (typeof v === 'string') values.push(v);
+      else values.push(...[v.accessToken, v.refreshToken].filter((x): x is string => typeof x === 'string'));
+    } catch {
+      failedRowIds.push(row.id);
+    }
+  }
+  if (failedRowIds.length === 0) return { values, vaultUnavailable: false };
+  const whole = keyMissing || failedRowIds.length === rows.length;
+  const vaultUnavailable = whole || !skipBadRows;
+  log('[approval redaction] vault values unavailable', {
+    reason: keyMissing ? 'key_missing' : whole ? 'no_row_decrypts' : 'row_decrypt_failed',
+    rows: rows.length,
+    failed: failedRowIds.length,
+    failedRowIds: failedRowIds.slice(0, 50),
+    hidingFreeText: vaultUnavailable,
+  });
+  return { values, vaultUnavailable };
+}
 
 /** Normalised (lower-case, alphanumerics only) fragments that mark a key as credential-bearing. */
 const SENSITIVE_KEY_PARTS = [
@@ -36,9 +96,13 @@ const SENSITIVE_KEY_PARTS = [
   'sessionid',
   'encryptedvalue',
   'bearer',
+  'pwd',
+  'dsn',
+  'connectionstring',
+  'xauth',
 ];
 /** Whole (normalised) key names that are credentials but too short to match as fragments. */
-const SENSITIVE_KEY_EXACT = new Set(['auth', 'jwt', 'otp', 'pin', 'sig', 'signature']);
+const SENSITIVE_KEY_EXACT = new Set(['auth', 'jwt', 'otp', 'pin', 'sig', 'signature', 'pass']);
 
 const normaliseKey = (key: string) => key.toLowerCase().replace(/[^a-z0-9]/g, '');
 
@@ -63,9 +127,21 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 
 /** `apiKey=…`, `"password": "…"`, `x-api-key: …` inside free text (Bearer/Basic handled later). */
 const SENSITIVE_ASSIGNMENT_RE =
-  /(\b[\w-]*(?:token|api[-_]?key|passw(?:or)?d|secret|authorization|credential|private[-_]?key|access[-_]?key)["']?\s*[:=]\s*["']?)(?!\[redacted\])(?!(?:Bearer|Basic)\s)[^\s"'&,;}<>()[\]]+/gi;
+  /(\b(?:[\w-]*(?:token|api[-_]?key|passw(?:or)?d|pwd|secret|authorization|credential|private[-_]?key|access[-_]?key|dsn|connection[-_]?string|x-auth)|pass)["']?\s*[:=]\s*["']?)(?!\[redacted\])(?!(?:Bearer|Basic)\s)[^\s"'&,;}<>()[\]]+/gi;
 /** Whole `Cookie:` / `Set-Cookie:` header lines. */
 const COOKIE_HEADER_RE = /(\b(?:set-)?cookie\s*:\s*)(?!\[redacted\])[^\r\n]+/gi;
+/** PEM blocks (keys, certificates); an unterminated block is cut to the end of the string. */
+const PEM_BLOCK_RE = /-----BEGIN [A-Z0-9 ]{1,64}-----(?:[\s\S]*?-----END [A-Z0-9 ]{1,64}-----|[\s\S]*$)/g;
+/**
+ * Userinfo password in a URL of any scheme (`postgres://user:pw@`, `redis://:pw@`, `wss://…`);
+ * http(s) userinfo is already removed whole by redactUrlsInText. Without a `:` the whole userinfo
+ * goes (`scheme://token@host`). Up to the last `@` before the path, so `@` in a password is covered.
+ */
+const URL_USERINFO_RE = /\b([a-z][a-z0-9+.-]*:\/\/)([^\s/?#"'<>`]*)@/gi;
+const scrubUserinfo = (_m: string, scheme: string, userinfo: string) => {
+  const colon = userinfo.indexOf(':');
+  return colon === -1 ? `${scheme}${REDACTED}@` : `${scheme}${userinfo.slice(0, colon)}:${REDACTED}@`;
+};
 /** Well-known credential shapes, redacted wherever they appear. */
 const TOKEN_SHAPES_RE =
   /\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})/g;
@@ -91,8 +167,16 @@ export const PAYLOAD_DISPLAY_CAP: DisplayCap = {
 };
 
 export interface ApprovalRedactor {
+  /** True when vault values could not be loaded (see REDACTION_UNAVAILABLE). */
+  readonly unavailable: boolean;
   /** Scrub one string. */
   text(s: string): string;
+  /**
+   * Free text that may echo a vault value (payload title/summary, notes, HITLy error, issue
+   * titles): REDACTION_UNAVAILABLE when the vault values are unavailable (empty stays empty),
+   * otherwise `text(s)`.
+   */
+  freeText(s: string): string;
   /** Deep copy with credential keys and every string scrubbed. Dates/class instances pass through. */
   deep<T>(value: T): T;
   /** As `deep`, plus the size/depth cap; `truncated` says whether anything was cut. */
@@ -105,7 +189,11 @@ export interface ApprovalRedactor {
  * SECRET_VALUE_MIN_LENGTH are ignored for value matching (they'd mangle unrelated text); they
  * are still covered by the key-name rule.
  */
-export function createApprovalRedactor(knownValues: Iterable<string | null | undefined> = []): ApprovalRedactor {
+export function createApprovalRedactor(
+  knownValues: Iterable<string | null | undefined> = [],
+  opts: { vaultUnavailable?: boolean } = {},
+): ApprovalRedactor {
+  const unavailable = opts.vaultUnavailable === true;
   const variants: Array<[variant: string, secret: string]> = [];
   for (const raw of new Set(knownValues)) {
     if (typeof raw !== 'string' || raw.trim().length < SECRET_VALUE_MIN_LENGTH) continue;
@@ -124,7 +212,8 @@ export function createApprovalRedactor(knownValues: Iterable<string | null | und
     for (const [v, secret] of variants) if (s.includes(v)) present.add(secret);
     // Known values (whole, all encodings), Bearer/Basic and URL userinfo/query first (#125),
     // then credential-looking assignments, Cookie headers and token shapes.
-    return scrubProviderSecrets(s, present)
+    return scrubProviderSecrets(s.replace(PEM_BLOCK_RE, REDACTED), present)
+      .replace(URL_USERINFO_RE, scrubUserinfo)
       .replace(COOKIE_HEADER_RE, `$1${REDACTED}`)
       .replace(SENSITIVE_ASSIGNMENT_RE, `$1${REDACTED}`)
       .replace(TOKEN_SHAPES_RE, REDACTED);
@@ -185,8 +274,12 @@ export function createApprovalRedactor(knownValues: Iterable<string | null | und
     return out;
   };
 
+  const freeText = (s: string): string => (unavailable && s ? REDACTION_UNAVAILABLE : text(s));
+
   return {
+    unavailable,
     text,
+    freeText,
     deep: <T,>(value: T) => walk(value, null, { left: Infinity, truncated: false }, 0, null) as T,
     capped(value, cap = PAYLOAD_DISPLAY_CAP) {
       const state = { left: cap.maxTotalChars, truncated: false };

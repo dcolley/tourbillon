@@ -31,6 +31,12 @@ export function ApprovalDetailView({
         </Link>
       </div>
 
+      {detail.redactionUnavailable ? (
+        <p role="status" className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          Some text is hidden: stored secrets could not be loaded to redact it. Status, dates and ids are shown.
+        </p>
+      ) : null}
+
       <PageHeader
         title={approval.title}
         description={approval.summary ?? undefined}
@@ -169,7 +175,7 @@ export function ApprovalDetailView({
         </CardHeader>
         <CardContent>
           <pre className="max-h-[32rem] overflow-auto rounded-md bg-muted/40 p-3 text-xs whitespace-pre-wrap break-words">
-            {JSON.stringify(approval.payload, null, 2)}
+            {typeof approval.payload === 'string' ? approval.payload : JSON.stringify(approval.payload, null, 2)}
           </pre>
           <p className="mt-2 text-xs text-muted-foreground">
             Secrets are shown as [redacted].

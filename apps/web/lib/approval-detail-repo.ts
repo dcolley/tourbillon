@@ -2,21 +2,9 @@
 import { db, approvals, agents, issues, activityLog, companies, llmProviders, vaultSecrets } from '@tourbillon/db';
 import { and, arrayOverlaps, asc, desc, eq, inArray, ne, or, sql } from 'drizzle-orm';
 import { collectSecretValueEntries } from '@tourbillon/shared';
-import { decryptCredential } from '@tourbillon/shared/vault-encryption';
 import { RELATED_APPROVALS_LIMIT, type ApprovalDetailRepo } from './approval-detail';
+import { vaultValuesForRedaction } from './approval-redaction';
 import { providerSecretValues } from './provider-safety';
-
-/** Plain strings from a decrypted vault value (API key string, or OAuth access/refresh tokens). */
-export function vaultValueStrings(encryptedValue: string): string[] {
-  try {
-    const v = decryptCredential(encryptedValue);
-    if (typeof v === 'string') return [v];
-    return [v.accessToken, v.refreshToken].filter((s): s is string => typeof s === 'string');
-  } catch {
-    // No/odd VAULT_ENCRYPTION_KEY or a corrupt row: nothing to add (never log the value).
-    return [];
-  }
-}
 
 type Db = typeof db;
 
@@ -104,7 +92,7 @@ export function createApprovalDetailRepo(database: Db = db): ApprovalDetailRepo 
     async getSecretValues(companyId) {
       const [vaultRows, agentRows, providerRows] = await Promise.all([
         database
-          .select({ encryptedValue: vaultSecrets.encryptedValue })
+          .select({ id: vaultSecrets.id, encryptedValue: vaultSecrets.encryptedValue })
           .from(vaultSecrets)
           .where(eq(vaultSecrets.companyId, companyId)),
         database
@@ -116,8 +104,10 @@ export function createApprovalDetailRepo(database: Db = db): ApprovalDetailRepo 
           .select({ apiKey: llmProviders.apiKey, headers: llmProviders.headers, baseURL: llmProviders.baseURL })
           .from(llmProviders),
       ]);
-      return [
-        ...vaultRows.flatMap((r) => vaultValueStrings(r.encryptedValue)),
+      // B3: rows that can't be decrypted are reported (vaultUnavailable), never silently dropped.
+      const vault = vaultValuesForRedaction(vaultRows);
+      const values = [
+        ...vault.values,
         ...agentRows.flatMap((r) => collectSecretValueEntries(r.runtimeConfig).map(([, v]) => v)),
         ...providerRows.flatMap((r) =>
           providerSecretValues({
@@ -127,6 +117,7 @@ export function createApprovalDetailRepo(database: Db = db): ApprovalDetailRepo 
           }),
         ),
       ];
+      return { values, vaultUnavailable: vault.vaultUnavailable };
     },
   };
 }

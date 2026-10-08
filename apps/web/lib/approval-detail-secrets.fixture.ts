@@ -157,7 +157,10 @@ export function plantedRepo(over: Partial<ApprovalRow> = {}): ApprovalDetailRepo
       return { hitlyGate: { apiKey: p.settings }, mcpCredentials: { github: p.actorName } };
     },
     async getSecretValues() {
-      return [p.vault, p.title, p.historyNote, p.provider, p.issueTitle, p.decisionNote, p.relatedVault];
+      return {
+        values: [p.vault, p.title, p.historyNote, p.provider, p.issueTitle, p.decisionNote, p.relatedVault],
+        vaultUnavailable: false,
+      };
     },
     async getRelatedApprovals(companyId, approvalId) {
       return companyId === 'company-a' ? plantedRelatedApprovals().filter((r) => r.id !== approvalId) : [];

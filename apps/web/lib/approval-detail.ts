@@ -6,7 +6,13 @@
  * this file stays testable.
  */
 import { collectSecretValueEntries } from '@tourbillon/shared';
-import { collectValuesUnderSensitiveKeys, createApprovalRedactor, PAYLOAD_DISPLAY_CAP } from './approval-redaction';
+import {
+  collectValuesUnderSensitiveKeys,
+  createApprovalRedactor,
+  PAYLOAD_DISPLAY_CAP,
+  REDACTION_UNAVAILABLE,
+  type KnownSecretValues,
+} from './approval-redaction';
 
 export interface ApprovalRow {
   id: string;
@@ -67,8 +73,9 @@ export interface ApprovalDetailRepo {
   /**
    * Secret values to scrub (vault secrets and agent runtime secrets of this company, LLM provider
    * keys/header values). Held in memory for redaction only: never logged or returned.
+   * `vaultUnavailable` when vault rows could not be decrypted: free text is then hidden.
    */
-  getSecretValues(companyId: string): Promise<string[]>;
+  getSecretValues(companyId: string): Promise<KnownSecretValues>;
   /**
    * Other approvals in this company that share at least one linked issue (newest first).
    * Optional so older repos/tests without it simply show no related approvals.
@@ -128,6 +135,11 @@ export interface ApprovalDetail {
   history: ApprovalHistoryEvent[];
   /** Other approvals on the same linked issues (resubmissions show up here), newest first. */
   relatedApprovals: RelatedApproval[];
+  /**
+   * True when vault values could not be loaded: payload, title, summary, notes, HITLy error and
+   * issue titles show REDACTION_UNAVAILABLE; status, dates, actors and ids still render.
+   */
+  redactionUnavailable: boolean;
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -193,7 +205,11 @@ export function buildApprovalHistory(
   opts: { requesterName?: string | null; issuesById?: Map<string, { id: string; identifier: string }> } = {},
 ): ApprovalHistoryEvent[] {
   const requester = opts.requesterName ?? 'Unknown agent';
-  const issueRef = (id: string) => opts.issuesById?.get(id) ?? { id, identifier: id.slice(0, 8) };
+  // Only id + identifier: history never carries the issue title (or any other issue field).
+  const issueRef = (id: string) => {
+    const issue = opts.issuesById?.get(id);
+    return issue ? { id: issue.id, identifier: issue.identifier } : { id, identifier: id.slice(0, 8) };
+  };
   const own = (row: ApprovalActivityRow) =>
     row.companyId === approval.companyId && row.entityType === 'approval' && row.entityId === approval.id;
   const actorOf = (row: ApprovalActivityRow) =>
@@ -307,7 +323,7 @@ export async function loadApprovalDetail(
   if (!approval || approval.companyId !== companyId) return null;
 
   const issueIds = Array.isArray(approval.issueIds) ? approval.issueIds : [];
-  const [agent, issueRows, activity, settings, secretValues, relatedRows] = await Promise.all([
+  const [agent, issueRows, activity, settings, known, relatedRows] = await Promise.all([
     approval.requestedByAgentId ? repo.getAgent(companyId, approval.requestedByAgentId) : Promise.resolve(null),
     issueIds.length ? repo.getIssues(companyId, issueIds) : Promise.resolve([]),
     repo.getActivity(companyId, approval.id, issueIds),
@@ -326,33 +342,55 @@ export async function loadApprovalDetail(
   // keys (repo), company settings, the requester, and anything held under a credential key in
   // the payload, activity details or a related approval's payload (e.g. hitlyResumeToken), so the
   // same value is also scrubbed where it was echoed (title, HITLy error, notes, related titles…).
+  // B3: if the vault values can't all be loaded, every free-text field that could echo one is
+  // hidden (redact.freeText) instead of rendered with an incomplete list.
   const redact = createApprovalRedactor([
-    ...secretValues,
+    ...known.values,
     ...collectSecretValueEntries(settings).map(([, v]) => v),
     ...collectSecretValueEntries(requester?.runtimeConfig).map(([, v]) => v),
     ...collectValuesUnderSensitiveKeys(approval.payload),
     ...activity.flatMap((row) => collectValuesUnderSensitiveKeys(row.details)),
     ...relatedRows.flatMap((row) => collectValuesUnderSensitiveKeys(row.payload)),
-  ]);
+  ], { vaultUnavailable: known.vaultUnavailable });
+  const hidden = redact.unavailable;
 
   const rawPayload = isPlainObject(approval.payload) ? approval.payload : {};
-  const { value: payload, truncated: payloadTruncated } = redact.capped(approval.payload ?? {}, PAYLOAD_DISPLAY_CAP);
+  const { value: payload, truncated: payloadTruncated } = hidden
+    ? { value: REDACTION_UNAVAILABLE, truncated: false }
+    : redact.capped(approval.payload ?? {}, PAYLOAD_DISPLAY_CAP);
   // Scrub before clipping, so a cut can never leave half a secret behind.
-  const title = clip(redact.text(str(rawPayload.title)?.trim() || approval.type), APPROVAL_TITLE_MAX_CHARS);
+  const title = clip(redact.freeText(str(rawPayload.title)?.trim() || approval.type), APPROVAL_TITLE_MAX_CHARS);
   const rawSummary = str(rawPayload.summary)?.trim();
-  const summary = rawSummary ? clip(redact.text(rawSummary), APPROVAL_SUMMARY_MAX_CHARS) : null;
+  const summary = rawSummary ? clip(redact.freeText(rawSummary), APPROVAL_SUMMARY_MAX_CHARS) : null;
+  const optText = (s: string | null) => (s ? redact.freeText(s) : s);
 
+  const history = buildApprovalHistory(approval, activity, { requesterName: requester?.name ?? null, issuesById });
   const detail: ApprovalDetail = {
-    approval: { ...approval, payload, payloadTruncated, title, summary },
+    approval: {
+      ...approval,
+      payload,
+      payloadTruncated,
+      title,
+      summary,
+      note: optText(approval.note),
+      hitlyError: optText(approval.hitlyError),
+    },
     requester: requester ? { id: requester.id, name: requester.name, urlKey: requester.urlKey } : null,
     decidedBy: decidedByLabel(approval),
     linkedIssues: issueIds
       .map((id) => issuesById.get(id))
       .filter((i): i is ApprovalIssueRow => Boolean(i))
-      .map(({ companyId: _c, ...i }) => ({ ...i, haltedByThis: i.boardApprovalId === approval.id })),
+      .map(({ companyId: _c, ...i }) => ({ ...i, title: redact.freeText(i.title), haltedByThis: i.boardApprovalId === approval.id })),
     missingIssueIds: issueIds.filter((id) => !issuesById.has(id)),
-    history: buildApprovalHistory(approval, activity, { requesterName: requester?.name ?? null, issuesById }),
-    relatedApprovals: relatedApprovalsFor(approval, relatedRows, redact.text),
+    history: hidden
+      ? history.map((e) => ({
+          ...e,
+          ...(e.note ? { note: REDACTION_UNAVAILABLE } : {}),
+          ...(e.kind === 'hitly_error' ? { text: `HITLy error: ${REDACTION_UNAVAILABLE}` } : {}),
+        }))
+      : history,
+    redactionUnavailable: hidden,
+    relatedApprovals: relatedApprovalsFor(approval, relatedRows, redact.freeText),
   };
   // B2: the same scrub over the whole object (note, hitlyError, issue titles, history text/notes,
   // actor names…), so the page, its RSC data and the JSON route all get this one copy.
@@ -405,5 +443,6 @@ export function approvalDetailJson(d: ApprovalDetail) {
     missingIssueIds: d.missingIssueIds,
     history: d.history.map((e) => ({ ...e, at: iso(e.at) })),
     relatedApprovals: d.relatedApprovals.map((r) => ({ ...r, createdAt: iso(r.createdAt) })),
+    redactionUnavailable: d.redactionUnavailable,
   };
 }
