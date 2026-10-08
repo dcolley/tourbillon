@@ -10,9 +10,12 @@ import { NextRequest } from 'next/server';
  * @/lib/mobile-auth (jose); agent bearers are refused by pm_run_/pm_chat_ prefix. All credential values are fakes.
  */
 
-const SESSION_SECRET = new TextEncoder().encode(
-  process.env.BETTER_AUTH_SECRET || 'change-me-in-production'
-);
+// #108 B3: board JWTs signed with the public default BETTER_AUTH_SECRET are refused whatever
+// NODE_ENV is, so the fixture signs with a non-default test secret (set before the route loads,
+// since lib/mobile-auth reads it at import time on main).
+const JWT_SECRET = 'test-better-auth-secret-not-default';
+process.env.BETTER_AUTH_SECRET = JWT_SECRET;
+const SESSION_SECRET = new TextEncoder().encode(JWT_SECRET);
 
 async function boardTokenFor(companyId: string): Promise<string> {
   return new SignJWT({ companyId })
@@ -125,6 +128,7 @@ describe('/api/agents/:agentId/secrets (#103)', () => {
   });
 
   beforeEach(() => {
+    process.env.BETTER_AUTH_SECRET = JWT_SECRET;
     agents = freshAgents();
     activeCompanyCookie = null;
     writes = 0;
