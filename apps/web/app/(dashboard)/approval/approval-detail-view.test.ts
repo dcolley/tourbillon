@@ -81,6 +81,16 @@ describe('approval details page: rendered HTML', () => {
     assert.match(html, /role="alert"[^>]*>A reason is required to reject/);
   });
 
+  it('S2: reason_too_long and reason_not_string alerts', async () => {
+    const d = await loadApprovalDetail(plantedRepo({ status: 'pending', decidedAt: null }), 'company-a', 'appr-a');
+    assert.ok(d);
+    const long = renderToStaticMarkup(React.createElement(ApprovalDetailView as never, { detail: d, reasonError: 'reason_too_long' }));
+    assert.match(long, /role="alert"[^>]*>The reason is too long: at most 2,000 characters/);
+    const notString = renderToStaticMarkup(React.createElement(ApprovalDetailView as never, { detail: d, reasonError: 'reason_not_string' }));
+    assert.match(notString, /role="alert"[^>]*>The reason must be text/);
+    assert.match(long, /maxLength="2000"|maxlength="2000"/);
+  });
+
   it('issue links are URL-encoded (Test S7)', async () => {
     const repo = plantedRepo({ issueIds: ['iss/../x?y'] });
     repo.getIssues = async (companyId) => [

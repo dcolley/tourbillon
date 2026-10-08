@@ -21,6 +21,7 @@ import { addIssueComment } from '@/lib/issue-comments';
 import { triggerAgentHeartbeat } from '@/lib/heartbeat';
 import { enqueueApprovalWake } from '@/lib/wake-client';
 import { APPROVAL_ACTORS, approvalDecidedActivity } from '@/lib/approval-activity';
+import { checkDecisionReason } from '@/lib/approval-reason';
 
 interface McpRequest {
   jsonrpc: '2.0';
@@ -630,7 +631,8 @@ const MCP_TOOLS: McpTool[] = [
         },
         reason: {
           type: 'string',
-          description: 'Decision reason/note. Required (non-blank) when decision is rejected: it is the Board feedback the requesting agent gets. Optional for approved.',
+          maxLength: 2000,
+          description: 'Decision reason/note (string, trimmed, at most 2000 characters; longer is refused). Required (non-blank) when decision is rejected: it is the Board feedback the requesting agent gets. Optional for approved.',
         },
       },
       required: ['company_id', 'approval_id', 'decision'],
@@ -1479,7 +1481,7 @@ async function handleListApprovals(tokenCompanyId: string, params: any) {
 }
 
 async function handleDecideApproval(tokenCompanyId: string, params: any) {
-  const { company_id, approval_id, decision, reason } = params;
+  const { company_id, approval_id, decision, reason: rawReason } = params;
   if (!company_id) {
     throw new Error('company_id is required');
   }
@@ -1493,9 +1495,15 @@ async function handleDecideApproval(tokenCompanyId: string, params: any) {
   // Same rule as the board decide route: a reject is the board's "request changes", and the
   // reason is the feedback the requesting agent gets. Checked before any read or write, so a
   // blank reject changes nothing and writes no activity row.
-  if (decision === 'rejected' && (typeof reason !== 'string' || !reason.trim())) {
-    throw new Error('reason is required to reject (it is sent to the requesting agent as Board feedback)');
+  const checkedReason = checkDecisionReason(decision, rawReason);
+  if (!checkedReason.ok) {
+    throw new Error(
+      checkedReason.code === 'reason_required'
+        ? 'reason is required to reject (it is sent to the requesting agent as Board feedback)'
+        : checkedReason.message,
+    );
   }
+  const reason = checkedReason.reason;
 
   const approval = await db.query.approvals.findFirst({
     where: eq(approvals.id, approval_id),

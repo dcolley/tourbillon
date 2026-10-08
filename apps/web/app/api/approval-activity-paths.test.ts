@@ -159,7 +159,7 @@ describe('approval.created / approval.decided activity rows (every path)', () =>
   before(async () => {
     const Module = require('module');
     const originalRequire = Module.prototype.require;
-    const REAL_LIB = new Set(['approval-activity', 'approval-detail', 'approval-links']);
+    const REAL_LIB = new Set(['approval-activity', 'approval-detail', 'approval-links', 'approval-reason']);
     Module.prototype.require = function (id: string) {
       if (id === '@tourbillon/db') return { db: fakeDb, ...tables };
       if (id === 'drizzle-orm') return fakeDrizzle;
@@ -298,6 +298,55 @@ describe('approval.created / approval.decided activity rows (every path)', () =>
       assert.equal(store.approvals[0].status, 'pending');
     });
 
+
+    it('JSON reject with a non-string note → 400 reason_not_string, still pending', async () => {
+      pending('appr-a', 'company-a');
+      const res = await routes.decide(
+        json('/api/approvals/appr-a/decide', { decision: 'rejected', note: 42 }, { 'x-test-board-company': 'company-a' }),
+        ctx({ approvalId: 'appr-a' }),
+      );
+      assert.equal(res.status, 400);
+      const body = (await res.json()) as { error: string; code: string };
+      assert.equal(body.code, 'reason_not_string');
+      assert.match(body.error, /must be a string/);
+      assert.equal(store.approvals[0].status, 'pending');
+      assert.equal(store.activityLog.length, 0);
+    });
+
+    it('JSON reject with only zero-width characters → 400 reason_required', async () => {
+      pending('appr-a', 'company-a');
+      const res = await decide('company-a', 'appr-a', 'rejected', '\u200B\u200C\u200D\u2060\uFEFF');
+      assert.equal(res.status, 400);
+      assert.equal(((await res.json()) as { code: string }).code, 'reason_required');
+      assert.equal(store.approvals[0].status, 'pending');
+    });
+
+    it('JSON reject over 2000 chars → 400; at the cap is stored trimmed', async () => {
+      pending('appr-a', 'company-a');
+      pending('appr-b', 'company-a');
+      const over = await decide('company-a', 'appr-a', 'rejected', 'z'.repeat(2001));
+      assert.equal(over.status, 400);
+      assert.equal(((await over.json()) as { code: string }).code, 'reason_too_long');
+      assert.equal(store.approvals[0].status, 'pending');
+      const ok = 'w'.repeat(2000);
+      const res = await decide('company-a', 'appr-b', 'rejected', `\u200B${ok}  `);
+      assert.equal(res.status, 200);
+      assert.equal(store.approvals[1].note, ok);
+    });
+
+    it('HTML form reject over 2000 chars → 303 with error=reason_too_long', async () => {
+      pending('appr-a', 'company-a');
+      const req = new NextRequest('http://localhost/api/approvals/appr-a/decide', {
+        method: 'POST',
+        headers: { accept: 'text/html', 'x-test-board-company': 'company-a', 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ decision: 'rejected', note: 'q'.repeat(2001) }).toString(),
+      });
+      const res = await routes.decide(req, ctx({ approvalId: 'appr-a' }));
+      assert.equal(res.status, 303);
+      assert.equal(new URL(res.headers.get('location') ?? '').searchParams.get('error'), 'reason_too_long');
+      assert.equal(store.approvals[0].status, 'pending');
+    });
+
     it('reject with a reason → 200 and the reason is the decided row note; approve still needs none', async () => {
       pending('appr-a', 'company-a');
       pending('appr-c', 'company-a');
@@ -307,11 +356,11 @@ describe('approval.created / approval.decided activity rows (every path)', () =>
       assert.deepEqual(notes, [['appr-a', 'Split the migration'], ['appr-c', null]]);
     });
 
-    it('MCP decide_approval: reject without a reason (missing, empty, blank, non-string) → tool error, nothing changes', async () => {
+    it('MCP decide_approval: reject without a reason (missing, empty, blank, zero-width) → tool error, nothing changes', async () => {
       pending('appr-a', 'company-a', { issueIds: ['issue-a1'] });
       store.issues[0].boardApprovalId = 'appr-a';
       store.issues[0].status = 'blocked';
-      for (const reason of [undefined, '', '   \n\t', 42]) {
+      for (const reason of [undefined, '', '   \n\t', '\u200B\u200C\uFEFF']) {
         const r = await mcp('company-a', { company_id: 'company-a', approval_id: 'appr-a', decision: 'rejected', reason });
         assert.equal(r.result, undefined, JSON.stringify(r));
         assert.match(r.error?.message ?? '', /reason is required to reject/);
@@ -319,6 +368,30 @@ describe('approval.created / approval.decided activity rows (every path)', () =>
       assert.deepEqual([store.approvals[0].status, store.approvals[0].note, store.approvals[0].decidedAt], ['pending', null, null]);
       assert.deepEqual([store.issues[0].status, store.issues[0].boardApprovalId], ['blocked', 'appr-a']);
       assert.equal(store.activityLog.length, 0);
+    });
+
+    it('MCP decide_approval: reject with a non-string reason → tool error, nothing changes', async () => {
+      pending('appr-a', 'company-a');
+      for (const reason of [42, true, { a: 1 }, ['x']]) {
+        const r = await mcp('company-a', { company_id: 'company-a', approval_id: 'appr-a', decision: 'rejected', reason });
+        assert.equal(r.result, undefined, JSON.stringify(r));
+        assert.match(r.error?.message ?? '', /reason must be a string/);
+      }
+      assert.equal(store.approvals[0].status, 'pending');
+      assert.equal(store.activityLog.length, 0);
+    });
+
+    it('MCP decide_approval: reject over 2000 chars → tool error; at the cap → ok', async () => {
+      pending('appr-a', 'company-a');
+      pending('appr-b', 'company-a');
+      const over = 'x'.repeat(2001);
+      const bad = await mcp('company-a', { company_id: 'company-a', approval_id: 'appr-a', decision: 'rejected', reason: over });
+      assert.match(bad.error?.message ?? '', /at most 2000/);
+      assert.equal(store.approvals[0].status, 'pending');
+      const ok = 'y'.repeat(2000);
+      const good = await mcp('company-a', { company_id: 'company-a', approval_id: 'appr-b', decision: 'rejected', reason: `  ${ok}\u200B  ` });
+      assert.equal(good.error, undefined, JSON.stringify(good));
+      assert.equal(store.approvals[1].note, ok);
     });
 
     it('MCP decide_approval: reject with a reason → rejected, reason stored and on the decided row; approve needs none', async () => {

@@ -18,13 +18,14 @@ export function ApprovalDecisionForm({ approvalId }: { approvalId: string }) {
           name="note"
           rows={3}
           required
+          maxLength={2000}
           aria-describedby={`approval-note-help-${approvalId}`}
           placeholder="What should change? Required to reject; optional to approve."
           className="resize-y"
         />
         <p id={`approval-note-help-${approvalId}`} className="text-xs text-muted-foreground">
-          To request changes, reject with a reason: the agent gets it as Board feedback, and it is
-          posted to linked issues.
+          To request changes, reject with a reason (at most 2,000 characters): the agent gets it as
+          Board feedback, and it is posted to linked issues.
         </p>
       </div>
       <div className="flex gap-2">

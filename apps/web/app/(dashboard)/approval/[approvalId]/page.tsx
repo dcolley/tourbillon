@@ -22,7 +22,11 @@ export default async function ApprovalDetailPage({
   if (!isValidApprovalId(approvalId)) notFound();
   const detail = await loadApprovalDetail(createApprovalDetailRepo(), company.id, approvalId);
   if (!detail) notFound();
-  // Set by the decide route when a reject came without a reason (303 back here).
-  const reasonRequired = (await searchParams).error === 'reason_required';
-  return <ApprovalDetailView detail={detail} reasonRequired={reasonRequired} />;
+  // Set by the decide route when a reject came with a bad reason (303 back here).
+  const err = (await searchParams).error;
+  const reasonError =
+    err === 'reason_required' || err === 'reason_too_long' || err === 'reason_not_string'
+      ? err
+      : undefined;
+  return <ApprovalDetailView detail={detail} reasonError={reasonError} />;
 }

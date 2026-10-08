@@ -8,6 +8,7 @@ import { requireBoardCompany } from '@/lib/board-route-auth';
 import { APPROVAL_ACTORS, approvalActivityScrubber, approvalDecidedActivity } from '@/lib/approval-activity';
 import { approvalDetailHref } from '@/lib/approval-links';
 import { isValidApprovalId } from '@/lib/approval-detail';
+import { checkDecisionReason } from '@/lib/approval-reason';
 
 type ApprovalPayload = Record<string, unknown> & {
   title?: string;
@@ -15,22 +16,24 @@ type ApprovalPayload = Record<string, unknown> & {
   priorStatuses?: Record<string, IssueStatus>;
 };
 
-async function parseDecisionBody(req: NextRequest): Promise<Record<string, string>> {
+/**
+ * JSON keeps the raw values (a non-string `note` is a 400, not coerced); form posts are strings.
+ * `null` = unreadable body (malformed JSON or form data).
+ */
+async function parseDecisionBody(req: NextRequest): Promise<Record<string, unknown> | null> {
   const contentType = req.headers.get('content-type') ?? '';
-  if (contentType.includes('application/json')) {
-    const json = (await req.json()) as Record<string, unknown>;
+  try {
+    if (contentType.includes('application/json')) {
+      const json: unknown = await req.json();
+      return json && typeof json === 'object' && !Array.isArray(json) ? (json as Record<string, unknown>) : null;
+    }
+    const formData = await req.formData();
     return Object.fromEntries(
-      Object.entries(json).map(([key, value]) => [key, value == null ? '' : String(value)])
+      [...formData.entries()].map(([key, value]) => [key, typeof value === 'string' ? value : value.name]),
     );
+  } catch {
+    return null;
   }
-
-  const formData = await req.formData();
-  return Object.fromEntries(
-    [...formData.entries()].map(([key, value]) => [
-      key,
-      typeof value === 'string' ? value : value.name,
-    ])
-  );
 }
 
 export async function POST(
@@ -46,26 +49,25 @@ export async function POST(
   // NUL/control characters made Postgres throw (500); malformed ids are a 400.
   if (!isValidApprovalId(approvalId)) return NextResponse.json({ error: 'Invalid approval id' }, { status: 400 });
   const body = await parseDecisionBody(req);
+  if (!body) return NextResponse.json({ error: 'Invalid request body' }, { status: 400 });
 
   const decision = body.decision as 'approved' | 'rejected';
-  const note = body.note || undefined;
-
-  if (!['approved', 'rejected'].includes(decision)) {
+  if (typeof decision !== 'string' || !['approved', 'rejected'].includes(decision)) {
     return NextResponse.json({ error: 'decision must be approved or rejected' }, { status: 400 });
   }
   // A reject is the board's "request changes": the reason is the feedback the requesting agent
-  // gets, so it is required (board UI, this board API and MCP decide_approval).
-  if (decision === 'rejected' && !note?.trim()) {
+  // gets, so it is required (board UI, this board API and MCP decide_approval). Same rules on all
+  // three (lib/approval-reason): string, trimmed, not blank/zero-width to reject, capped.
+  const checked = checkDecisionReason(decision, body.note);
+  if (!checked.ok) {
     if ((req.headers.get('accept') ?? '').includes('text/html')) {
       const back = new URL(approvalDetailHref(approvalId), publicOriginFromRequest(req));
-      back.searchParams.set('error', 'reason_required');
+      back.searchParams.set('error', checked.code);
       return NextResponse.redirect(back, 303);
     }
-    return NextResponse.json(
-      { error: 'A reason is required to reject (it is sent to the requesting agent as Board feedback)' },
-      { status: 400 },
-    );
+    return NextResponse.json({ error: checked.message, code: checked.code }, { status: 400 });
   }
+  const note = checked.reason;
 
   const approval = await db.query.approvals.findFirst({
     where: and(eq(approvals.id, approvalId), eq(approvals.companyId, company.id)),

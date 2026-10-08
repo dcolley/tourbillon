@@ -7,6 +7,12 @@ import type { ApprovalDetail, ApprovalHistoryEvent } from '@/lib/approval-detail
 import { approvalDetailHref } from '@/lib/approval-links';
 import { ApprovalDecisionForm } from './approval-decision-form';
 
+const REASON_ALERTS = {
+  reason_required: 'A reason is required to reject. It is sent to the requesting agent as Board feedback.',
+  reason_too_long: 'The reason is too long: at most 2,000 characters.',
+  reason_not_string: 'The reason must be text.',
+} as const;
+
 /**
  * Approval details view. `detail` comes from loadApprovalDetail, already redacted in every field
  * (lib/approval-redaction); this component renders nothing else from the database.
@@ -14,11 +20,17 @@ import { ApprovalDecisionForm } from './approval-decision-form';
 export function ApprovalDetailView({
   detail,
   reasonRequired = false,
+  reasonError,
 }: {
   detail: ApprovalDetail;
   /** Show the "a reason is required to reject" alert (decide route 303 with error=reason_required). */
   reasonRequired?: boolean;
+  /** Decide route 303 error code for a refused reason (lib/approval-reason). */
+  reasonError?: 'reason_required' | 'reason_too_long' | 'reason_not_string';
 }) {
+  const reasonAlert = (reasonError ?? (reasonRequired ? 'reason_required' : undefined))
+    ? REASON_ALERTS[reasonError ?? 'reason_required']
+    : null;
   const { approval, requester, decidedBy, linkedIssues, missingIssueIds, history, relatedApprovals } = detail;
   const pending = approval.status === 'pending';
   const noteLabel = approval.status === 'rejected' ? 'Board feedback' : 'Board decision note';
@@ -103,9 +115,9 @@ export function ApprovalDetailView({
             <CardTitle className="text-base">Decision</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
-            {reasonRequired ? (
+            {reasonAlert ? (
               <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-                A reason is required to reject. It is sent to the requesting agent as Board feedback.
+                {reasonAlert}
               </p>
             ) : null}
             <ApprovalDecisionForm approvalId={approval.id} />
