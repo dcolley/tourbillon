@@ -29,6 +29,7 @@ describe('approval details: vault values available', () => {
     assert.equal(d.redactionUnavailable, false);
     assert.equal(d.approval.title, 'Deploy with [redacted]');
     assert.equal(d.linkedIssues[0].title, 'Rotate [redacted]');
+    assert.deepEqual(d.relatedApprovals.map((r) => r.title), ['Use vault [redacted]', 'Retry with [redacted]']);
     assert.deepEqual(leaks(JSON.stringify(approvalDetailJson(d))), []);
     assert.deepEqual(leaks(JSON.stringify(d)), []);
   });
@@ -59,6 +60,16 @@ describe('approval details: vault values unavailable (#130 B3)', () => {
       assert.equal(d.history.find((e) => e.text === 'approval.commented')?.note, H);
       assert.equal(d.history.find((e) => e.kind === 'decided')?.note, H);
       assert.equal(d.history.find((e) => e.kind === 'hitly_error')?.text, `HITLy error: ${H}`);
+      // #131: creation note, decision feedback and related approval titles are hidden too.
+      assert.equal(d.history.find((e) => e.kind === 'created')?.note, H);
+      assert.equal(d.history.find((e) => e.kind === 'decided')?.noteLabel, 'Board feedback');
+      assert.deepEqual(
+        d.relatedApprovals.map((r) => [r.id, r.status, r.title, r.sharedIssueIds]),
+        [
+          ['appr-r2', 'pending', H, ['issue-a1']],
+          ['appr-r1', 'rejected', H, ['issue-a1']],
+        ],
+      );
       // Kept: status, dates, ids, actors, issue identifiers.
       assert.equal(d.approval.id, 'appr-a');
       assert.equal(d.approval.status, 'rejected');

@@ -101,6 +101,9 @@ describe('approval details page (page.tsx)', () => {
       assert.match(html, /request_board_approval/);
       assert.match(html, /2026/); // dates
       assert.match(html, /[Rr]ejected/);
+      // #131: related approvals still listed (link + status), titles hidden.
+      assert.match(html, /href="\/approval\/appr-r1"/);
+      assert.match(html, /href="\/approval\/appr-r2"/);
     });
   }
 
