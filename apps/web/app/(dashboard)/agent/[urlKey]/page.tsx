@@ -11,7 +11,7 @@ import { actionError, actionSuccess, type ActionResult } from '@/lib/action-resu
 import { AgentDisambiguation } from '@/components/agent-disambiguation';
 import { DeepLinkCompanySync } from '@/components/deep-link-company-sync';
 import { ActionForm, ActionSubmitButton } from '@/components/action-form';
-import { getCompanyById } from '@/lib/company';
+import { getCompanyById, requireBoardSession } from '@/lib/company';
 import { parseCompanyIdFromSearchParams } from '@/lib/company-link';
 import { deleteAgentAction, updateAgentRoleAction } from '../actions';
 import { getLlmProviderRecordById, listLlmProvidersPublic } from '@/lib/llm-providers';
@@ -42,6 +42,7 @@ async function updateHeartbeatConfig(
   formData: FormData,
 ): Promise<ActionResult> {
   'use server';
+  await requireBoardSession();
 
   const { parseHeartbeatTimeoutSec, validateTimeoutConfig } = await import('@tourbillon/shared/timeout-config');
 
@@ -99,6 +100,7 @@ async function updateCapabilities(
   formData: FormData,
 ): Promise<ActionResult> {
   'use server';
+  await requireBoardSession();
 
   const agentId = formData.get('agentId') as string;
   const urlKey = formData.get('urlKey') as string;
@@ -195,6 +197,7 @@ async function updateCodeExecution(
   formData: FormData,
 ): Promise<ActionResult> {
   'use server';
+  await requireBoardSession();
 
   let parsed;
   try {
@@ -227,6 +230,7 @@ async function updateBudgetConfig(
   formData: FormData,
 ): Promise<ActionResult> {
   'use server';
+  await requireBoardSession();
 
   const agentId = formData.get('agentId') as string;
   const enforce = formData.get('enforceBudget') === 'on';
@@ -252,6 +256,7 @@ async function updateMailConfig(
   formData: FormData,
 ): Promise<ActionResult> {
   'use server';
+  await requireBoardSession();
 
   const agentId = formData.get('agentId') as string;
   const mailEnabled = formData.get('mailEnabled') === 'on';
@@ -276,6 +281,7 @@ async function updateAgentOmConfig(
   formData: FormData,
 ): Promise<ActionResult> {
   'use server';
+  await requireBoardSession();
 
   const agentId = formData.get('agentId') as string;
   const mode = (formData.get('mode') as 'inherit' | 'off' | 'on') || 'inherit';
@@ -322,6 +328,7 @@ async function updateProfile(
   formData: FormData,
 ): Promise<ActionResult> {
   'use server';
+  await requireBoardSession();
 
   const agentId = formData.get('agentId') as string;
   const currentUrlKey = formData.get('currentUrlKey') as string;
@@ -352,6 +359,7 @@ async function updateModel(
   formData: FormData,
 ): Promise<ActionResult> {
   'use server';
+  await requireBoardSession();
 
   const agentId = formData.get('agentId') as string;
   const modelId = formData.get('modelId') as string;
@@ -373,6 +381,7 @@ async function updateModelSettings(
   formData: FormData,
 ): Promise<ActionResult> {
   'use server';
+  await requireBoardSession();
 
   const agentId = formData.get('agentId') as string;
 
@@ -395,6 +404,7 @@ async function updateInstructions(
   formData: FormData,
 ): Promise<ActionResult> {
   'use server';
+  await requireBoardSession();
 
   const agentId = formData.get('agentId') as string;
 
@@ -417,6 +427,7 @@ async function toggleRoutine(
   formData: FormData,
 ): Promise<ActionResult> {
   'use server';
+  await requireBoardSession();
 
   const routineId = formData.get('routineId') as string;
   const agentId = formData.get('agentId') as string;
@@ -436,6 +447,7 @@ async function cloneAgentAction(
   formData: FormData,
 ): Promise<ActionResult> {
   'use server';
+  await requireBoardSession();
 
   const sourceAgentId = formData.get('sourceAgentId') as string;
   const name = formData.get('name') as string;

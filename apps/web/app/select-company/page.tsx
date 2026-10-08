@@ -1,5 +1,5 @@
 import { Suspense } from 'react';
-import { listCompanies } from '@/lib/company';
+import { hasBoardSession, listCompanies } from '@/lib/company';
 import { CompanySelector } from '@/components/company-selector';
 
 function SelectorFallback() {
@@ -11,7 +11,8 @@ function SelectorFallback() {
 }
 
 export default async function SelectCompanyPage() {
-  const companies = await listCompanies();
+  // #105 B1: defence in depth behind proxy.ts; no session → empty list (and the proxy redirects).
+  const companies = (await hasBoardSession()) ? await listCompanies() : [];
 
   return (
     <Suspense fallback={<SelectorFallback />}>

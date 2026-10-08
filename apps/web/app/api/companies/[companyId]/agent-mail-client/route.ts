@@ -1,8 +1,7 @@
-import { cookies } from 'next/headers';
 import { NextRequest, NextResponse } from 'next/server';
 import { db, agentMail, agents } from '@tourbillon/db';
 import { eq, or, and, desc, inArray } from 'drizzle-orm';
-import { ACTIVE_COMPANY_COOKIE } from '@/lib/company';
+import { getActiveCompanyOrNull } from '@/lib/company';
 
 export async function GET(
   req: NextRequest,
@@ -17,9 +16,9 @@ export async function GET(
     return NextResponse.json({ error: 'agentId query parameter required' }, { status: 400 });
   }
 
-  // Verify active company matches requested company
-  const cookieStore = await cookies();
-  const activeCompanyId = cookieStore.get(ACTIVE_COMPANY_COOKIE)?.value;
+  // Verify active company matches requested company.
+  // #105: board session required (the raw company cookie alone is not board).
+  const activeCompanyId = (await getActiveCompanyOrNull())?.id;
   if (!activeCompanyId) {
     return NextResponse.json({ error: 'No active company' }, { status: 401 });
   }

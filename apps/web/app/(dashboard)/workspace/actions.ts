@@ -2,7 +2,7 @@
 
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
-import { getActiveCompany } from '@/lib/company';
+import { getActiveCompany, requireBoardSession } from '@/lib/company';
 import {
   writeWorkspaceText,
   createWorkspaceDirectory,
@@ -18,6 +18,7 @@ export async function saveWorkspaceFileAction(
   _prev: WorkspaceActionState,
   formData: FormData
 ): Promise<WorkspaceActionState> {
+  await requireBoardSession();
   const company = await getActiveCompany();
   const path = (formData.get('path') as string)?.trim();
   const content = formData.get('content') as string;
@@ -41,6 +42,7 @@ export async function deleteWorkspaceFileAction(
   _prev: WorkspaceActionState,
   formData: FormData
 ): Promise<WorkspaceActionState> {
+  await requireBoardSession();
   const company = await getActiveCompany();
   const path = (formData.get('path') as string)?.trim();
   if (!path) return { error: 'Path is required.' };
@@ -61,6 +63,7 @@ export async function uploadWorkspaceFileAction(
   _prev: WorkspaceActionState,
   formData: FormData
 ): Promise<WorkspaceActionState> {
+  await requireBoardSession();
   const company = await getActiveCompany();
   const targetDir = ((formData.get('targetDir') as string) ?? '').trim();
   const file = formData.get('file');
@@ -89,6 +92,7 @@ export async function createWorkspaceDirectoryAction(
   _prev: WorkspaceActionState,
   formData: FormData
 ): Promise<WorkspaceActionState & { path?: string }> {
+  await requireBoardSession();
   const company = await getActiveCompany();
   const path = (formData.get('path') as string)?.trim();
   if (!path) return { error: 'Directory path is required.' };

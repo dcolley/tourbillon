@@ -17,18 +17,18 @@ Tourbillon is a local-first agent orchestration app (Mastra + company board + sh
 |---|---|---|
 | Control-plane MCP `POST /api/mcp` | `X-Company-Token` | Companies, agents, heartbeat/OM knobs, failed jobs, run detail. **Not** issues/goals/projects/approvals/chat/hire. |
 | REST | Split (see Auth) | Most mutations. Agent-run routes reject the company JWT. |
-| Web UI | Company cookie / signed-in browser | Full product. Singular paths: `/goal` `/project` `/issue` `/approval` `/agent` `/jobs/heartbeat`. Plural `/goals` `/approvals` 404. |
+| Web UI | Board session cookie (unlock at `/unlock` with the operator secret) | Full product. Singular paths: `/goal` `/project` `/issue` `/approval` `/agent` `/jobs/heartbeat`. Plural `/goals` `/approvals` 404. |
 
 Prefer MCP when the tool exists. Prefer REST with a company token when MCP lacks the tool **and** the route accepts that token. Use the UI for board decisions, issue create/cancel, goals/projects, and anything that returns 401 on the company JWT.
 
 ## Auth
 
-1. **Company JWT** (`X-Company-Token`): mint with `POST /api/mobile/companies` body `{ "companyId": "<uuid>" }`. Header name is `X-Company-Token`, not `Authorization`. Payload `{ companyId }`. Same secret as mobile (`BETTER_AUTH_SECRET`). Token identifies the operator; `company_id` on MCP tools identifies the tenant. Isolation: `company_id` must be one `company_list` would return.
+1. **Company JWT** (`X-Company-Token`): mint with `POST /api/mobile/companies` body `{ "companyId": "<uuid>" }` **and header `X-Board-Secret: $TOURBILLON_BOARD_SECRET`** (the operator secret; without it → 401, and minting fails closed when the server has no `TOURBILLON_BOARD_SECRET`). Header name is `X-Company-Token`, not `Authorization`. Payload `{ companyId }`. Signed with `BETTER_AUTH_SECRET` (must be set to a non-default value whatever `NODE_ENV` is, or minting returns 503 and tokens are refused). Token identifies the operator; `company_id` on MCP tools identifies the tenant. Isolation: `company_id` must be one `company_list` would return.
 2. **Agent run token** (`Authorization: Bearer`): `validateRunToken`. Required by issue PATCH/create, many `/api/companies/:id/*` writes. Company JWT gets **401 Unauthorized** here. Do not treat that as "TEST is down".
-3. **Cookie** `getActiveCompany`: web UI only. MCP must not use cookies.
+3. **Board session cookie** (`tourbillon_board_session`): web UI only. `POST /api/board/session` with the operator secret (or the `/unlock` page) issues a signed, httpOnly, 12h cookie. The `active_company_id` cookie only selects a company; on its own it is **not** board. A request with an agent run token is never board. MCP must not use cookies.
 4. **HITLy**: human/board gate on halted issues. Decide in-app at `/approval` (or HITLy HTTP if the company toggle is on). MCP currently cannot decide.
 
-`GET /api/mobile/companies` lists companies with no auth (id, name, issuePrefix, slug).
+`GET /api/mobile/companies` lists companies (id, name, issuePrefix, slug). Board only: send `X-Board-Secret` (to discover ids before you have a token) or a valid `X-Company-Token`; otherwise 401 with an empty body.
 
 ## MCP tools (current)
 
@@ -72,7 +72,7 @@ Sidebar (company-scoped): Dashboard, Approvals (`/approval`), Issues (`/issue`),
 
 ## REST that works with `X-Company-Token`
 
-- `GET /api/mobile/companies` and `POST /api/mobile/companies`
+- `GET /api/mobile/companies` (`POST` needs `X-Board-Secret`, not the token)
 - `GET /api/issues/list?filter=active` (rows are `{ issue, agent }`)
 - `GET /api/chat/agents`
 - MCP `/api/mcp`
