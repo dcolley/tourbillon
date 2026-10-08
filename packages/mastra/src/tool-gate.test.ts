@@ -55,6 +55,11 @@ const fetchCalls: string[] = [];
 const mcpCalls: string[] = [];
 const unlistedCalls: string[] = [];
 let clock = 1_700_000_000_000;
+/**
+ * Explicit staleness bound for gate decisions, deliberately NOT the TTL constant: a change must
+ * be seen this long after it was written. Raising TOOL_GATE_CACHE_TTL_MS above it fails tests.
+ */
+const MAX_STALENESS_MS = 5_000;
 let loadAgentOverride: ((id: string) => Promise<unknown>) | null = null;
 
 const COMPANY_A = 'company-a-5c1f';
@@ -103,17 +108,17 @@ function makeCompany(id: string, over: Partial<CompanyRow> = {}): CompanyRow {
   return row;
 }
 
-/** Change a row the way a dashboard edit would, then let the gate cache expire. */
+/** Change a row the way a dashboard edit would, then wait out the explicit staleness bound. */
 function editAgent(id: string, patch: Partial<AgentRow>): void {
   const row = agentRows.get(id)!;
   agentRows.set(id, { ...row, ...patch, updatedAt: new Date(clock + 1) } as AgentRow);
-  clock += gate.TOOL_GATE_CACHE_TTL_MS;
+  clock += MAX_STALENESS_MS;
 }
 
 function editCompany(id: string, patch: Partial<CompanyRow>): void {
   const row = companyRows.get(id)!;
   companyRows.set(id, { ...row, ...patch, updatedAt: new Date(clock + 1) });
-  clock += gate.TOOL_GATE_CACHE_TTL_MS;
+  clock += MAX_STALENESS_MS;
 }
 
 function contextFor(agent: { id: string; companyId: string }, runId = `run-${agent.id}`) {
@@ -123,6 +128,17 @@ function contextFor(agent: { id: string; companyId: string }, runId = `run-${age
     agentId: agent.id,
     companyId: agent.companyId,
   });
+}
+
+/** Request context as Mastra leaves it inside a memory-backed run on `threadId`. */
+function threadContextFor(agent: { id: string; companyId: string }, runId: string, threadId: string) {
+  const rc = contextFor(agent, runId);
+  (rc as unknown as { set(key: string, value: unknown): void }).set('MastraMemory', { thread: { id: threadId }, resourceId: `res-${agent.id}` });
+  return rc;
+}
+
+function unknownRows(agentId: string) {
+  return deniedRows.filter((r) => r.agentId === agentId && r.reason === 'unknown_tool');
 }
 
 interface ScriptedModel {
@@ -281,7 +297,12 @@ beforeEach(() => {
     fetchCalls.push(String(url));
     return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } });
   }) as typeof fetch;
-  gate.setToolGateDepsForTests({
+  gate.setToolGateDepsForTests(baseDeps());
+  seedMastra();
+});
+
+function baseDeps(): Parameters<Gate['setToolGateDepsForTests']>[0] {
+  return {
     loadAgent: async (id) => {
       if (loadAgentOverride) return (await loadAgentOverride(id)) as never;
       const row = agentRows.get(id);
@@ -295,9 +316,8 @@ beforeEach(() => {
       deniedRows.push({ ...row });
     },
     now: () => clock,
-  });
-  seedMastra();
-});
+  };
+}
 
 afterEach(() => {
   for (const key of SEARCH_ENV) {
@@ -312,12 +332,25 @@ after(() => {
 });
 
 describe('tool permission gate: unknown tools', () => {
+  /** The model-path ToolNotFoundError left exactly one unknown_tool row for this call. */
+  async function assertUnknownToolRow(agentId: string, tool: string, runId: string, surface: string) {
+    await flush();
+    const rows = unknownRows(agentId);
+    assert.equal(rows.length, 1, `one unknown_tool row, got ${JSON.stringify(deniedRows)}`);
+    assert.equal(rows[0]!.tool, tool);
+    assert.equal(rows[0]!.runId, runId);
+    assert.equal(rows[0]!.surface, surface);
+    assert.equal(rows[0]!.companyId, COMPANY_A);
+    assert.ok(!('args' in rows[0]!) && !('input' in rows[0]!), 'no arguments on the row');
+  }
+
   it('an invented tool name is not run on the heartbeat durable agent (tracing off)', async () => {
     const a = makeAgent('agent-hb', COMPANY_A);
     const durable = await factory.createDurableAgentWithSkills(a);
     const { outcomes } = await runAgent(durable, scriptedModel([['inventedTool']]), contextFor(a));
     assert.equal(outcomes[0]?.error, 'ToolNotFoundError');
     assert.equal(fetchCalls.length, 0);
+    await assertUnknownToolRow(a.id, 'inventedTool', `run-${a.id}`, 'heartbeat');
   });
 
   it('an invented tool name is not run on the heartbeat durable agent (tracing on)', async () => {
@@ -327,6 +360,7 @@ describe('tool permission gate: unknown tools', () => {
     const { outcomes } = await runAgent(durable, scriptedModel([['inventedTool']]), contextFor(a));
     assert.equal(outcomes[0]?.error, 'ToolNotFoundError');
     assert.equal(fetchCalls.length, 0);
+    await assertUnknownToolRow(a.id, 'inventedTool', `run-${a.id}`, 'heartbeat');
   });
 
   it('an invented tool name is not run on the harness controller agent', async () => {
@@ -335,6 +369,7 @@ describe('tool permission gate: unknown tools', () => {
     const { outcomes } = await runAgent(agent, scriptedModel([['inventedTool']]), contextFor(a));
     assert.equal(outcomes[0]?.error, 'ToolNotFoundError');
     assert.equal(fetchCalls.length, 0);
+    await assertUnknownToolRow(a.id, 'inventedTool', `run-${a.id}`, 'harness');
   });
 
   it('an invented tool name is not run on the chat agent', async () => {
@@ -343,6 +378,47 @@ describe('tool permission gate: unknown tools', () => {
     const { outcomes } = await runAgent(agent, scriptedModel([['inventedTool']]), contextFor(a, `chat-${a.id}`));
     assert.equal(outcomes[0]?.error, 'ToolNotFoundError');
     assert.equal(fetchCalls.length, 0);
+    await assertUnknownToolRow(a.id, 'inventedTool', `chat-${a.id}`, 'chat');
+  });
+
+  it('a tool the agent does not hold, called on the durable path, is logged as unknown_tool', async () => {
+    // Engineer without the roster toolset: createAgentTool exists elsewhere but not on this agent.
+    const a = makeAgent('agent-not-held', COMPANY_A);
+    const durable = await factory.createDurableAgentWithSkills(a);
+    const model = scriptedModel([['createAgentTool'], ['getDateTimeTool']]);
+    const { outcomes, text } = await runAgent(durable, model, contextFor(a, 'run-not-held'));
+    assert.equal(outcomes[0]?.error, 'ToolNotFoundError');
+    assert.equal(outcomes[1]?.result?.error, undefined, 'the run continued and a held tool ran');
+    assert.equal(text, 'done');
+    assert.equal(fetchCalls.length, 0, 'createAgent never reached the API');
+    await assertUnknownToolRow(a.id, 'createAgentTool', 'run-not-held', 'heartbeat');
+  });
+
+  it('unknown tool names on the model path share the per-run cap with gate denials', async () => {
+    const a = makeAgent('agent-unknown-cap', COMPANY_A);
+    const rc = contextFor(a, 'run-unknown-cap');
+    for (let i = 0; i < 5; i += 1) {
+      await gate.checkToolPermission({ agentId: a.id, companyId: COMPANY_A, surface: 'heartbeat', toolName: 'browser_open', requestContext: rc });
+    }
+    const durable = await factory.createDurableAgentWithSkills(a);
+    const invented = Array.from({ length: gate.TOOL_DENIED_ROWS_PER_RUN + 5 }, (_, i) => `invented${i}Tool`);
+    const { outcomes } = await runAgent(durable, scriptedModel([invented]), rc);
+    assert.equal(outcomes.filter((o) => o.error === 'ToolNotFoundError').length, invented.length);
+    await flush();
+    const rows = deniedRows.filter((r) => r.runId === 'run-unknown-cap');
+    assert.equal(rows.length, gate.TOOL_DENIED_ROWS_PER_RUN + 1, 'one cap across both kinds of denial');
+    assert.equal(rows.filter((r) => r.reason === 'browser_tools_disabled').length, 5);
+    assert.equal(rows.filter((r) => r.reason === 'unknown_tool').length, gate.TOOL_DENIED_ROWS_PER_RUN - 5);
+    assert.equal(rows.at(-1)?.summary, true);
+    assert.equal(rows.at(-1)?.reason, 'limit_reached');
+  });
+
+  it('an over-long invented tool name is truncated on the row', async () => {
+    const a = makeAgent('agent-long-name', COMPANY_A);
+    gate.recordUnknownToolCall({ agentId: a.id, companyId: COMPANY_A, surface: 'heartbeat' }, 'x'.repeat(5_000), contextFor(a));
+    await flush();
+    const tool = String(unknownRows(a.id)[0]?.tool);
+    assert.ok(tool.length <= gate.TOOL_DENIED_NAME_MAX + 1, `stored ${tool.length} chars`);
   });
 
   for (const surface of ['heartbeat', 'harness', 'chat'] as const) {
@@ -390,6 +466,15 @@ describe('tool permission gate: tools stay with their agent', () => {
     }
     assert.equal(fetchCalls.length, 0, 'createAgent did not run');
     assert.deepEqual(mcpCalls, [], 'MCP write did not run');
+    // Through the real durable/model path, every refused call by B left a row for B.
+    await flush();
+    const bRows = deniedRows.filter((r) => r.agentId === b.id && r.runId === `run-${b.id}`);
+    assert.deepEqual(
+      bRows.map((r) => r.tool).sort(),
+      ['createAgent', 'createAgentTool', 'filesystem_write_file'],
+      `rows for B: ${JSON.stringify(bRows)}`,
+    );
+    for (const row of bRows) assert.ok(row.reason === 'unknown_tool' || row.reason === 'not_allowed', String(row.reason));
 
     // Tool instances are bound to the agent they were built for.
     const denied = await aTools.filesystem_write_file.execute({}, { requestContext: contextFor(b) });
@@ -476,6 +561,36 @@ describe('tool permission gate: changes apply mid-run', () => {
     assert.equal((await gate.checkToolPermission({ ...ctx, toolName: 'listAgentsTool', requestContext: rc })).allowed, true);
     clock += 1;
     assert.equal((await gate.checkToolPermission({ ...ctx, toolName: 'listAgentsTool', requestContext: rc })).allowed, false);
+  });
+
+  it('a change is seen at most 5 seconds after it was written (explicit clock, not the TTL constant)', async () => {
+    const a = makeAgent('agent-staleness', COMPANY_A, { assignedToolsets: ['roster'] });
+    const ctx = { agentId: a.id, companyId: COMPANY_A, surface: 'heartbeat' as const, toolName: 'listAgentsTool' };
+    const start = clock;
+    assert.equal((await gate.checkToolPermission({ ...ctx, requestContext: contextFor(a) })).allowed, true);
+    agentRows.set(a.id, { ...agentRows.get(a.id)!, assignedToolsets: [], updatedAt: new Date(start + 1) } as AgentRow);
+    clock = start + 5_000;
+    assert.deepEqual(await gate.checkToolPermission({ ...ctx, requestContext: contextFor(a) }), {
+      allowed: false,
+      reason: 'not_in_toolset',
+    });
+  });
+
+  it('a status change is seen at most 5 seconds later on a real clock', async () => {
+    const a = makeAgent('agent-real-clock', COMPANY_A);
+    gate.setToolGateDepsForTests({ ...baseDeps(), now: () => Date.now() });
+    const input = { agentId: a.id, companyId: COMPANY_A, surface: 'heartbeat' as const, toolName: 'getDateTimeTool' };
+    assert.equal((await gate.checkToolPermission({ ...input, requestContext: contextFor(a) })).allowed, true);
+    agentRows.set(a.id, { ...agentRows.get(a.id)!, status: 'archived', updatedAt: new Date() } as AgentRow);
+    // Real time: poll until the gate sees the archive, and require it within 5 s (+ slack).
+    const started = Date.now();
+    let decision = await gate.checkToolPermission({ ...input, requestContext: contextFor(a) });
+    while (decision.allowed && Date.now() - started < 7_000) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      decision = await gate.checkToolPermission({ ...input, requestContext: contextFor(a) });
+    }
+    assert.deepEqual(decision, { allowed: false, reason: 'agent_archived' });
+    assert.ok(Date.now() - started <= 5_000 + 500, `seen after ${Date.now() - started} ms`);
   });
 });
 
@@ -686,6 +801,136 @@ describe('tool permission gate: deny is a tool result', () => {
     assert.equal(rows.length, gate.TOOL_DENIED_ROWS_PER_RUN + 1);
     assert.equal(rows.filter((r) => r.summary === true).length, 1);
     assert.equal(rows.at(-1)?.summary, true);
+  });
+
+  it('the cap is per run: a new heartbeat run logs again', async () => {
+    const a = makeAgent('agent-cap-runs', COMPANY_A);
+    for (const runId of ['run-cap-1', 'run-cap-2']) {
+      const rc = contextFor(a, runId);
+      for (let i = 0; i < gate.TOOL_DENIED_ROWS_PER_RUN + 5; i += 1) {
+        await gate.checkToolPermission({ agentId: a.id, companyId: COMPANY_A, surface: 'heartbeat', toolName: `invented${i}`, requestContext: rc });
+      }
+    }
+    await flush();
+    for (const runId of ['run-cap-1', 'run-cap-2']) {
+      assert.equal(deniedRows.filter((r) => r.runId === runId).length, gate.TOOL_DENIED_ROWS_PER_RUN + 1, runId);
+    }
+  });
+
+  it('chat threads share a run id but each has its own cap', async () => {
+    const a = makeAgent('agent-cap-chat', COMPANY_A);
+    const runId = `chat-${a.id}`;
+    const deny = (threadId: string, i: number) =>
+      gate.checkToolPermission({ agentId: a.id, companyId: COMPANY_A, surface: 'chat', toolName: `invented${i}`, requestContext: threadContextFor(a, runId, threadId) });
+    for (let i = 0; i < gate.TOOL_DENIED_ROWS_PER_RUN + 5; i += 1) await deny('thread-one', i);
+    // A second thread (same agent, same chat run id) is not silenced by the first one.
+    await deny('thread-two', 0);
+    gate.recordUnknownToolCall({ agentId: a.id, companyId: COMPANY_A, surface: 'chat' }, 'nopeTool', threadContextFor(a, runId, 'thread-two'));
+    await flush();
+    const one = deniedRows.filter((r) => r.threadId === 'thread-one');
+    const two = deniedRows.filter((r) => r.threadId === 'thread-two');
+    assert.equal(one.length, gate.TOOL_DENIED_ROWS_PER_RUN + 1);
+    assert.equal(one.at(-1)?.summary, true);
+    assert.deepEqual(two.map((r) => [r.tool, r.reason]), [['invented0', 'not_allowed'], ['nopeTool', 'unknown_tool']]);
+    assert.ok(two.every((r) => r.runId === runId));
+    assert.notEqual(
+      gate.denialCapKey(a.id, 'chat', { runId, threadId: 'thread-one' }),
+      gate.denialCapKey(a.id, 'chat', { runId, threadId: 'thread-two' }),
+    );
+  });
+
+  it('a chat run on a memory thread records its thread id (model path)', async () => {
+    const a = makeAgent('agent-chat-thread', COMPANY_A);
+    const agent = await chat.createChatAgentWithSkills(a);
+    const { outcomes } = await runAgent(agent, scriptedModel([['inventedTool', 'browser_open']]), contextFor(a, `chat-${a.id}`), {
+      memory: { thread: 'chat-thread-7', resource: `res-${a.id}` },
+    });
+    assert.equal(outcomes.length, 2);
+    await flush();
+    const rows = deniedRows.filter((r) => r.agentId === a.id);
+    assert.equal(rows.length, 2, JSON.stringify(rows));
+    assert.ok(rows.every((r) => r.threadId === 'chat-thread-7' && r.runId === `chat-${a.id}`), JSON.stringify(rows));
+  });
+});
+
+describe('tool permission gate: allow-list reuse depends on updated_at', () => {
+  // Pins the documented contract in loadState: the derived allow-list is recomputed only when
+  // the agent or company row's updatedAt changes. If this changes (e.g. a content hash), update
+  // the comment in tool-gate.ts and these tests together.
+  it('an allow-list edit without an updated_at bump is not picked up, even after the TTL', async () => {
+    const a = makeAgent('agent-pin-stale', COMPANY_A, { assignedToolsets: ['roster'] });
+    const input = { agentId: a.id, companyId: COMPANY_A, surface: 'heartbeat' as const, toolName: 'listAgentsTool' };
+    assert.equal((await gate.checkToolPermission({ ...input, requestContext: contextFor(a) })).allowed, true);
+    agentRows.set(a.id, { ...agentRows.get(a.id)!, assignedToolsets: [] } as AgentRow); // same updatedAt
+    clock += MAX_STALENESS_MS * 3;
+    assert.equal((await gate.checkToolPermission({ ...input, requestContext: contextFor(a) })).allowed, true);
+  });
+
+  it('the same edit with an updated_at bump is picked up after the TTL', async () => {
+    const a = makeAgent('agent-pin-bump', COMPANY_A, { assignedToolsets: ['roster'] });
+    const input = { agentId: a.id, companyId: COMPANY_A, surface: 'heartbeat' as const, toolName: 'listAgentsTool' };
+    assert.equal((await gate.checkToolPermission({ ...input, requestContext: contextFor(a) })).allowed, true);
+    editAgent(a.id, { assignedToolsets: [] });
+    assert.deepEqual(await gate.checkToolPermission({ ...input, requestContext: contextFor(a) }), {
+      allowed: false,
+      reason: 'not_in_toolset',
+    });
+  });
+
+  it('a company edit with an updated_at bump is picked up; status is read fresh regardless', async () => {
+    const a = makeAgent('agent-pin-company', COMPANY_A, { mcpServerIds: ['filesystem-local'] });
+    const input = { agentId: a.id, companyId: COMPANY_A, surface: 'heartbeat' as const, toolName: 'filesystem_read_file' };
+    assert.equal((await gate.checkToolPermission({ ...input, requestContext: contextFor(a) })).allowed, true);
+    // Company allow-list narrowed without a bump: reused.
+    companyRows.set(COMPANY_A, { ...companyRows.get(COMPANY_A)!, allowedMcpServerIds: ['github-mcp'] });
+    clock += MAX_STALENESS_MS;
+    assert.equal((await gate.checkToolPermission({ ...input, requestContext: contextFor(a) })).allowed, true);
+    // Status changes without a bump are still enforced (status is not part of the reused allow-list).
+    agentRows.set(a.id, { ...agentRows.get(a.id)!, status: 'archived' } as AgentRow);
+    clock += MAX_STALENESS_MS;
+    assert.deepEqual(await gate.checkToolPermission({ ...input, requestContext: contextFor(a) }), {
+      allowed: false,
+      reason: 'agent_archived',
+    });
+    agentRows.set(a.id, { ...agentRows.get(a.id)!, status: 'active' } as AgentRow);
+    editCompany(COMPANY_A, {});
+    assert.deepEqual(await gate.checkToolPermission({ ...input, requestContext: contextFor(a) }), {
+      allowed: false,
+      reason: 'mcp_server_not_allowed',
+    });
+  });
+});
+
+describe('tool permission gate: exact MCP tool names', () => {
+  const acme = { id: 'acme-mcp', label: 'Acme', transport: 'http', url: 'http://acme.test/mcp', source: 'file' };
+  const acmeAdmin = { id: 'acme-admin-mcp', label: 'Acme admin', transport: 'http', url: 'http://acme-admin.test/mcp', source: 'file' };
+
+  function useRegistry(defs: Array<Record<string, unknown>>) {
+    gate.setToolGateDepsForTests({
+      ...baseDeps(),
+      getMcpServer: (id) => defs.find((d) => d.id === id) as never,
+      listMcpServers: () => defs as never,
+    });
+  }
+
+  it('an allowed server never covers a registered server whose namespace extends it (collision)', async () => {
+    useRegistry([acme, acmeAdmin]);
+    const a = makeAgent('agent-acme', COMPANY_A, { mcpServerIds: ['acme-mcp'] });
+    const check = (toolName: string) =>
+      gate.checkToolPermission({ agentId: a.id, companyId: COMPANY_A, surface: 'heartbeat', toolName, requestContext: contextFor(a) });
+    assert.deepEqual(await check('acme_list_widgets'), { allowed: true });
+    assert.deepEqual(await check('acme_admin_drop_all'), { allowed: false, reason: 'mcp_server_not_allowed' });
+  });
+
+  it('policy patterns match the exact tool name, not a prefix or substring', async () => {
+    useRegistry([{ ...acme, toolWhitelist: ['get_post', 'acme_list_widgets'], toolBlacklist: ['post'] }]);
+    const a = makeAgent('agent-acme-policy', COMPANY_A, { mcpServerIds: ['acme-mcp'] });
+    const check = (toolName: string) =>
+      gate.checkToolPermission({ agentId: a.id, companyId: COMPANY_A, surface: 'heartbeat', toolName, requestContext: contextFor(a) });
+    assert.deepEqual(await check('acme_get_post'), { allowed: true }, 'bare whitelist name (blacklist "post" is not a substring match)');
+    assert.deepEqual(await check('acme_list_widgets'), { allowed: true }, 'full whitelist name');
+    assert.deepEqual(await check('acme_get_post_metrics'), { allowed: false, reason: 'mcp_policy_denied' });
+    assert.deepEqual(await check('acme_list_widgets_all'), { allowed: false, reason: 'mcp_policy_denied' });
   });
 });
 

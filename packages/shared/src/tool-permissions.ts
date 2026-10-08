@@ -92,6 +92,8 @@ export interface McpToolPolicy {
   deny: string[];
   /** `undefined` = no allow filter; `[]` = allow none; non-empty = allow matching names. */
   allow: string[] | undefined;
+  /** Server tool namespace (`${namespace}_${tool}`); lets patterns name the bare tool. */
+  namespace?: string;
 }
 
 /** Registry defaults + per-agent `mcpToolPolicy` for one server. */
@@ -105,19 +107,43 @@ export function resolveMcpToolPolicy(
   return {
     deny: [...(serverDef.toolBlacklist ?? []), ...(policy?.deny ?? [])],
     allow: policy?.allow !== undefined ? policy.allow : serverDef.toolWhitelist,
+    namespace: mcpServerToolNamespace(serverDef.id),
   };
 }
 
-function matchesMcpToolPattern(toolName: string, pattern: string): boolean {
-  return toolName === pattern || toolName.endsWith(`_${pattern}`) || toolName.includes(pattern);
+/**
+ * Exact MCP tool name match. A pattern names either the full exposed tool name
+ * (`github_create_issue`, as stored by the capabilities form) or the bare tool name under the
+ * server's namespace (`create_issue`, as in registry white/blacklists). No prefix, suffix or
+ * substring matching: `get_post` does not match `buffer_get_post_metrics`.
+ */
+export function mcpToolNameMatchesPattern(toolName: string, pattern: string, namespace?: string): boolean {
+  if (!pattern) return false;
+  if (toolName === pattern) return true;
+  return namespace !== undefined && namespace.length > 0 && toolName === `${namespace}_${pattern}`;
 }
 
 /** Same name matching MCP tool loading uses (deny wins; then allow filter). */
 export function isMcpToolNameAllowed(toolName: string, policy: McpToolPolicy): boolean {
-  if (policy.deny.some((pattern) => matchesMcpToolPattern(toolName, pattern))) return false;
+  const matches = (pattern: string) => mcpToolNameMatchesPattern(toolName, pattern, policy.namespace);
+  if (policy.deny.some(matches)) return false;
   if (policy.allow === undefined) return true;
   if (policy.allow.length === 0) return false;
-  return policy.allow.some((pattern) => matchesMcpToolPattern(toolName, pattern));
+  return policy.allow.some(matches);
+}
+
+/**
+ * The MCP namespace an exposed tool name belongs to: the longest namespace `ns` with the name
+ * starting `${ns}_`. Longest wins so a server namespaced `acme` never claims tools of a server
+ * namespaced `acme_admin`. Returns null when no namespace matches.
+ */
+export function owningMcpNamespace(toolName: string, namespaces: Iterable<string>): string | null {
+  let owner: string | null = null;
+  for (const ns of namespaces) {
+    if (!ns || !toolName.startsWith(`${ns}_`) || toolName.length === ns.length + 1) continue;
+    if (owner === null || ns.length > owner.length) owner = ns;
+  }
+  return owner;
 }
 
 const BROWSER_OR_COMPUTER_TOKEN = /(^|[_\-.:])(browser|computer|takeover)([_\-.:]|$)/i;
@@ -140,6 +166,11 @@ export interface ToolPermissionCompanyLike {
 export interface ResolveAllowedToolNamesOptions {
   /** MCP servers this agent may use (already intersected with the company allow-list). */
   mcpServers?: McpToolPolicyServerLike[];
+  /**
+   * Ids of every registered MCP server (allowed or not). Used only to decide which server owns
+   * a tool name, so an allowed server's namespace cannot claim another server's tools.
+   */
+  knownMcpServerIds?: string[];
 }
 
 export type ToolExclusionReason = 'mail_disabled' | 'web_search_not_configured' | 'not_in_toolset';
@@ -159,6 +190,8 @@ export interface AllowedToolNames {
   excluded: Map<string, ToolExclusionReason>;
   workspace: boolean;
   mcpServers: AllowedMcpServer[];
+  /** Namespaces of every known MCP server (allowed ones included), for tool-name ownership. */
+  mcpNamespaces: Set<string>;
 }
 
 let knownStaticIds: Set<string> | null = null;
@@ -250,12 +283,16 @@ export function resolveAllowedToolNames(
     policy: resolveMcpToolPolicy(def, runtimeConfig),
   }));
 
+  const mcpNamespaces = new Set<string>(mcpServers.map((server) => server.namespace));
+  for (const id of options.knownMcpServerIds ?? []) mcpNamespaces.add(mcpServerToolNamespace(id));
+
   return {
     staticToolIds: ordered,
     staticNames,
     excluded,
     workspace: toolsets.includes(CODE_EXECUTION_TOOLSET_ID),
     mcpServers,
+    mcpNamespaces,
   };
 }
 
@@ -292,13 +329,18 @@ function evaluateOneName(
       : { allowed: false, reason: 'not_in_toolset' };
   }
 
-  let policyDenied = false;
-  for (const server of allowed.mcpServers) {
-    if (!name.startsWith(`${server.namespace}_`)) continue;
-    if (isMcpToolNameAllowed(name, server.policy)) return { allowed: true, category: 'mcp' };
-    policyDenied = true;
+  // MCP: the owning namespace is decided over every known server (longest match), then only
+  // allowed servers with exactly that namespace are consulted.
+  const owner = owningMcpNamespace(name, allowed.mcpNamespaces ?? allowed.mcpServers.map((s) => s.namespace));
+  if (owner !== null) {
+    let policyDenied = false;
+    for (const server of allowed.mcpServers) {
+      if (server.namespace !== owner) continue;
+      if (isMcpToolNameAllowed(name, server.policy)) return { allowed: true, category: 'mcp' };
+      policyDenied = true;
+    }
+    if (policyDenied) return { allowed: false, reason: 'mcp_policy_denied' };
   }
-  if (policyDenied) return { allowed: false, reason: 'mcp_policy_denied' };
 
   const staticId = name.endsWith('Tool') && allKnownStaticIds().has(name.slice(0, -4)) ? name.slice(0, -4) : name;
   const exclusion = allowed.excluded.get(staticId);

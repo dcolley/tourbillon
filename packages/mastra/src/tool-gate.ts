@@ -11,14 +11,25 @@
  * A denied call returns a structured tool result to the model (the run continues) and writes
  * an `agent.tool_denied` activity row (tool name + reason only, never arguments). The gate
  * fails closed: an exception, a slow lookup or missing request context denies the call.
+ *
+ * A name the agent does not hold at all never reaches the hook: Mastra answers it with a
+ * `ToolNotFoundError` tool result first. An agent-level output processor
+ * ({@link createUnknownToolAuditProcessor}) catches that result and logs it as `unknown_tool`
+ * under the same per-run cap, so every refused tool call leaves a row.
+ *
+ * Denial rows are capped per run ({@link TOOL_DENIED_ROWS_PER_RUN} + one summary row). The cap
+ * key is the run id plus, when present, the memory thread id, so each dashboard chat thread
+ * (which shares one run id per agent) has its own cap.
  */
 import type { ToolHooks } from '@mastra/core/tools';
+import type { OutputProcessor } from '@mastra/core/processors';
 import { db, agents, companies, activityLog, eq, type Agent as AgentRecord, type Company } from '@tourbillon/db';
 import {
   evaluateToolName,
   formatTrace,
   isBrowserOrComputerToolName,
   mcpServerToolNamespace,
+  owningMcpNamespace,
   parseCompanySettings,
   resolveAllowedToolNames,
   type AllowedToolNames,
@@ -55,7 +66,9 @@ export type ToolGateReason =
   | 'not_in_toolset'
   | 'mcp_policy_denied'
   | 'mcp_server_not_allowed'
-  | 'not_allowed';
+  | 'not_allowed'
+  /** The model called a name the agent does not hold (Mastra answered `ToolNotFoundError`). */
+  | 'unknown_tool';
 
 export type ToolGateDecision = { allowed: true } | { allowed: false; reason: ToolGateReason };
 
@@ -78,6 +91,8 @@ export interface ToolDeniedActivity {
   agentName?: string | null;
   surface: ToolGateSurface;
   runId?: string;
+  /** Memory thread the call ran in (dashboard chat threads), when known. */
+  threadId?: string;
   tool: string | null;
   reason: ToolGateReason | 'limit_reached';
   summary?: boolean;
@@ -96,6 +111,8 @@ export interface ToolGateDeps {
 export const TOOL_GATE_CACHE_TTL_MS = 5_000;
 export const TOOL_GATE_TIMEOUT_MS = 2_000;
 export const TOOL_DENIED_ROWS_PER_RUN = 20;
+/** Longest tool name stored on a denial row (model-chosen names are untrusted text). */
+export const TOOL_DENIED_NAME_MAX = 128;
 const MAX_TRACKED_RUNS = 1_000;
 const MAX_CACHED_AGENTS = 2_000;
 
@@ -134,8 +151,15 @@ const defaultDeps: ToolGateDeps = {
         reason: row.reason,
         surface: row.surface,
         ...(row.runId ? { runId: row.runId } : {}),
+        ...(row.threadId ? { threadId: row.threadId } : {}),
         ...(row.summary
-          ? { summary: true, limit: TOOL_DENIED_ROWS_PER_RUN, message: 'Further tool denials in this run are not logged.' }
+          ? {
+              summary: true,
+              limit: TOOL_DENIED_ROWS_PER_RUN,
+              message: row.threadId
+                ? 'Further tool denials in this chat thread are not logged.'
+                : 'Further tool denials in this run are not logged.',
+            }
           : {}),
       },
     });
@@ -150,6 +174,10 @@ let deps: ToolGateDeps = defaultDeps;
 interface GateState {
   agent: ToolGateAgentRow;
   company: ToolGateCompanyRow;
+  /**
+   * Derived from the agent and company rows plus the MCP registry. Reused across cache
+   * refreshes while both rows' `updatedAt` are unchanged (see loadState).
+   */
   allowed: AllowedToolNames;
   loadedAt: number;
 }
@@ -207,7 +235,11 @@ function computeAllowed(agent: ToolGateAgentRow, company: ToolGateCompanyRow): A
   const mcpServers = serverIds
     .map((id) => deps.getMcpServer(id))
     .filter((def): def is McpServerDefinition => Boolean(def));
-  return resolveAllowedToolNames(agent, { settings: parseCompanySettings(company.settings) }, { mcpServers });
+  return resolveAllowedToolNames(
+    agent,
+    { settings: parseCompanySettings(company.settings) },
+    { mcpServers, knownMcpServerIds: deps.listMcpServers().map((def) => def.id) },
+  );
 }
 
 async function loadState(ctx: ToolGateContext): Promise<GateState | ToolGateReason> {
@@ -223,7 +255,12 @@ async function loadState(ctx: ToolGateContext): Promise<GateState | ToolGateReas
     const [agent, company] = await Promise.all([deps.loadAgent(ctx.agentId), deps.loadCompany(ctx.companyId)]);
     if (!agent || agent.companyId !== ctx.companyId) return 'agent_not_found';
     if (!company) return 'company_inactive';
-    // Allow-list is derived from the rows; reuse it while neither row's updatedAt moved.
+    // The allow-list is derived from the rows; reuse it while neither row's updatedAt moved.
+    // This relies on every writer of an allow-list input (agent toolsets, assigned tools,
+    // mcpServerIds, runtimeConfig, status, role; company settings and allowedMcpServerIds)
+    // bumping `updated_at` on the row it changes. A writer that skips the bump is only seen
+    // once the other row changes. Agent status / company status are read from the fresh rows
+    // on every refresh regardless. Pinned by the tool-gate tests ("updated_at dependency").
     const sameRows =
       cached &&
       updatedAtMs(cached.agent.updatedAt) === updatedAtMs(agent.updatedAt) &&
@@ -247,8 +284,8 @@ async function loadState(ctx: ToolGateContext): Promise<GateState | ToolGateReas
 }
 
 function matchesAnyRegisteredMcpServer(names: string[]): boolean {
-  const namespaces = deps.listMcpServers().map((def) => `${mcpServerToolNamespace(def.id)}_`);
-  return names.some((name) => namespaces.some((ns) => name.startsWith(ns)));
+  const namespaces = deps.listMcpServers().map((def) => mcpServerToolNamespace(def.id));
+  return names.some((name) => owningMcpNamespace(name, namespaces) !== null);
 }
 
 /**
@@ -310,15 +347,49 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   });
 }
 
-function recordDenial(input: CheckInput, reason: ToolGateReason, runId: string | undefined): void {
-  const runKey = `${input.agentId}:${runId ?? input.surface}`;
+interface DenialScope {
+  runId?: string;
+  threadId?: string;
+}
+
+/** Run id (Tourbillon request context) and memory thread id (Mastra) for the denial cap. */
+function denialScope(requestContext: unknown): DenialScope {
+  let runId: string | undefined;
+  let threadId: string | undefined;
+  try {
+    runId = extractToolRuntimeContext(requestContext).runId;
+  } catch {
+    runId = undefined;
+  }
+  try {
+    const rc = requestContext as { get?: (key: string) => unknown } | undefined;
+    if (rc && typeof rc.get === 'function') {
+      const memory = rc.get('MastraMemory') as { thread?: { id?: unknown } } | undefined;
+      const candidate = memory?.thread?.id ?? rc.get('mastra__threadId');
+      if (typeof candidate === 'string' && candidate.length > 0) threadId = candidate;
+    }
+  } catch {
+    threadId = undefined;
+  }
+  return { runId, threadId };
+}
+
+/** Cap key: per run, and per memory thread when there is one (chat threads share a run id). */
+export function denialCapKey(agentId: string, surface: ToolGateSurface, scope: DenialScope): string {
+  return `${agentId}:${scope.runId ?? surface}:${scope.threadId ?? ''}`;
+}
+
+function recordDenial(input: CheckInput, reason: ToolGateReason, scope: DenialScope): void {
+  const { runId, threadId } = scope;
+  const runKey = denialCapKey(input.agentId, input.surface, scope);
   const count = (deniedCounts.get(runKey) ?? 0) + 1;
   if (!deniedCounts.has(runKey) && deniedCounts.size >= MAX_TRACKED_RUNS) {
     deniedCounts.delete(deniedCounts.keys().next().value as string);
   }
   deniedCounts.set(runKey, count);
 
-  const tool = input.toolName || input.toolId || null;
+  const rawTool = input.toolName || input.toolId || null;
+  const tool = rawTool && rawTool.length > TOOL_DENIED_NAME_MAX ? `${rawTool.slice(0, TOOL_DENIED_NAME_MAX)}…` : rawTool;
   console.warn(
     formatTrace('tool-gate', { agentId: input.agentId, companyId: input.companyId, runId }, 'tool call denied', {
       tool,
@@ -330,9 +401,10 @@ function recordDenial(input: CheckInput, reason: ToolGateReason, runId: string |
   if (count > TOOL_DENIED_ROWS_PER_RUN + 1) return;
   const summary = count === TOOL_DENIED_ROWS_PER_RUN + 1;
   const agentName = stateCache.get(cacheKey(input))?.agent.name ?? null;
+  const base = { companyId: input.companyId, agentId: input.agentId, agentName, surface: input.surface, runId, ...(threadId ? { threadId } : {}) };
   const row: ToolDeniedActivity = summary
-    ? { companyId: input.companyId, agentId: input.agentId, agentName, surface: input.surface, runId, tool: null, reason: 'limit_reached', summary: true }
-    : { companyId: input.companyId, agentId: input.agentId, agentName, surface: input.surface, runId, tool, reason };
+    ? { ...base, tool: null, reason: 'limit_reached', summary: true }
+    : { ...base, tool, reason };
   void Promise.resolve()
     .then(() => deps.recordDenied(row))
     .catch((err) => {
@@ -361,16 +433,54 @@ export async function checkToolPermission(input: CheckInput): Promise<ToolGateDe
     );
     decision = { allowed: false, reason: 'gate_error' };
   }
-  if (!decision.allowed) {
-    let runId: string | undefined;
-    try {
-      runId = extractToolRuntimeContext(input.requestContext).runId;
-    } catch {
-      runId = undefined;
-    }
-    recordDenial(input, decision.reason, runId);
-  }
+  if (!decision.allowed) recordDenial(input, decision.reason, denialScope(input.requestContext));
   return decision;
+}
+
+/**
+ * Log a tool call Mastra refused with `ToolNotFoundError` (a name the agent does not hold) as an
+ * `agent.tool_denied` row with reason `unknown_tool`, under the same per-run cap. Never throws.
+ */
+export function recordUnknownToolCall(ctx: ToolGateContext, toolName: string, requestContext: unknown): void {
+  try {
+    const name = typeof toolName === 'string' && toolName.length > 0 ? toolName : '(unnamed)';
+    recordDenial({ ...ctx, toolName: name, requestContext }, 'unknown_tool', denialScope(requestContext));
+  } catch (err) {
+    console.warn(
+      formatTrace('tool-gate', { agentId: ctx.agentId }, 'failed to record unknown tool call', {
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    );
+  }
+}
+
+function isToolNotFoundError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  return (error as { name?: unknown }).name === 'ToolNotFoundError';
+}
+
+/**
+ * Agent-level output processor: watches the run's stream for `tool-error` results carrying
+ * `ToolNotFoundError` (Mastra answers those before any tool hook runs, on the durable and the
+ * plain agent paths) and records them via {@link recordUnknownToolCall}. Passes every chunk
+ * through unchanged.
+ */
+export function createUnknownToolAuditProcessor(ctx: ToolGateContext): OutputProcessor {
+  return {
+    id: 'tourbillon-unknown-tool-audit',
+    name: 'Unknown tool audit',
+    processOutputStream: async ({ part, requestContext }) => {
+      try {
+        const chunk = part as { type?: string; payload?: { toolName?: unknown; error?: unknown } };
+        if (chunk?.type === 'tool-error' && isToolNotFoundError(chunk.payload?.error)) {
+          recordUnknownToolCall(ctx, String(chunk.payload?.toolName ?? ''), requestContext);
+        }
+      } catch {
+        // Auditing must never break the run.
+      }
+      return part;
+    },
+  };
 }
 
 /** Agent-level hooks: deny returns a structured tool result instead of running the tool. */
@@ -392,10 +502,12 @@ export function createToolGateHooks(ctx: ToolGateContext): ToolHooks {
 export function gatedAgentOptions<T extends Record<string, unknown>>(
   ctx: ToolGateContext,
   tools: T,
-): { tools: () => T; hooks: ToolHooks } {
+): { tools: () => T; hooks: ToolHooks; outputProcessors: OutputProcessor[] } {
   return {
     tools: () => tools,
     hooks: createToolGateHooks(ctx),
+    // Builders must not pass their own `outputProcessors` after this spread (it would drop the audit).
+    outputProcessors: [createUnknownToolAuditProcessor(ctx)],
   };
 }
 

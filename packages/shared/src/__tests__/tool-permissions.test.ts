@@ -6,6 +6,8 @@ import {
   isBrowserOrComputerToolName,
   isMcpToolNameAllowed,
   mcpServerToolNamespace,
+  mcpToolNameMatchesPattern,
+  owningMcpNamespace,
   resolveAllowedToolNames,
   resolveMcpToolPolicy,
   toolKeyForId,
@@ -163,6 +165,54 @@ describe('MCP allow-list', () => {
       { mcpToolPolicy: { 'memory-mcp': { deny: ['delete_entities'] } } } as never,
     );
     assert.deepEqual(policy.deny, ['delete_entities']);
+  });
+
+  it('policy patterns match the exact tool name only (no prefix, suffix or substring)', () => {
+    const buffer = { id: 'buffer-mcp', toolWhitelist: ['get_post', 'buffer_list_posts'], toolBlacklist: ['post'] };
+    const policy = resolveMcpToolPolicy(buffer);
+    assert.equal(policy.namespace, 'buffer');
+    // Bare name under the server namespace, or the full exposed name.
+    assert.equal(isMcpToolNameAllowed('buffer_get_post', policy), true);
+    assert.equal(isMcpToolNameAllowed('buffer_list_posts', policy), true);
+    // Old substring / suffix matches no longer count.
+    assert.equal(isMcpToolNameAllowed('buffer_get_post_metrics', policy), false, 'whitelist is not a prefix');
+    assert.equal(isMcpToolNameAllowed('buffer_admin_get_post', policy), false, 'whitelist is not a suffix');
+    assert.equal(mcpToolNameMatchesPattern('buffer_get_post', 'post', 'buffer'), false, 'blacklist is not a substring');
+    assert.equal(mcpToolNameMatchesPattern('buffer_get_post', 'get_post', 'other'), false, 'namespace must match');
+    assert.equal(mcpToolNameMatchesPattern('buffer_get_post', '', 'buffer'), false);
+    const deny = resolveMcpToolPolicy({ id: 'buffer-mcp', toolBlacklist: ['delete_post'] });
+    assert.equal(isMcpToolNameAllowed('buffer_delete_post', deny), false);
+    assert.equal(isMcpToolNameAllowed('buffer_delete_post_draft', deny), true);
+  });
+
+  it('a server namespace never claims tools of a server whose namespace extends it (collision)', () => {
+    assert.equal(owningMcpNamespace('acme_admin_drop_all', ['acme', 'acme_admin']), 'acme_admin');
+    assert.equal(owningMcpNamespace('acme_admin_drop_all', ['acme_admin', 'acme']), 'acme_admin');
+    assert.equal(owningMcpNamespace('acme_list', ['acme', 'acme_admin']), 'acme');
+    assert.equal(owningMcpNamespace('acmex_list', ['acme']), null);
+    assert.equal(owningMcpNamespace('acme_', ['acme']), null);
+
+    // Only `acme-mcp` is allowed; `acme-admin-mcp` is registered but not allowed.
+    const allowed = resolveAllowedToolNames(engineer, null, {
+      mcpServers: [{ id: 'acme-mcp' }],
+      knownMcpServerIds: ['acme-mcp', 'acme-admin-mcp'],
+    });
+    assert.deepEqual(evaluateToolName(allowed, 'acme_list', 'heartbeat'), { allowed: true, category: 'mcp' });
+    assert.deepEqual(evaluateToolName(allowed, 'acme_admin_drop_all', 'heartbeat'), {
+      allowed: false,
+      reason: 'not_allowed',
+    });
+
+    // Policy patterns are scoped to the owning server's namespace too.
+    const narrowed = resolveAllowedToolNames(
+      { ...engineer, runtimeConfig: { mcpToolPolicy: { 'acme-mcp': { allow: ['list'] } } } },
+      null,
+      { mcpServers: [{ id: 'acme-mcp' }, { id: 'acme-admin-mcp' }], knownMcpServerIds: ['acme-mcp', 'acme-admin-mcp'] },
+    );
+    assert.equal(evaluateToolName(narrowed, 'acme_list', 'heartbeat').allowed, true);
+    assert.equal(evaluateToolName(narrowed, 'acme_admin_list', 'heartbeat').allowed, true, 'admin server has no policy');
+    assert.deepEqual(evaluateToolName(narrowed, 'acme_admin_drop_all', 'heartbeat'), { allowed: true, category: 'mcp' });
+    assert.deepEqual(evaluateToolName(narrowed, 'acme_drop_all', 'heartbeat'), { allowed: false, reason: 'mcp_policy_denied' });
   });
 
   it('tools of servers not passed in are not allowed', () => {
