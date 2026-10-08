@@ -21,7 +21,8 @@ export function AgentListRow({
   const heartbeat = getAgentHeartbeatSummary(runtime);
   const model = getAgentModelSummary(agent, providers);
   const isActive = agent.status === 'active';
-  const canToggle = agent.status !== 'pending_approval';
+  // #119 B1: archived agents cannot be activated (setAgentActive refuses), so no toggle for them.
+  const canToggle = agent.status === 'active' || agent.status === 'paused';
   const canRunHeartbeat =
     agent.status === 'active' &&
     !isAgentBudgetExceeded(agent.spentMonthlyTokens, agent.budgetMonthlyTokens, runtime);

@@ -30,6 +30,8 @@ import { AgentCapabilitiesForm } from './agent-capabilities-form';
 import { AgentCodeExecutionForm } from './agent-code-execution-form';
 import { AgentHeartbeatForm } from './agent-heartbeat-form';
 import { AgentHeartbeatHeaderActions } from './agent-heartbeat-header-actions';
+import { AgentActiveChip } from './agent-active-chip';
+import { canToggleAgentChip } from './agent-active-chip-logic';
 import { AgentQueryToast } from './agent-query-toast';
 import { AgentRoutineToggle } from './agent-routine-toggle';
 import { AgentCloneForm } from './agent-clone-form';
@@ -601,7 +603,16 @@ export default async function AgentDetailPage({
             </div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            <AgentStatusBadge status={agent.status} />
+            {canToggleAgentChip(agent.status) ? (
+              <AgentActiveChip
+                agentId={agent.id}
+                urlKey={agent.urlKey}
+                initialStatus={agent.status}
+                inFlightHeartbeat={inFlightHeartbeat}
+              />
+            ) : (
+              <AgentStatusBadge status={agent.status} />
+            )}
             <AgentHeartbeatHeaderActions
               agentId={agent.id}
               companyId={agent.companyId}

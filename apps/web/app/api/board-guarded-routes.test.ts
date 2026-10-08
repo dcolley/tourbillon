@@ -203,6 +203,9 @@ describe('#106 board-guarded routes', () => {
           getLlmProviderRecordById: async (id2: string) => (id2 === 'prov-1' ? { id: 'prov-1' } : null),
         };
       }
+      if (is(id, 'default-provider-models')) {
+        return { defaultProviderModelsResponse: async () => Response.json({ models: [{ id: 'm1' }] }) };
+      }
       return originalRequire.apply(this, arguments as unknown as [string]);
     };
 
