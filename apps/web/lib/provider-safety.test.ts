@@ -146,6 +146,15 @@ describe('S3 redirects', () => {
     assert.equal(sameCredentialBoundary('http://h.test/v1', 'http://evil.test/v1'), false);
     assert.equal(sameCredentialBoundary('http://H.TEST/v1', 'http://h.test/v1'), true);
     assert.equal(sameCredentialBoundary('nope', 'http://h.test'), false);
+    // D2 mutant: endsWith(hostname) would wrongly allow evilapi.openai.com vs openai.com.
+    assert.equal(
+      sameCredentialBoundary('https://openai.com/v1', 'https://evilapi.openai.com/v1'),
+      false,
+    );
+    assert.equal(
+      sameCredentialBoundary('https://api.openai.com/v1', 'https://evilapi.openai.com/v1'),
+      false,
+    );
   });
 
   type Call = { url: string; init: RequestInit };

@@ -240,15 +240,21 @@ const BASE_URL_ENV: Record<ModelProviderKind, readonly string[]> = {
   lmstudio: ['LM_STUDIO_BASE_URL', 'LLM_BASE_URL'],
 };
 
+/** True when the env var is set and not blank/whitespace-only (matches apps/web envSet). */
+function envVarSet(name: string): boolean {
+  const value = process.env[name];
+  return typeof value === 'string' && value.trim() !== '';
+}
+
 /** Name of the env var the base URL comes from, or null when the built-in default is used. */
 function envBaseURLName(provider: ModelProviderKind): string | null {
   const names = BASE_URL_ENV[provider] ?? BASE_URL_ENV.lmstudio;
-  return names.find((name) => process.env[name] !== undefined) ?? null;
+  return names.find((name) => envVarSet(name)) ?? null;
 }
 
 function envBaseURL(provider: ModelProviderKind): string {
   const name = envBaseURLName(provider);
-  if (name) return process.env[name] ?? '';
+  if (name) return (process.env[name] ?? '').trim();
   return (PROVIDER_DEFAULTS[provider] ?? PROVIDER_DEFAULTS.lmstudio).baseURL;
 }
 

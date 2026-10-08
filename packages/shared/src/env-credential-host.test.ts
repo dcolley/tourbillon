@@ -80,6 +80,42 @@ describe('envCredentialHostMatches', () => {
     );
   });
 
+  it('refuses a look-alike host that prefixes the real one (evilapi.openai.com)', () => {
+    // H2 mutant: endsWith(hostname) would wrongly allow evilapi.openai.com vs openai.com.
+    assert.equal(
+      envCredentialHostMatches('https://openai.com/v1', 'https://evilapi.openai.com/v1'),
+      false,
+    );
+    assert.equal(
+      envCredentialHostMatches('https://api.openai.com/v1', 'https://evilapi.openai.com/v1'),
+      false,
+    );
+  });
+
+  it('refuses http → https upgrade when either side uses a non-default port', () => {
+    // H7 mutant: dropping the empty-port guard would allow this.
+    assert.equal(
+      envCredentialHostMatches('http://llm.example:8080/v1', 'https://llm.example:8443/v1'),
+      false,
+    );
+    assert.equal(
+      envCredentialHostMatches('http://llm.example:8080/v1', 'https://llm.example/v1'),
+      false,
+    );
+    assert.equal(
+      envCredentialHostMatches('http://llm.example/v1', 'https://llm.example:8443/v1'),
+      false,
+    );
+  });
+
+  it('refuses userinfo with username only (no password) on the right host', () => {
+    // U2 mutant: password-only check would allow user@host.
+    assert.equal(
+      envCredentialHostMatches('https://api.openai.com/v1', 'https://user@api.openai.com/v1'),
+      false,
+    );
+  });
+
   it('refuses a base URL with userinfo (user@host)', () => {
     assert.equal(
       envCredentialHostMatches('https://api.openai.com/v1', 'https://api.openai.com@other.example/v1'),
@@ -162,10 +198,71 @@ describe('envCredentialHostRefusal', () => {
     assert.equal(err.code, 'llm_provider_base_url_credentials');
   });
 
-  it('isEnvCredentialHostError recognises the error by shape', () => {
+  it('message never echoes the raw URL (path, query, fragment)', () => {
+    // R2 mutant: returning raw from originForMessage would leak these.
+    const err = envCredentialHostRefusal({
+      providerLabel: 'OpenAI',
+      keyEnvName: 'OPENAI_API_KEY',
+      configuredBaseURL: 'https://api.openai.com/v1/secret-path?token=cfg-secret',
+      requestBaseURL: 'https://evil.example/v1/leak?token=req-secret#frag',
+    });
+    assert.ok(err);
+    assert.equal(err.code, 'llm_provider_base_url_host_mismatch');
+    assert.match(err.message, /https:\/\/api\.openai\.com/);
+    assert.match(err.message, /https:\/\/evil\.example/);
+    assert.doesNotMatch(err.message, /secret-path|cfg-secret|req-secret|#frag|\/v1\/leak/);
+  });
+
+  it('credentials refusal message never echoes userinfo from the raw URL', () => {
+    const err = envCredentialHostRefusal({
+      providerLabel: 'OpenAI',
+      keyEnvName: 'OPENAI_API_KEY',
+      configuredBaseURL: 'https://api.openai.com/v1',
+      requestBaseURL: 'https://alice:s3cret@api.openai.com/v1/leak?token=req-secret',
+    });
+    assert.ok(err);
+    assert.equal(err.code, 'llm_provider_base_url_credentials');
+    assert.doesNotMatch(err.message, /alice|s3cret|req-secret|\/v1\/leak/);
+  });
+
+  it('isEnvCredentialHostError requires the exact llm_provider_* code across bundles', () => {
+    // Real class instance.
     const err = new EnvCredentialHostError('x', 'llm_provider_base_url_host_mismatch');
     assert.equal(isEnvCredentialHostError(err), true);
     assert.equal(isEnvCredentialHostError(new Error('nope')), false);
+
+    // Cross-bundle structural path (R5 mutant drops this): plain Error with the right shape.
+    const cross = Object.assign(new Error('cross-bundle host mismatch'), {
+      name: 'ProviderConfigError',
+      status: 409,
+      code: 'llm_provider_base_url_host_mismatch',
+    });
+    assert.equal(isEnvCredentialHostError(cross), true);
+    const crossCreds = Object.assign(new Error('cross-bundle credentials'), {
+      name: 'ProviderConfigError',
+      status: 409,
+      code: 'llm_provider_base_url_credentials',
+    });
+    assert.equal(isEnvCredentialHostError(crossCreds), true);
+
+    // Shape alone is not enough: wrong/missing code must not match.
+    const wrongCode = Object.assign(new Error('other provider config'), {
+      name: 'ProviderConfigError',
+      status: 409,
+      code: 'llm_provider_something_else',
+    });
+    assert.equal(isEnvCredentialHostError(wrongCode), false);
+    const noCode = Object.assign(new Error('no code'), {
+      name: 'ProviderConfigError',
+      status: 409,
+    });
+    assert.equal(isEnvCredentialHostError(noCode), false);
+    const wrongStatus = Object.assign(new Error('wrong status'), {
+      name: 'ProviderConfigError',
+      status: 400,
+      code: 'llm_provider_base_url_host_mismatch',
+    });
+    assert.equal(isEnvCredentialHostError(wrongStatus), false);
   });
 });
 
@@ -249,6 +346,44 @@ describe('resolveModelProviderConfigFromEnv env key host check', () => {
     );
   });
 
+  it('user@right-host with no password refuses (credentials code)', () => {
+    process.env.LLM_PROVIDER = 'openai';
+    process.env.OPENAI_API_KEY = 'sk-env-user-only-key';
+    process.env.OPENAI_BASE_URL = 'https://api.openai.com/v1';
+    assert.throws(
+      () =>
+        resolveModelProviderConfigFromEnv({
+          provider: 'openai',
+          baseURL: 'https://alice@api.openai.com/v1',
+        }),
+      (err: unknown) => {
+        assert.ok(isEnvCredentialHostError(err));
+        assert.equal((err as EnvCredentialHostError).code, 'llm_provider_base_url_credentials');
+        assert.doesNotMatch((err as Error).message, /alice|sk-env-user-only/);
+        return true;
+      },
+    );
+  });
+
+  it('suffix lookalike evilapi.openai.com refuses at resolve time', () => {
+    process.env.LLM_PROVIDER = 'openai';
+    process.env.OPENAI_API_KEY = 'sk-env-suffix-key';
+    process.env.OPENAI_BASE_URL = 'https://openai.com/v1';
+    assert.throws(
+      () =>
+        resolveModelProviderConfigFromEnv({
+          provider: 'openai',
+          baseURL: 'https://evilapi.openai.com/v1',
+        }),
+      (err: unknown) => {
+        assert.ok(isEnvCredentialHostError(err));
+        assert.equal((err as EnvCredentialHostError).code, 'llm_provider_base_url_host_mismatch');
+        assert.doesNotMatch((err as Error).message, /sk-env-suffix/);
+        return true;
+      },
+    );
+  });
+
   it('no baseURL uses the default host and attaches the key', () => {
     process.env.LLM_PROVIDER = 'openai';
     process.env.OPENAI_API_KEY = 'sk-env-default-host-key';
@@ -312,6 +447,74 @@ describe('resolveModelProviderConfigFromEnv env key host check', () => {
     const fromRecord = resolveModelProviderConfigFromRecord(record);
     assert.equal(fromRecord.apiKey, 'sk-provider-row-key');
     assert.equal(fromRecord.baseURL, 'https://gw.test/v1');
+  });
+});
+
+
+describe('resolveModelProviderConfigFromEnv blank base URL env (S4)', () => {
+  beforeEach(() => {
+    for (const k of ENV_KEYS) saved[k] = process.env[k];
+    clearEnv();
+  });
+  afterEach(() => {
+    for (const k of ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  it('blank LLM_BASE_URL counts as unset and uses the built-in default host', () => {
+    process.env.LLM_PROVIDER = 'openai';
+    process.env.OPENAI_API_KEY = 'sk-env-blank-base-key';
+    process.env.LLM_BASE_URL = '';
+    const config = resolveModelProviderConfigFromEnv({ provider: 'openai' });
+    // Not an empty baseURL that the SDK would reject — falls through to the openai default.
+    assert.equal(config.baseURL, 'https://api.openai.com/v1');
+    assert.equal(config.apiKey, 'sk-env-blank-base-key');
+  });
+
+  it('whitespace-only OPENAI_BASE_URL counts as unset', () => {
+    process.env.LLM_PROVIDER = 'openai';
+    process.env.OPENAI_API_KEY = 'sk-env-ws-base-key';
+    process.env.OPENAI_BASE_URL = '   \t  ';
+    const config = resolveModelProviderConfigFromEnv({ provider: 'openai' });
+    assert.equal(config.baseURL, 'https://api.openai.com/v1');
+    assert.equal(config.apiKey, 'sk-env-ws-base-key');
+  });
+
+  it('blank LLM_BASE_URL does not block a later real OPENAI_BASE_URL', () => {
+    // openai-compatible prefers LLM_BASE_URL then OPENAI_BASE_URL.
+    process.env.LLM_PROVIDER = 'openai-compatible';
+    process.env.LLM_API_KEY = 'sk-env-blank-then-real-key';
+    process.env.LLM_BASE_URL = '';
+    process.env.OPENAI_BASE_URL = 'https://llm-real.example/v1';
+    const config = resolveModelProviderConfigFromEnv({
+      provider: 'openai-compatible',
+      baseURL: 'https://llm-real.example/v1',
+    });
+    assert.equal(config.baseURL, 'https://llm-real.example/v1');
+    assert.equal(config.apiKey, 'sk-env-blank-then-real-key');
+  });
+
+  it('blank base URL env still refuses a mismatched agent host with a clear 409', () => {
+    process.env.LLM_PROVIDER = 'openai';
+    process.env.OPENAI_API_KEY = 'sk-env-blank-mismatch-key';
+    process.env.OPENAI_BASE_URL = ' ';
+    assert.throws(
+      () =>
+        resolveModelProviderConfigFromEnv({
+          provider: 'openai',
+          baseURL: 'https://evil.example/v1',
+        }),
+      (err: unknown) => {
+        assert.ok(isEnvCredentialHostError(err));
+        assert.equal((err as EnvCredentialHostError).code, 'llm_provider_base_url_host_mismatch');
+        assert.match((err as Error).message, /evil\.example/);
+        assert.match((err as Error).message, /api\.openai\.com/);
+        assert.doesNotMatch((err as Error).message, /sk-env-blank-mismatch|baseURL is not a valid URL|Failed to parse/i);
+        return true;
+      },
+    );
   });
 });
 
