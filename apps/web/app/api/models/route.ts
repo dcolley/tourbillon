@@ -1,15 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db, agents } from '@tourbillon/db';
 import { and, eq } from 'drizzle-orm';
+import { getLlmProviderRecordById } from '@/lib/llm-providers';
 import {
-  getLlmProviderRecordById,
-  listLlmProvidersPublic,
-} from '@/lib/llm-providers';
-import {
-  listProviderModels,
   listProviderModelsForAgent,
   listProviderModelsForRecord,
 } from '@/lib/model-catalog';
+import { defaultProviderModelsResponse } from '@/lib/default-provider-models';
 import { requireBoardCompany, requireBoardIdentity } from '@/lib/board-route-auth';
 
 export async function GET(req: NextRequest) {
@@ -53,9 +50,9 @@ export async function GET(req: NextRequest) {
       return NextResponse.json(result);
     }
 
-    await listLlmProvidersPublic();
-    const result = await listProviderModels();
-    return NextResponse.json(result);
+    // Registry default provider first, env only when there is no default; clear 409/502/503 JSON
+    // errors instead of a bare 502 (see lib/default-provider-models.ts).
+    return await defaultProviderModelsResponse();
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Failed to list models';
     return NextResponse.json({ error: message }, { status: 502 });
