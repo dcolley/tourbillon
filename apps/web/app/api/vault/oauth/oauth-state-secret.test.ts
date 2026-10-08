@@ -1,7 +1,7 @@
 /**
  * #112: the vault OAuth state HMAC fails closed. With BETTER_AUTH_SECRET unset or a known
  * public default, both starting (authorize) and finishing (callback) the flow are refused with
- * an absolute /settings redirect + error flag, and one server error names the env var (never a
+ * a relative /settings redirect + error flag, and one server error names the env var (never a
  * value). A real secret still completes the round trip.
  */
 import { describe, it, before, beforeEach, afterEach } from 'node:test';
@@ -12,7 +12,7 @@ import { NextRequest } from 'next/server';
 const env = process.env as Record<string, string | undefined>;
 const REAL_SECRET = 'real-better-auth-secret-for-oauth-tests-0123456789';
 const DEFAULTS = ['change-me-in-production', 'change-me-in-production-use-openssl-rand-base64-32'];
-const NOT_CONFIGURED = 'http://localhost:3002/settings?oauth_error=oauth_state_secret_not_configured';
+const NOT_CONFIGURED = '/settings?oauth_error=oauth_state_secret_not_configured';
 
 let companyLookups = 0;
 let errors: string[] = [];
@@ -112,15 +112,15 @@ describe('#112 vault OAuth state secret fails closed', () => {
     const state = location.searchParams.get('state') ?? '';
     // Signature verifies → reaches provider handling (no client secret here → not_configured).
     const done = await finish(state);
-    assert.equal(done.headers.get('location'), 'http://localhost:3002/settings?oauth_error=not_configured');
+    assert.equal(done.headers.get('location'), '/settings?oauth_error=not_configured');
     assert.equal(companyLookups, 1);
     // A state forged with the public default is not accepted under a real secret.
     const forged = await finish(stateSignedWith('change-me-in-production'));
-    assert.equal(forged.headers.get('location'), 'http://localhost:3002/settings?oauth_error=invalid_state_signature');
+    assert.equal(forged.headers.get('location'), '/settings?oauth_error=invalid_state_signature');
     // A malformed state (non-string payload, no signature) is a clean signature failure,
     // not a thrown HMAC error falling through to callback_failed.
     const malformed = await finish(Buffer.from(JSON.stringify({ payload: 123 })).toString('base64'));
-    assert.equal(malformed.headers.get('location'), 'http://localhost:3002/settings?oauth_error=invalid_state_signature');
+    assert.equal(malformed.headers.get('location'), '/settings?oauth_error=invalid_state_signature');
     assert.deepEqual(errors, []);
   });
 });

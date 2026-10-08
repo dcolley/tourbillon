@@ -10,6 +10,7 @@
  * Never log the secret or the state. This module only logs the env var name.
  */
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { NextResponse } from 'next/server';
 import { isDefaultOrUnsetJwtSecret } from './board-auth';
 
 export const OAUTH_STATE_SECRET_ENV = 'BETTER_AUTH_SECRET';
@@ -50,4 +51,20 @@ export function verifyOAuthState(payload: unknown, signature: unknown): boolean 
   const a = Buffer.from(signature, 'utf8');
   const b = Buffer.from(expected, 'utf8');
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/**
+ * Redirect to a /settings page with a RELATIVE Location header (RFC 9110 §10.2.2 allows it;
+ * browsers resolve it against the URL they requested, i.e. the public origin).
+ * Why not an absolute URL: in Next 16 `req.nextUrl.origin` is the address the server was
+ * started on (localhost:3002), so behind a TLS proxy every redirect went to localhost; and
+ * building from Host / X-Forwarded-Host would let a client pick the redirect origin. A
+ * relative path needs no env (BETTER_AUTH_URL) and no request header, so nothing can steer
+ * it off-site. NextResponse.redirect rejects relative URLs, hence the raw 307.
+ */
+export function settingsRedirect(pathAndQuery: string): NextResponse {
+  if (!pathAndQuery.startsWith('/settings')) {
+    throw new Error('settingsRedirect only redirects within /settings');
+  }
+  return new NextResponse(null, { status: 307, headers: { Location: pathAndQuery } });
 }

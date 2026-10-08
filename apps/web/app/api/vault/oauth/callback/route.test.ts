@@ -1,4 +1,9 @@
-/** #109 review S3: OAuth callback redirects must be absolute (a relative NextResponse.redirect → 500). */
+/**
+ * #109 review S3: OAuth callback redirects must not 500 (NextResponse.redirect rejects relative
+ * URLs). #117 review B1: they must also not point at the server's bind address
+ * (req.nextUrl.origin = localhost:3002 behind a TLS proxy) nor at a client-chosen Host /
+ * X-Forwarded-Host. So the Location is a relative /settings path.
+ */
 import { describe, it, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { NextRequest } from 'next/server';
@@ -35,10 +40,38 @@ describe('#106 vault OAuth callback redirects', () => {
       'oauth_error=invalid_state_signature',
     ],
   ] as const) {
-    it(`${query || '(no params)'} → absolute redirect to /settings?${expected}`, async () => {
+    it(`${query || '(no params)'} → relative redirect to /settings?${expected}`, async () => {
       const res = await GET(get(query));
       assert.equal(res.status, 307);
-      assert.equal(res.headers.get('location'), `http://localhost:3002/settings?${expected}`);
+      assert.equal(res.headers.get('location'), `/settings?${expected}`);
     });
   }
+
+  it('B1: behind a proxy with spoofed Host / X-Forwarded-Host, Location is never evil.example nor localhost', async () => {
+    const env = process.env as Record<string, string | undefined>;
+    const savedUrl = env.BETTER_AUTH_URL;
+    env.BETTER_AUTH_URL = 'https://tourbillon.example.test';
+    try {
+      for (const query of ['?error=access_denied', '', '?code=c&state=%%%']) {
+        // The server sees its own bind address as the URL (as Next does behind a TLS proxy).
+        const req = new NextRequest(`http://localhost:3002/api/vault/oauth/callback${query}`, {
+          headers: {
+            host: 'evil.example',
+            'x-forwarded-host': 'evil.example',
+            'x-forwarded-proto': 'https',
+            forwarded: 'host=evil.example;proto=https',
+          },
+        });
+        const res = await GET(req);
+        assert.equal(res.status, 307);
+        const location = res.headers.get('location') ?? '';
+        assert.match(location, /^\/settings\?/);
+        assert.doesNotMatch(location, /evil\.example/);
+        assert.doesNotMatch(location, /localhost/);
+      }
+    } finally {
+      if (savedUrl === undefined) delete env.BETTER_AUTH_URL;
+      else env.BETTER_AUTH_URL = savedUrl;
+    }
+  });
 });

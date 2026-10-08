@@ -7,6 +7,7 @@ import {
   OAUTH_NOT_CONFIGURED_ERROR,
   isOAuthStateSecretConfigured,
   logOAuthStateSecretMissing,
+  settingsRedirect,
   signOAuthState,
 } from '@/lib/vault-oauth-state';
 
@@ -25,7 +26,7 @@ export async function GET(req: NextRequest) {
   // #112: fail closed. Without a real BETTER_AUTH_SECRET the state HMAC is forgeable.
   if (!isOAuthStateSecretConfigured()) {
     logOAuthStateSecretMissing('start');
-    return NextResponse.redirect(new URL(`/settings?oauth_error=${OAUTH_NOT_CONFIGURED_ERROR}`, req.nextUrl.origin));
+    return settingsRedirect(`/settings?oauth_error=${OAUTH_NOT_CONFIGURED_ERROR}`);
   }
 
   try {
@@ -70,7 +71,7 @@ export async function GET(req: NextRequest) {
       const signature = signOAuthState(statePayload);
       if (!signature) {
         logOAuthStateSecretMissing('start');
-        return NextResponse.redirect(new URL(`/settings?oauth_error=${OAUTH_NOT_CONFIGURED_ERROR}`, req.nextUrl.origin));
+        return settingsRedirect(`/settings?oauth_error=${OAUTH_NOT_CONFIGURED_ERROR}`);
       }
       const state = Buffer.from(JSON.stringify({
         payload: statePayload,
