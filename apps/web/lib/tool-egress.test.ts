@@ -19,7 +19,7 @@ let tavily: typeof import('./tavily/client');
 let nitter: typeof import('./nitter/client');
 
 const realFetch = globalThis.fetch;
-const calls: Array<{ url: string; redirect?: RequestRedirect }> = [];
+const calls: Array<{ url: string; redirect?: RequestRedirect; body?: unknown }> = [];
 let respond: (url: string) => Response = () => new Response('{}', { status: 200 });
 
 before(async () => {
@@ -30,7 +30,7 @@ before(async () => {
   tavily = await import('./tavily/client');
   nitter = await import('./nitter/client');
   globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
-    calls.push({ url: String(url), redirect: init?.redirect });
+    calls.push({ url: String(url), redirect: init?.redirect, body: init?.body });
     return respond(String(url));
   }) as typeof fetch;
 });
@@ -92,6 +92,25 @@ describe('tool egress: search clients', () => {
       (err: unknown) => err instanceof shared.ToolEgressBlockedError && err.host === 'elsewhere.test',
     );
     assert.deepEqual(calls.map((c) => c.url), ['https://api.tavily.com/search']);
+  });
+
+  it('Tavily: the API key is not re-sent when a redirect changes origin (both hosts listed)', async () => {
+    respond = (url) =>
+      url.startsWith('https://api.tavily.com')
+        ? new Response(null, { status: 307, headers: { location: 'https://mirror.tavily.test/search' } })
+        : new Response(JSON.stringify({ results: [] }), { status: 200 });
+    const res = await tavily.runTavilySearch({
+      apiKey: 'tvly-secret',
+      query: 'q',
+      maxResults: 3,
+      egressPolicy: policy(['api.tavily.com', 'mirror.tavily.test']),
+    });
+    assert.equal(res.success, true);
+    assert.deepEqual(calls.map((c) => c.url), ['https://api.tavily.com/search', 'https://mirror.tavily.test/search']);
+    assert.equal(JSON.parse(String(calls[0]!.body)).api_key, 'tvly-secret');
+    const resent = JSON.parse(String(calls[1]!.body));
+    assert.equal('api_key' in resent, false);
+    assert.equal(resent.query, 'q');
   });
 
   it('Nitter: the configured base URL is checked as written (other IP notations refused)', async () => {
@@ -161,8 +180,30 @@ describe('tool egress: settings form', () => {
       entries: ['search.example.com', '*.example.org', 'mcp.example.net:443'],
     });
     const off = new FormData();
+    off.set('toolEgressMode', 'off');
     off.set('toolEgressEntries', 'search.example.com');
     assert.equal(form.parseToolEgressFormData(off).mode, 'off');
+  });
+
+  it('passes a missing mode through as null and an unknown one unchanged (never off)', () => {
+    const missing = new FormData();
+    missing.set('toolEgressEntries', 'search.example.com');
+    assert.equal(form.parseToolEgressFormData(missing).mode, null);
+    assert.throws(
+      () => shared.resolveToolEgressAllowListInput(form.parseToolEgressFormData(missing).mode, []),
+      /Mode must be 'off' or 'list'/,
+    );
+    for (const value of ['maybe', 'OFF', 'List', '', ' off']) {
+      const unknown = new FormData();
+      unknown.set('toolEgressMode', value);
+      unknown.set('toolEgressEntries', 'search.example.com');
+      assert.equal(form.parseToolEgressFormData(unknown).mode, value, JSON.stringify(value));
+      assert.throws(
+        () => shared.resolveToolEgressAllowListInput(form.parseToolEgressFormData(unknown).mode, []),
+        /Mode must be 'off' or 'list'/,
+        JSON.stringify(value),
+      );
+    }
   });
 
   it('save-time validation names the bad entry', () => {

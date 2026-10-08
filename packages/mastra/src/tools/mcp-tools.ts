@@ -44,7 +44,8 @@ export function primeMcpClientCacheForTests(key: string, client: { listTools(): 
 
 /**
  * fetch for an HTTP MCP server. With a tool egress allow-list set, every request and redirect hop
- * must stay on the list (fetchWithToolEgress); without one, plain fetch as before. A blocked hop
+ * must stay on the list (fetchWithToolEgress), and a redirect to another origin drops the API key
+ * and every configured server header; without one, plain fetch as before. A blocked hop
  * writes one server warning line with the MCP server name and the blocked host only (no path,
  * query or agent), then the error is rethrown.
  */
@@ -66,7 +67,10 @@ export function createMcpHttpFetch(
     }
     if (isToolEgressRestricted(egressPolicy)) {
       try {
-        return await fetchWithToolEgress(url, { ...init, headers }, egressPolicy);
+        // Configured server headers may carry credentials: never re-send them to another origin.
+        return await fetchWithToolEgress(url, { ...init, headers }, egressPolicy, {
+          credentialHeaders: Object.keys(extraHeaders ?? {}),
+        });
       } catch (err) {
         if (isToolEgressBlockedError(err)) {
           console.warn(

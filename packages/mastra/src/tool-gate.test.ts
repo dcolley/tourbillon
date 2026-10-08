@@ -949,6 +949,30 @@ describe('tool permission gate: outbound host allow-list', () => {
     assert.deepEqual(hops, ['https://mcp.buffer.com/mcp']);
   });
 
+  it('the MCP HTTP fetch drops the API key and every configured header when a redirect changes origin', async () => {
+    const hops: Array<{ url: string; headers: Headers }> = [];
+    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+      hops.push({ url: String(url), headers: new Headers(init?.headers) });
+      if (hops.length === 1) return new Response(null, { status: 307, headers: { location: '/mcp2' } });
+      if (hops.length === 2) return new Response(null, { status: 307, headers: { location: 'https://mcp.other.example/mcp' } });
+      return new Response('{}', { status: 200 });
+    }) as typeof fetch;
+    const mcpFetch = mcp.createMcpHttpFetch(
+      'k',
+      { 'X-Api-Key': 'server-secret', 'X-Workspace': 'ws-1' },
+      shared.resolveToolEgressPolicy({ toolEgressAllowList: ['mcp.buffer.com', 'mcp.other.example'] }),
+      'buffer-mcp',
+    );
+    const res = await mcpFetch('https://mcp.buffer.com/mcp', { method: 'POST', body: '{}', headers: { Accept: 'application/json' } });
+    assert.equal(res.status, 200);
+    assert.deepEqual(hops.map((h) => h.url), ['https://mcp.buffer.com/mcp', 'https://mcp.buffer.com/mcp2', 'https://mcp.other.example/mcp']);
+    const seen = (name: string) => hops.map((h) => h.headers.get(name));
+    assert.deepEqual(seen('authorization'), ['Bearer k', 'Bearer k', null]);
+    assert.deepEqual(seen('x-api-key'), ['server-secret', 'server-secret', null]);
+    assert.deepEqual(seen('x-workspace'), ['ws-1', 'ws-1', null]);
+    assert.deepEqual(seen('accept'), ['application/json', 'application/json', 'application/json']);
+  });
+
   it('the MCP HTTP fetch logs one warning with the server name and blocked host only', async () => {
     globalThis.fetch = (async () =>
       new Response(null, { status: 302, headers: { location: 'https://elsewhere.example:8443/private/path?token=abc#frag' } })) as typeof fetch;

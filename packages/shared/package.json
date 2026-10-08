@@ -45,6 +45,7 @@
   "dependencies": {
     "croner": "^10.0.1",
     "drizzle-orm": "catalog:",
+    "tldts": "^7.4.18",
     "zod": "catalog:"
   },
   "devDependencies": {

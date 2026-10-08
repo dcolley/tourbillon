@@ -481,7 +481,8 @@ function IntegrationsTab({
         <div>
           <h3 className="text-sm font-medium">Outbound hosts for agent tools</h3>
           <p className="text-xs text-muted-foreground mt-1">
-            Hosts agent tools may contact. Code execution has its own sandbox allow-list per agent.
+            Tool-host allow-list: the hosts agent tools may contact, matched by host name. It is not
+            an internal-network or DNS guard. Code execution has its own sandbox allow-list per agent.
           </p>
         </div>
         <ToolEgressAllowListFields list={integrationSettings.toolEgressAllowList} scope="company" />

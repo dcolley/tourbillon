@@ -50,6 +50,47 @@ describe('parseToolEgressEntry', () => {
     }
   });
 
+  it('refuses wildcards over a whole public suffix, a single label or localhost', () => {
+    for (const raw of [
+      '*.com',
+      '*.COM:443',
+      '*.co.uk',
+      '*.uk',
+      '*.xn--p1ai',
+      '*.github.io',
+      '*.s3.amazonaws.com',
+      '*.foo.ck',
+      '*.internal',
+      '*.localhost',
+      '*.app.localhost',
+    ]) {
+      const r = parseToolEgressEntry(raw);
+      assert.equal(r.ok, false, raw);
+      if (!r.ok) assert.match(r.error, /public suffix|localhost/, raw);
+    }
+    assert.throws(() => sanitizeToolEgressAllowList(['ok.example', '*.co.uk']), /\*\.co\.uk: A wildcard cannot cover a whole public suffix/);
+  });
+
+  it('allows wildcards under a registrable domain, and exact internal hosts and IPs', () => {
+    for (const [raw, entry] of [
+      ['*.example.com', '*.example.com'],
+      ['*.example.co.uk', '*.example.co.uk'],
+      ['*.me.github.io', '*.me.github.io'],
+      ['*.amazonaws.com', '*.amazonaws.com'],
+      ['*.corp.internal', '*.corp.internal'],
+      ['localhost', 'localhost'],
+      ['app.localhost:3000', 'app.localhost:3000'],
+      ['intranet', 'intranet'],
+      ['db.corp.internal', 'db.corp.internal'],
+      ['10.0.0.5', '10.0.0.5'],
+      ['127.0.0.1:8080', '127.0.0.1:8080'],
+      ['co.uk', 'co.uk'],
+    ] as const) {
+      const r = parseToolEgressEntry(raw);
+      assert.equal(r.ok && r.entry, entry, raw);
+    }
+  });
+
   it('rejects non-dotted-decimal IPv4 forms', () => {
     for (const raw of ['2130706433', '0177.0.0.1', '0x7f.0.0.1', '127.1', '127.0.0.1/8']) {
       assert.equal(parseToolEgressEntry(raw).ok, false, raw);
@@ -115,6 +156,19 @@ describe('sanitizeToolEgressAllowList / resolveToolEgressAllowListInput', () => 
 
 describe('checkToolEgressTarget', () => {
   const policy = resolveToolEgressPolicy({ toolEgressAllowList: ['api.example.com', '*.cdn.example', '203.0.113.7'] });
+
+  it('a stored list with one unreadable entry stays restrictive', () => {
+    for (const stored of [['not a host!'], ['*.com'], ['https://api.example.com/x'], ['api.example.com', 'bad entry']]) {
+      const p = resolveToolEgressPolicy({ toolEgressAllowList: stored as string[] });
+      assert.equal(isToolEgressRestricted(p), true, JSON.stringify(stored));
+      assert.equal(checkToolEgressTarget(p, 'https://other.example/').allowed, false, JSON.stringify(stored));
+      assert.equal(checkToolEgressTarget(p, 'https://x.com/').allowed, false, JSON.stringify(stored));
+    }
+    const mixed = resolveToolEgressPolicy({ toolEgressAllowList: ['api.example.com', 'bad entry'] });
+    assert.equal(checkToolEgressTarget(mixed, 'https://api.example.com/').allowed, true);
+    const agentOnly = resolveToolEgressPolicy(null, { toolEgressAllowList: ['bad entry'] });
+    assert.equal(checkToolEgressTarget(agentOnly, 'https://api.example.com/').allowed, false);
+  });
 
   it('allows every host when no list is set', () => {
     assert.deepEqual(checkToolEgressTarget({}, 'https://evil.example/x?k=1'), { allowed: true, host: null });
@@ -334,7 +388,7 @@ describe('fetchWithToolEgress', () => {
 });
 
 describe('fetchWithToolEgress: redirect handling', () => {
-  type Hop = { url: string; method: string; body: unknown; auth: string | null };
+  type Hop = { url: string; method: string; body: unknown; auth: string | null; headers: Headers };
   function scripted(responses: Array<() => Response>) {
     const hops: Hop[] = [];
     const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
@@ -343,6 +397,7 @@ describe('fetchWithToolEgress: redirect handling', () => {
         method: init?.method ?? 'GET',
         body: init?.body,
         auth: new Headers(init?.headers).get('authorization'),
+        headers: new Headers(init?.headers),
       });
       assert.equal(init?.redirect, 'manual', 'redirects are never followed automatically');
       const next = responses[hops.length - 1];
@@ -375,6 +430,40 @@ describe('fetchWithToolEgress: redirect handling', () => {
     const { hops, fetchImpl } = scripted([redirect('/same'), redirect('https://b.example/other')]);
     await fetchWithToolEgress('https://a.example/', { headers: { Authorization: 'Bearer k' } }, policy, { fetchImpl });
     assert.deepEqual(hops.map((h) => h.auth), ['Bearer k', 'Bearer k', null]);
+  });
+
+  it('drops every configured credential header when the origin changes, keeps them on the same origin', async () => {
+    const { hops, fetchImpl } = scripted([redirect('/same', 307), redirect('https://b.example/other', 307)]);
+    const init = {
+      method: 'POST',
+      body: '{"jsonrpc":"2.0"}',
+      headers: { Authorization: 'Bearer k', 'X-Api-Key': 'secret', 'X-Tenant': 't1', Cookie: 'c=1', Accept: 'application/json' },
+    };
+    await fetchWithToolEgress('https://a.example/', init, policy, { fetchImpl, credentialHeaders: ['X-Api-Key', 'x-tenant'] });
+    const seen = (name: string) => hops.map((h) => h.headers.get(name));
+    assert.deepEqual(seen('x-api-key'), ['secret', 'secret', null]);
+    assert.deepEqual(seen('x-tenant'), ['t1', 't1', null]);
+    assert.deepEqual(seen('cookie'), ['c=1', 'c=1', null]);
+    assert.deepEqual(seen('authorization'), ['Bearer k', 'Bearer k', null]);
+    assert.deepEqual(seen('accept'), ['application/json', 'application/json', 'application/json']);
+    assert.deepEqual(hops.map((h) => h.body), ['{"jsonrpc":"2.0"}', '{"jsonrpc":"2.0"}', '{"jsonrpc":"2.0"}']);
+  });
+
+  it('removes credential body keys when a body is re-sent to another origin', async () => {
+    const body = JSON.stringify({ api_key: 'tvly-secret', query: 'q' });
+    const { hops, fetchImpl } = scripted([redirect('/same', 307), redirect('https://b.example/other', 308)]);
+    await fetchWithToolEgress('https://a.example/', { method: 'POST', body }, policy, { fetchImpl, credentialBodyKeys: ['api_key'] });
+    assert.deepEqual(hops.map((h) => h.body), [body, body, JSON.stringify({ query: 'q' })]);
+    assert.ok(!String(hops[2]!.body).includes('tvly-secret'));
+  });
+
+  it('refuses to re-send a body it cannot clear to another origin', async () => {
+    const { hops, fetchImpl } = scripted([redirect('https://b.example/other', 307)]);
+    await assert.rejects(
+      () => fetchWithToolEgress('https://a.example/', { method: 'POST', body: 'api_key=s' }, policy, { fetchImpl, credentialBodyKeys: ['api_key'] }),
+      /could not be cleared of credentials/,
+    );
+    assert.equal(hops.length, 1);
   });
 
   it('switches to GET without a body on 303 and after POST on 302; keeps both on 307', async () => {

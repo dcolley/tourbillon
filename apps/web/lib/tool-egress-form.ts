@@ -1,9 +1,15 @@
 import { splitToolEgressAllowListText } from '@tourbillon/shared';
 
-/** Read the allow-list fields posted by ToolEgressAllowListFields. Validation happens on save. */
-export function parseToolEgressFormData(formData: FormData): { mode: 'off' | 'list'; entries: string[] } {
-  const mode = formData.get('toolEgressMode') === 'list' ? 'list' : 'off';
-  return { mode, entries: splitToolEgressAllowListText(formData.get('toolEgressEntries')) };
+/**
+ * Read the allow-list fields posted by ToolEgressAllowListFields. The mode is passed through as
+ * posted (null when missing) so the writer refuses anything but 'off' or 'list' and a bad post
+ * never clears a list. Validation happens on save.
+ */
+export function parseToolEgressFormData(formData: FormData): { mode: unknown; entries: string[] } {
+  return {
+    mode: formData.get('toolEgressMode'),
+    entries: splitToolEgressAllowListText(formData.get('toolEgressEntries')),
+  };
 }
 
 export const TOOL_EGRESS_EMPTY_LIST_WARNING =

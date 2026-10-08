@@ -58,6 +58,8 @@ export async function callTavilySearch(params: TavilySearchParams): Promise<Tavi
       ...(signal ? { signal } : {}),
     },
     params.egressPolicy,
+    // The API key travels in the body: never re-send it to another origin on a redirect.
+    { credentialBodyKeys: ['api_key'] },
   );
 
   if (!res.ok) {

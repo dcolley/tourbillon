@@ -1,5 +1,5 @@
 /**
- * Outbound host allow-list for agent tools.
+ * Tool-host allow-list for agent tools (outbound hosts, matched by host name).
  *
  * A company (`settings.toolEgressAllowList`) and an agent (`runtimeConfig.toolEgressAllowList`)
  * may each set a list of hosts that agent tools may contact (web search, Nitter, HTTP MCP
@@ -9,7 +9,13 @@
  * Entries: an exact host (`search.example.com`), a leading wildcard for subdomains only
  * (`*.example.com` does not match `example.com`), or an IPv4 address in dotted-decimal form,
  * each with an optional `:port` (no port = any port). Hosts are matched case-insensitively
- * after IDN → punycode normalisation.
+ * after IDN → punycode normalisation. A wildcard may not cover a whole public suffix (public
+ * suffix list, including its private section, e.g. `*.com`, `*.co.uk`, `*.github.io`), a
+ * single-label name, or `localhost`; exact hosts, including internal names and IPv4
+ * addresses, are allowed.
+ *
+ * Matching is by the host name in the URL only, with no DNS resolution: a listed name may
+ * resolve to any address. This is a tool-host allow-list, not an internal-network or DNS guard.
  *
  * Destinations are refused when a list is set and the URL carries user info, uses a non-http(s)
  * scheme, an IPv6 literal (including IPv4-mapped forms), an IPv4 literal in any form other than
@@ -21,6 +27,7 @@
  */
 import type { AgentRuntimeConfig, CompanySettings } from './types';
 import { readStoredToolEgressAllowList, resolveSearxngBaseUrl } from './company-settings';
+import { parse as parseDomain } from 'tldts';
 import { SEARXNG_TOOLSET_TOOL_IDS, TAVILY_TOOLSET_TOOL_IDS, NITTER_TOOLSET_TOOL_IDS, toolKeyForId } from './tool-permissions';
 
 export const TOOL_EGRESS_MAX_ENTRIES = 200;
@@ -31,8 +38,10 @@ export const TAVILY_API_ORIGIN = 'https://api.tavily.com';
 
 export const TOOL_EGRESS_ALLOW_LIST_HELP = [
   'One host per line: search.example.com, *.example.com (subdomains only) or an IPv4 address',
+  'Wildcards cannot cover a whole public suffix (*.com, *.co.uk) or localhost; list exact hosts instead',
   'Add :port to allow only that port; without a port every port is allowed',
   'Leave the list off to allow every host (default)',
+  'Matched by host name only, without DNS lookups: a listed name may resolve to any address, so this is not an internal-network or DNS guard',
   'Not enforced for local (stdio) MCP servers',
 ] as const;
 
@@ -101,6 +110,22 @@ function parsePort(raw: string): number | null | 'invalid' {
   return n >= 1 && n <= 65535 ? n : 'invalid';
 }
 
+/**
+ * Why a wildcard base is refused, or null when it is a registrable domain (or below one).
+ * Refused: localhost and names under it, single-label names, and any name that is itself a
+ * public suffix or sits inside one (public suffix list, ICANN and private sections).
+ */
+function wildcardBaseError(domain: string): string | null {
+  if (domain === 'localhost' || domain.endsWith('.localhost')) {
+    return 'Wildcards under localhost are not allowed; list the exact host.';
+  }
+  const info = parseDomain(domain, { allowPrivateDomains: true });
+  if (!domain.includes('.') || info.publicSuffix === domain || info.domain === null) {
+    return 'A wildcard cannot cover a whole public suffix (e.g. *.com, *.co.uk); use *.yourdomain.example or exact hosts.';
+  }
+  return null;
+}
+
 /** Validate and normalise one allow-list entry. */
 export function parseToolEgressEntry(raw: string): ToolEgressEntryParseResult {
   const entry = typeof raw === 'string' ? raw.trim() : '';
@@ -137,6 +162,8 @@ export function parseToolEgressEntry(raw: string): ToolEgressEntryParseResult {
     if (looksLikeIpv4Literal(domain)) return { ok: false, error: 'Wildcards cannot be used with IP addresses.' };
     const ascii = toAsciiHostname(domain);
     if (!ascii) return { ok: false, error: 'Enter a wildcard as *.domain (subdomains only).' };
+    const baseError = wildcardBaseError(ascii);
+    if (baseError) return { ok: false, error: baseError };
     return { ok: true, entry: `*.${ascii}${portSuffix}`, parsed: { kind: 'wildcard', host: ascii, port } };
   }
   if (lower.includes('*')) return { ok: false, error: 'A wildcard is only allowed as a leading *.' };
@@ -405,12 +432,41 @@ function nextHopUrl(location: string, current: string): string {
 export interface FetchWithToolEgressOptions {
   fetchImpl?: typeof fetch;
   maxRedirects?: number;
+  /**
+   * Extra request headers that carry credentials (e.g. configured MCP server headers). They are
+   * dropped, like Authorization, Proxy-Authorization and Cookie, when a redirect changes origin.
+   */
+  credentialHeaders?: readonly string[];
+  /**
+   * Top-level keys of a JSON request body that carry credentials (e.g. `api_key`). They are
+   * removed from a body that is re-sent to a different origin; a body that cannot be read as a
+   * JSON object is not re-sent there (the redirect is refused).
+   */
+  credentialBodyKeys?: readonly string[];
+}
+
+/** Body to re-send on a cross-origin hop with credential keys removed; throws when it cannot. */
+function bodyWithoutCredentialKeys(body: RequestInit['body'], keys: readonly string[]): RequestInit['body'] {
+  if (body === undefined || body === null || keys.length === 0) return body;
+  let parsed: unknown;
+  try {
+    parsed = typeof body === 'string' ? JSON.parse(body) : undefined;
+  } catch {
+    parsed = undefined;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Redirect to another origin refused: the request body could not be cleared of credentials.');
+  }
+  const copy = { ...(parsed as Record<string, unknown>) };
+  for (const key of keys) delete copy[key];
+  return JSON.stringify(copy);
 }
 
 /**
  * `fetch` that keeps every hop on the tool allow-list. Unrestricted policy → plain
  * `fetch(url, init)` (unchanged behaviour). Restricted → the first URL and every redirect
- * target are checked; redirects are followed by hand (bounded), Authorization is dropped when
+ * target are checked; redirects are followed by hand (bounded), credentials (Authorization,
+ * Proxy-Authorization, Cookie, `credentialHeaders` and `credentialBodyKeys`) are dropped when
  * the origin changes, and 303 (or 301/302 after POST) switch to GET as fetch does.
  * Throws {@link ToolEgressBlockedError} on a host outside the list.
  */
@@ -455,6 +511,8 @@ export async function fetchWithToolEgress(
       headers.delete('authorization');
       headers.delete('proxy-authorization');
       headers.delete('cookie');
+      for (const name of options.credentialHeaders ?? []) headers.delete(name);
+      body = bodyWithoutCredentialKeys(body, options.credentialBodyKeys ?? []);
     }
     current = next;
   }

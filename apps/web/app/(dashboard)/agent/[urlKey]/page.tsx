@@ -973,11 +973,13 @@ export default async function AgentDetailPage({
                   <div>
                     <h2 className="text-sm font-semibold">Outbound hosts for tools</h2>
                     <p className="text-xs text-muted-foreground mt-1">
-                      Narrow the hosts this agent&apos;s tools may contact.
+                      Tool-host allow-list: narrow the hosts this agent&apos;s tools may contact,
+                      matched by host name (not an internal-network or DNS guard).
                     </p>
                   </div>
                   <ActionForm action={updateToolEgressConfig} className="space-y-4">
                     <input type="hidden" name="agentId" value={agent.id} />
+                    {/* Raw stored value: a malformed one renders with a warning and can be saved over. */}
                     <ToolEgressAllowListFields list={runtime.toolEgressAllowList} scope="agent" />
                     <ActionSubmitButton label="Save outbound hosts" />
                   </ActionForm>

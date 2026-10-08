@@ -1,22 +1,29 @@
-import { TOOL_EGRESS_ALLOW_LIST_HELP, isStoredToolEgressAllowListMalformed } from '@tourbillon/shared';
+import {
+  TOOL_EGRESS_ALLOW_LIST_HELP,
+  isStoredToolEgressAllowListMalformed,
+  readStoredToolEgressAllowList,
+} from '@tourbillon/shared';
 
 /**
- * Form fields for an outbound host allow-list for agent tools (company or agent level).
+ * Form fields for a tool-host allow-list for agent tools (company or agent level).
  * Posts `toolEgressMode` ('off' | 'list') and `toolEgressEntries` (one host per line).
  * Warns when the saved list is "Only these hosts" with no entries (no outbound host allowed)
- * or holds entries that cannot be read (they match no host).
+ * or cannot be read in whole or in part (unreadable entries match no host). Any stored value is
+ * accepted, so a malformed one still renders and can be replaced by saving a fresh list.
  */
 export function ToolEgressAllowListFields({
-  list,
+  list: stored,
   scope,
 }: {
-  /** Stored list; undefined = off (every host allowed). */
-  list: string[] | undefined;
+  /** Stored value as read (raw JSON); undefined/null = off (every host allowed). */
+  list: unknown;
   scope: 'company' | 'agent';
 }) {
+  const list = readStoredToolEgressAllowList(stored);
   const on = list !== undefined;
-  const savedEmpty = on && list.length === 0;
-  const savedUnreadable = on && !savedEmpty && isStoredToolEgressAllowListMalformed(list);
+  const notAList = on && !Array.isArray(stored);
+  const savedEmpty = on && !notAList && list.length === 0;
+  const savedUnreadable = on && !savedEmpty && isStoredToolEgressAllowListMalformed(stored);
   const offLabel =
     scope === 'company' ? 'Allow every host (default)' : 'No agent-level list (company list applies)';
   const who = scope === 'company' ? 'Agent tools' : "This agent's tools";
@@ -31,7 +38,9 @@ export function ToolEgressAllowListFields({
       )}
       {savedUnreadable && (
         <p role="status" className="rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-xs">
-          Some saved entries cannot be read and match no host. Correct them and save again.
+          {notAList
+            ? 'The saved list cannot be read, so no outbound host is allowed. Save a new list or allow every host.'
+            : 'Some saved entries cannot be read and match no host. Correct them and save again.'}
         </p>
       )}
       <div className="space-y-1.5">

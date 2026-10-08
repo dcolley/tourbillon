@@ -10,10 +10,12 @@ process.env.DATABASE_URL ??= 'postgres://tool-egress-test:unused@127.0.0.1:1/unu
 
 let company: typeof import('./company');
 let agents: typeof import('./agents');
+let form: typeof import('./tool-egress-form');
 
 before(async () => {
   company = await import('./company');
   agents = await import('./agents');
+  form = await import('./tool-egress-form');
 });
 
 const BAD_INPUTS: Array<[string, { mode: unknown; entries: unknown }, RegExp]> = [
@@ -42,4 +44,51 @@ describe('tool egress allow-list: write paths validate before the database', () 
       );
     });
   }
+});
+
+/** Settings-page posts go through parseToolEgressFormData before the writer (both pages). */
+const BAD_POSTS: Array<[string, Record<string, string>]> = [
+  ['missing mode', { toolEgressEntries: 'search.example.com' }],
+  ['missing mode and entries', {}],
+  ['unknown mode', { toolEgressMode: 'maybe', toolEgressEntries: 'search.example.com' }],
+  ['empty mode', { toolEgressMode: '', toolEgressEntries: '' }],
+  ['wrong-case mode', { toolEgressMode: 'OFF', toolEgressEntries: '' }],
+];
+
+describe('tool egress allow-list: settings form posts are refused, never cleared', () => {
+  const post = (fields: Record<string, string>) => {
+    const fd = new FormData();
+    for (const [k, v] of Object.entries(fields)) fd.set(k, v);
+    return form.parseToolEgressFormData(fd);
+  };
+
+  for (const [label, fields] of BAD_POSTS) {
+    it(`company settings page: refuses ${label}`, async () => {
+      await assert.rejects(
+        () => company.updateCompanyToolEgressAllowList('company-x', post(fields)),
+        (err: unknown) => err instanceof Error && err.name === 'ToolEgressAllowListValidationError' && /Mode must be 'off' or 'list'/.test(err.message),
+      );
+    });
+
+    it(`agent settings page: refuses ${label}`, async () => {
+      await assert.rejects(
+        () => agents.updateAgentToolEgressAllowList('agent-x', post(fields)),
+        (err: unknown) => err instanceof agents.AgentValidationError && /Mode must be 'off' or 'list'/.test(err.message),
+      );
+    });
+  }
+
+  it('company settings page: refuses a wildcard over a public suffix', async () => {
+    await assert.rejects(
+      () => company.updateCompanyToolEgressAllowList('company-x', post({ toolEgressMode: 'list', toolEgressEntries: 'ok.example\n*.co.uk' })),
+      (err: unknown) => err instanceof Error && /\*\.co\.uk: A wildcard cannot cover a whole public suffix/.test(err.message),
+    );
+  });
+
+  it('agent settings page: refuses a wildcard under localhost', async () => {
+    await assert.rejects(
+      () => agents.updateAgentToolEgressAllowList('agent-x', post({ toolEgressMode: 'list', toolEgressEntries: '*.localhost' })),
+      (err: unknown) => err instanceof agents.AgentValidationError && /localhost/.test(err.message),
+    );
+  });
 });
