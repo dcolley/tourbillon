@@ -13,7 +13,8 @@ import { triggerWake } from './wake-runner';
 
 const tracer = createTraceLogger('schedule-boot', {});
 
-async function fireRoutineIssue(meta: Record<string, unknown>): Promise<{
+/** Routine fire → internal issue create on the web app. Exported for tests. */
+export async function fireRoutineIssue(meta: Record<string, unknown>): Promise<{
   issueId?: string;
   companyId: string;
   agentId: string;

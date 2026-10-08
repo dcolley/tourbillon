@@ -2,7 +2,7 @@
  * Scheduler bearer key check for internal web routes (e.g. routine issue create).
  *
  * The configured SCHEDULER_API_KEY is validated here at first use, not at import, so `next build`
- * works with it unset. When it is unset, a placeholder or too short, every presented key is
+ * works with it unset. When it is unset, padded with whitespace, a placeholder or too short, every presented key is
  * refused and the reason (never the value) is logged once per reason per process.
  */
 import {

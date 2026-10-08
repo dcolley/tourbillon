@@ -4,7 +4,9 @@
  *
  * One helper for both sides:
  * - `schedulerApiKeyProblem` / `requireSchedulerApiKey` check the configured value: it must be set,
- *   at least 32 characters, and not a placeholder from .env.example or the docs.
+ *   have no leading or trailing whitespace, be at least 32 characters, and not be a placeholder
+ *   from .env.example or the docs. The value is never trimmed: the exact configured string is what
+ *   both sides send and compare, so surrounding whitespace is refused rather than silently used.
  * - `schedulerKeyMatches` compares a presented key with the configured one via SHA-256 digests and
  *   `crypto.timingSafeEqual` (equal-length buffers, so keys of any length never throw).
  *
@@ -27,10 +29,11 @@ export const SCHEDULER_API_KEY_PLACEHOLDERS: readonly string[] = [
   '<generate with: openssl rand -base64 32>',
 ];
 
-export type SchedulerApiKeyProblem = 'unset' | 'placeholder' | 'too_short';
+export type SchedulerApiKeyProblem = 'unset' | 'whitespace' | 'placeholder' | 'too_short';
 
 const PROBLEM_TEXT: Record<SchedulerApiKeyProblem, string> = {
   unset: 'is not set',
+  whitespace: 'has leading or trailing whitespace (remove it; the value is not trimmed)',
   placeholder: 'is a placeholder value',
   too_short: `is shorter than ${SCHEDULER_API_KEY_MIN_LENGTH} characters`,
 };
@@ -43,9 +46,16 @@ function isPlaceholder(value: string): boolean {
   return /change[-_ ]?me/.test(v);
 }
 
-/** Why the configured value is unusable, or null when it is fine. Never returns the value. */
+/** Leading or trailing whitespace, including newlines, BOM and zero-width characters. */
+const EDGE_WHITESPACE = /^[\s\u200B-\u200D\u2060]|[\s\u200B-\u200D\u2060]$/;
+
+/**
+ * Why the configured value is unusable, or null when it is fine. Never returns the value.
+ * Checks the raw value: whitespace padding is refused on its own and never counts toward the length.
+ */
 export function schedulerApiKeyProblem(value: string | null | undefined): SchedulerApiKeyProblem | null {
   if (typeof value !== 'string' || value.trim() === '') return 'unset';
+  if (EDGE_WHITESPACE.test(value)) return 'whitespace';
   if (isPlaceholder(value)) return 'placeholder';
   if (value.length < SCHEDULER_API_KEY_MIN_LENGTH) return 'too_short';
   return null;
@@ -101,8 +111,8 @@ export type SchedulerKeyCheck =
   | { ok: false; reason: 'config'; problem: SchedulerApiKeyProblem };
 
 /**
- * Check a presented key against SCHEDULER_API_KEY. A misconfigured key (unset, placeholder, short)
- * rejects every request and reports `config` so the caller can log the reason.
+ * Check a presented key against SCHEDULER_API_KEY. A misconfigured key (unset, whitespace,
+ * placeholder, short) rejects every request and reports `config` so the caller can log the reason.
  */
 export function checkSchedulerApiKey(presented: unknown, env: Env = process.env): SchedulerKeyCheck {
   const expected = env[SCHEDULER_API_KEY_ENV];

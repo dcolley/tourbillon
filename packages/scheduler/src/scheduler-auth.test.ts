@@ -25,6 +25,11 @@ describe('scheduler startup key check', () => {
       ['change-me-in-production', 'placeholder'],
       ['<generate with: openssl rand -base64 32>', 'placeholder'],
       ['short-secret-value-0042', 'too_short'],
+      // Whitespace is its own reason and is never trimmed (padding never counts toward the length).
+      [`Zq7Lw2${' '.repeat(26)}`, 'whitespace'],
+      [`  ${VALID}`, 'whitespace'],
+      [`${VALID} `, 'whitespace'],
+      [`${VALID}\n`, 'whitespace'],
     ];
     for (const [value, reason] of cases) {
       const { lines, log } = captureLog();
@@ -35,7 +40,22 @@ describe('scheduler startup key check', () => {
       assert.equal(lines.length, 1);
       assert.match(lines[0], /refusing to start: SCHEDULER_API_KEY/);
       assert.ok(lines[0].includes(`"reason":"${reason}"`));
-      if (value) assert.ok(!lines[0].includes(value), `log must not contain the value (${reason})`);
+      if (value?.trim()) {
+        assert.ok(!lines[0].includes(value.trim()), `log must not contain the value (${reason})`);
+      }
+    }
+  });
+
+  it('never logs the length of the configured value', () => {
+    // Distinctive lengths that appear nowhere in the fixed message text.
+    for (const value of ['short-secret-value-0042', `${VALID}\n`, `   ${VALID}`]) {
+      const { lines, log } = captureLog();
+      assert.throws(() => assertSchedulerApiKeyAtStartup(log, { SCHEDULER_API_KEY: value }), SchedulerKeyConfigError);
+      assert.equal(lines.length, 1);
+      for (const n of [value.length, value.trim().length]) {
+        assert.notEqual(n, 32);
+        assert.ok(!new RegExp(`\\b${n}\\b`).test(lines[0]), `log must not contain the length ${n}`);
+      }
     }
   });
 
@@ -65,6 +85,14 @@ describe('wake-server request authorization', () => {
     ]) {
       assert.doesNotThrow(() => authorizeSchedulerRequest(h, env));
       assert.equal(authorizeSchedulerRequest(h, env), false, String(h));
+    }
+  });
+
+  it('rejects every request when the configured key has edge whitespace, padded or not', () => {
+    for (const configured of [`${VALID}\n`, `${VALID} `, ` ${VALID}`]) {
+      const env = { SCHEDULER_API_KEY: configured };
+      assert.equal(authorizeSchedulerRequest(`Bearer ${configured}`, env), false);
+      assert.equal(authorizeSchedulerRequest(`Bearer ${VALID}`, env), false);
     }
   });
 

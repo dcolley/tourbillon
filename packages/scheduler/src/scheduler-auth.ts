@@ -2,8 +2,9 @@
  * SCHEDULER_API_KEY handling for the scheduler process (kept free of db/mastra imports so it is
  * cheap to test).
  *
- * - `assertSchedulerApiKeyAtStartup` refuses to start when the key is unset, a placeholder or
- *   shorter than 32 characters. It logs the reason only, never the value.
+ * - `assertSchedulerApiKeyAtStartup` refuses to start when the key is unset, has leading or
+ *   trailing whitespace, is a placeholder or is shorter than 32 characters. It logs the reason
+ *   only, never the value.
  * - `authorizeSchedulerRequest` checks the bearer key on wake-server requests with the shared
  *   constant-time comparison.
  */

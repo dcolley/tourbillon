@@ -51,6 +51,10 @@ describe('validateSchedulerKey', () => {
       [undefined, /SCHEDULER_API_KEY is not set/],
       ['change-me-in-production', /SCHEDULER_API_KEY is a placeholder value/],
       ['short-secret-value-0099', /SCHEDULER_API_KEY is shorter than 32 characters/],
+      [`Zq7Lw2${' '.repeat(26)}`, /SCHEDULER_API_KEY has leading or trailing whitespace/],
+      [`${VALID}\n`, /SCHEDULER_API_KEY has leading or trailing whitespace/],
+      [`${VALID} `, /SCHEDULER_API_KEY has leading or trailing whitespace/],
+      [`   ${VALID}`, /SCHEDULER_API_KEY has leading or trailing whitespace/],
     ];
     for (const [value, reason] of cases) {
       resetSchedulerKeyLogStateForTests();
@@ -62,7 +66,21 @@ describe('validateSchedulerKey', () => {
       assert.equal(validateSchedulerKey(presented), false);
       assert.equal(logged.length, 1, 'logged once per reason');
       assert.match(logged[0], reason);
-      if (value) assert.ok(!logged[0].includes(value), 'log must not contain the value');
+      if (value) {
+        assert.ok(!logged[0].includes(value.trim()), 'log must not contain the value');
+        for (const n of new Set([value.length, value.trim().length])) {
+          if (n === 32) continue; // the documented minimum appears in the fixed text
+          assert.ok(!new RegExp(`\\b${n}\\b`).test(logged[0]), `log must not contain the length ${n}`);
+        }
+      }
+    }
+  });
+
+  it('refuses a padded key even when the presented key is the exact padded or unpadded value', () => {
+    for (const configured of [`${VALID}\n`, ` ${VALID}`]) {
+      env.SCHEDULER_API_KEY = configured;
+      assert.equal(validateSchedulerKey(configured), false);
+      assert.equal(validateSchedulerKey(VALID), false);
     }
   });
 });
