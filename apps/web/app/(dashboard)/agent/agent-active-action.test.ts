@@ -1,13 +1,16 @@
 /**
  * UX-2: setAgentActiveAction (status chip on the agent detail page).
- * Real lib/company.ts + lib/board-auth.ts (board session cookie, agent-token refusal);
- * next/headers, @tourbillon/db, @tourbillon/shared and @/lib/agents are mocked via
- * Module.prototype.require (same approach as lib/board-gate.test.ts). All values are fakes.
+ * AC: agent bearer refused (401 from the proxy, action also refuses).
+ * Real proxy.ts + lib/company.ts + lib/board-auth.ts (board session cookie via #108's
+ * createBoardSessionToken, agent-token refusal); next/headers, @tourbillon/db, @tourbillon/shared
+ * and @/lib/agents are mocked via Module.prototype.require (same approach as
+ * lib/board-gate.test.ts). The proxy request helper mirrors proxy.test.ts. All values are fakes.
  */
 import { describe, it, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import { SignJWT } from 'jose';
+import { NextRequest } from 'next/server';
 
 const BOARD_SECRET = 'test-operator-secret-ux2';
 const SESSION_COOKIE = 'tourbillon_board_session';
@@ -21,7 +24,8 @@ const AGENT_CHAT_TOKEN = `pm_chat_${Buffer.from(
 function sessionKey(secret: string): Uint8Array {
   return new Uint8Array(createHmac('sha256', 'tourbillon-board-session-v1').update(secret).digest());
 }
-async function sessionToken(secret = BOARD_SECRET) {
+/** A session cookie signed with the wrong key (forged). Valid ones come from createBoardSessionToken. */
+async function forgedSessionToken(secret: string) {
   return new SignJWT({ typ: 'tourbillon_board_session' })
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
@@ -38,6 +42,8 @@ let revalidated: string[];
 
 describe('UX-2 setAgentActiveAction', () => {
   let action: typeof import('./actions').setAgentActiveAction;
+  let proxy: typeof import('../../../proxy').proxy;
+  let createBoardSessionToken: typeof import('../../../lib/board-auth').createBoardSessionToken;
   let AgentValidationError: new (m: string) => Error;
 
   before(async () => {
@@ -86,13 +92,33 @@ describe('UX-2 setAgentActiveAction', () => {
       return originalRequire.apply(this, arguments as unknown as [string]);
     };
     ({ setAgentActiveAction: action } = await import('./actions'));
+    ({ proxy } = await import('../../../proxy'));
+    ({ createBoardSessionToken } = await import('../../../lib/board-auth'));
   });
+
+  // Same request helper as #108's proxy.test.ts.
+  const req = (path: string, init: { method?: string; headers?: Record<string, string> } = {}) =>
+    new NextRequest(`http://localhost${path}`, init);
+
+  async function validSession(): Promise<string> {
+    const token = await createBoardSessionToken();
+    assert.ok(token, 'board session token minted');
+    return token;
+  }
+
+  /** Server-action request through the real proxy: the action runs only if the proxy passes it on. */
+  async function dispatchChipAction(headers: Record<string, string>): Promise<number> {
+    const res = await proxy(req('/agent/on', { method: 'POST', headers: { 'next-action': 'chip', ...headers } }));
+    if (res.headers.get('x-middleware-next') !== '1') return res.status;
+    const result = await action('agent-on', false, 'on');
+    return result.ok ? 200 : result.status;
+  }
 
   beforeEach(async () => {
     process.env.TOURBILLON_BOARD_SECRET = BOARD_SECRET;
     delete process.env.TOURBILLON_BOARD_AUTH_INSECURE_DEV;
     process.env.BETTER_AUTH_SECRET = 'test-better-auth-secret-not-default';
-    reqState.cookies = { [SESSION_COOKIE]: await sessionToken() };
+    reqState.cookies = { [SESSION_COOKIE]: await validSession() };
     reqState.headers = {};
     agentsById = new Map([
       ['agent-on', { id: 'agent-on', status: 'active', runtimeConfig: { heartbeat: { enabled: false } } }],
@@ -124,16 +150,35 @@ describe('UX-2 setAgentActiveAction', () => {
     assert.equal(agentsById.get('agent-off')!.runtimeConfig.heartbeat.enabled, true);
   });
 
-  it('no board session → refused before any write', async () => {
+  it('agent bearer (pm_run_/pm_chat_) + board session → 401 from the proxy before the action runs', async () => {
+    const cookie = `${SESSION_COOKIE}=${await validSession()}`;
+    // Control: the same board request without a bearer passes the proxy and the action writes.
+    assert.equal(await dispatchChipAction({ cookie }), 200);
+    assert.deepEqual(setCalls, [['agent-on', false]]);
+    agentsById.get('agent-on')!.status = 'active';
+    setCalls = [];
+    for (const token of [AGENT_RUN_TOKEN, AGENT_CHAT_TOKEN]) {
+      assert.equal(await dispatchChipAction({ cookie, authorization: `Bearer ${token}` }), 401, token.slice(0, 8));
+    }
+    assert.deepEqual(setCalls, [], 'action never ran');
+    assert.equal(agentsById.get('agent-on')!.status, 'active');
+  });
+
+  it('no board session → 401 from the proxy before the action runs', async () => {
+    assert.equal(await dispatchChipAction({}), 401);
+    assert.deepEqual(setCalls, []);
+  });
+
+  it('setAgentActiveAction itself refuses with no write when called without a board session', async () => {
     reqState.cookies = {};
     await assert.rejects(() => action('agent-on', false), { name: 'BoardSessionRequiredError' });
-    reqState.cookies = { [SESSION_COOKIE]: await sessionToken('attacker-guess') };
+    reqState.cookies = { [SESSION_COOKIE]: await forgedSessionToken('attacker-guess') };
     await assert.rejects(() => action('agent-on', false), { name: 'BoardSessionRequiredError' });
     assert.deepEqual(setCalls, []);
     assert.equal(agentsById.get('agent-on')!.status, 'active');
   });
 
-  it('agent run/chat bearer (even with a valid board session) → refused before any write', async () => {
+  it('setAgentActiveAction itself also refuses an agent bearer (pm_run_/pm_chat_) + board session, no write', async () => {
     for (const token of [AGENT_RUN_TOKEN, AGENT_CHAT_TOKEN]) {
       reqState.headers = { authorization: `Bearer ${token}` };
       await assert.rejects(() => action('agent-on', false), { name: 'BoardSessionRequiredError' });
