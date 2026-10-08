@@ -34,8 +34,8 @@ describe('getAgentModelSummary env credential host (display)', () => {
       {
         modelId: 'gpt-test',
         providerId: null,
-        adapterType: 'openai',
-        adapterConfig: { baseURL: 'https://evil.example/v1' },
+        adapterType: 'lmstudio',
+        adapterConfig: { provider: 'openai', baseURL: 'https://evil.example/v1' },
       },
       [],
     );
@@ -52,8 +52,8 @@ describe('getAgentModelSummary env credential host (display)', () => {
       {
         modelId: null,
         providerId: null,
-        adapterType: 'openai',
-        adapterConfig: {},
+        adapterType: 'lmstudio',
+        adapterConfig: { provider: 'openai' },
       },
       [],
     );

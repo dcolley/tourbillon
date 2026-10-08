@@ -246,6 +246,36 @@ function envVarSet(name: string): boolean {
   return typeof value === 'string' && value.trim() !== '';
 }
 
+/** Distinct LLM base-URL env var names (union of BASE_URL_ENV lists). */
+const LLM_BASE_URL_ENV_VARS = [
+  'LLM_BASE_URL',
+  'OPENAI_BASE_URL',
+  'LM_STUDIO_BASE_URL',
+  'OLLAMA_BASE_URL',
+] as const;
+
+let blankBaseUrlEnvWarned = false;
+
+/**
+ * Once per process: name any LLM base-URL env var that is set but blank/whitespace-only.
+ * Never logs the values. Called from resolveModelProviderConfigFromEnv.
+ */
+export function warnBlankBaseUrlEnvVars(): void {
+  if (blankBaseUrlEnvWarned) return;
+  blankBaseUrlEnvWarned = true;
+  for (const name of LLM_BASE_URL_ENV_VARS) {
+    const value = process.env[name];
+    if (typeof value === 'string' && value.trim() === '') {
+      console.warn(`${name} is set but blank; treated as unset`);
+    }
+  }
+}
+
+/** Test helper: allow warnBlankBaseUrlEnvVars to run again in the same process. */
+export function resetBlankBaseUrlEnvWarningForTests(): void {
+  blankBaseUrlEnvWarned = false;
+}
+
 /** Name of the env var the base URL comes from, or null when the built-in default is used. */
 function envBaseURLName(provider: ModelProviderKind): string | null {
   const names = BASE_URL_ENV[provider] ?? BASE_URL_ENV.lmstudio;
@@ -335,6 +365,7 @@ export function resolveModelProviderConfigFromEnv(
   modelId?: string | null,
   options?: EnvCredentialResolveOptions,
 ): ModelProviderConfig {
+  warnBlankBaseUrlEnvVars();
   const provider = overrides?.provider ?? envProviderKind();
   const apiMode = overrides?.apiMode ?? envApiMode(provider);
   // A server env API key only goes to the env-configured base URL host for this provider kind,

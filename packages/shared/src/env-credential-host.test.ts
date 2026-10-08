@@ -11,9 +11,11 @@ import {
   isEnvCredentialHostError,
 } from './env-credential-host';
 import {
+  resetBlankBaseUrlEnvWarningForTests,
   resolveModelProviderConfig,
   resolveModelProviderConfigFromEnv,
   resolveModelProviderConfigFromRecord,
+  warnBlankBaseUrlEnvVars,
   type LlmProviderRecord,
 } from './model-provider';
 
@@ -515,6 +517,54 @@ describe('resolveModelProviderConfigFromEnv blank base URL env (S4)', () => {
         return true;
       },
     );
+  });
+});
+
+describe('warnBlankBaseUrlEnvVars (D1)', () => {
+  const warns: string[] = [];
+  let originalWarn: typeof console.warn;
+
+  beforeEach(() => {
+    for (const k of ENV_KEYS) saved[k] = process.env[k];
+    clearEnv();
+    resetBlankBaseUrlEnvWarningForTests();
+    warns.length = 0;
+    originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.map(String).join(' '));
+    };
+  });
+  afterEach(() => {
+    console.warn = originalWarn;
+    for (const k of ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    resetBlankBaseUrlEnvWarningForTests();
+  });
+
+  it('names blank and whitespace-only base URL vars once; never logs values', () => {
+    process.env.OPENAI_BASE_URL = '';
+    process.env.LLM_BASE_URL = '   \t  ';
+    process.env.LM_STUDIO_BASE_URL = 'http://kept.example/v1';
+    warnBlankBaseUrlEnvVars();
+    warnBlankBaseUrlEnvVars(); // second call is a no-op
+    assert.equal(warns.length, 2);
+    assert.ok(warns.some((w) => w === 'OPENAI_BASE_URL is set but blank; treated as unset'));
+    assert.ok(warns.some((w) => w === 'LLM_BASE_URL is set but blank; treated as unset'));
+    assert.ok(!warns.some((w) => w.includes('LM_STUDIO_BASE_URL')));
+    // Values must never appear in the warning text.
+    for (const w of warns) {
+      assert.doesNotMatch(w, /http:\/\/|sk-|kept\.example|\t/);
+      assert.match(w, /^[A-Z0-9_]+ is set but blank; treated as unset$/);
+    }
+  });
+
+  it('resolveModelProviderConfigFromEnv triggers the once-per-process warning', () => {
+    process.env.OLLAMA_BASE_URL = ' ';
+    resolveModelProviderConfigFromEnv({ provider: 'ollama' });
+    resolveModelProviderConfigFromEnv({ provider: 'ollama' });
+    assert.deepEqual(warns, ['OLLAMA_BASE_URL is set but blank; treated as unset']);
   });
 });
 
