@@ -38,7 +38,8 @@
     "./vault-credentials": "./src/vault-credentials.ts",
     "./knowledge-graph": "./src/knowledge-graph.ts",
     "./knowledge-graph-config": "./src/knowledge-graph-config.ts",
-    "./agent-token": "./src/agent-token.ts"
+    "./agent-token": "./src/agent-token.ts",
+    "./scheduler-key": "./src/scheduler-key.ts"
   },
   "dependencies": {
     "croner": "^10.0.1",

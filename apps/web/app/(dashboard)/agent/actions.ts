@@ -12,6 +12,7 @@ import { triggerAgentHeartbeat, retryFailedHeartbeat } from '@/lib/heartbeat';
 import { getHeartbeatRun, getInFlightHeartbeatRun } from '@/lib/heartbeats';
 import { actionError, actionSuccess, type ActionResult } from '@/lib/action-result';
 import { requireBoardSession } from '@/lib/company';
+import { isSchedulerApiKeyConfigured } from '@tourbillon/shared/scheduler-key';
 import type { AgentActiveToggleResult } from './[urlKey]/agent-active-chip-logic';
 
 export async function triggerAgentHeartbeatAction(formData: FormData) {
@@ -152,11 +153,10 @@ export async function forceKillHeartbeatAction(formData: FormData) {
   }
 
   const schedulerUrl = process.env.SCHEDULER_WAKE_URL ?? 'http://127.0.0.1:3003';
-  const apiKey = process.env.SCHEDULER_API_KEY;
-
-  if (!apiKey) {
+  if (!isSchedulerApiKeyConfigured()) {
     redirect(`${returnPath}?error=${encodeURIComponent('SCHEDULER_API_KEY not configured')}`);
   }
+  const apiKey = process.env.SCHEDULER_API_KEY as string;
 
   let errorMessage: string | null = null;
 

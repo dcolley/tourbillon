@@ -8,6 +8,7 @@ import {
   getMastraInstance,
 } from '@tourbillon/mastra';
 import { createTraceLogger } from '@tourbillon/shared';
+import { requireSchedulerApiKey } from '@tourbillon/shared/scheduler-key';
 import { triggerWake } from './wake-runner';
 
 const tracer = createTraceLogger('schedule-boot', {});
@@ -30,7 +31,7 @@ async function fireRoutineIssue(meta: Record<string, unknown>): Promise<{
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${process.env.SCHEDULER_API_KEY}`,
+      Authorization: `Bearer ${requireSchedulerApiKey()}`,
     },
     body: JSON.stringify({
       ...taskTemplate,

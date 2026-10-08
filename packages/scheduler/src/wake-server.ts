@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import { createTraceLogger, type HeartbeatJobData } from '@tourbillon/shared';
 import { syncAgentTimerSchedule, syncRoutineSchedule, deleteRoutineSchedule } from '@tourbillon/mastra';
 import { startWake, sweepStaleHeartbeatRuns, forceKillHeartbeat } from './wake-runner';
+import { assertSchedulerApiKeyAtStartup, authorizeSchedulerRequest } from './scheduler-auth';
 
 const tracer = createTraceLogger('wake-server', {});
 
@@ -17,11 +18,7 @@ function readBody(req: http.IncomingMessage): Promise<string> {
 }
 
 function authorize(req: http.IncomingMessage): boolean {
-  const expected = process.env.SCHEDULER_API_KEY;
-  if (!expected) return false;
-  const auth = req.headers.authorization ?? '';
-  const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
-  return token === expected;
+  return authorizeSchedulerRequest(req.headers.authorization);
 }
 
 function json(res: http.ServerResponse, status: number, body: unknown): void {
@@ -34,6 +31,7 @@ function json(res: http.ServerResponse, status: number, body: unknown): void {
  * without BullMQ. Default: SCHEDULER_WAKE_PORT=3003
  */
 export function startWakeServer(): http.Server {
+  assertSchedulerApiKeyAtStartup(tracer);
   const port = parseInt(process.env.SCHEDULER_WAKE_PORT ?? '3003', 10);
 
   const server = http.createServer(async (req, res) => {
