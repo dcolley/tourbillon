@@ -1,11 +1,13 @@
 /**
  * LLM API keys from the server environment (LLM_API_KEY, OPENAI_API_KEY, LM_STUDIO_API_KEY, …)
- * are only attached to requests for the host they were configured for: the env base URL of that
- * provider kind, or the provider's built-in default when no env base URL is set.
+ * are only attached to requests for the host they were configured for: the env base URL set for
+ * that provider kind, or the kind's built-in default host only when it is the env provider kind
+ * (LLM_PROVIDER).
  *
  * An agent with no LLM provider row falls back to the env config; when its
- * `adapterConfig.baseURL` points somewhere else, the env key is not attached and resolution
- * fails with {@link EnvCredentialHostError} (409) instead.
+ * `adapterConfig.baseURL` points somewhere else, or it switches provider kind to one with no env
+ * base URL, the env key is not attached and resolution fails with {@link EnvCredentialHostError}
+ * (409) instead.
  *
  * Host rule: the same one used for provider rows (sameCredentialBoundary in
  * apps/web/lib/provider-safety.ts, used for redirects and base URL changes): same hostname
@@ -77,31 +79,37 @@ function originForMessage(raw: string): string {
 
 /**
  * The error to raise when an env key would be sent to `requestBaseURL`, or null when it may be.
+ * `configuredBaseURL` is the base URL the key is configured for, or null when it has none for
+ * this provider kind (e.g. the agent switched provider kind and that kind has no env base URL).
  * Messages name the provider, the env variable and both hosts; never the key itself.
  */
 export function envCredentialHostRefusal(input: {
   providerLabel: string;
   keyEnvName: string;
-  configuredBaseURL: string;
+  configuredBaseURL: string | null;
   requestBaseURL: string;
 }): EnvCredentialHostError | null {
   const { providerLabel, keyEnvName, configuredBaseURL, requestBaseURL } = input;
-  if (envCredentialHostMatches(configuredBaseURL, requestBaseURL)) return null;
+  if (configuredBaseURL !== null && envCredentialHostMatches(configuredBaseURL, requestBaseURL)) {
+    return null;
+  }
+  const remedy =
+    'Add an API key to the agent, or add an LLM provider for that host in Settings → LLM Providers.';
   const request = parseURL(requestBaseURL);
   if (request && (request.username || request.password)) {
     return new EnvCredentialHostError(
-      `The agent's base URL contains a username or password (user:pass@host); refusing to attach ` +
-        `the ${providerLabel} API key from the server environment (${keyEnvName}). Remove the ` +
-        'credentials from the URL.',
+      `The server's ${providerLabel} API key (${keyEnvName}) isn't sent to a base URL that ` +
+        `contains a username or password (user:pass@host). Remove the credentials from the URL. ${remedy}`,
       'llm_provider_base_url_credentials',
     );
   }
+  const expected =
+    configuredBaseURL === null
+      ? `it is not configured for any ${providerLabel} host in the server environment`
+      : `it is only used for ${originForMessage(configuredBaseURL)}`;
   return new EnvCredentialHostError(
-    `The agent's base URL (${originForMessage(requestBaseURL)}) is on a different host from the ` +
-      `${providerLabel} base URL configured in the server environment ` +
-      `(expected ${originForMessage(configuredBaseURL)}); refusing to attach the API key from ` +
-      `${keyEnvName} there. Remove the agent's base URL override, give the agent its own API key, ` +
-      'or add an LLM provider for that host in Settings → LLM Providers.',
+    `The server's API key (${keyEnvName}) isn't sent to this agent's ${providerLabel} host ` +
+      `(${originForMessage(requestBaseURL)}): ${expected}. ${remedy}`,
     'llm_provider_base_url_host_mismatch',
   );
 }

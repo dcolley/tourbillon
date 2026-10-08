@@ -231,36 +231,25 @@ function envApiMode(provider: ModelProviderKind): ModelApiMode {
   );
 }
 
+/** Env vars that set the base URL for each provider kind, first set one wins. */
+const BASE_URL_ENV: Record<ModelProviderKind, readonly string[]> = {
+  ollama: ['OLLAMA_BASE_URL', 'LLM_BASE_URL'],
+  vllm: ['LLM_BASE_URL'],
+  openai: ['OPENAI_BASE_URL', 'LLM_BASE_URL'],
+  'openai-compatible': ['LLM_BASE_URL', 'OPENAI_BASE_URL'],
+  lmstudio: ['LM_STUDIO_BASE_URL', 'LLM_BASE_URL'],
+};
+
+/** Name of the env var the base URL comes from, or null when the built-in default is used. */
+function envBaseURLName(provider: ModelProviderKind): string | null {
+  const names = BASE_URL_ENV[provider] ?? BASE_URL_ENV.lmstudio;
+  return names.find((name) => process.env[name] !== undefined) ?? null;
+}
+
 function envBaseURL(provider: ModelProviderKind): string {
-  switch (provider) {
-    case 'ollama':
-      return (
-        process.env.OLLAMA_BASE_URL ??
-        process.env.LLM_BASE_URL ??
-        PROVIDER_DEFAULTS.ollama.baseURL
-      );
-    case 'vllm':
-      return process.env.LLM_BASE_URL ?? PROVIDER_DEFAULTS.vllm.baseURL;
-    case 'openai':
-      return (
-        process.env.OPENAI_BASE_URL ??
-        process.env.LLM_BASE_URL ??
-        PROVIDER_DEFAULTS.openai.baseURL
-      );
-    case 'openai-compatible':
-      return (
-        process.env.LLM_BASE_URL ??
-        process.env.OPENAI_BASE_URL ??
-        PROVIDER_DEFAULTS['openai-compatible'].baseURL
-      );
-    case 'lmstudio':
-    default:
-      return (
-        process.env.LM_STUDIO_BASE_URL ??
-        process.env.LLM_BASE_URL ??
-        PROVIDER_DEFAULTS.lmstudio.baseURL
-      );
-  }
+  const name = envBaseURLName(provider);
+  if (name) return process.env[name] ?? '';
+  return (PROVIDER_DEFAULTS[provider] ?? PROVIDER_DEFAULTS.lmstudio).baseURL;
 }
 
 /** Env vars that hold the API key for each provider kind, first set one wins. */
@@ -342,25 +331,31 @@ export function resolveModelProviderConfigFromEnv(
 ): ModelProviderConfig {
   const provider = overrides?.provider ?? envProviderKind();
   const apiMode = overrides?.apiMode ?? envApiMode(provider);
-  // An env API key is only attached when the request goes to the env base URL's host for that
-  // provider (built-in default when unset). An agent base URL override on another host throws
-  // EnvCredentialHostError (409), or with `onEnvCredentialHostMismatch: 'omit-key'` resolves
-  // without the key.
+  // A server env API key only goes to the env-configured base URL host for this provider kind,
+  // or to the kind's built-in default host when this kind is the env kind (LLM_PROVIDER). Any
+  // other host (an agent base URL override, or a provider-kind change with no env base URL for
+  // that kind) throws EnvCredentialHostError (409), or with `onEnvCredentialHostMismatch:
+  // 'omit-key'` resolves without the key.
   const configuredBaseURL = envBaseURL(provider);
   const overrideBaseURL = overrides?.baseURL?.trim();
   const baseURL = overrideBaseURL || configuredBaseURL;
   let apiKey = overrides?.apiKey ?? envApiKey(provider);
   const keyEnvName = overrides?.apiKey === undefined ? envApiKeyName(provider) : null;
-  if (keyEnvName && apiKey !== '' && overrideBaseURL) {
-    const refusal = envCredentialHostRefusal({
-      providerLabel: LLM_PROVIDER_TYPE_LABELS[provider] ?? provider,
-      keyEnvName,
-      configuredBaseURL,
-      requestBaseURL: overrideBaseURL,
-    });
-    if (refusal) {
-      if (options?.onEnvCredentialHostMismatch !== 'omit-key') throw refusal;
-      apiKey = '';
+  if (keyEnvName && apiKey !== '') {
+    const envKind = envProviderKind();
+    const keyBaseURL =
+      envBaseURLName(provider) !== null || provider === envKind ? configuredBaseURL : null;
+    if (overrideBaseURL || keyBaseURL === null) {
+      const refusal = envCredentialHostRefusal({
+        providerLabel: LLM_PROVIDER_TYPE_LABELS[provider] ?? provider,
+        keyEnvName,
+        configuredBaseURL: keyBaseURL,
+        requestBaseURL: baseURL,
+      });
+      if (refusal) {
+        if (options?.onEnvCredentialHostMismatch !== 'omit-key') throw refusal;
+        apiKey = '';
+      }
     }
   }
   const defaultModel = modelId ?? overrides?.modelId ?? envDefaultModel();

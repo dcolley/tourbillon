@@ -101,6 +101,21 @@ describe('agent model resolution: env key host check', () => {
     assert.equal(requests.length, 0);
   });
 
+  it('provider-kind change with no baseURL: refuses, nothing is sent', () => {
+    process.env.LLM_PROVIDER = 'lmstudio';
+    process.env.LLM_API_KEY = 'sk-mastra-kind-switch-key';
+    assert.throws(
+      () => getLanguageModelForAgent({ adapterType: 'openai', adapterConfig: {}, modelId: 'm1' }, null),
+      (err: unknown) => {
+        assert.ok(isEnvCredentialHostError(err));
+        assert.equal((err as { code?: string }).code, 'llm_provider_base_url_host_mismatch');
+        assert.doesNotMatch((err as Error).message, /sk-mastra/);
+        return true;
+      },
+    );
+    assert.equal(requests.length, 0);
+  });
+
   it('no baseURL: the built-in default host gets the key', async () => {
     process.env.LLM_PROVIDER = 'openai';
     process.env.OPENAI_API_KEY = 'sk-mastra-default-key';

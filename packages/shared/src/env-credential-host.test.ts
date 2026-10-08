@@ -134,7 +134,21 @@ describe('envCredentialHostRefusal', () => {
     assert.match(err.message, /OPENAI_API_KEY/);
     assert.match(err.message, /api\.openai\.com/);
     assert.match(err.message, /evil\.example/);
+    assert.match(err.message, /isn't sent/);
+    assert.match(err.message, /Add an API key to the agent, or add an LLM provider/);
     assert.doesNotMatch(err.message, /sk-/);
+  });
+
+  it('refuses when the key has no configured base URL for this kind', () => {
+    const err = envCredentialHostRefusal({
+      providerLabel: 'OpenAI',
+      keyEnvName: 'LLM_API_KEY',
+      configuredBaseURL: null,
+      requestBaseURL: 'https://api.openai.com/v1',
+    });
+    assert.ok(err);
+    assert.equal(err.code, 'llm_provider_base_url_host_mismatch');
+    assert.match(err.message, /not configured for any OpenAI host/);
   });
 
   it('uses the credentials code when the request URL has userinfo', () => {
@@ -298,5 +312,94 @@ describe('resolveModelProviderConfigFromEnv env key host check', () => {
     const fromRecord = resolveModelProviderConfigFromRecord(record);
     assert.equal(fromRecord.apiKey, 'sk-provider-row-key');
     assert.equal(fromRecord.baseURL, 'https://gw.test/v1');
+  });
+});
+
+describe('resolveModelProviderConfigFromEnv provider-kind change', () => {
+  beforeEach(() => {
+    for (const k of ENV_KEYS) saved[k] = process.env[k];
+    clearEnv();
+  });
+  afterEach(() => {
+    for (const k of ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  it('kind change with no baseURL refuses: the shared key is not sent to the other kind default host', () => {
+    process.env.LLM_PROVIDER = 'lmstudio';
+    process.env.LLM_API_KEY = 'sk-env-kind-switch-key';
+    assert.throws(
+      () => resolveModelProviderConfigFromEnv({ provider: 'openai' }),
+      (err: unknown) => {
+        assert.ok(isEnvCredentialHostError(err));
+        assert.equal((err as EnvCredentialHostError).code, 'llm_provider_base_url_host_mismatch');
+        const message = (err as Error).message;
+        assert.match(message, /LLM_API_KEY/);
+        assert.match(message, /isn't sent/);
+        assert.match(message, /api\.openai\.com/);
+        assert.match(message, /Add an API key to the agent, or add an LLM provider/);
+        assert.doesNotMatch(message, /sk-env-kind-switch/);
+        return true;
+      },
+    );
+  });
+
+  it('kind change refuses with the default env kind too (LLM_PROVIDER unset)', () => {
+    process.env.OPENAI_API_KEY = 'sk-env-kind-default-key';
+    assert.throws(
+      () => resolveModelProviderConfigFromEnv({ provider: 'openai-compatible' }),
+      (err: unknown) => isEnvCredentialHostError(err),
+    );
+    assert.throws(
+      () => resolveModelProviderConfigFromEnv({ provider: 'openai' }),
+      (err: unknown) => isEnvCredentialHostError(err),
+    );
+  });
+
+  it('kind change to that kind default host given explicitly also refuses', () => {
+    process.env.LLM_PROVIDER = 'lmstudio';
+    process.env.LLM_API_KEY = 'sk-env-kind-explicit-key';
+    assert.throws(
+      () => resolveModelProviderConfigFromEnv({ provider: 'openai', baseURL: 'https://api.openai.com/v1' }),
+      (err: unknown) => isEnvCredentialHostError(err),
+    );
+  });
+
+  it('kind change keeps the key when that kind resolves to the env-configured base URL', () => {
+    process.env.LLM_PROVIDER = 'lmstudio';
+    process.env.LLM_BASE_URL = 'http://lan-llm.example:8000/v1';
+    process.env.LLM_API_KEY = 'sk-env-kind-same-host-key';
+    const config = resolveModelProviderConfigFromEnv({ provider: 'vllm' });
+    assert.equal(config.baseURL, 'http://lan-llm.example:8000/v1');
+    assert.equal(config.apiKey, 'sk-env-kind-same-host-key');
+  });
+
+  it('same kind as the env kind keeps the default host', () => {
+    process.env.LLM_PROVIDER = 'openai';
+    process.env.OPENAI_API_KEY = 'sk-env-kind-match-key';
+    const config = resolveModelProviderConfigFromEnv({ provider: 'openai' });
+    assert.equal(config.baseURL, 'https://api.openai.com/v1');
+    assert.equal(config.apiKey, 'sk-env-kind-match-key');
+    const noOverride = resolveModelProviderConfig();
+    assert.equal(noOverride.apiKey, 'sk-env-kind-match-key');
+  });
+
+  it('kind change with omit-key resolves without the key (display path)', () => {
+    process.env.LLM_PROVIDER = 'lmstudio';
+    process.env.LLM_API_KEY = 'sk-env-kind-omit-key';
+    const config = resolveModelProviderConfigFromEnv({ provider: 'openai' }, null, {
+      onEnvCredentialHostMismatch: 'omit-key',
+    });
+    assert.equal(config.apiKey, '');
+    assert.equal(config.baseURL, 'https://api.openai.com/v1');
+  });
+
+  it('kind change with no env key set is unaffected (placeholder / empty key)', () => {
+    process.env.LLM_PROVIDER = 'openai';
+    const config = resolveModelProviderConfigFromEnv({ provider: 'lmstudio' });
+    assert.equal(config.apiKey, 'lm-studio');
+    assert.equal(config.baseURL, 'http://localhost:1234/v1');
   });
 });
