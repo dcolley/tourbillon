@@ -1,0 +1,764 @@
+/**
+ * Live tool permission gate: end-to-end through the real agent builders (heartbeat durable agent,
+ * harness controller backing agent, dashboard chat agent) with a scripted mock model, in-memory
+ * agent/company rows and in-memory Mastra storage. No database, network or model provider.
+ */
+import assert from 'node:assert/strict';
+import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
+import { performance } from 'node:perf_hooks';
+import { Mastra } from '@mastra/core';
+import { InMemoryStore } from '@mastra/core/storage';
+import { createTool } from '@mastra/core/tools';
+import { RequestContext } from '@mastra/core/request-context';
+import { Memory } from '@mastra/memory';
+import { z } from 'zod';
+import type { Agent as AgentRecord } from '@tourbillon/db';
+
+// Module-level DB clients are created lazily and never connected in this file.
+process.env.DATABASE_URL ??= 'postgres://tool-gate-test:unused@127.0.0.1:1/unused';
+
+// Workspace sources under packages/shared import @tourbillon/db, which is linked into this
+// package's node_modules but not into packages/shared's. Let the loader find it from here.
+{
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const nodeModule = require('node:module') as { _initPaths?: () => void };
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const nodePath = require('node:path') as typeof import('node:path');
+  const local = nodePath.resolve(__dirname, '..', 'node_modules');
+  process.env.NODE_PATH = [local, process.env.NODE_PATH].filter(Boolean).join(nodePath.delimiter);
+  nodeModule._initPaths?.();
+}
+
+type Gate = typeof import('./tool-gate');
+type Factory = typeof import('./agent-factory');
+type Controller = typeof import('./controller-config');
+type Chat = typeof import('./chat-controller');
+type McpTools = typeof import('./tools/mcp-tools');
+type ApiClient = typeof import('./tools/api-client');
+type Shared = typeof import('@tourbillon/shared');
+
+let gate: Gate;
+let factory: Factory;
+let controller: Controller;
+let chat: Chat;
+let mcp: McpTools;
+let api: ApiClient;
+let shared: Shared;
+
+type AgentRow = AgentRecord;
+type CompanyRow = { id: string; status: 'active' | 'paused' | 'archived'; settings: Record<string, unknown>; allowedMcpServerIds: string[]; updatedAt: Date };
+
+const agentRows = new Map<string, AgentRow>();
+const companyRows = new Map<string, CompanyRow>();
+const deniedRows: Array<Record<string, unknown>> = [];
+const fetchCalls: string[] = [];
+const mcpCalls: string[] = [];
+const unlistedCalls: string[] = [];
+let clock = 1_700_000_000_000;
+let loadAgentOverride: ((id: string) => Promise<unknown>) | null = null;
+
+const COMPANY_A = 'company-a-5c1f';
+const COMPANY_B = 'company-b-93d0';
+const SEARCH_ENV = ['SEARXNG_URL', 'SEARXNG_API_KEY', 'TAVILY_API_KEY', 'OBSERVABILITY_ENABLED', 'PHOENIX_COLLECTOR_ENABLED'];
+const savedEnv: Record<string, string | undefined> = {};
+const realFetch = globalThis.fetch;
+
+function makeAgent(id: string, companyId: string, over: Partial<AgentRow> = {}): AgentRow {
+  const now = new Date(clock);
+  const row = {
+    id,
+    companyId,
+    name: `Agent ${id}`,
+    role: 'engineer',
+    title: 'Engineer',
+    icon: 'bot',
+    urlKey: id,
+    reportsToId: null,
+    adapterType: 'lmstudio',
+    adapterConfig: {},
+    providerId: null,
+    modelId: 'mock-model',
+    instructionsBundleSoulMd: null,
+    instructionsBundleAgentsMd: null,
+    instructionsPath: null,
+    assignedSkills: ['control-plane'],
+    assignedToolsets: [],
+    mcpServerIds: [],
+    budgetMonthlyTokens: 500_000,
+    spentMonthlyTokens: 0,
+    status: 'active',
+    runtimeConfig: {},
+    defaultBillingCode: 'default',
+    createdAt: now,
+    updatedAt: now,
+    ...over,
+  } as AgentRow;
+  agentRows.set(id, row);
+  return row;
+}
+
+function makeCompany(id: string, over: Partial<CompanyRow> = {}): CompanyRow {
+  const row: CompanyRow = { id, status: 'active', settings: {}, allowedMcpServerIds: [], updatedAt: new Date(clock), ...over };
+  companyRows.set(id, row);
+  return row;
+}
+
+/** Change a row the way a dashboard edit would, then let the gate cache expire. */
+function editAgent(id: string, patch: Partial<AgentRow>): void {
+  const row = agentRows.get(id)!;
+  agentRows.set(id, { ...row, ...patch, updatedAt: new Date(clock + 1) } as AgentRow);
+  clock += gate.TOOL_GATE_CACHE_TTL_MS;
+}
+
+function editCompany(id: string, patch: Partial<CompanyRow>): void {
+  const row = companyRows.get(id)!;
+  companyRows.set(id, { ...row, ...patch, updatedAt: new Date(clock + 1) });
+  clock += gate.TOOL_GATE_CACHE_TTL_MS;
+}
+
+function contextFor(agent: { id: string; companyId: string }, runId = `run-${agent.id}`) {
+  return api.createHeartbeatRuntimeContext({
+    apiKey: 'test-run-token',
+    runId,
+    agentId: agent.id,
+    companyId: agent.companyId,
+  });
+}
+
+interface ScriptedModel {
+  prompts: unknown[];
+  model: unknown;
+}
+
+/** Each entry is one model step: tool names to call, or a final text answer when exhausted. */
+function scriptedModel(steps: string[][], onCall?: (n: number) => void | Promise<void>): ScriptedModel {
+  const prompts: unknown[] = [];
+  let call = 0;
+  const finish = (unified: string, raw: string) => ({
+    type: 'finish',
+    finishReason: { unified, raw },
+    usage: { inputTokens: { total: 1 }, outputTokens: { total: 1 } },
+  });
+  const model = {
+    specificationVersion: 'v3',
+    provider: 'mock',
+    modelId: 'mock-model',
+    supportedUrls: {},
+    doGenerate: async () => {
+      throw new Error('doGenerate not used');
+    },
+    doStream: async (options: { prompt: unknown }) => {
+      call += 1;
+      prompts.push(options.prompt);
+      await onCall?.(call);
+      const names = steps[call - 1];
+      const chunks: unknown[] = names
+        ? [
+            { type: 'stream-start', warnings: [] },
+            ...names.map((toolName, i) => ({ type: 'tool-call', toolCallId: `call-${call}-${i}`, toolName, input: '{}' })),
+            finish('tool-calls', 'tool_calls'),
+          ]
+        : [
+            { type: 'stream-start', warnings: [] },
+            { type: 'text-start', id: 't' },
+            { type: 'text-delta', id: 't', delta: 'done' },
+            { type: 'text-end', id: 't' },
+            finish('stop', 'stop'),
+          ];
+      return {
+        stream: new ReadableStream({
+          start(c) {
+            for (const chunk of chunks) c.enqueue(chunk);
+            c.close();
+          },
+        }),
+      };
+    },
+  };
+  return { prompts, model };
+}
+
+interface ToolOutcome {
+  name: string;
+  result?: any;
+  error?: string;
+}
+
+async function runAgent(
+  agentLike: any,
+  model: ScriptedModel,
+  requestContext: unknown,
+  extra: Record<string, unknown> = {},
+): Promise<{ outcomes: ToolOutcome[]; text: string }> {
+  agentLike.__updateModel({ model: model.model });
+  const res = await agentLike.stream('go', { maxSteps: 6, requestContext, ...extra });
+  const outcomes: ToolOutcome[] = [];
+  let text = '';
+  for await (const chunk of res.fullStream as AsyncIterable<any>) {
+    if (chunk.type === 'tool-result') outcomes.push({ name: chunk.payload.toolName, result: chunk.payload.result });
+    else if (chunk.type === 'tool-error') {
+      outcomes.push({ name: chunk.payload.toolName, error: chunk.payload.error?.name ?? String(chunk.payload.error) });
+    } else if (chunk.type === 'text-delta') text += chunk.payload.text;
+  }
+  return { outcomes, text };
+}
+
+function deniedOutcome(outcome: ToolOutcome | undefined, reason?: string): void {
+  assert.ok(outcome, 'tool outcome present');
+  assert.equal(outcome.result?.error, 'tool_not_allowed', `expected tool_not_allowed, got ${JSON.stringify(outcome)}`);
+  if (reason) assert.equal(outcome.result?.reason, reason);
+}
+
+function fakeMcpTool(id: string) {
+  return createTool({
+    id,
+    description: `fake ${id}`,
+    inputSchema: z.object({}),
+    execute: async () => {
+      mcpCalls.push(id);
+      return { ok: true, tool: id };
+    },
+  });
+}
+
+/** Serve fake filesystem MCP tools for a company (real assembly / filter path, no server). */
+function primeFilesystemMcp(companyId: string): void {
+  mcp.primeMcpClientCacheForTests(mcp.mcpClientCacheKey({ serverId: 'filesystem-local', companyId }), {
+    listTools: async () => ({
+      filesystem_read_file: fakeMcpTool('filesystem_read_file'),
+      filesystem_write_file: fakeMcpTool('filesystem_write_file'),
+    }),
+  });
+}
+
+const unlistedTool = createTool({
+  id: 'unlistedTool',
+  description: 'not on any allow-list',
+  inputSchema: z.object({}),
+  execute: async () => {
+    unlistedCalls.push('unlistedTool');
+    return { ran: true };
+  },
+});
+
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+function seedMastra(): Mastra {
+  const mastra = new Mastra({ logger: false, storage: new InMemoryStore() });
+  (globalThis as { tourbillonMastra?: Mastra }).tourbillonMastra = mastra;
+  return mastra;
+}
+
+before(async () => {
+  gate = await import('./tool-gate');
+  factory = await import('./agent-factory');
+  controller = await import('./controller-config');
+  chat = await import('./chat-controller');
+  mcp = await import('./tools/mcp-tools');
+  api = await import('./tools/api-client');
+  shared = await import('@tourbillon/shared');
+  // Agent builders share one Memory per config; serve an in-memory one.
+  (globalThis as { mastraMemoryByKey?: Map<string, Memory> }).mastraMemoryByKey = new Map([
+    ['base', new Memory({ storage: new InMemoryStore() })],
+  ]);
+});
+
+beforeEach(() => {
+  for (const key of SEARCH_ENV) {
+    savedEnv[key] = process.env[key];
+    delete process.env[key];
+  }
+  agentRows.clear();
+  companyRows.clear();
+  deniedRows.length = 0;
+  fetchCalls.length = 0;
+  mcpCalls.length = 0;
+  unlistedCalls.length = 0;
+  loadAgentOverride = null;
+  makeCompany(COMPANY_A);
+  makeCompany(COMPANY_B);
+  globalThis.fetch = (async (url: string | URL) => {
+    fetchCalls.push(String(url));
+    return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  gate.setToolGateDepsForTests({
+    loadAgent: async (id) => {
+      if (loadAgentOverride) return (await loadAgentOverride(id)) as never;
+      const row = agentRows.get(id);
+      return row ? { ...row } : undefined;
+    },
+    loadCompany: async (id) => {
+      const row = companyRows.get(id);
+      return row ? ({ ...row } as never) : undefined;
+    },
+    recordDenied: async (row) => {
+      deniedRows.push({ ...row });
+    },
+    now: () => clock,
+  });
+  seedMastra();
+});
+
+afterEach(() => {
+  for (const key of SEARCH_ENV) {
+    if (savedEnv[key] === undefined) delete process.env[key];
+    else process.env[key] = savedEnv[key];
+  }
+  globalThis.fetch = realFetch;
+});
+
+after(() => {
+  gate.setToolGateDepsForTests();
+});
+
+describe('tool permission gate: unknown tools', () => {
+  it('an invented tool name is not run on the heartbeat durable agent (tracing off)', async () => {
+    const a = makeAgent('agent-hb', COMPANY_A);
+    const durable = await factory.createDurableAgentWithSkills(a);
+    const { outcomes } = await runAgent(durable, scriptedModel([['inventedTool']]), contextFor(a));
+    assert.equal(outcomes[0]?.error, 'ToolNotFoundError');
+    assert.equal(fetchCalls.length, 0);
+  });
+
+  it('an invented tool name is not run on the heartbeat durable agent (tracing on)', async () => {
+    process.env.OBSERVABILITY_ENABLED = 'true';
+    const a = makeAgent('agent-hb-traced', COMPANY_A);
+    const durable = await factory.createDurableAgentWithSkills(a);
+    const { outcomes } = await runAgent(durable, scriptedModel([['inventedTool']]), contextFor(a));
+    assert.equal(outcomes[0]?.error, 'ToolNotFoundError');
+    assert.equal(fetchCalls.length, 0);
+  });
+
+  it('an invented tool name is not run on the harness controller agent', async () => {
+    const a = makeAgent('agent-harness', COMPANY_A, { adapterType: 'harness_local' });
+    const { agent } = await controller.buildControllerModes(a);
+    const { outcomes } = await runAgent(agent, scriptedModel([['inventedTool']]), contextFor(a));
+    assert.equal(outcomes[0]?.error, 'ToolNotFoundError');
+    assert.equal(fetchCalls.length, 0);
+  });
+
+  it('an invented tool name is not run on the chat agent', async () => {
+    const a = makeAgent('agent-chat', COMPANY_A);
+    const agent = await chat.createChatAgentWithSkills(a);
+    const { outcomes } = await runAgent(agent, scriptedModel([['inventedTool']]), contextFor(a, `chat-${a.id}`));
+    assert.equal(outcomes[0]?.error, 'ToolNotFoundError');
+    assert.equal(fetchCalls.length, 0);
+  });
+
+  for (const surface of ['heartbeat', 'harness', 'chat'] as const) {
+    it(`a tool outside the allow-list supplied at call time is denied on ${surface}`, async () => {
+      const a = makeAgent(`agent-extra-${surface}`, COMPANY_A);
+      const agent =
+        surface === 'heartbeat'
+          ? await factory.createAgentWithSkills(a)
+          : surface === 'harness'
+            ? (await controller.buildControllerModes(a)).agent
+            : await chat.createChatAgentWithSkills(a);
+      const { outcomes } = await runAgent(agent, scriptedModel([['unlistedTool']]), contextFor(a), {
+        toolsets: { extra: { unlistedTool } },
+      });
+      deniedOutcome(outcomes[0], 'not_allowed');
+      assert.deepEqual(unlistedCalls, []);
+    });
+  }
+});
+
+describe('tool permission gate: tools stay with their agent', () => {
+  it('each agent runs only its own allow-listed tools; the registry stays empty; denials are logged', async () => {
+    process.env.OBSERVABILITY_ENABLED = 'true';
+    const mastra = seedMastra();
+    const a = makeAgent('agent-a', COMPANY_A, { role: 'ceo', assignedToolsets: ['roster'], mcpServerIds: ['filesystem-local'] });
+    const b = makeAgent('agent-b', COMPANY_B);
+    primeFilesystemMcp(COMPANY_A);
+
+    const durableA = await factory.createDurableAgentWithSkills(a);
+    const aTools = await durableA.agent.listTools({ requestContext: contextFor(a) });
+    assert.ok(aTools.createAgentTool && aTools.filesystem_write_file, 'A holds createAgent and the MCP write tool');
+
+    const durableB = await factory.createDurableAgentWithSkills(b);
+    assert.equal(gate.isMastraToolRegistryEmpty(mastra), true, 'Mastra tool registry is empty');
+    assert.equal(Object.keys(mastra.listTools() ?? {}).length, 0);
+
+    const { outcomes } = await runAgent(
+      durableB,
+      scriptedModel([['createAgentTool', 'createAgent', 'filesystem_write_file']]),
+      contextFor(b),
+    );
+    assert.equal(outcomes.length, 3);
+    for (const outcome of outcomes) {
+      assert.ok(outcome.error === 'ToolNotFoundError' || outcome.result?.error === 'tool_not_allowed', JSON.stringify(outcome));
+    }
+    assert.equal(fetchCalls.length, 0, 'createAgent did not run');
+    assert.deepEqual(mcpCalls, [], 'MCP write did not run');
+
+    // Tool instances are bound to the agent they were built for.
+    const denied = await aTools.filesystem_write_file.execute({}, { requestContext: contextFor(b) });
+    assert.equal(denied.error, 'tool_not_allowed');
+    assert.equal(denied.reason, 'context_mismatch');
+    const deniedCreate = await aTools.createAgentTool.execute({ name: 'x', title: 'y', role: 'engineer' }, { requestContext: contextFor(b) });
+    assert.equal(deniedCreate.error, 'tool_not_allowed');
+    assert.deepEqual(mcpCalls, []);
+    assert.equal(fetchCalls.length, 0);
+    await flush();
+    assert.ok(
+      deniedRows.some((r) => r.agentId === a.id && r.reason === 'context_mismatch' && r.tool === 'filesystem_write_file'),
+      'agent.tool_denied row written',
+    );
+    assert.ok(deniedRows.every((r) => !('args' in r) && !('input' in r)), 'no arguments in denial rows');
+  });
+
+  it('the registry check refuses a Mastra instance holding tools', () => {
+    const mastra = new Mastra({ logger: false, tools: { stray: unlistedTool } as never });
+    assert.equal(gate.isMastraToolRegistryEmpty(mastra), false);
+    assert.throws(() => gate.assertMastraToolRegistryEmpty(mastra), /registry must stay empty/);
+    assert.doesNotThrow(() => gate.assertMastraToolRegistryEmpty(new Mastra({ logger: false })));
+  });
+});
+
+describe('tool permission gate: changes apply mid-run', () => {
+  it('a toolset removed mid-run is denied on the next call (within the cache window)', async () => {
+    const a = makeAgent('agent-roster', COMPANY_A, { assignedToolsets: ['roster'] });
+    const durable = await factory.createDurableAgentWithSkills(a);
+    const model = scriptedModel([['listAgentsTool'], ['listAgentsTool']], (n) => {
+      if (n === 2) editAgent(a.id, { assignedToolsets: [] });
+    });
+    const { outcomes } = await runAgent(durable, model, contextFor(a));
+    assert.equal(outcomes[0]?.result?.error, undefined, 'first call ran');
+    assert.equal(fetchCalls.length, 1);
+    deniedOutcome(outcomes[1], 'not_in_toolset');
+    assert.equal(fetchCalls.length, 1, 'second call did not run');
+  });
+
+  it('an MCP server removed mid-run is denied on the next call', async () => {
+    const a = makeAgent('agent-mcp-removed', COMPANY_A, { mcpServerIds: ['filesystem-local'] });
+    primeFilesystemMcp(COMPANY_A);
+    const durable = await factory.createDurableAgentWithSkills(a);
+    const model = scriptedModel([['filesystem_read_file'], ['filesystem_read_file']], (n) => {
+      if (n === 2) editAgent(a.id, { mcpServerIds: [] });
+    });
+    const { outcomes } = await runAgent(durable, model, contextFor(a));
+    assert.equal(outcomes[0]?.result?.ok, true);
+    deniedOutcome(outcomes[1], 'mcp_server_not_allowed');
+    assert.deepEqual(mcpCalls, ['filesystem_read_file']);
+  });
+
+  it('an MCP tool policy deny added mid-run is denied on the next call', async () => {
+    const a = makeAgent('agent-mcp-policy', COMPANY_A, { mcpServerIds: ['filesystem-local'] });
+    primeFilesystemMcp(COMPANY_A);
+    const durable = await factory.createDurableAgentWithSkills(a);
+    const model = scriptedModel([['filesystem_write_file'], ['filesystem_write_file']], (n) => {
+      if (n === 2) editAgent(a.id, { runtimeConfig: { mcpToolPolicy: { 'filesystem-local': { deny: ['write_file'] } } } });
+    });
+    const { outcomes } = await runAgent(durable, model, contextFor(a));
+    assert.equal(outcomes[0]?.result?.ok, true);
+    deniedOutcome(outcomes[1], 'mcp_policy_denied');
+    assert.deepEqual(mcpCalls, ['filesystem_write_file']);
+  });
+
+  it('a cached chat agent loses a removed toolset on the next turn', async () => {
+    const a = makeAgent('agent-chat-cached', COMPANY_A, { assignedToolsets: ['roster'] });
+    const agent = await chat.createChatAgentWithSkills(a);
+    const first = await runAgent(agent, scriptedModel([['listAgentsTool']]), contextFor(a, `chat-${a.id}`));
+    assert.equal(first.outcomes[0]?.result?.error, undefined);
+    editAgent(a.id, { assignedToolsets: [] });
+    const second = await runAgent(agent, scriptedModel([['listAgentsTool']]), contextFor(a, `chat-${a.id}`));
+    deniedOutcome(second.outcomes[0], 'not_in_toolset');
+    assert.equal(fetchCalls.length, 1);
+  });
+
+  it('within the cache window a change is not yet seen; after it, it is', async () => {
+    const a = makeAgent('agent-window', COMPANY_A, { assignedToolsets: ['roster'] });
+    const ctx = { agentId: a.id, companyId: COMPANY_A, surface: 'heartbeat' as const };
+    const rc = contextFor(a);
+    assert.equal((await gate.checkToolPermission({ ...ctx, toolName: 'listAgentsTool', requestContext: rc })).allowed, true);
+    agentRows.set(a.id, { ...agentRows.get(a.id)!, assignedToolsets: [], updatedAt: new Date(clock + 1) } as AgentRow);
+    clock += gate.TOOL_GATE_CACHE_TTL_MS - 1;
+    assert.equal((await gate.checkToolPermission({ ...ctx, toolName: 'listAgentsTool', requestContext: rc })).allowed, true);
+    clock += 1;
+    assert.equal((await gate.checkToolPermission({ ...ctx, toolName: 'listAgentsTool', requestContext: rc })).allowed, false);
+  });
+});
+
+describe('tool permission gate: agent and company status', () => {
+  it('an agent archived mid-run is denied every tool, including MCP, web search and skills', async () => {
+    const a = makeAgent('agent-archived', COMPANY_A, {
+      assignedToolsets: ['web-search'],
+      mcpServerIds: ['filesystem-local'],
+    });
+    editCompany(COMPANY_A, { settings: { searxngUrl: 'http://searxng.test' } });
+    primeFilesystemMcp(COMPANY_A);
+    const durable = await factory.createDurableAgentWithSkills(a, { companySettings: { searxngUrl: 'http://searxng.test' } as never });
+    const model = scriptedModel([['getDateTimeTool'], ['filesystem_read_file', 'searxngSearchTool', 'listSkillsTool']], (n) => {
+      if (n === 2) editAgent(a.id, { status: 'archived' });
+    });
+    const { outcomes } = await runAgent(durable, model, contextFor(a));
+    assert.equal(outcomes[0]?.result?.error, undefined, 'first call ran');
+    for (const outcome of outcomes.slice(1)) deniedOutcome(outcome, 'agent_archived');
+    assert.deepEqual(mcpCalls, []);
+    assert.equal(fetchCalls.length, 0);
+  });
+
+  it('an agent paused mid-run is denied on heartbeat and harness, not in chat', async () => {
+    const a = makeAgent('agent-paused', COMPANY_A);
+    const durable = await factory.createDurableAgentWithSkills(a);
+    const model = scriptedModel([['getDateTimeTool'], ['getDateTimeTool']], (n) => {
+      if (n === 2) editAgent(a.id, { status: 'paused' });
+    });
+    const { outcomes } = await runAgent(durable, model, contextFor(a));
+    assert.equal(outcomes[0]?.result?.error, undefined);
+    deniedOutcome(outcomes[1], 'agent_paused');
+
+    const rc = contextFor(a);
+    const harness = await gate.checkToolPermission({ agentId: a.id, companyId: COMPANY_A, surface: 'harness', toolName: 'getDateTimeTool', requestContext: rc });
+    assert.deepEqual(harness, { allowed: false, reason: 'agent_paused' });
+    const chatDecision = await gate.checkToolPermission({ agentId: a.id, companyId: COMPANY_A, surface: 'chat', toolName: 'getDateTimeTool', requestContext: rc });
+    assert.deepEqual(chatDecision, { allowed: true });
+  });
+
+  it('pending-approval agents and inactive companies are denied', async () => {
+    const pending = makeAgent('agent-pending', COMPANY_A, { status: 'pending_approval' });
+    const d1 = await gate.checkToolPermission({ agentId: pending.id, companyId: COMPANY_A, surface: 'chat', toolName: 'getDateTimeTool', requestContext: contextFor(pending) });
+    assert.deepEqual(d1, { allowed: false, reason: 'agent_pending_approval' });
+    makeCompany('company-paused', { status: 'paused' });
+    const c = makeAgent('agent-in-paused-co', 'company-paused');
+    const d2 = await gate.checkToolPermission({ agentId: c.id, companyId: c.companyId, surface: 'heartbeat', toolName: 'getDateTimeTool', requestContext: contextFor(c) });
+    assert.deepEqual(d2, { allowed: false, reason: 'company_inactive' });
+  });
+});
+
+describe('tool permission gate: MCP allow-list', () => {
+  it('an allowed server and policy-allowed tool runs', async () => {
+    const a = makeAgent('agent-mcp-ok', COMPANY_A, { mcpServerIds: ['filesystem-local'] });
+    primeFilesystemMcp(COMPANY_A);
+    const durable = await factory.createDurableAgentWithSkills(a);
+    const { outcomes } = await runAgent(durable, scriptedModel([['filesystem_read_file']]), contextFor(a));
+    assert.equal(outcomes[0]?.result?.ok, true);
+    assert.deepEqual(mcpCalls, ['filesystem_read_file']);
+  });
+
+  it('a policy-denied MCP tool is denied (and not assembled)', async () => {
+    const a = makeAgent('agent-mcp-deny', COMPANY_A, {
+      mcpServerIds: ['filesystem-local'],
+      runtimeConfig: { mcpToolPolicy: { 'filesystem-local': { deny: ['write_file'] } } },
+    });
+    primeFilesystemMcp(COMPANY_A);
+    const decision = await gate.checkToolPermission({ agentId: a.id, companyId: COMPANY_A, surface: 'heartbeat', toolName: 'filesystem_write_file', requestContext: contextFor(a) });
+    assert.deepEqual(decision, { allowed: false, reason: 'mcp_policy_denied' });
+    const durable = await factory.createDurableAgentWithSkills(a);
+    const { outcomes } = await runAgent(durable, scriptedModel([['filesystem_write_file']]), contextFor(a));
+    assert.equal(outcomes[0]?.error, 'ToolNotFoundError');
+    assert.deepEqual(mcpCalls, []);
+  });
+
+  it('a server not on the company allow-list is denied', async () => {
+    const a = makeAgent('agent-mcp-unlisted', COMPANY_A, { mcpServerIds: ['filesystem-local'] });
+    editCompany(COMPANY_A, { allowedMcpServerIds: ['github-mcp'] });
+    const decision = await gate.checkToolPermission({ agentId: a.id, companyId: COMPANY_A, surface: 'heartbeat', toolName: 'filesystem_read_file', requestContext: contextFor(a) });
+    assert.deepEqual(decision, { allowed: false, reason: 'mcp_server_not_allowed' });
+  });
+
+  it('a server dropped from the company allow-list mid-run is denied', async () => {
+    const a = makeAgent('agent-mcp-co-drop', COMPANY_A, { mcpServerIds: ['filesystem-local'] });
+    primeFilesystemMcp(COMPANY_A);
+    const durable = await factory.createDurableAgentWithSkills(a);
+    const model = scriptedModel([['filesystem_read_file'], ['filesystem_read_file']], (n) => {
+      if (n === 2) editCompany(COMPANY_A, { allowedMcpServerIds: ['github-mcp'] });
+    });
+    const { outcomes } = await runAgent(durable, model, contextFor(a));
+    assert.equal(outcomes[0]?.result?.ok, true);
+    deniedOutcome(outcomes[1], 'mcp_server_not_allowed');
+  });
+});
+
+describe('tool permission gate: configuration-dependent tools', () => {
+  it('sendToAgent is denied once mail is disabled', async () => {
+    const a = makeAgent('agent-mail', COMPANY_A);
+    const durable = await factory.createDurableAgentWithSkills(a);
+    const model = scriptedModel([['sendToAgentTool']], (n) => {
+      if (n === 1) editAgent(a.id, { runtimeConfig: { mail: { enabled: false } } });
+    });
+    const { outcomes } = await runAgent(durable, model, contextFor(a));
+    deniedOutcome(outcomes[0], 'mail_disabled');
+    assert.equal(fetchCalls.length, 0);
+  });
+
+  it('web search is denied when it is not configured', async () => {
+    const a = makeAgent('agent-search', COMPANY_A, { assignedToolsets: ['web-search'] });
+    editCompany(COMPANY_A, { settings: { searxngUrl: 'http://searxng.test' } });
+    const durable = await factory.createDurableAgentWithSkills(a, { companySettings: { searxngUrl: 'http://searxng.test' } as never });
+    const model = scriptedModel([['searxngSearchTool']], (n) => {
+      if (n === 1) editCompany(COMPANY_A, { settings: {} });
+    });
+    const { outcomes } = await runAgent(durable, model, contextFor(a));
+    deniedOutcome(outcomes[0], 'web_search_not_configured');
+    assert.equal(fetchCalls.length, 0);
+  });
+
+  it('browser / computer tools are denied by default', async () => {
+    const a = makeAgent('agent-browser', COMPANY_A);
+    const decision = await gate.checkToolPermission({ agentId: a.id, companyId: COMPANY_A, surface: 'harness', toolName: 'browser_navigate', requestContext: contextFor(a) });
+    assert.deepEqual(decision, { allowed: false, reason: 'browser_tools_disabled' });
+  });
+});
+
+describe('tool permission gate: fails closed', () => {
+  async function expectGateErrorRun(a: AgentRow, rc: unknown, reason = 'gate_error') {
+    const durable = await factory.createDurableAgentWithSkills(a);
+    const { outcomes, text } = await runAgent(durable, scriptedModel([['getIdentityTool']]), rc);
+    deniedOutcome(outcomes[0], reason);
+    assert.equal(fetchCalls.length, 0, 'tool never called');
+    assert.equal(text, 'done');
+  }
+
+  it('a throwing lookup denies with gate_error', async () => {
+    const a = makeAgent('agent-throw', COMPANY_A);
+    loadAgentOverride = async () => {
+      throw new Error('unexpected');
+    };
+    await expectGateErrorRun(a, contextFor(a));
+  });
+
+  it('database down denies with gate_error', async () => {
+    const a = makeAgent('agent-db-down', COMPANY_A);
+    loadAgentOverride = async () => {
+      throw Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:5432'), { code: 'ECONNREFUSED' });
+    };
+    await expectGateErrorRun(a, contextFor(a));
+  });
+
+  it('a lookup slower than the timeout denies with gate_error', async () => {
+    const a = makeAgent('agent-slow', COMPANY_A);
+    loadAgentOverride = () => new Promise(() => undefined);
+    const started = Date.now();
+    const decision = await gate.checkToolPermission({ agentId: a.id, companyId: COMPANY_A, surface: 'heartbeat', toolName: 'getIdentityTool', requestContext: contextFor(a) });
+    assert.deepEqual(decision, { allowed: false, reason: 'gate_error' });
+    assert.ok(Date.now() - started >= gate.TOOL_GATE_TIMEOUT_MS - 50);
+  });
+
+  it('missing agentId in the request context denies with gate_error', async () => {
+    const a = makeAgent('agent-no-ctx', COMPANY_A);
+    const rc = new RequestContext();
+    rc.set('companyId', COMPANY_A);
+    rc.set('runId', 'run-no-agent');
+    await expectGateErrorRun(a, rc);
+  });
+
+  it('a request context for another agent denies with context_mismatch', async () => {
+    const a = makeAgent('agent-ctx-a', COMPANY_A);
+    const other = makeAgent('agent-ctx-other', COMPANY_A);
+    await expectGateErrorRun(a, contextFor(other), 'context_mismatch');
+  });
+
+  it('a tool instance called with no context is denied and never runs', async () => {
+    const a = makeAgent('agent-direct', COMPANY_A, { assignedToolsets: ['roster'] });
+    const tools = await factory.assembleAgentTools(a);
+    const result = (await (tools.listAgentsTool as any).execute({}, {})) as Record<string, unknown>;
+    assert.equal(result.error, 'tool_not_allowed');
+    assert.equal(result.reason, 'gate_error');
+    assert.equal(fetchCalls.length, 0);
+  });
+});
+
+describe('tool permission gate: deny is a tool result', () => {
+  it('the deny output reaches the model and the run continues', async () => {
+    const a = makeAgent('agent-continue', COMPANY_A);
+    const durable = await factory.createDurableAgentWithSkills(a);
+    const model = scriptedModel([['getDateTimeTool'], ['getDateTimeTool']], (n) => {
+      if (n === 2) editAgent(a.id, { status: 'paused' });
+    });
+    const { outcomes, text } = await runAgent(durable, model, contextFor(a));
+    deniedOutcome(outcomes[1], 'agent_paused');
+    assert.equal(text, 'done', 'run finished normally');
+    assert.equal(model.prompts.length, 3);
+    const thirdPrompt = JSON.stringify(model.prompts[2]);
+    assert.ok(thirdPrompt.includes('tool_not_allowed'), 'model saw the structured deny');
+    assert.ok(thirdPrompt.includes('agent_paused'));
+  });
+
+  it('denial rows are capped per run with one summary row', async () => {
+    const a = makeAgent('agent-cap', COMPANY_A);
+    const rc = contextFor(a, 'run-cap');
+    for (let i = 0; i < gate.TOOL_DENIED_ROWS_PER_RUN + 10; i += 1) {
+      await gate.checkToolPermission({ agentId: a.id, companyId: COMPANY_A, surface: 'heartbeat', toolName: `invented${i}`, requestContext: rc });
+    }
+    await flush();
+    const rows = deniedRows.filter((r) => r.runId === 'run-cap');
+    assert.equal(rows.length, gate.TOOL_DENIED_ROWS_PER_RUN + 1);
+    assert.equal(rows.filter((r) => r.summary === true).length, 1);
+    assert.equal(rows.at(-1)?.summary, true);
+  });
+});
+
+describe('tool permission gate: one allow-list for assembly and the gate', () => {
+  it('the shared tool manifest matches the tool objects', async () => {
+    const { CONTROL_PLANE_TOOLS } = await import('./tools/control-plane-tools');
+    const { ROLE_TOOLS } = await import('./tools/role-tools');
+    const { ASSIGNABLE_TOOLS } = await import('./tools/assignable-tools');
+    const keyedIds = (tools: Record<string, unknown>) =>
+      Object.entries(tools).map(([key, tool]) => {
+        const id = (tool as { id: string }).id;
+        assert.equal(key, shared.toolKeyForId(id), `record key for ${id}`);
+        return id;
+      });
+    assert.deepEqual(keyedIds(CONTROL_PLANE_TOOLS), [...shared.CONTROL_PLANE_TOOL_IDS]);
+    assert.deepEqual(Object.keys(ROLE_TOOLS).sort(), Object.keys(shared.ROLE_TOOLSET_TOOL_IDS).sort());
+    for (const [toolsetId, tools] of Object.entries(ROLE_TOOLS)) {
+      assert.deepEqual(keyedIds(tools), [...shared.ROLE_TOOLSET_TOOL_IDS[toolsetId]!], toolsetId);
+    }
+    assert.deepEqual(Object.keys(ASSIGNABLE_TOOLS).sort(), [...shared.ALL_ASSIGNABLE_TOOL_IDS].sort());
+    for (const id of [...shared.CONTROL_PLANE_TOOL_IDS, ...shared.ALL_ASSIGNABLE_TOOL_IDS]) {
+      assert.ok(factory.STATIC_TOOLS_BY_ID[id], id);
+    }
+  });
+
+  it('assembled tools are exactly the resolved allow-list', async () => {
+    const cases: Array<Partial<AgentRow>> = [
+      {},
+      { role: 'ceo', assignedToolsets: ['roster', 'approvals', 'comments', 'nitter'] },
+      { assignedToolsets: ['web-search', 'web-search-tavily'], runtimeConfig: { mail: { enabled: false } } },
+      { role: 'custom', runtimeConfig: { assignedTools: ['listGoals', 'createIssue'] } },
+    ];
+    for (const [i, over] of cases.entries()) {
+      const a = makeAgent(`agent-parity-${i}`, COMPANY_A, over);
+      const tools = await factory.assembleAgentTools(a);
+      const allowed = shared.resolveAllowedToolNames(a, { settings: null });
+      assert.deepEqual(Object.keys(tools), allowed.staticToolIds.map(shared.toolKeyForId), `case ${i}`);
+    }
+  });
+});
+
+describe('MCP client cache key', () => {
+  it('hashes the credential and scopes by company and server', () => {
+    const k1 = mcp.mcpClientCacheKey({ serverId: 'buffer-mcp', companyId: COMPANY_A, apiKey: 'sk-proj-aaaaaaaa1111' });
+    const k2 = mcp.mcpClientCacheKey({ serverId: 'buffer-mcp', companyId: COMPANY_A, apiKey: 'sk-proj-aaaaaaaa2222' });
+    const k3 = mcp.mcpClientCacheKey({ serverId: 'buffer-mcp', companyId: COMPANY_B, apiKey: 'sk-proj-aaaaaaaa1111' });
+    const k4 = mcp.mcpClientCacheKey({ serverId: 'github-mcp', companyId: COMPANY_A, apiKey: 'sk-proj-aaaaaaaa1111' });
+    assert.equal(new Set([k1, k2, k3, k4]).size, 4);
+    for (const key of [k1, k2, k3, k4]) assert.ok(!key.includes('sk-proj'), 'no raw credential in the key');
+    assert.notEqual(
+      mcp.mcpClientCacheKey({ serverId: 'github-mcp', companyId: COMPANY_A }),
+      mcp.mcpClientCacheKey({ serverId: 'github-mcp', companyId: COMPANY_B }),
+    );
+  });
+});
+
+describe('tool permission gate: overhead', () => {
+  it('adds at most 5 ms p95 per call with a warm cache', async () => {
+    const a = makeAgent('agent-perf', COMPANY_A, { role: 'ceo', assignedToolsets: ['roster', 'approvals'], mcpServerIds: ['filesystem-local'] });
+    const rc = contextFor(a);
+    const input = { agentId: a.id, companyId: COMPANY_A, surface: 'heartbeat' as const, toolName: 'filesystem_read_file', requestContext: rc };
+    await gate.checkToolPermission(input);
+    const samples: number[] = [];
+    for (let i = 0; i < 5_000; i += 1) {
+      const t0 = performance.now();
+      const decision = await gate.checkToolPermission(input);
+      samples.push(performance.now() - t0);
+      assert.equal(decision.allowed, true);
+    }
+    samples.sort((x, y) => x - y);
+    const p95 = samples[Math.floor(samples.length * 0.95)]!;
+    const p50 = samples[Math.floor(samples.length * 0.5)]!;
+    console.log(`[tool-gate overhead] warm-cache p50=${p50.toFixed(4)}ms p95=${p95.toFixed(4)}ms n=${samples.length}`);
+    assert.ok(p95 <= 5, `p95 ${p95}ms`);
+  });
+});

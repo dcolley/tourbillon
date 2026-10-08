@@ -6,6 +6,18 @@ export * from './model-settings';
 export * from './agent-factory';
 export * from './controller-config';
 export {
+  checkToolPermission,
+  createToolGateHooks,
+  gatedAgentOptions,
+  toolNotAllowedResult,
+  isMastraToolRegistryEmpty,
+  assertMastraToolRegistryEmpty,
+  type ToolGateContext,
+  type ToolGateDecision,
+  type ToolGateReason,
+  type ToolGateSurface,
+} from './tool-gate';
+export {
   destroyCodeExecutionWorkspace,
   sweepStaleEgressSockets,
 } from './execution-workspace';

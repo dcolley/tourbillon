@@ -30,9 +30,9 @@ import {
   toMastraDefaultOptions,
 } from './model-settings';
 import { buildChatWorkspace, buildCodeExecutionWorkspace } from './execution-workspace';
-import { agentNeedsMcpTools } from '@tourbillon/shared/mcp-registry';
 import { buildHeartbeatInputProcessors } from './heartbeat-processors';
 import { getMastraInstance } from './mastra-instance';
+import { gatedAgentOptions } from './tool-gate';
 
 export type { AgentController, AgentControllerEvent, AgentControllerMode, Session };
 
@@ -73,31 +73,11 @@ export function buildControllerStorageConfig(): {
 /** @deprecated Prefer {@link buildControllerStorageConfig}. */
 export const buildHarnessStorageConfig = buildControllerStorageConfig;
 
-export function buildControllerPermissionRules(
-  agentRecord: AgentRecord,
-  codeExecutionEnabled: boolean,
-) {
-  const mcpEnabled = agentNeedsMcpTools(agentRecord);
-
-  return {
-    categories: {
-      read: 'allow' as const,
-      edit: codeExecutionEnabled ? ('allow' as const) : ('deny' as const),
-      execute: codeExecutionEnabled ? ('allow' as const) : ('deny' as const),
-      mcp: mcpEnabled ? ('allow' as const) : ('deny' as const),
-    },
-    tools: {},
-  };
-}
-
-/** @deprecated Prefer {@link buildControllerPermissionRules}. */
-export const buildHarnessPermissionRules = buildControllerPermissionRules;
-
 async function buildBackingAgent(
   agentRecord: AgentRecord,
   options?: AssembleAgentToolsOptions,
 ): Promise<Agent> {
-  const tools = await assembleAgentTools(agentRecord, options);
+  const tools = await assembleAgentTools(agentRecord, { ...options, surface: 'harness' });
   const systemPrompt = await assembleAgentSystemPrompt(agentRecord);
   const codeExecutionEnabled = await shouldAttachCodeExecutionWorkspace(agentRecord);
   const providerRow = agentRecord.providerId
@@ -112,7 +92,10 @@ async function buildBackingAgent(
     name: agentRecord.name,
     instructions: systemPrompt,
     model: getLanguageModelForAgent(agentRecord, providerRecord),
-    tools: tools as any,
+    ...(gatedAgentOptions(
+      { agentId: agentRecord.id, companyId: agentRecord.companyId, surface: 'harness' },
+      tools,
+    ) as object),
     memory: await getAgentMemory(options?.companySettings ?? null, agentRecord.runtimeConfig as AgentRuntimeConfig),
     inputProcessors: buildHeartbeatInputProcessors({ limit: contextBudget.limiterLimit }),
     ...(codeExecutionEnabled ? { workspace: buildCodeExecutionWorkspace() } : {}),
@@ -153,7 +136,6 @@ export async function buildHarnessWorkModes(
 
 export interface TourbillonControllerState {
   yolo?: boolean;
-  permissionRules?: ReturnType<typeof buildControllerPermissionRules>;
   /** Allow createSession tags / projectPath without clobbering typed state. */
   projectPath?: string;
   [key: string]: unknown;
@@ -195,9 +177,10 @@ export async function createTourbillonController(
     agent,
     modes,
     workspace: codeExecutionEnabled ? buildCodeExecutionWorkspace() : buildChatWorkspace(),
+    // Tool permissions are enforced per call by the live tool permission gate (hooks on the
+    // backing agent), so the controller's own category rules are not used.
     initialState: {
       yolo: true,
-      permissionRules: buildControllerPermissionRules(agentRecord, codeExecutionEnabled),
     },
     // Share Tourbillon exporters (Postgres UI + Phoenix) without __registerMastra,
     // which would also bind controller storage to the scheduler Mastra instance.

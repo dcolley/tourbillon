@@ -1,4 +1,4 @@
-import { getMastraInstance, sweepStaleEgressSockets } from '@tourbillon/mastra';
+import { assertMastraToolRegistryEmpty, getMastraInstance, sweepStaleEgressSockets } from '@tourbillon/mastra';
 import { createTraceLogger, isObservabilityEnabled, isPhoenixCollectorEnabled } from '@tourbillon/shared';
 import { startWakeServer, startStaleSweepInterval } from './wake-server';
 import { bootMastraSchedules } from './schedule-boot';
@@ -10,6 +10,8 @@ async function main(): Promise<void> {
   const wakeServer = startWakeServer();
   const staleSweep = startStaleSweepInterval();
   await bootMastraSchedules();
+  // Agent tools are resolved per agent; the shared Mastra instance must never hold any.
+  assertMastraToolRegistryEmpty(getMastraInstance());
 
   async function shutdown(): Promise<void> {
     clearInterval(staleSweep);

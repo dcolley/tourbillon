@@ -16,6 +16,15 @@ import { and, eq } from 'drizzle-orm';
 import { getActiveCompany } from '@/lib/company';
 import { buildChatScopedApiKey, validateChatToken } from '@/lib/auth/chat-token';
 import { chatSessionIdForAgent } from '@tourbillon/shared/agent-token';
+import { ChatAgentError } from './errors';
+import {
+  chatControllerCache,
+  chatControllerCompanies,
+  clearChatControllerCache,
+} from './controller-cache';
+
+export { ChatAgentError } from './errors';
+export { assertChatAgentCanRun } from './agent-run-guard';
 
 /** #110: re-mint chat tokens with less than this many seconds left. */
 const CHAT_TOKEN_REFRESH_SEC = 60 * 60;
@@ -24,37 +33,22 @@ export type TourbillonChatController = AgentController<ChatControllerState>;
 export type TourbillonChatSession = Session<ChatControllerState>;
 
 const globalForChat = globalThis as unknown as {
-  tourbillonChatControllers?: Map<string, Promise<TourbillonChatController>>;
   tourbillonChatApiKeys?: Map<string, string>;
 };
 
-/** Bust in-process controller cache (HMR / workspace requirement changes). */
-export function clearChatControllerCache(): void {
-  globalForChat.tourbillonChatControllers?.clear();
-}
+export {
+  clearChatControllerCache,
+  invalidateChatControllerForAgent,
+  invalidateChatControllersForCompany,
+  invalidateChatControllersForProviderChange,
+} from './controller-cache';
 
-/**
- * Invalidate all cached chat controllers for a specific agent.
- * Called after agent model/provider settings change so the next chat uses fresh config.
- */
-export function invalidateChatControllerForAgent(agentId: string): void {
-  const cache = controllerCache();
-  const keysToDelete: string[] = [];
-  for (const key of cache.keys()) {
-    if (key.startsWith(`tourbillon-chat-${agentId}`)) {
-      keysToDelete.push(key);
-    }
-  }
-  for (const key of keysToDelete) {
-    cache.delete(key);
-  }
+function controllerCompanies(): Map<string, string> {
+  return chatControllerCompanies();
 }
 
 function controllerCache(): Map<string, Promise<TourbillonChatController>> {
-  if (!globalForChat.tourbillonChatControllers) {
-    globalForChat.tourbillonChatControllers = new Map();
-  }
-  return globalForChat.tourbillonChatControllers;
+  return chatControllerCache<TourbillonChatController>();
 }
 
 // Drop cached controllers on module reload so workspace/config changes take effect in dev.
@@ -110,16 +104,6 @@ export async function resolveChatAgent(agentKey: string): Promise<Agent> {
   throw new ChatAgentError('Agent not found', 404);
 }
 
-export class ChatAgentError extends Error {
-  constructor(
-    message: string,
-    readonly status: number,
-  ) {
-    super(message);
-    this.name = 'ChatAgentError';
-  }
-}
-
 /**
  * Lazy per-agent (optional model override) AgentController in the Next.js process.
  * Controllers are long-lived across chat requests (not destroyed after each message).
@@ -147,10 +131,12 @@ export async function getOrCreateChatController(
   })();
 
   cache.set(cacheKey, pending);
+  controllerCompanies().set(cacheKey, agentRecord.companyId);
   try {
     return await pending;
   } catch (err) {
     cache.delete(cacheKey);
+    controllerCompanies().delete(cacheKey);
     throw err;
   }
 }

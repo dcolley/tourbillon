@@ -375,6 +375,9 @@ export async function updateAgentRuntimeConfig(
     }
   }
 
+  // Cached chat controllers hold a tool snapshot; rebuild on next chat.
+  invalidateChatControllerForAgent(agentId);
+
   return updated;
 }
 
@@ -430,6 +433,9 @@ export async function updateAgentAssignedToolsets(
     .set({ assignedToolsets: unique, updatedAt: new Date() })
     .where(eq(agents.id, agentId))
     .returning();
+
+  // Cached chat controllers hold a tool snapshot; rebuild on next chat.
+  invalidateChatControllerForAgent(agentId);
 
   return updated;
 }
@@ -590,6 +596,9 @@ export async function updateAgentCapabilities(
     .where(eq(agents.id, agentId))
     .returning();
 
+  // Cached chat controllers hold a tool snapshot; rebuild on next chat.
+  invalidateChatControllerForAgent(agentId);
+
   return updated;
 }
 
@@ -679,6 +688,9 @@ export async function updateAgentCodeExecution(
       clearCodeExecutionOverrides: input.clearCodeExecutionOverrides,
     }),
   });
+
+  // Cached chat controllers hold a tool snapshot; rebuild on next chat.
+  invalidateChatControllerForAgent(agentId);
 
   return updated;
 }
@@ -779,6 +791,9 @@ export async function updateAgentProfile(
     .where(eq(agents.id, agentId))
     .returning();
 
+  // Cached chat controllers hold a tool snapshot; rebuild on next chat.
+  invalidateChatControllerForAgent(agentId);
+
   return updated;
 }
 
@@ -825,6 +840,9 @@ export async function setAgentActiveWithOutcome(
     .where(eq(agents.id, agentId))
     .returning();
 
+  // Cached chat controllers hold a tool snapshot; rebuild on next chat.
+  invalidateChatControllerForAgent(agentId);
+
   return { agent: updated, changed: updated.status !== previousStatus };
 }
 
@@ -861,6 +879,9 @@ export async function updateAgentRole(agentId: string, roleInput: string): Promi
     .where(eq(agents.id, agentId))
     .returning();
 
+  // Cached chat controllers hold a tool snapshot; rebuild on next chat.
+  invalidateChatControllerForAgent(agentId);
+
   return updated;
 }
 
@@ -886,6 +907,7 @@ export async function deleteAgent(agentId: string, confirmUrlKey: string): Promi
   }
 
   await db.delete(agents).where(eq(agents.id, agentId));
+  invalidateChatControllerForAgent(agentId);
 }
 
 export {
@@ -1129,6 +1151,9 @@ export async function updateAgentSecrets(
     .where(eq(agents.id, agentId))
     .returning();
 
+  // Cached chat controllers hold a tool snapshot; rebuild on next chat.
+  invalidateChatControllerForAgent(agentId);
+
   return updated;
 }
 
@@ -1163,6 +1188,9 @@ export async function deleteAgentSecrets(
     })
     .where(eq(agents.id, agentId))
     .returning();
+
+  // Cached chat controllers hold a tool snapshot; rebuild on next chat.
+  invalidateChatControllerForAgent(agentId);
 
   return updated;
 }

@@ -8,14 +8,13 @@ import {
   formatTrace,
   modelProviderOverridesFromAgent,
   resolveModelProviderConfig,
-  resolveAssignedTools,
+  resolveAllowedToolNames,
   resolveObservationalMemoryModel,
   resolveObservationalMemorySettings,
   type AgentRuntimeConfig,
   type CompanySettings,
-  isSearxngConfigured,
-  isTavilyConfigured,
   isCodeExecutionAvailable,
+  toolKeyForId,
 } from '@tourbillon/shared';
 import {
   getEmbeddingModel,
@@ -25,7 +24,7 @@ import {
 } from './provider';
 import { CONTROL_PLANE_TOOLS } from './tools/control-plane-tools';
 import { ROLE_TOOLS } from './tools/role-tools';
-import { assignableToolsForIds } from './tools/assignable-tools';
+import { ASSIGNABLE_TOOLS } from './tools/assignable-tools';
 import {
   formatSkillsCatalogSection,
   prepareAgentSkills,
@@ -33,8 +32,6 @@ import {
 import { agentNeedsMcpTools } from '@tourbillon/shared/mcp-registry';
 import { buildMCPTools } from './tools/mcp-tools';
 import { withAgentSecretRedaction } from './tools/redact-tool-output';
-import { SEARXNG_TOOLS } from './tools/searxng-tools';
-import { TAVILY_TOOLS } from './tools/tavily-tools';
 import { getInternalApiUrl } from './tools/api-client';
 import { buildCodeExecutionWorkspace } from './execution-workspace';
 import {
@@ -45,6 +42,7 @@ import {
 import { getMastraInstance } from './mastra-instance';
 import { isMastraTracingEnabled } from '@tourbillon/shared';
 import { buildHeartbeatInputProcessors } from './heartbeat-processors';
+import { assertMastraToolRegistryEmpty, gatedAgentOptions, type ToolGateSurface } from './tool-gate';
 
 const globalForMastra = globalThis as unknown as {
   /** Memory instances keyed by resolved OM config (or `base` when OM is off). */
@@ -131,40 +129,36 @@ export async function getAgentMemory(
 export interface AssembleAgentToolsOptions {
   allowedMcpServerIds?: string[];
   companySettings?: CompanySettings | null;
+  /** Where the tools run (permission gate surface). Default: heartbeat. */
+  surface?: ToolGateSurface;
 }
+
+/** Every static (non-MCP) tool by tool id. Selection comes from resolveAllowedToolNames. */
+export const STATIC_TOOLS_BY_ID: Readonly<Record<string, unknown>> = (() => {
+  const byId: Record<string, unknown> = {};
+  const add = (tool: unknown) => {
+    const id = (tool as { id?: unknown } | null)?.id;
+    if (typeof id === 'string') byId[id] = tool;
+  };
+  for (const tool of Object.values(CONTROL_PLANE_TOOLS)) add(tool);
+  for (const toolset of Object.values(ROLE_TOOLS)) for (const tool of Object.values(toolset)) add(tool);
+  for (const tool of Object.values(ASSIGNABLE_TOOLS)) add(tool);
+  return byId;
+})();
 
 export async function assembleAgentTools(
   agentRecord: AgentRecord,
   options?: AssembleAgentToolsOptions,
 ): Promise<Record<string, unknown>> {
-  const tools: Record<string, unknown> = { ...CONTROL_PLANE_TOOLS };
-  const runtimeConfig = agentRecord.runtimeConfig as AgentRuntimeConfig;
   const companySettings = options?.companySettings ?? null;
+  const tools: Record<string, unknown> = {};
 
-  const booleanToolsets = (agentRecord.assignedToolsets ?? []).filter((id) => id !== 'planning');
-  for (const toolsetId of booleanToolsets) {
-    const roleTools = ROLE_TOOLS[toolsetId];
-    if (roleTools) Object.assign(tools, roleTools);
+  // Same allow-list the live tool permission gate evaluates per call (no drift).
+  const allowed = resolveAllowedToolNames(agentRecord, { settings: companySettings });
+  for (const toolId of allowed.staticToolIds) {
+    const tool = STATIC_TOOLS_BY_ID[toolId];
+    if (tool) tools[toolKeyForId(toolId)] = tool;
   }
-
-  if (!isSearxngConfigured(companySettings, runtimeConfig)) {
-    for (const key of Object.keys(SEARXNG_TOOLS)) {
-      delete tools[key];
-    }
-  }
-
-  if (!isTavilyConfigured(companySettings, runtimeConfig)) {
-    for (const key of Object.keys(TAVILY_TOOLS)) {
-      delete tools[key];
-    }
-  }
-
-  const assignedToolIds = resolveAssignedTools({
-    role: agentRecord.role,
-    assignedToolsets: agentRecord.assignedToolsets,
-    runtimeConfig,
-  });
-  Object.assign(tools, assignableToolsForIds(assignedToolIds));
 
   if (agentNeedsMcpTools(agentRecord)) {
     const mcpTools = await buildMCPTools(agentRecord, {
@@ -174,14 +168,13 @@ export async function assembleAgentTools(
     Object.assign(tools, mcpTools);
   }
 
-  // Remove sendToAgent when DMs are disabled (default: enabled)
-  const mailEnabled = runtimeConfig.mail?.enabled ?? true;
-  if (!mailEnabled) {
-    delete tools.sendToAgentTool;
-  }
-
   // #100: one choke point — no tool result may carry agent runtimeConfig secret values.
-  return withAgentSecretRedaction(tools);
+  // Each tool is also bound to this agent and re-checked against its live allow-list per call.
+  return withAgentSecretRedaction(tools, {
+    agentId: agentRecord.id,
+    companyId: agentRecord.companyId,
+    surface: options?.surface ?? 'heartbeat',
+  });
 }
 
 export async function shouldAttachCodeExecutionWorkspace(
@@ -224,7 +217,7 @@ export async function createAgentWithSkills(
   agentRecord: AgentRecord,
   options?: AssembleAgentToolsOptions
 ): Promise<Agent> {
-  const tools = await assembleAgentTools(agentRecord, options);
+  const tools = await assembleAgentTools(agentRecord, { ...options, surface: 'heartbeat' });
 
   const prepared = await prepareAgentSkills(agentRecord);
   const systemPrompt = assembleSystemPrompt(agentRecord, prepared);
@@ -277,7 +270,10 @@ export async function createAgentWithSkills(
     name: agentRecord.name,
     instructions: systemPrompt,
     model: getLanguageModelForAgent(agentRecord, providerRecord),
-    tools: tools as any,
+    ...(gatedAgentOptions(
+      { agentId: agentRecord.id, companyId: agentRecord.companyId, surface: 'heartbeat' },
+      tools,
+    ) as object),
     memory: await getAgentMemory(options?.companySettings ?? null, agentRecord.runtimeConfig as AgentRuntimeConfig),
     inputProcessors,
     ...(codeExecutionEnabled ? { workspace: buildCodeExecutionWorkspace() } : {}),
@@ -303,6 +299,8 @@ export async function createDurableAgentWithSkills(
     const mastra = getMastraInstance();
     mastra.removeAgent(agentRecord.id);
     mastra.addAgent(durableAgent, agentRecord.id);
+    // Agent tools are resolved per agent (function-valued); none may land in the instance registry.
+    assertMastraToolRegistryEmpty(mastra);
   }
 
   return durableAgent;

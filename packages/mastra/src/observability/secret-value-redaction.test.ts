@@ -9,6 +9,7 @@ import {
 import { BaseExporter, Observability } from '@mastra/observability';
 import { ROLE_TOOLS } from '../tools/role-tools';
 import { withAgentSecretRedaction } from '../tools/redact-tool-output';
+import { setToolGateDepsForTests } from '../tool-gate';
 import { createHeartbeatRuntimeContext } from '../tools/api-client';
 import { buildSpanOutputProcessors } from '../mastra-instance';
 import { clearKnownSecretValues, registerKnownSecretValues } from './secret-value-redaction';
@@ -57,7 +58,7 @@ function heartbeatContext() {
 
 /** Runs the redacted listAgents tool against a server that still returns raw agent rows. */
 async function callListAgents(): Promise<unknown> {
-  const tools = withAgentSecretRedaction(ROLE_TOOLS.roster) as Record<string, any>;
+  const tools = withAgentSecretRedaction(ROLE_TOOLS.roster, null) as Record<string, any>;
   return tools.listAgentsTool.execute({}, { requestContext: heartbeatContext() });
 }
 
@@ -131,6 +132,21 @@ describe('#100 agent secrets redaction', () => {
       t.skip('agent-factory import chain unavailable in this checkout (MODULE_NOT_FOUND)');
       return;
     }
+    // Assembled tools also run the live permission check; serve this agent's row in memory.
+    const now = new Date();
+    setToolGateDepsForTests({
+      loadAgent: async () => ({
+        ...cyberRow,
+        role: 'ceo',
+        status: 'active' as const,
+        assignedToolsets: ['roster'],
+        mcpServerIds: [],
+        updatedAt: now,
+      }),
+      loadCompany: async () => ({ id: COMPANY_ID, status: 'active' as const, settings: {}, allowedMcpServerIds: [], updatedAt: now }),
+      recordDenied: async () => undefined,
+    });
+    t.after(() => setToolGateDepsForTests());
     const tools = (await agentFactory.assembleAgentTools({
       ...cyberRow,
       role: 'ceo',
