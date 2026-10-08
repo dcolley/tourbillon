@@ -1,9 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
-import { createHmac } from 'crypto';
 import { db, agents } from '@tourbillon/db';
 import { and, eq } from 'drizzle-orm';
 import { requireBoardCompany } from '@/lib/board-route-auth';
+import {
+  OAUTH_NOT_CONFIGURED_ERROR,
+  isOAuthStateSecretConfigured,
+  logOAuthStateSecretMissing,
+  settingsRedirect,
+  signOAuthState,
+} from '@/lib/vault-oauth-state';
 
 const authorizeSchema = z.object({
   serverId: z.string().min(1),
@@ -12,22 +18,16 @@ const authorizeSchema = z.object({
   agentId: z.string().optional(),
 });
 
-function signOAuthState(payload: string): string {
-  const secret = process.env.BETTER_AUTH_SECRET || 'change-me-in-production';
-  const hmac = createHmac('sha256', secret);
-  hmac.update(payload);
-  return hmac.digest('hex');
-}
-
-function verifyOAuthState(payload: string, signature: string): boolean {
-  const expected = signOAuthState(payload);
-  return signature === expected;
-}
-
 export async function GET(req: NextRequest) {
   // #106: board only (starts an OAuth grant that stores credentials for the active company).
   const auth = await requireBoardCompany(req);
   if (!auth.ok) return auth.response;
+
+  // #112: fail closed. Without a real BETTER_AUTH_SECRET the state HMAC is forgeable.
+  if (!isOAuthStateSecretConfigured()) {
+    logOAuthStateSecretMissing('start');
+    return settingsRedirect(`/settings?oauth_error=${OAUTH_NOT_CONFIGURED_ERROR}`);
+  }
 
   try {
     const { searchParams } = new URL(req.url);
@@ -69,6 +69,10 @@ export async function GET(req: NextRequest) {
         agentId: validated.agentId,
       });
       const signature = signOAuthState(statePayload);
+      if (!signature) {
+        logOAuthStateSecretMissing('start');
+        return settingsRedirect(`/settings?oauth_error=${OAUTH_NOT_CONFIGURED_ERROR}`);
+      }
       const state = Buffer.from(JSON.stringify({
         payload: statePayload,
         signature,

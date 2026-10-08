@@ -29,6 +29,8 @@ import { driveSessionHeadless } from '../harness-session-drive';
 
 export interface HarnessRunContext {
   wake: HeartbeatJobData;
+  /** Message built at run start by wake-runner (WC1–6); rebuilt from `wake` when absent. */
+  wakeMessage?: string;
   runId: string;
   apiKey: string;
   goalId?: string;
@@ -153,7 +155,7 @@ export async function runWithHarness(
   try {
     const result = await driveSessionHeadless(
       session,
-      buildWakeMessage(wake),
+      context.wakeMessage ?? buildWakeMessage(wake),
       runtimeContext,
       onEvent,
       options.abortSignal,
