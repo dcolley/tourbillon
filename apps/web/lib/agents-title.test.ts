@@ -153,13 +153,17 @@ describe('agent title validation', () => {
       }
     });
 
-    it('refuses empty / whitespace-only after trim (title required)', () => {
-      for (const raw of ['', '   ', '\n\t', '  \n  ']) {
+    it('refuses empty / whitespace-only / zero-width-only after edge-blank trim', () => {
+      for (const raw of ['', '   ', '\n\t', '  \n  ', '\u200B', '\u200B\u200C\u200D\u2060\uFEFF', '  \u200B  ']) {
         assert.throws(() => normalizeAgentTitle(raw), {
           name: 'AgentValidationError',
           message: 'Title is required.',
         });
       }
+    });
+
+    it('edge-blank trims zero-width at the edges and accepts the middle', () => {
+      assert.equal(normalizeAgentTitle('  \u200BChief Technology Officer\uFEFF\n'), 'Chief Technology Officer');
     });
 
     it('trims and accepts a normal title', () => {
@@ -275,15 +279,61 @@ describe('agent title validation', () => {
       assert.equal(setPayloads[0].title, title200);
     });
 
-    it('empty title after trim → Title is required (unchanged behaviour)', async () => {
+    it('empty / zero-width-only title → Title is required (dashboard/REST)', async () => {
+      for (const title of ['  ', '\u200B\u200C', ' \uFEFF ']) {
+        setPayloads = [];
+        await assert.rejects(
+          () =>
+            updateAgentProfile('agent-1', {
+              name: 'Alice',
+              title,
+              urlKey: 'alice',
+            }),
+          { name: 'AgentValidationError', message: 'Title is required.' },
+        );
+        assert.equal(setPayloads.length, 0);
+      }
+    });
+
+    it('S3: unchanged over-cap title does not block a name-only save', async () => {
+      const legacy = 'L'.repeat(AGENT_TITLE_MAX_CHARS + 50);
+      agentRow = { ...agentRow, title: legacy };
+      nextAgentFind = agentRow;
+      const updated = await updateAgentProfile('agent-1', {
+        name: 'Alice Renamed',
+        title: legacy,
+        urlKey: 'alice',
+      });
+      assert.equal(updated.name, 'Alice Renamed');
+      assert.equal(updated.title, legacy);
+      assert.equal(setPayloads.length, 1);
+      assert.equal(setPayloads[0].title, legacy);
+
+      // Same content after edge-blank trim (extra ZWSP edges) still counts as unchanged.
+      setPayloads = [];
+      agentRow = { ...agentRow, title: legacy, name: 'Alice Renamed' };
+      nextAgentFind = agentRow;
+      const again = await updateAgentProfile('agent-1', {
+        name: 'Alice Renamed',
+        title: `\u200B${legacy}\uFEFF`,
+        urlKey: 'alice',
+      });
+      assert.equal(again.title, legacy);
+      assert.equal(setPayloads[0].title, legacy);
+    });
+
+    it('S3: changing to a different over-cap title is still refused', async () => {
+      const legacy = 'L'.repeat(AGENT_TITLE_MAX_CHARS + 50);
+      agentRow = { ...agentRow, title: legacy };
+      nextAgentFind = agentRow;
       await assert.rejects(
         () =>
           updateAgentProfile('agent-1', {
             name: 'Alice',
-            title: '  ',
+            title: 'N'.repeat(AGENT_TITLE_MAX_CHARS + 1),
             urlKey: 'alice',
           }),
-        { name: 'AgentValidationError', message: 'Title is required.' },
+        { name: 'AgentValidationError', message: 'Title must be at most 200 characters.' },
       );
       assert.equal(setPayloads.length, 0);
     });

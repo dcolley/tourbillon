@@ -292,12 +292,20 @@ describe('agent title validation surfaces (REST + mobile)', () => {
       assert.equal(inserts.length, 1);
     });
 
-    it('empty title after trim → 400 Title is required', async () => {
+    it('empty / zero-width-only title → 400 Title is required', async () => {
       nextAgentFind = null;
-      const res = await restCreate({ name: 'Bob', title: '   ', role: 'engineer', urlKey: 'bob-empty' });
-      assert.equal(res.status, 400);
-      assert.equal(res.body.error, 'Title is required.');
-      assert.equal(inserts.length, 0);
+      for (const title of ['   ', '​', '​‌﻿']) {
+        inserts = [];
+        const res = await restCreate({
+          name: 'Bob',
+          title,
+          role: 'engineer',
+          urlKey: `bob-empty-${title.length}`,
+        });
+        assert.equal(res.status, 400);
+        assert.equal(res.body.error, 'Title is required.');
+        assert.equal(inserts.length, 0);
+      }
     });
   });
 
@@ -326,8 +334,8 @@ describe('agent title validation surfaces (REST + mobile)', () => {
       assert.equal(setPayloads[0].title, title200);
     });
 
-    it('omitted / null / blank title keeps the current title (no wipe)', async () => {
-      for (const body of [{}, { title: null }, { title: '' }, { title: '   ' }]) {
+    it('omitted / null / blank / zero-width-only title keeps the current title (no wipe)', async () => {
+      for (const body of [{}, { title: null }, { title: '' }, { title: '   ' }, { title: '​‌﻿' }]) {
         agentRow = agentFixture();
         nextAgentFind = agentRow;
         setPayloads = [];
@@ -337,6 +345,19 @@ describe('agent title validation surfaces (REST + mobile)', () => {
         assert.equal(setPayloads.length, 1);
         assert.equal(setPayloads[0].title, 'CEO');
       }
+    });
+
+    it('S3: mobile name-only save keeps a legacy over-cap title', async () => {
+      const legacy = 'L'.repeat(AGENT_TITLE_MAX_CHARS + 40);
+      agentRow = { ...agentFixture(), title: legacy };
+      nextAgentFind = agentRow;
+      // Omitted title → keep current (over-cap) without re-applying the 200 cap.
+      const res = await mobileProfile({ name: 'Alice Renamed' });
+      assert.equal(res.status, 200);
+      assert.equal(res.body.agent?.title, legacy);
+      assert.equal(setPayloads.length, 1);
+      assert.equal(setPayloads[0].title, legacy);
+      assert.equal(setPayloads[0].name, 'Alice Renamed');
     });
   });
 

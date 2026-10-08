@@ -218,20 +218,43 @@ describe('dashboard updateAgentProfileAction title validation', () => {
     assert.equal(setPayloads[0].title, title200);
   });
 
-  it('empty title after trim → Title is required', async () => {
+  it('empty / zero-width-only title → Title is required', async () => {
+    for (const title of ['   ', '​‌', ' ﻿ ']) {
+      setPayloads = [];
+      const res = await action(
+        null,
+        formWith({
+          agentId: 'agent-1',
+          currentUrlKey: 'alice',
+          name: 'Alice',
+          title,
+          urlKey: 'alice',
+          reportsToId: '',
+        }),
+      );
+      assert.equal(res.ok, false);
+      if (!res.ok) assert.equal(res.error, 'Title is required.');
+      assert.equal(setPayloads.length, 0);
+    }
+  });
+
+  it('S3: unchanged over-cap title does not block a name-only save', async () => {
+    const legacy = 'L'.repeat(AGENT_TITLE_MAX_CHARS + 50);
+    agentRow = { ...agentRow, title: legacy };
     const res = await action(
       null,
       formWith({
         agentId: 'agent-1',
         currentUrlKey: 'alice',
-        name: 'Alice',
-        title: '   ',
+        name: 'Alice Renamed',
+        title: legacy,
         urlKey: 'alice',
         reportsToId: '',
       }),
     );
-    assert.equal(res.ok, false);
-    if (!res.ok) assert.equal(res.error, 'Title is required.');
-    assert.equal(setPayloads.length, 0);
+    assert.equal(res.ok, true);
+    assert.equal(setPayloads.length, 1);
+    assert.equal(setPayloads[0].title, legacy);
+    assert.equal(setPayloads[0].name, 'Alice Renamed');
   });
 });

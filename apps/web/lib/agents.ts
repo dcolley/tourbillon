@@ -42,6 +42,7 @@ import {
   applyCodeExecutionOverrides,
   buildCodeExecutionActivityDetails,
 } from './code-execution-config';
+import { trimEdgeBlank } from './edge-blank';
 
 const AGENT_ROLES = ['ceo', 'cto', 'engineer', 'pm', 'qa', 'designer', 'custom'] as const;
 export type AgentRole = (typeof AGENT_ROLES)[number];
@@ -108,23 +109,37 @@ export class AgentValidationError extends Error {
   }
 }
 
-/** Max length for agent title after trim. Longer values are refused (never truncated). */
+/** Max length for agent title after edge-blank trim. Longer values are refused (never truncated). */
 export const AGENT_TITLE_MAX_CHARS = 200;
+
+export type NormalizeAgentTitleOptions = {
+  /**
+   * When set (profile update), a title that matches the current one after edge-blank trim
+   * is kept as-is and the 200-char cap is not re-applied — so a legacy over-cap title does
+   * not block a name-only save.
+   */
+  currentTitle?: string;
+};
 
 /**
  * Validate and normalise an agent title for create/update:
- * - missing (undefined/null) or empty after trim is refused (title is required, as before);
+ * - missing (undefined/null) or empty after edge-blank trim is refused (title is required);
  * - any other non-string (number, boolean, object, array) is refused, never coerced;
- * - trimmed;
- * - at most AGENT_TITLE_MAX_CHARS characters after trim: longer is refused, never cut.
+ * - edge-blank trimmed (whitespace + zero-width; same helper as approval reasons);
+ * - at most AGENT_TITLE_MAX_CHARS after trim when the value *changes*; unchanged current
+ *   titles skip the length check (S3).
  */
-export function normalizeAgentTitle(raw: unknown): string {
+export function normalizeAgentTitle(raw: unknown, opts?: NormalizeAgentTitleOptions): string {
   if (raw === undefined || raw === null) throw new AgentValidationError('Title is required.');
   if (typeof raw !== 'string') {
     throw new AgentValidationError('Title must be a string.');
   }
-  const title = raw.trim();
+  const title = trimEdgeBlank(raw);
   if (!title) throw new AgentValidationError('Title is required.');
+  const current = opts?.currentTitle;
+  if (typeof current === 'string' && title === trimEdgeBlank(current)) {
+    return current;
+  }
   if (title.length > AGENT_TITLE_MAX_CHARS) {
     throw new AgentValidationError(
       `Title must be at most ${AGENT_TITLE_MAX_CHARS} characters.`,
@@ -753,7 +768,7 @@ export async function updateAgentProfile(
   const name = input.name?.trim();
   if (!name) throw new AgentValidationError('Name is required.');
 
-  const title = normalizeAgentTitle(input.title);
+  const title = normalizeAgentTitle(input.title, { currentTitle: agent.title });
 
   const urlKey = slugifyUrlKey(input.urlKey?.trim() || '');
   if (!urlKey) throw new AgentValidationError('Agent ID is required.');
