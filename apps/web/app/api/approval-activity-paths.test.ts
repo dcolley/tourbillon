@@ -307,11 +307,33 @@ describe('approval.created / approval.decided activity rows (every path)', () =>
       assert.deepEqual(notes, [['appr-a', 'Split the migration'], ['appr-c', null]]);
     });
 
-    it('MCP decide_approval contract unchanged: reject without a reason still works', async () => {
+    it('MCP decide_approval: reject without a reason (missing, empty, blank, non-string) → tool error, nothing changes', async () => {
+      pending('appr-a', 'company-a', { issueIds: ['issue-a1'] });
+      store.issues[0].boardApprovalId = 'appr-a';
+      store.issues[0].status = 'blocked';
+      for (const reason of [undefined, '', '   \n\t', 42]) {
+        const r = await mcp('company-a', { company_id: 'company-a', approval_id: 'appr-a', decision: 'rejected', reason });
+        assert.equal(r.result, undefined, JSON.stringify(r));
+        assert.match(r.error?.message ?? '', /reason is required to reject/);
+      }
+      assert.deepEqual([store.approvals[0].status, store.approvals[0].note, store.approvals[0].decidedAt], ['pending', null, null]);
+      assert.deepEqual([store.issues[0].status, store.issues[0].boardApprovalId], ['blocked', 'appr-a']);
+      assert.equal(store.activityLog.length, 0);
+    });
+
+    it('MCP decide_approval: reject with a reason → rejected, reason stored and on the decided row; approve needs none', async () => {
       pending('appr-a', 'company-a');
-      const r = await mcp('company-a', { company_id: 'company-a', approval_id: 'appr-a', decision: 'rejected' });
+      pending('appr-c', 'company-a');
+      const r = await mcp('company-a', { company_id: 'company-a', approval_id: 'appr-a', decision: 'rejected', reason: 'Split the migration' });
       assert.equal(r.error, undefined, JSON.stringify(r));
-      assert.equal(store.approvals[0].status, 'rejected');
+      const ok = await mcp('company-a', { company_id: 'company-a', approval_id: 'appr-c', decision: 'approved' });
+      assert.equal(ok.error, undefined, JSON.stringify(ok));
+      assert.deepEqual(
+        store.approvals.map((a) => [a.id, a.status, a.note ?? null]),
+        [['appr-a', 'rejected', 'Split the migration'], ['appr-c', 'approved', null]],
+      );
+      const notes = lifecycle('approval.decided').map((x) => [x.entityId, (x.details as Row).note]);
+      assert.deepEqual(notes, [['appr-a', 'Split the migration'], ['appr-c', null]]);
     });
   });
 
@@ -396,7 +418,7 @@ describe('approval.created / approval.decided activity rows (every path)', () =>
     it('racing decide (stale pending read) → already decided, no row', async () => {
       pending('appr-a', 'company-a', { status: 'approved' });
       stalePending = true;
-      const r = await mcp('company-a', { company_id: 'company-a', approval_id: 'appr-a', decision: 'rejected' });
+      const r = await mcp('company-a', { company_id: 'company-a', approval_id: 'appr-a', decision: 'rejected', reason: 'Too late' });
       assert.match(r.error?.message ?? '', /already decided/);
       assert.equal(lifecycle('approval.decided').length, 0);
     });

@@ -611,7 +611,7 @@ const MCP_TOOLS: McpTool[] = [
   },
   {
     name: 'decide_approval',
-    description: 'Decide a pending board approval (approve or reject). Reject restores blocked status; issues must be manually cancelled via set_issue_status if needed.',
+    description: 'Decide a pending board approval (approve or reject). Reject requires a non-blank reason (sent to the requesting agent as Board feedback; a blank reject is refused with no change). Reject leaves linked issues blocked; cancel them via set_issue_status if needed.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -630,7 +630,7 @@ const MCP_TOOLS: McpTool[] = [
         },
         reason: {
           type: 'string',
-          description: 'Decision reason/note',
+          description: 'Decision reason/note. Required (non-blank) when decision is rejected: it is the Board feedback the requesting agent gets. Optional for approved.',
         },
       },
       required: ['company_id', 'approval_id', 'decision'],
@@ -1490,6 +1490,12 @@ async function handleDecideApproval(tokenCompanyId: string, params: any) {
     throw new Error('decision must be approved or rejected');
   }
   validateCompanyAccess(tokenCompanyId, company_id);
+  // Same rule as the board decide route: a reject is the board's "request changes", and the
+  // reason is the feedback the requesting agent gets. Checked before any read or write, so a
+  // blank reject changes nothing and writes no activity row.
+  if (decision === 'rejected' && (typeof reason !== 'string' || !reason.trim())) {
+    throw new Error('reason is required to reject (it is sent to the requesting agent as Board feedback)');
+  }
 
   const approval = await db.query.approvals.findFirst({
     where: eq(approvals.id, approval_id),

@@ -546,11 +546,13 @@ List pending and recent board approvals.
 
 Decide a pending board approval. Approval restores prior issue status; rejection leaves issues blocked. Issues must be manually cancelled via `set_issue_status` if needed after rejection.
 
+A reject needs a non-blank `reason`: it is the Board feedback the requesting agent gets (same rule as the board UI and `POST /api/approvals/:approvalId/decide`). A reject with a missing or blank `reason` returns a tool error (`reason is required to reject …`) and changes nothing: the approval stays pending, linked issues stay halted, and no activity row or wake is written. `reason` stays optional for approve.
+
 **Parameters:**
 - `company_id` (string, required): Company UUID
 - `approval_id` (string, required): Approval UUID
 - `decision` (string, required): Decision (approved or rejected)
-- `reason` (string): Decision reason/note
+- `reason` (string; required when `decision` is `rejected`): Decision reason/note. For a reject it is sent to the requesting agent as Board feedback
 
 **Returns:**
 - `id`: Approval UUID
