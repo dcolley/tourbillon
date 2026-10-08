@@ -23,6 +23,7 @@ import { ObservationalMemorySettingsForm } from '@/components/observational-memo
 import { listLlmProvidersPublic } from '@/lib/llm-providers';
 import { actionError, actionSuccess, type ActionResult } from '@/lib/action-result';
 import { CompanySettingsTabs } from './company-settings-tabs';
+import { redactBaseURL } from '@/lib/provider-safety';
 
 async function saveSettings(
   _prev: ActionResult | null,
@@ -177,7 +178,7 @@ export default async function SettingsPage() {
   const envSettings = [
     { label: 'LLM provider', value: llm.provider },
     { label: 'LLM API mode', value: llm.apiMode },
-    { label: 'Model base URL', value: llm.baseURL },
+    { label: 'Model base URL', value: redactBaseURL(llm.baseURL) },
     { label: 'Default model', value: llm.defaultModel },
     { label: 'Redis', value: process.env.REDIS_URL ?? '—' },
     { label: 'Internal API', value: process.env.INTERNAL_API_URL ?? '—' },

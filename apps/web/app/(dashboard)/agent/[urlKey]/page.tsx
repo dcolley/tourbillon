@@ -15,6 +15,7 @@ import { getCompanyById, requireBoardSession } from '@/lib/company';
 import { parseCompanyIdFromSearchParams } from '@/lib/company-link';
 import { deleteAgentAction, updateAgentRoleAction } from '../actions';
 import { getLlmProviderRecordById, listLlmProvidersPublic } from '@/lib/llm-providers';
+import { redactBaseURL } from '@/lib/provider-safety';
 import { AgentModelForm } from './agent-model-form';
 import { AgentModelSettingsForm } from './agent-model-settings-form';
 import { getInFlightHeartbeatRun, heartbeatJobHref } from '@/lib/heartbeats';
@@ -818,7 +819,7 @@ export default async function AgentDetailPage({
                       value={providerConfig.providerName ?? providerConfig.provider}
                     />
                     <DetailCard label="API mode" value={providerConfig.apiMode} />
-                    <DetailCard label="Endpoint" value={providerConfig.baseURL} />
+                    <DetailCard label="Endpoint" value={redactBaseURL(providerConfig.baseURL)} />
                   </div>
                   <AgentModelForm
                     agentId={agent.id}
