@@ -55,6 +55,10 @@ describe('validateSchedulerKey', () => {
       [`${VALID}\n`, /SCHEDULER_API_KEY has leading or trailing whitespace/],
       [`${VALID} `, /SCHEDULER_API_KEY has leading or trailing whitespace/],
       [`   ${VALID}`, /SCHEDULER_API_KEY has leading or trailing whitespace/],
+      [`${VALID.slice(0, 20)}\n${VALID.slice(20)}`, /SCHEDULER_API_KEY contains characters outside printable ASCII/],
+      [`${VALID.slice(0, 20)}\u200B${VALID.slice(20)}`, /SCHEDULER_API_KEY contains characters outside printable ASCII/],
+      [`${VALID.slice(0, 20)}\u{1F511}${VALID.slice(20)}`, /SCHEDULER_API_KEY contains characters outside printable ASCII/],
+      [`${VALID.slice(0, 20)} ${VALID.slice(20)}`, /SCHEDULER_API_KEY contains characters outside printable ASCII/],
     ];
     for (const [value, reason] of cases) {
       resetSchedulerKeyLogStateForTests();

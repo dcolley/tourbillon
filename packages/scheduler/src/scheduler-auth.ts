@@ -3,7 +3,8 @@
  * cheap to test).
  *
  * - `assertSchedulerApiKeyAtStartup` refuses to start when the key is unset, has leading or
- *   trailing whitespace, is a placeholder or is shorter than 32 characters. It logs the reason
+ *   trailing whitespace, is a placeholder, has a character outside printable ASCII U+0021–U+007E,
+ *   or is shorter than 32 characters. It logs the reason
  *   only, never the value.
  * - `authorizeSchedulerRequest` checks the bearer key on wake-server requests with the shared
  *   constant-time comparison.

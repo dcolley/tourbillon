@@ -1,6 +1,6 @@
 /**
  * forceKillHeartbeatAction: SCHEDULER_API_KEY goes through the shared requireSchedulerApiKey
- * helper (unset, whitespace, placeholder, short) before any request is sent. Redirects name the
+ * helper (unset, whitespace, placeholder, invalid characters, short) before any request is sent. Redirects name the
  * setting only; no value or length is echoed. All values are fakes.
  */
 import { describe, it, before, beforeEach, afterEach } from 'node:test';
@@ -119,6 +119,9 @@ describe('forceKillHeartbeatAction scheduler key', () => {
     ['space-padded short value reaching 32', `Zq7Lw2${' '.repeat(26)}`],
     ['trailing newline', `${VALID}\n`],
     ['leading spaces', `   ${VALID}`],
+    ['interior line break', `${VALID.slice(0, 20)}\n${VALID.slice(20)}`],
+    ['interior zero-width space', `${VALID.slice(0, 20)}\u200B${VALID.slice(20)}`],
+    ['interior tab', `${VALID.slice(0, 20)}\t${VALID.slice(20)}`],
   ] as const) {
     it(`redirects without sending a request when the key is ${label}`, async () => {
       await expectRedirect(value, '/agent/a1?error=SCHEDULER_API_KEY%20not%20configured');

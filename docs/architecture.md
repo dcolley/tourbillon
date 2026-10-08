@@ -254,7 +254,7 @@ Key configuration (all in `.env`):
 | `LLM_PROVIDER` | Env fallback + seeds registry | `lmstudio` |
 | `LLM_API_MODE` | API mode | `chat` |
 | `INTERNAL_API_URL` | Scheduler → Next.js API | `http://localhost:3002` |
-| `SCHEDULER_API_KEY` | Wake/schedule auth | required, ≥32 chars, no placeholder, no leading/trailing whitespace: `openssl rand -base64 32` |
+| `SCHEDULER_API_KEY` | Wake/schedule auth | required, ≥32 chars, printable ASCII only (no spaces), no placeholder, no leading/trailing whitespace: `openssl rand -base64 32` |
 | `SCHEDULER_WAKE_PORT` | WakeRunner HTTP port | `3003` |
 | `SCHEDULER_WAKE_URL` | Web → scheduler base URL | `http://127.0.0.1:3003` |
 | `MEMORY_SEMANTIC_RECALL` | Enable pgvector semantic memory | `false` |

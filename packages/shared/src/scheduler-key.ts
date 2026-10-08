@@ -4,9 +4,11 @@
  *
  * One helper for both sides:
  * - `schedulerApiKeyProblem` / `requireSchedulerApiKey` check the configured value: it must be set,
- *   have no leading or trailing whitespace, be at least 32 characters, and not be a placeholder
- *   from .env.example or the docs. The value is never trimmed: the exact configured string is what
- *   both sides send and compare, so surrounding whitespace is refused rather than silently used.
+ *   have no leading or trailing whitespace, contain only printable ASCII (U+0021–U+007E, so no
+ *   spaces, tabs, control characters or non-ASCII anywhere), be at least 32 characters, and not be
+ *   a placeholder from .env.example or the docs. The value is never trimmed: the exact configured
+ *   string is what both sides send and compare, so surrounding whitespace is refused rather than
+ *   silently used. The character rule matches what an HTTP `Authorization` header can carry.
  * - `schedulerKeyMatches` compares a presented key with the configured one via SHA-256 digests and
  *   `crypto.timingSafeEqual` (equal-length buffers, so keys of any length never throw).
  *
@@ -29,12 +31,13 @@ export const SCHEDULER_API_KEY_PLACEHOLDERS: readonly string[] = [
   '<generate with: openssl rand -base64 32>',
 ];
 
-export type SchedulerApiKeyProblem = 'unset' | 'whitespace' | 'placeholder' | 'too_short';
+export type SchedulerApiKeyProblem = 'unset' | 'whitespace' | 'placeholder' | 'invalid_characters' | 'too_short';
 
 const PROBLEM_TEXT: Record<SchedulerApiKeyProblem, string> = {
   unset: 'is not set',
   whitespace: 'has leading or trailing whitespace (remove it; the value is not trimmed)',
   placeholder: 'is a placeholder value',
+  invalid_characters: 'contains characters outside printable ASCII (only U+0021–U+007E are allowed; no spaces)',
   too_short: `is shorter than ${SCHEDULER_API_KEY_MIN_LENGTH} characters`,
 };
 
@@ -49,14 +52,20 @@ function isPlaceholder(value: string): boolean {
 /** Leading or trailing whitespace, including newlines, BOM and zero-width characters. */
 const EDGE_WHITESPACE = /^[\s\u200B-\u200D\u2060]|[\s\u200B-\u200D\u2060]$/;
 
+/** Any character outside printable ASCII U+0021–U+007E, anywhere in the value. */
+const OUTSIDE_PRINTABLE_ASCII = /[^\u0021-\u007E]/;
+
 /**
  * Why the configured value is unusable, or null when it is fine. Never returns the value.
  * Checks the raw value: whitespace padding is refused on its own and never counts toward the length.
+ * Every path that reads the key (web auth, wake client, dashboard actions, scheduler start, wake
+ * server, schedule sync, startup warning) goes through this check.
  */
 export function schedulerApiKeyProblem(value: string | null | undefined): SchedulerApiKeyProblem | null {
   if (typeof value !== 'string' || value.trim() === '') return 'unset';
   if (EDGE_WHITESPACE.test(value)) return 'whitespace';
   if (isPlaceholder(value)) return 'placeholder';
+  if (OUTSIDE_PRINTABLE_ASCII.test(value)) return 'invalid_characters';
   if (value.length < SCHEDULER_API_KEY_MIN_LENGTH) return 'too_short';
   return null;
 }
@@ -112,7 +121,7 @@ export type SchedulerKeyCheck =
 
 /**
  * Check a presented key against SCHEDULER_API_KEY. A misconfigured key (unset, whitespace,
- * placeholder, short) rejects every request and reports `config` so the caller can log the reason.
+ * placeholder, invalid characters, short) rejects every request and reports `config` so the caller can log the reason.
  */
 export function checkSchedulerApiKey(presented: unknown, env: Env = process.env): SchedulerKeyCheck {
   const expected = env[SCHEDULER_API_KEY_ENV];

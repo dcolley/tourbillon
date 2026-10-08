@@ -20,6 +20,9 @@ const BAD_KEYS: Array<[string, string, string]> = [
   ['space-padded short value reaching 32', `Zq7Lw2${' '.repeat(26)}`, 'whitespace'],
   ['trailing newline', `${VALID}\n`, 'whitespace'],
   ['leading spaces', `   ${VALID}`, 'whitespace'],
+  ['interior line break', `${VALID.slice(0, 20)}\n${VALID.slice(20)}`, 'invalid_characters'],
+  ['interior zero-width space', `${VALID.slice(0, 20)}\u200B${VALID.slice(20)}`, 'invalid_characters'],
+  ['interior emoji', `${VALID.slice(0, 20)}\u{1F511}${VALID.slice(20)}`, 'invalid_characters'],
 ];
 const env = process.env as Record<string, string | undefined>;
 
@@ -104,7 +107,7 @@ describe('startWakeServer startup refusal', () => {
 describe('scheduler entry point (src/index.ts) startup refusal', () => {
   const schedulerRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-  for (const [label, value, reason] of BAD_KEYS.slice(0, 3)) {
+  for (const [label, value, reason] of [...BAD_KEYS.slice(0, 3), BAD_KEYS[4]]) {
     it(`exits 1 before any other work when the key is ${label}`, () => {
       const run = spawnSync(process.execPath, ['--import', 'tsx', 'src/index.ts'], {
         cwd: schedulerRoot,

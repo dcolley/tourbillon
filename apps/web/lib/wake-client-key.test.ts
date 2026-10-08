@@ -63,13 +63,17 @@ describe('wake-client scheduler key', () => {
     assert.equal(calls.length, 0);
   });
 
-  it('throws for a placeholder, short or whitespace-padded key without echoing it', async () => {
+  it('throws for a placeholder, short, whitespace-padded or non-printable-ASCII key without echoing it', async () => {
     for (const bad of [
       'change-me-in-production',
       'short-secret-value-0123',
       `Zq7Lw2${' '.repeat(26)}`,
       `${VALID}\n`,
       `  ${VALID}`,
+      `${VALID.slice(0, 20)}\n${VALID.slice(20)}`,
+      `${VALID.slice(0, 20)}\u200B${VALID.slice(20)}`,
+      `${VALID.slice(0, 20)}\u{1F511}${VALID.slice(20)}`,
+      `${VALID.slice(0, 20)}\u00A0${VALID.slice(20)}`,
     ]) {
       env.SCHEDULER_API_KEY = bad;
       await assert.rejects(

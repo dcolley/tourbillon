@@ -279,7 +279,7 @@ All variables live in `.env` at the repo root. Key ones:
 | `LLM_PROVIDER` | Env fallback + seeds default registry entry | `lmstudio` |
 | `LLM_API_MODE` | `chat` or `responses` API mode | `chat` |
 | `INTERNAL_API_URL` | Scheduler → Next.js API | `http://localhost:3002` |
-| `SCHEDULER_API_KEY` | Wake/schedule sync + internal issue create | required, ≥32 chars, no placeholder, no leading/trailing whitespace: `openssl rand -base64 32` |
+| `SCHEDULER_API_KEY` | Wake/schedule sync + internal issue create | required, ≥32 chars, printable ASCII only (no spaces), no placeholder, no leading/trailing whitespace: `openssl rand -base64 32` |
 | `SCHEDULER_WAKE_PORT` | WakeRunner HTTP port | `3003` |
 | `SCHEDULER_WAKE_URL` | Web → scheduler base URL | `http://127.0.0.1:3003` |
 | `BETTER_AUTH_SECRET` | Auth signing secret | generate with `openssl rand -base64 32` |

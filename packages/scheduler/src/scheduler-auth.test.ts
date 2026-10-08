@@ -30,6 +30,11 @@ describe('scheduler startup key check', () => {
       [`  ${VALID}`, 'whitespace'],
       [`${VALID} `, 'whitespace'],
       [`${VALID}\n`, 'whitespace'],
+      // Anything outside printable ASCII U+0021–U+007E anywhere in the value.
+      [`${VALID.slice(0, 20)}\n${VALID.slice(20)}`, 'invalid_characters'],
+      [`${VALID.slice(0, 20)}\u200B${VALID.slice(20)}`, 'invalid_characters'],
+      [`${VALID.slice(0, 20)} ${VALID.slice(20)}`, 'invalid_characters'],
+      [`${VALID}\u180E`, 'invalid_characters'],
     ];
     for (const [value, reason] of cases) {
       const { lines, log } = captureLog();
@@ -90,6 +95,19 @@ describe('wake-server request authorization', () => {
 
   it('rejects every request when the configured key has edge whitespace, padded or not', () => {
     for (const configured of [`${VALID}\n`, `${VALID} `, ` ${VALID}`]) {
+      const env = { SCHEDULER_API_KEY: configured };
+      assert.equal(authorizeSchedulerRequest(`Bearer ${configured}`, env), false);
+      assert.equal(authorizeSchedulerRequest(`Bearer ${VALID}`, env), false);
+    }
+  });
+
+  it('rejects every request when the configured key has a character outside printable ASCII', () => {
+    for (const configured of [
+      `${VALID.slice(0, 20)}\r\n${VALID.slice(20)}`,
+      `${VALID.slice(0, 20)}\u{1F511}${VALID.slice(20)}`,
+      `${VALID.slice(0, 20)}\u00A0${VALID.slice(20)}`,
+      `${VALID.slice(0, 20)}\t${VALID.slice(20)}`,
+    ]) {
       const env = { SCHEDULER_API_KEY: configured };
       assert.equal(authorizeSchedulerRequest(`Bearer ${configured}`, env), false);
       assert.equal(authorizeSchedulerRequest(`Bearer ${VALID}`, env), false);

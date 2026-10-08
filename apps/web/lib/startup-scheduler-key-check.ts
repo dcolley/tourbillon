@@ -27,7 +27,8 @@ export function shouldRunStartupSchedulerKeyCheck(env: Env = process.env): boole
 }
 
 /**
- * Log one line when SCHEDULER_API_KEY is unset, padded with whitespace, a placeholder or too short.
+ * Log one line when SCHEDULER_API_KEY is unset, padded with whitespace, a placeholder, has a
+ * character outside printable ASCII, or is too short.
  * Returns true when a warning was logged. Never throws and never includes the value.
  */
 export function runStartupSchedulerKeyCheck(

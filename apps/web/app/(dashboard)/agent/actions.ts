@@ -153,7 +153,7 @@ export async function forceKillHeartbeatAction(formData: FormData) {
   }
 
   const schedulerUrl = process.env.SCHEDULER_WAKE_URL ?? 'http://127.0.0.1:3003';
-  // Shared helper: unset, whitespace-padded, placeholder or short keys are refused before any
+  // Shared helper: unset, whitespace-padded, placeholder, non-printable-ASCII or short keys are refused before any
   // request is sent (the error names the setting only, never the value).
   let apiKey: string;
   try {

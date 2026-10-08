@@ -33,6 +33,7 @@ function capture() {
 }
 
 const runtime = { NEXT_RUNTIME: 'nodejs' };
+const NON_ASCII = /SCHEDULER_API_KEY contains characters outside printable ASCII/;
 
 describe('shouldRunStartupSchedulerKeyCheck', () => {
   it('runs only in the Node.js runtime', () => {
@@ -60,6 +61,10 @@ describe('runStartupSchedulerKeyCheck', () => {
     ['strong with a trailing newline', TRAILING_NEWLINE, /SCHEDULER_API_KEY has leading or trailing whitespace/],
     ['strong with a trailing space', `${STRONG} `, /SCHEDULER_API_KEY has leading or trailing whitespace/],
     ['strong with leading spaces', LEADING_SPACES, /SCHEDULER_API_KEY has leading or trailing whitespace/],
+    ['strong with an interior line break', `${STRONG.slice(0, 16)}\n${STRONG.slice(16)}`, NON_ASCII],
+    ['strong with an interior zero-width space', `${STRONG.slice(0, 16)}\u200B${STRONG.slice(16)}`, NON_ASCII],
+    ['strong with an interior emoji', `${STRONG.slice(0, 16)}\u{1F511}${STRONG.slice(16)}`, NON_ASCII],
+    ['strong with a trailing U+180E', `${STRONG}\u180E`, NON_ASCII],
   ] as const) {
     it(`warns once when SCHEDULER_API_KEY is ${label}, without the value or its length`, () => {
       const { lines, log } = capture();

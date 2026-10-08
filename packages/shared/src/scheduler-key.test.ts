@@ -70,9 +70,77 @@ describe('scheduler-key config', () => {
       `${visible}${' '.repeat(SCHEDULER_API_KEY_MIN_LENGTH - visible.length)}`.length,
       SCHEDULER_API_KEY_MIN_LENGTH,
     );
-    // Inner whitespace is not edge whitespace: only the length / placeholder rules apply.
-    assert.equal(schedulerApiKeyProblem('abcd efgh ijkl mnop qrst uvwx yz12 3456'), null);
+    // Inner whitespace is not edge whitespace; it is refused by the printable-ASCII rule instead.
+    assert.equal(schedulerApiKeyProblem('abcd efgh ijkl mnop qrst uvwx yz12 3456'), 'invalid_characters');
     assert.match(describeSchedulerApiKeyProblem('whitespace'), /^SCHEDULER_API_KEY has leading or trailing whitespace/);
+  });
+
+  it('any character outside printable ASCII U+0021–U+007E anywhere is refused as one reason', () => {
+    const head = VALID.slice(0, 20);
+    const tail = VALID.slice(20);
+    const cases: Array<[string, string]> = [
+      ['interior LF', `${head}\n${tail}`],
+      ['interior CR', `${head}\r${tail}`],
+      ['interior CRLF', `${head}\r\n${tail}`],
+      ['interior zero-width space', `${head}\u200B${tail}`],
+      ['interior emoji', `${head}\u{1F511}${tail}`],
+      ['interior NBSP', `${head}\u00A0${tail}`],
+      ['interior tab', `${head}\t${tail}`],
+      ['interior space', `${head} ${tail}`],
+      ['interior NUL', `${head}\u0000${tail}`],
+      ['interior U+001F', `${head}\u001F${tail}`],
+      ['interior DEL', `${head}\u007F${tail}`],
+      ['interior U+0080', `${head}\u0080${tail}`],
+      ['interior Latin-1 letter', `${head}\u00E9${tail}`],
+      ['interior U+0100', `${head}\u0100${tail}`],
+      ['interior U+180E', `${head}\u180E${tail}`],
+      ['trailing U+180E', `${VALID}\u180E`],
+      ['leading U+180E', `\u180E${VALID}`],
+      ['interior word joiner', `${head}\u2060${tail}`],
+      ['interior BOM', `${head}\uFEFF${tail}`],
+      ['short value with a control character', 'abc\u0001'],
+    ];
+    for (const [label, value] of cases) {
+      assert.equal(schedulerApiKeyProblem(value), 'invalid_characters', label);
+      assert.equal(isSchedulerApiKeyConfigured(env(value)), false, label);
+      assert.throws(
+        () => requireSchedulerApiKey(env(value)),
+        (e: unknown) =>
+          e instanceof SchedulerKeyConfigError &&
+          e.reason === 'invalid_characters' &&
+          !e.message.includes(head) &&
+          !e.message.includes(tail),
+        label,
+      );
+      // Refused for every presented key, including the exact configured string.
+      assert.deepEqual(checkSchedulerApiKey(value, env(value)), {
+        ok: false,
+        reason: 'config',
+        problem: 'invalid_characters',
+      });
+      assert.deepEqual(checkSchedulerApiKey(VALID, env(value)), {
+        ok: false,
+        reason: 'config',
+        problem: 'invalid_characters',
+      });
+    }
+    const text = describeSchedulerApiKeyProblem('invalid_characters');
+    assert.match(text, /^SCHEDULER_API_KEY contains characters outside printable ASCII/);
+    assert.match(text, /U\+0021–U\+007E/);
+  });
+
+  it('normal base64, base64url and hex keys pass, including the U+0021 and U+007E boundaries', () => {
+    for (const [label, value] of [
+      ['base64 (openssl rand -base64 32)', 'q3Zr+8Lw/2Kp7Tn0Yx5Vb1Mc4Hd6Jf9Gs3Ae2Ru8Wo='],
+      ['base64url', 'q3Zr-8Lw_2Kp7Tn0Yx5Vb1Mc4Hd6Jf9Gs3Ae2Ru8Wo'],
+      ['hex', '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08'],
+      ['every printable ASCII character', Array.from({ length: 0x7e - 0x21 + 1 }, (_, i) => String.fromCharCode(0x21 + i)).join('')],
+      ['boundaries', `!${'k'.repeat(SCHEDULER_API_KEY_MIN_LENGTH - 2)}~`],
+    ] as const) {
+      assert.equal(schedulerApiKeyProblem(value), null, label);
+      assert.equal(requireSchedulerApiKey(env(value)), value, label);
+      assert.deepEqual(checkSchedulerApiKey(value, env(value)), { ok: true }, label);
+    }
   });
 
   it('shorter than the minimum is refused', () => {
@@ -113,7 +181,7 @@ describe('scheduler-key config', () => {
       assert.ok(!e.message.includes(VALID));
       assert.ok(!/\b(40|41)\b/.test(e.message), 'message must not contain the value length');
     }
-    for (const r of ['unset', 'whitespace', 'placeholder', 'too_short'] as const) {
+    for (const r of ['unset', 'whitespace', 'placeholder', 'invalid_characters', 'too_short'] as const) {
       assert.match(describeSchedulerApiKeyProblem(r), /^SCHEDULER_API_KEY /);
     }
   });
