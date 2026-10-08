@@ -228,6 +228,45 @@ describe('company concurrent-run cap (wake-runner)', () => {
     assert.ok(bResult.runId);
   });
 
+  it('cap removed while deferred: the next retry re-reads settings and the wake runs', async () => {
+    setCap('company-a', 1);
+    store.heartbeatRuns.push(running('r1', 'a2', 'company-a'));
+    const started = await startWake(wake('a1', 'company-a'));
+    assert.equal(started.deferred, true);
+    setCap('company-a', undefined); // board clears the cap; r1 is still running
+    const result = await started.done;
+    assert.ok(result.runId, 'deferred wake ran without waiting for r1');
+    assert.equal(rowsFor('a1').length, 1);
+    assert.equal(store.heartbeatRuns.find((r) => r.id === 'r1')?.status, 'running');
+  });
+
+  it('agent paused while deferred: the retry skips it (no run), it is not started over the pause', async () => {
+    setCap('company-a', 1);
+    store.heartbeatRuns.push(running('r1', 'a2', 'company-a'));
+    const started = await startWake(wake('a1', 'company-a'));
+    assert.equal(started.deferred, true);
+    store.agents.find((r) => r.id === 'a1')!.status = 'paused';
+    store.heartbeatRuns[0].status = 'succeeded';
+    const result = await started.done;
+    assert.equal(result.status, 'skipped');
+    assert.equal(rowsFor('a1').length, 0);
+  });
+
+  it('further wakes for a deferred agent coalesce behind it (one follow-up, no extra waiters)', async () => {
+    setCap('company-a', 1);
+    store.heartbeatRuns.push(running('r1', 'a2', 'company-a'));
+    const first = await startWake(wake('a1', 'company-a'));
+    assert.equal(first.deferred, true);
+    const second = await startWake(wake('a1', 'company-a'));
+    assert.equal(second.status, 'queued');
+    assert.notEqual(second.deferred, true, 'queued behind the per-agent lock, not a second cap waiter');
+    store.heartbeatRuns[0].status = 'succeeded';
+    await first.done;
+    for (let i = 0; i < 100 && rowsFor('a1').length < 2; i++) await sleep(10);
+    assert.equal(rowsFor('a1').length, 2, 'the deferred wake ran, then its follow-up');
+    assert.ok((maxRunning['company-a'] ?? 0) <= 1);
+  });
+
   it('a burst over the cap never exceeds it; every deferred wake eventually runs', async () => {
     setCap('company-a', 2);
     updateDelayMs = 25; // keep each run "running" briefly

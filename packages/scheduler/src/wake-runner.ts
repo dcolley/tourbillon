@@ -1335,7 +1335,9 @@ export async function sweepStaleHeartbeatRuns(): Promise<number> {
       errorText: heartbeatStaleErrorText(staleSec),
     })
     .where(and(eq(heartbeatRuns.status, 'running'), lt(heartbeatRuns.lastSeenAt, cutoff)))
-    .returning({ id: heartbeatRuns.id });
+    .returning({ id: heartbeatRuns.id, companyId: heartbeatRuns.companyId });
+  // Swept rows no longer count against a company's concurrent-run cap: retry its deferred wakes.
+  for (const companyId of new Set(stale.map((row) => row.companyId))) notifyRunSlotFreed(companyId);
   return stale.length;
 }
 
@@ -1387,6 +1389,9 @@ export async function forceKillHeartbeat(runId: string, companyId: string): Prom
 
   // Publish update
   await publishHeartbeatRunUpdate(companyId, runId, 'failed', run.agentId);
+
+  // The killed run no longer counts against the company's concurrent-run cap.
+  notifyRunSlotFreed(companyId);
 
   return { success: true, hadController };
 }
