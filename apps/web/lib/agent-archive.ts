@@ -15,18 +15,26 @@
  *    - Every open issue assigned to the agent (any status but done/cancelled) is unassigned:
  *      in_progress → todo, other statuses kept, checkout lock cleared, an `issue.updated` row and
  *      a system comment ARCHIVE_UNASSIGN_COMMENT.
+ *    - Every in_progress issue with no assignee whose checkout lock belongs to the agent (its
+ *      checkout_run_id is one of the agent's runs, or execution_agent_name_key is the agent) is
+ *      put back to todo with the lock cleared and an `issue.updated` row. The checkout route does
+ *      not require the caller to be the assignee, so this catches those holds before run-stop
+ *      releases the locks.
  * 2. Timer: ask the scheduler to re-sync the agent's Mastra timer schedule, which pauses it.
  *    Best effort: if the scheduler is down, its boot reconcile pauses it (the config is off).
  * 3. In-flight run(s) (queued/running): stopped through the scheduler's force-kill with reason
  *    'agent_archived' (aborts the run's AbortController; row → cancelled, AGENT_ARCHIVED_RUN_ERROR;
  *    checkout locks released). If the scheduler can't be reached, the row is recorded cancelled
  *    here with the same reason and its checkout locks are released; the run's token already 401s.
+ *    Unassigned in_progress holds are reset again just before this stop so a checkout that landed
+ *    during the archive transaction is still matched while its lock is present.
  *
- * 4. Post-commit sweep (once, after the runs are stopped): an agent request already past auth when
- *    the archive committed can still land. So the sweep stops any run that started in that window,
- *    rejects any approval the agent created in it, unassigns any issue assigned to it in it, and
- *    puts back to todo an issue the archive unassigned that a late write moved to in_progress
- *    (no assignee left). Same rows, actors and comments as step 1; nothing is written twice.
+ * 4. Post-commit sweep (once): an agent request already past auth when the archive committed can
+ *    still land. The sweep rejects any approval the agent created in that window, unassigns any
+ *    issue assigned to it, puts back to todo an issue the archive unassigned that a late write
+ *    moved to in_progress (no assignee left), and again resets unassigned in_progress holds whose
+ *    lock belongs to the agent — then stops any run that started in the window. Same rows, actors
+ *    and comments as step 1; nothing is written twice.
  *
  * Idempotent: archiving an already-archived agent writes no second `agent.archived` row (the
  * archived status is set by a conditional update, so of two concurrent archives only one does
@@ -145,6 +153,7 @@ export async function archiveAgent(
       if (!updated) return null;
       const rejected = await rejectPendingApprovals(tx, agent.id, companyId);
       const unassigned = await unassignOpenIssues(tx, agent.id, companyId, new Set());
+      await resetUnassignedInProgressHeldByAgent(tx, agent.id, companyId);
       await tx.insert(activityLog).values({
         companyId,
         ...BOARD_ACTOR,
@@ -183,21 +192,31 @@ export async function archiveAgent(
     timerSync = 'deferred';
   }
 
+  // Reset unassigned in_progress holds before run-stop releases their locks (a checkout that
+  // landed during the archive transaction is visible now; step 1 may have missed it).
+  if (current.status === 'archived') {
+    await db.transaction(async (tx) => {
+      await resetUnassignedInProgressHeldByAgent(tx, agent.id, companyId);
+    });
+  }
+
   const runs = await stopInFlightRuns(agent.id, companyId, deps, []);
 
   // 4. Post-commit sweep, once (only once the agent is archived; a concurrent toggle can no longer
-  // undo that, see setAgentActiveWithOutcome).
+  // undo that, see setAgentActiveWithOutcome). Issue/approval cleanup runs before the late run
+  // stop so unassigned holds are still matched while their locks are present.
   if (current.status === 'archived') {
-    const lateRuns = await stopInFlightRuns(agent.id, companyId, deps, runs.map((r) => r.runId));
-    runs.push(...lateRuns);
     const swept = await db.transaction(async (tx) => {
       const rejected = await rejectPendingApprovals(tx, agent.id, companyId);
       const unassigned = await unassignOpenIssues(tx, agent.id, companyId, new Set(unassignedIssueIds));
       await resetLateInProgress(tx, agent.id, companyId, unassignedIssueIds);
+      await resetUnassignedInProgressHeldByAgent(tx, agent.id, companyId);
       return { rejected, unassigned };
     });
     approvalsRejected += swept.rejected;
     issuesUnassigned += swept.unassigned.filter((id) => !unassignedIssueIds.includes(id)).length;
+    const lateRuns = await stopInFlightRuns(agent.id, companyId, deps, runs.map((r) => r.runId));
+    runs.push(...lateRuns);
   }
 
   return { agent: current, changed, timerSync, runs, approvalsRejected, issuesUnassigned };
@@ -442,6 +461,71 @@ async function resetLateInProgress(
         status: 'todo',
         previousStatus: 'in_progress',
         previousAssigneeAgentId: agentId,
+        reason: 'agent_archived',
+      },
+    });
+  }
+}
+
+/**
+ * Put back to todo any in_progress issue with no assignee whose checkout lock belongs to the
+ * agent (checkout_run_id in the agent's runs, or execution_agent_name_key = agent). The checkout
+ * route does not require the caller to be the assignee; run-stop would otherwise leave these
+ * in_progress with no assignee and no lock. One `issue.updated` row each; no unassign comment
+ * (there was no assignee to remove).
+ */
+async function resetUnassignedInProgressHeldByAgent(
+  tx: Tx,
+  agentId: string,
+  companyId: string,
+): Promise<void> {
+  const agentRuns = await tx
+    .select({ id: heartbeatRuns.id })
+    .from(heartbeatRuns)
+    .where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.companyId, companyId)));
+  const runIds = agentRuns.map((r) => r.id);
+  const held = await tx
+    .select({ id: issues.id, checkoutRunId: issues.checkoutRunId })
+    .from(issues)
+    .where(
+      and(
+        eq(issues.companyId, companyId),
+        eq(issues.status, 'in_progress'),
+        isNull(issues.assigneeAgentId),
+        isNull(issues.assigneeUserId),
+        or(
+          eq(issues.executionAgentNameKey, agentId),
+          runIds.length > 0 ? inArray(issues.checkoutRunId, runIds) : undefined,
+        ),
+      ),
+    );
+  if (held.length === 0) return;
+  const now = new Date();
+  for (const issue of held) {
+    const [row] = await tx
+      .update(issues)
+      .set({ status: 'todo', ...CHECKOUT_LOCK_CLEAR_FIELDS, updatedAt: now })
+      .where(
+        and(
+          eq(issues.id, issue.id),
+          eq(issues.companyId, companyId),
+          eq(issues.status, 'in_progress'),
+          isNull(issues.assigneeAgentId),
+          isNull(issues.assigneeUserId),
+        ),
+      )
+      .returning({ id: issues.id });
+    if (!row) continue;
+    await tx.insert(activityLog).values({
+      companyId,
+      ...SYSTEM_ACTOR,
+      action: 'issue.updated',
+      entityType: 'issue',
+      entityId: row.id,
+      details: {
+        status: 'todo',
+        previousStatus: 'in_progress',
+        ...(issue.checkoutRunId ? { previousCheckoutRunId: issue.checkoutRunId } : {}),
         reason: 'agent_archived',
       },
     });

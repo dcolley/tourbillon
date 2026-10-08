@@ -744,6 +744,62 @@ describe('Archive agent (lib/agent-archive)', () => {
     assert.equal(result!.issuesUnassigned, 7, 'six in step 1 plus the new one');
   });
 
+  it('B2 plain: an unassigned in_progress issue the agent checked out before archive goes back to todo with no lock', async () => {
+    store.issues.push({
+      id: 'is-orphan-held',
+      companyId: COMPANY,
+      status: 'in_progress',
+      assigneeAgentId: null,
+      boardApprovalId: null,
+      checkoutRunId: 'run-live',
+      executionLockedAt: new Date(1),
+      executionAgentNameKey: AGENT,
+    });
+    await archiveAgent(AGENT, COMPANY, schedulerDeps());
+    const i = issueRow('is-orphan-held');
+    assert.deepEqual(
+      [i.status, i.assigneeAgentId, i.checkoutRunId, i.executionLockedAt, i.executionAgentNameKey],
+      ['todo', null, null, null, null],
+    );
+    const updated = activity('issue.updated', 'is-orphan-held');
+    assert.equal(updated.length, 1);
+    assert.deepEqual(
+      [updated[0].actorType, updated[0].details.status, updated[0].details.previousStatus, updated[0].details.reason],
+      ['system', 'todo', 'in_progress', 'agent_archived'],
+    );
+    assert.equal(activity('issue.commented', 'is-orphan-held').length, 0, 'no unassign comment: there was no assignee');
+  });
+
+  it('B2 window: an unassigned issue checked out mid-archive goes back to todo with no lock', async () => {
+    await archiveAgent(
+      AGENT,
+      COMPANY,
+      depsWithWindow(() => {
+        store.issues.push({
+          id: 'is-orphan-late',
+          companyId: COMPANY,
+          status: 'in_progress',
+          assigneeAgentId: null,
+          boardApprovalId: null,
+          checkoutRunId: 'run-live',
+          executionLockedAt: new Date(),
+          executionAgentNameKey: AGENT,
+        });
+      }),
+    );
+    const i = issueRow('is-orphan-late');
+    assert.deepEqual(
+      [i.status, i.assigneeAgentId, i.checkoutRunId, i.executionLockedAt, i.executionAgentNameKey],
+      ['todo', null, null, null, null],
+    );
+    const updated = activity('issue.updated', 'is-orphan-late').filter(
+      (r) => r.details.previousStatus === 'in_progress' && r.details.status === 'todo',
+    );
+    assert.equal(updated.length, 1);
+    assert.deepEqual([updated[0].actorType, updated[0].details.reason], ['system', 'agent_archived']);
+    assert.equal(activity('issue.commented', 'is-orphan-late').length, 0);
+  });
+
   it("sweep: leaves alone what isn't the archived agent's (a user-assigned in_progress issue, peers, other companies)", async () => {
     await archiveAgent(
       AGENT,
@@ -751,10 +807,25 @@ describe('Archive agent (lib/agent-archive)', () => {
       depsWithWindow(() => {
         // The board picked an issue up for a person right after the archive: not the agent's.
         Object.assign(issueRow('is-todo'), { status: 'in_progress', assigneeUserId: 'user-1' });
+        // A peer's unassigned checkout: lock is not the archived agent's.
+        store.issues.push({
+          id: 'is-peer-orphan',
+          companyId: COMPANY,
+          status: 'in_progress',
+          assigneeAgentId: null,
+          boardApprovalId: null,
+          checkoutRunId: 'run-peer',
+          executionLockedAt: new Date(),
+          executionAgentNameKey: 'agent-a2',
+        });
       }),
     );
     assert.deepEqual([issueRow('is-todo').status, issueRow('is-todo').assigneeUserId], ['in_progress', 'user-1']);
     assert.deepEqual([issueRow('is-peer').status, issueRow('is-peer').assigneeAgentId], ['in_progress', 'agent-a2']);
+    assert.deepEqual(
+      [issueRow('is-peer-orphan').status, issueRow('is-peer-orphan').checkoutRunId, issueRow('is-peer-orphan').executionAgentNameKey],
+      ['in_progress', 'run-peer', 'agent-a2'],
+    );
     assert.equal(approvalRow('ap-peer').status, 'pending');
     assert.equal(approvalRow('ap-other').status, 'pending');
     assert.equal(runRow('run-peer').status, 'running');
