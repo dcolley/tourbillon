@@ -9,6 +9,7 @@ import {
   decidedByLabel,
   isValidApprovalId,
   loadApprovalDetail,
+  loadApprovalRedactor,
   type ApprovalActivityRow,
   type ApprovalAgentRow,
   type ApprovalDetailRepo,
@@ -16,6 +17,7 @@ import {
   type ApprovalRow,
 } from './approval-detail';
 import { PLANTED, PLANTED_VALUES, plantedRepo } from './approval-detail-secrets.fixture';
+import { REDACTION_UNAVAILABLE } from './approval-redaction';
 
 const T = (hhmm: string) => new Date(`2026-10-08T${hhmm}:00.000Z`);
 
@@ -451,5 +453,49 @@ describe('approval details: related approvals on the same issues', () => {
     const d2 = await loadApprovalDetail({ ...memoryRepo(s), getRelatedApprovals: async () => ((called = true), s.approvals) }, 'company-a', 'appr-a');
     assert.deepEqual(d2?.relatedApprovals, []);
     assert.equal(called, false);
+  });
+});
+
+describe('approval details: shared redactor loader for other approval surfaces (Test S15)', () => {
+  const repo = (over: Partial<Pick<ApprovalDetailRepo, 'getSecretValues' | 'getCompanySettings'>> = {}) => ({
+    getSecretValues: async () => ({ values: ['vault-value-s15-0001'], vaultUnavailable: false }),
+    getCompanySettings: async () => ({ hitlyGate: { apiKey: 'settings-value-s15-0002' } }),
+    ...over,
+  });
+
+  it('scrubs company-wide values plus the requester and payload sources', async () => {
+    const r = await loadApprovalRedactor(repo(), 'company-a', {
+      requesterRuntimeConfig: { secrets: { GH_TOKEN: 'runtime-value-s15-0003' } },
+      payloads: [{ hitlyResumeToken: 'resume-value-s15-0004' }],
+    });
+    assert.equal(r.unavailable, false);
+    assert.equal(
+      r.freeText('vault-value-s15-0001 settings-value-s15-0002 runtime-value-s15-0003 resume-value-s15-0004'),
+      '[redacted] [redacted] [redacted] [redacted]',
+    );
+  });
+
+  it('a throwing secret-value load hides free text instead of failing', async () => {
+    const r = await loadApprovalRedactor(repo({ getSecretValues: async () => { throw new Error('db down'); } }), 'company-a');
+    assert.equal(r.unavailable, true);
+    assert.equal(r.freeText('anything'), REDACTION_UNAVAILABLE);
+    const sync = await loadApprovalRedactor(repo({ getSecretValues: () => { throw new Error('sync'); } }), 'company-a');
+    assert.equal(sync.unavailable, true);
+  });
+
+  it('a throwing settings load also hides free text; vault-unavailable carries through', async () => {
+    const r = await loadApprovalRedactor(repo({ getCompanySettings: async () => { throw new Error('db down'); } }), 'company-a');
+    assert.equal(r.unavailable, true);
+    const v = await loadApprovalRedactor(repo({ getSecretValues: async () => ({ values: [], vaultUnavailable: true }) }), 'company-a');
+    assert.equal(v.freeText('x'), REDACTION_UNAVAILABLE);
+  });
+
+  it('the details loader hides free text when settings fail to load (same helper)', async () => {
+    const s = store();
+    const base = memoryRepo(s);
+    const d = await loadApprovalDetail({ ...base, getCompanySettings: async () => { throw new Error('x'); } }, 'company-a', 'appr-a');
+    assert.ok(d);
+    assert.equal(d.redactionUnavailable, true);
+    assert.equal(d.approval.title, REDACTION_UNAVAILABLE);
   });
 });

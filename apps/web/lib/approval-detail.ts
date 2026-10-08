@@ -11,6 +11,7 @@ import {
   createApprovalRedactor,
   PAYLOAD_DISPLAY_CAP,
   REDACTION_UNAVAILABLE,
+  type ApprovalRedactor,
   type KnownSecretValues,
 } from './approval-redaction';
 
@@ -309,6 +310,70 @@ export function buildApprovalHistory(
     .map(({ e }) => e);
 }
 
+/** Per-approval sources whose secret values are scrubbed as well as the company-wide ones. */
+export interface ApprovalRedactionSources {
+  /** The requesting agent's runtimeConfig (its runtime secrets). */
+  requesterRuntimeConfig?: unknown;
+  /**
+   * Payload / activity `details` objects: any value held under a credential key there (e.g.
+   * hitlyResumeToken) is scrubbed everywhere it was echoed (title, HITLy error, notes…).
+   */
+  payloads?: unknown[];
+}
+
+/**
+ * Company-wide known secret values: vault + agent runtime secrets + provider keys
+ * (repo.getSecretValues) and company settings. Never throws (#130 B3): if either can't be
+ * loaded, `vaultUnavailable` is set, so free text is hidden instead of rendered with an
+ * incomplete list (and never a 500). Values are held in memory only, never logged.
+ */
+export async function loadApprovalKnownSecrets(
+  repo: Pick<ApprovalDetailRepo, 'getSecretValues' | 'getCompanySettings'>,
+  companyId: string,
+): Promise<KnownSecretValues> {
+  const unavailable = (source: string): null => {
+    console.warn('[approval redaction] secret values unavailable', { reason: 'load_failed', source });
+    return null;
+  };
+  const [known, settings] = await Promise.all([
+    Promise.resolve()
+      .then(() => repo.getSecretValues(companyId))
+      .catch(() => unavailable('secret_values')),
+    Promise.resolve()
+      .then(() => repo.getCompanySettings(companyId))
+      .then((v) => ({ v }), () => unavailable('company_settings')),
+  ]);
+  return {
+    values: [...(known?.values ?? []), ...collectSecretValueEntries(settings?.v).map(([, v]) => v)],
+    vaultUnavailable: !known || !settings || known.vaultUnavailable === true,
+  };
+}
+
+/** The approval redactor for company-wide known values plus one approval's own sources. */
+export function approvalRedactorFor(known: KnownSecretValues, sources: ApprovalRedactionSources = {}): ApprovalRedactor {
+  return createApprovalRedactor(
+    [
+      ...known.values,
+      ...collectSecretValueEntries(sources.requesterRuntimeConfig).map(([, v]) => v),
+      ...(sources.payloads ?? []).flatMap((p) => collectValuesUnderSensitiveKeys(p)),
+    ],
+    { vaultUnavailable: known.vaultUnavailable },
+  );
+}
+
+/**
+ * One call for any surface that shows approval text (details page/API, list, MCP, mobile): loads
+ * the company-wide values with the hide-on-error step inside, then builds the redactor. Use
+ * `redactor.freeText` for free-text fields and `redactor.unavailable` to hide payloads.
+ */
+export async function loadApprovalRedactor(
+  repo: Pick<ApprovalDetailRepo, 'getSecretValues' | 'getCompanySettings'>,
+  companyId: string,
+  sources: ApprovalRedactionSources = {},
+): Promise<ApprovalRedactor> {
+  return approvalRedactorFor(await loadApprovalKnownSecrets(repo, companyId), sources);
+}
+
 /**
  * Load one approval for a company. Returns null for an unknown id AND for another company's id
  * (callers answer 404 for both, so ids don't leak across companies).
@@ -323,16 +388,12 @@ export async function loadApprovalDetail(
   if (!approval || approval.companyId !== companyId) return null;
 
   const issueIds = Array.isArray(approval.issueIds) ? approval.issueIds : [];
-  const [agent, issueRows, activity, settings, known, relatedRows] = await Promise.all([
+  const [agent, issueRows, activity, known, relatedRows] = await Promise.all([
     approval.requestedByAgentId ? repo.getAgent(companyId, approval.requestedByAgentId) : Promise.resolve(null),
     issueIds.length ? repo.getIssues(companyId, issueIds) : Promise.resolve([]),
     repo.getActivity(companyId, approval.id, issueIds),
-    repo.getCompanySettings(companyId),
-    // B3: if the secret values can't be loaded at all (query error…), hide free text; never a 500.
-    repo.getSecretValues(companyId).catch((): KnownSecretValues => {
-      console.warn('[approval redaction] secret values unavailable', { reason: 'load_failed' });
-      return { values: [], vaultUnavailable: true };
-    }),
+    // B3: if the secret values can't be loaded (query error…), free text is hidden; never a 500.
+    loadApprovalKnownSecrets(repo, companyId),
     issueIds.length && repo.getRelatedApprovals
       ? repo.getRelatedApprovals(companyId, approval.id, issueIds)
       : Promise.resolve([] as ApprovalRow[]),
@@ -348,14 +409,10 @@ export async function loadApprovalDetail(
   // same value is also scrubbed where it was echoed (title, HITLy error, notes, related titles…).
   // B3: if the vault values can't all be loaded, every free-text field that could echo one is
   // hidden (redact.freeText) instead of rendered with an incomplete list.
-  const redact = createApprovalRedactor([
-    ...known.values,
-    ...collectSecretValueEntries(settings).map(([, v]) => v),
-    ...collectSecretValueEntries(requester?.runtimeConfig).map(([, v]) => v),
-    ...collectValuesUnderSensitiveKeys(approval.payload),
-    ...activity.flatMap((row) => collectValuesUnderSensitiveKeys(row.details)),
-    ...relatedRows.flatMap((row) => collectValuesUnderSensitiveKeys(row.payload)),
-  ], { vaultUnavailable: known.vaultUnavailable });
+  const redact = approvalRedactorFor(known, {
+    requesterRuntimeConfig: requester?.runtimeConfig,
+    payloads: [approval.payload, ...activity.map((row) => row.details), ...relatedRows.map((row) => row.payload)],
+  });
   const hidden = redact.unavailable;
 
   const rawPayload = isPlainObject(approval.payload) ? approval.payload : {};

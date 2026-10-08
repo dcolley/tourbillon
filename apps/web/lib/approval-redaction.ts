@@ -41,6 +41,9 @@ export interface KnownSecretValues {
  * can't be decrypted hides free text, like a missing or wrong key. Set to `true` to skip just the
  * bad rows and keep rendering with the rest. A missing key, or every row failing (wrong/rotated
  * key), always hides free text whatever this says.
+ *
+ * Deliberately a code constant (no env read). If it is ever wired to an env var, parse it
+ * explicitly: only '1' or 'true' turn it on; any other value (including 'false', '0', '') is off.
  */
 export const SKIP_UNDECRYPTABLE_VAULT_ROWS: boolean = false;
 
@@ -127,27 +130,117 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 
 /**
  * Bare `key=value` / `key: value` / `"key": "value"` inside free text. Key kept, value masked when
- * the key name looks secret (isSensitiveKey). Skips token-count keys (`token_count=5`) and
- * Authorization: Bearer/Basic (those go through scrubProviderSecrets). Quoted values may contain
- * spaces; unquoted values stop at whitespace or common separators.
+ * the key name looks secret (isSensitiveKey).
+ *
+ * A single left-to-right pass over the `=` / `:` separators (linear in the text length):
+ * - The key is the whole run of `[A-Za-z0-9_.-]` before the separator (optionally quoted, blanks
+ *   allowed before the separator), so `--db-password=`, `.secret=`, `my.secret=` and keys of any
+ *   length are judged on their full name.
+ * - A non-secret pair never swallows what follows it: scanning resumes right after its separator,
+ *   so `redirect=/cb?token=…`, `user:password=…` and `wss://h/p?token=…` are each checked.
+ * - Values: `"…"` / `'…'` (backslash escapes allowed; an unterminated quote runs to the end of the
+ *   line) or unquoted up to whitespace or `"'&,;}<>()[]`. For Authorization-style keys a
+ *   `<scheme> <credential>` value (`Token`, `Bot`, `Digest`, `ApiKey`…) masks the credential.
+ * - Token-count keys (`max_tokens`, `token_count`, `auth_tokens`…) keep numeric values only.
+ * - `Bearer [redacted]` / `Basic [redacted]` (already masked by scrubProviderSecrets) are left as is.
  */
-const SENSITIVE_ASSIGNMENT_RE =
-  /(?<![\w.-])(["']?)([A-Za-z_][\w.-]{0,63})\1([ \t]*[:=][ \t]*)(?!(?:Bearer|Basic)\s)(?:"([^"\r\n]*)"|'([^'\r\n]*)'|([^\s"'&,;}<>()[\]]+))/g;
+const isKeyCode = (c: number) =>
+  (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95 || c === 46 || c === 45;
+const isBlankCode = (c: number) => c === 32 || c === 9;
+const isLineEndCode = (c: number) => c === 10 || c === 13;
+/** Characters that end an unquoted value: whitespace and `"'&,;}<>()[]`. */
+const UNQUOTED_VALUE_END = /[\s"'&,;}<>()[\]]/;
+const isUnquotedEnd = (ch: string) => UNQUOTED_VALUE_END.test(ch);
+const NUMERIC_VALUE_RE = /^-?\d+(?:\.\d+)?$/;
+const MASKED_SCHEME_RE = /^["']?(?:Bearer|Basic)\s+\[redacted\]/i;
+const SEPARATOR_RE = /[:=]/g;
+/** Authorization schemes other than Bearer/Basic (those are handled by scrubProviderSecrets). */
+const AUTH_SCHEME_RE = /^(?:Token|Bot|Digest|ApiKey|Api-Key|Key|SSWS|OAuth|DPoP|Negotiate|NTLM|HOBA|Mutual|AWS4-HMAC-SHA256|Bearer|Basic)$/i;
+
+/** Authorization-style keys, whose unquoted value may be `<scheme> <credential>`. */
+function isAuthHeaderKey(key: string): boolean {
+  const k = normaliseKey(key);
+  return k === 'auth' || k.endsWith('authorization') || k === 'xauth';
+}
+
+/** End (exclusive) of an unquoted value starting at `from`. */
+function unquotedEnd(s: string, from: number): number {
+  let j = from;
+  while (j < s.length && !isUnquotedEnd(s[j])) j++;
+  return j;
+}
 
 function scrubSensitiveAssignments(s: string): string {
-  return s.replace(
-    SENSITIVE_ASSIGNMENT_RE,
-    (match, q: string, key: string, sep: string, dq: string | undefined, sq: string | undefined, bare: string | undefined) => {
-      if (!isSensitiveKey(key) || isTokenCountKey(key)) return match;
-      const val = dq ?? sq ?? bare ?? '';
-      if (val === REDACTED) return match;
-      // Leave Authorization: Bearer/Basic … for scrubProviderSecrets.
-      if (/^(?:Bearer|Basic)\s/i.test(val)) return match;
-      if (dq !== undefined) return `${q}${key}${q}${sep}"${REDACTED}"`;
-      if (sq !== undefined) return `${q}${key}${q}${sep}'${REDACTED}'`;
-      return `${q}${key}${q}${sep}${REDACTED}`;
-    },
-  );
+  if (!s.includes('=') && !s.includes(':')) return s;
+  const out: string[] = [];
+  let copied = 0; // s[0, copied) is already in `out`
+  SEPARATOR_RE.lastIndex = 0;
+  for (let m = SEPARATOR_RE.exec(s); m; m = SEPARATOR_RE.exec(s)) {
+    const sep = m.index;
+    // Key: walk back over blanks, an optional closing quote, then the key run (never into text
+    // already handled).
+    let k = sep;
+    while (k > copied && isBlankCode(s.charCodeAt(k - 1))) k--;
+    let quote = '';
+    if (k > copied && (s[k - 1] === '"' || s[k - 1] === "'")) quote = s[--k];
+    const keyEnd = k;
+    while (k > copied && isKeyCode(s.charCodeAt(k - 1))) k--;
+    if (k === keyEnd) continue;
+    if (quote && (k === copied || s[k - 1] !== quote)) continue;
+    const key = s.slice(k, keyEnd);
+    if (!isSensitiveKey(key)) continue; // resume right after this separator
+
+    // Value.
+    let v = sep + 1;
+    while (v < s.length && isBlankCode(s.charCodeAt(v))) v++;
+    if (v >= s.length) continue;
+    if (MASKED_SCHEME_RE.test(s.slice(v, v + 64))) continue;
+    const open = s[v];
+    let end: number;
+    let inner: string;
+    let masked: string;
+    if (open === '"' || open === "'") {
+      let j = v + 1;
+      let closed = false;
+      while (j < s.length) {
+        const c = s.charCodeAt(j);
+        if (s[j] === open) {
+          closed = true;
+          break;
+        }
+        if (isLineEndCode(c)) break;
+        if (c === 92 /* \\ */ && j + 1 < s.length && !isLineEndCode(s.charCodeAt(j + 1))) j += 2;
+        else j++;
+      }
+      inner = s.slice(v + 1, Math.min(j, s.length));
+      end = closed ? j + 1 : Math.min(j, s.length);
+      masked = `${open}${REDACTED}${closed ? open : ''}`;
+    } else {
+      end = unquotedEnd(s, v);
+      if (end === v) continue;
+      inner = s.slice(v, end);
+      masked = REDACTED;
+      // `Authorization: Token abc`: the credential after a scheme word goes too.
+      if (isAuthHeaderKey(key) && AUTH_SCHEME_RE.test(inner)) {
+        let c = end;
+        while (c < s.length && isBlankCode(s.charCodeAt(c))) c++;
+        const credEnd = c > end ? unquotedEnd(s, c) : c;
+        if (credEnd > c && s.slice(c, credEnd) !== REDACTED) {
+          masked = `${inner}${s.slice(end, c)}${REDACTED}`;
+          end = credEnd;
+        }
+      }
+    }
+    const keep = inner === REDACTED || (isTokenCountKey(key) && NUMERIC_VALUE_RE.test(inner));
+    if (!keep) {
+      out.push(s.slice(copied, v), masked);
+      copied = end;
+    }
+    SEPARATOR_RE.lastIndex = Math.max(end, sep + 1);
+  }
+  if (copied === 0) return s;
+  out.push(s.slice(copied));
+  return out.join('');
 }
 /** Whole `Cookie:` / `Set-Cookie:` header lines. */
 const COOKIE_HEADER_RE = /(\b(?:set-)?cookie\s*:\s*)(?!\[redacted\])[^\r\n]+/gi;
@@ -157,15 +250,20 @@ const PEM_BLOCK_RE = /-----BEGIN [A-Z0-9 ]{1,64}-----(?:[\s\S]*?-----END [A-Z0-9
  * Userinfo password in a URL of any scheme (`postgres://user:pw@`, `redis://:pw@`, `wss://…`);
  * http(s) userinfo is already removed whole by redactUrlsInText. Without a `:` the whole userinfo
  * goes (`scheme://token@host`). Up to the last `@` before the path, so `@` in a password is covered.
+ * The scheme part is at most 32 characters, so each start position looks at a bounded window and
+ * long dotted/dashed runs (`a.a.a…`) stay linear.
  */
-const URL_USERINFO_RE = /\b([a-z][a-z0-9+.-]*:\/\/)([^\s/?#"'<>`]*)@/gi;
+const URL_USERINFO_RE = /([a-z][a-z0-9+.-]{0,31}:\/\/)([^\s/?#"'<>`]*)@/gi;
 const scrubUserinfo = (_m: string, scheme: string, userinfo: string) => {
   const colon = userinfo.indexOf(':');
   return colon === -1 ? `${scheme}${REDACTED}@` : `${scheme}${userinfo.slice(0, colon)}:${REDACTED}@`;
 };
-/** Well-known credential shapes, redacted wherever they appear. */
+/**
+ * Well-known credential shapes, redacted wherever they appear. A JWT only starts at the start of
+ * a `[A-Za-z0-9_-]` run, so a long `eyJ-eyJ-…` run is tried once, not once per `eyJ`.
+ */
 const TOKEN_SHAPES_RE =
-  /\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})/g;
+  /\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})/g;
 
 export interface DisplayCap {
   /** Objects/arrays nested deeper than this are replaced with a marker. */
