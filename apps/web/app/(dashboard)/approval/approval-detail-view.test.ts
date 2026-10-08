@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { loadApprovalDetail, type ApprovalDetail } from '@/lib/approval-detail';
-import { PLANTED_VALUES, plantedRepo } from '@/lib/approval-detail-secrets.fixture';
+import { PLANTED, PLANTED_VALUES, plantedRepo } from '@/lib/approval-detail-secrets.fixture';
 
 describe('approval details page: rendered HTML', () => {
   let ApprovalDetailView: (p: { detail: ApprovalDetail }) => React.ReactNode;
@@ -57,6 +57,28 @@ describe('approval details page: rendered HTML', () => {
     const html = render(d);
     assert.deepEqual(PLANTED_VALUES.filter((v) => forms(v).some((f) => html.includes(f))), []);
     assert.match(html, /action="\/api\/approvals\/appr%20a%2F1%3Fx\/decide"/);
+  });
+
+  it('#131: decision note shown as Board feedback and related approval titles carry no planted secret', async () => {
+    const d = await loadApprovalDetail(plantedRepo(), 'company-a', 'appr-a');
+    assert.ok(d);
+    const html = render(d);
+    const planted131 = [PLANTED.decisionNote, PLANTED.decisionBearer, PLANTED.createdNote, PLANTED.relatedTitle, PLANTED.relatedVault];
+    assert.deepEqual(planted131.filter((v) => forms(v).some((f) => html.includes(f))), []);
+    // Rendered, just scrubbed.
+    assert.match(html, /Board feedback/);
+    assert.match(html, /Split it; vault \[redacted\]; Authorization: Bearer \[redacted\]/);
+    assert.match(html, /Related approvals on this issue/);
+    assert.match(html, /href="\/approval\/appr-r1"[^>]*>Retry with \[redacted\]</);
+    assert.match(html, /href="\/approval\/appr-r2"[^>]*>Use vault \[redacted\]</);
+  });
+
+  it('reason_required alert renders only when asked', async () => {
+    const d = await loadApprovalDetail(plantedRepo({ status: 'pending', decidedAt: null }), 'company-a', 'appr-a');
+    assert.ok(d);
+    assert.doesNotMatch(render(d), /A reason is required to reject/);
+    const html = renderToStaticMarkup(React.createElement(ApprovalDetailView as never, { detail: d, reasonRequired: true }));
+    assert.match(html, /role="alert"[^>]*>A reason is required to reject/);
   });
 
   it('issue links are URL-encoded (Test S7)', async () => {

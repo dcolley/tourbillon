@@ -328,6 +328,42 @@ describe('approval.created / approval.decided activity rows (every path)', () =>
       assert.equal(rows[0].companyId, 'company-a');
     });
 
+    it('activity rows never store the resume token or a secret echoed in the note (HITLy, board, MCP)', async () => {
+      const TOKEN = 'dummy-resume-token-abcdef123456';
+      const payload = { title: 'T', hitlyResumeToken: TOKEN, priorStatuses: { 'issue-a1': 'in_progress' } };
+      const halt = (id: string) => {
+        store.issues[0].boardApprovalId = id;
+        store.issues[0].status = 'blocked';
+      };
+      pending('appr-h', 'company-a', { hitlyApprovalId: 'hitly-1', issueIds: ['issue-a1'], payload });
+      halt('appr-h');
+      assert.equal((await hitly('appr-h', TOKEN, 'reject', `bad; resume ${TOKEN}; Bearer dummybearer0123456789`)).status, 200);
+      pending('appr-b', 'company-a', { issueIds: ['issue-a1'], payload });
+      halt('appr-b');
+      assert.equal((await decide('company-a', 'appr-b', 'rejected', `token=${TOKEN} apiKey=dummyinlinekey0123`)).status, 200);
+      pending('appr-m', 'company-a', { issueIds: ['issue-a1'], payload });
+      halt('appr-m');
+      const m = await mcp('company-a', { company_id: 'company-a', approval_id: 'appr-m', decision: 'rejected', reason: `see ${TOKEN}` });
+      assert.equal(m.error, undefined, JSON.stringify(m));
+
+      const stored = JSON.stringify(store.activityLog);
+      for (const leak of [TOKEN, 'dummybearer0123456789', 'dummyinlinekey0123']) assert.ok(!stored.includes(leak), leak);
+      const notes = Object.fromEntries(lifecycle('approval.decided').map((r) => [r.entityId, (r.details as Row).note]));
+      assert.deepEqual(notes, {
+        'appr-h': 'bad; resume [redacted]; Bearer [redacted]',
+        'appr-b': 'token=[redacted] apiKey=[redacted]',
+        'appr-m': 'see [redacted]',
+      });
+      // The issue.updated rows the HITLy and board decides write carry the same scrubbed note.
+      const issueNotes = store.activityLog
+        .filter((r) => r.action === 'issue.updated' && r.entityType === 'issue')
+        .map((r) => [(r.details as Row).approvalId, (r.details as Row).note]);
+      assert.deepEqual(issueNotes, [
+        ['appr-h', 'bad; resume [redacted]; Bearer [redacted]'],
+        ['appr-b', 'token=[redacted] apiKey=[redacted]'],
+      ]);
+    });
+
     it('racing decide (stale pending read) → idempotent ok, no row', async () => {
       pending('appr-a', 'company-a', { status: 'rejected', payload: { hitlyResumeToken: 'tok-123456789' } });
       stalePending = true;

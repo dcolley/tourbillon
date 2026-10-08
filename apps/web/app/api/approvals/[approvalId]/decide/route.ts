@@ -5,7 +5,7 @@ import { enqueueApprovalWake } from '@/lib/wake-client';
 import { addIssueComment } from '@/lib/issue-comments';
 import { publicOriginFromRequest } from '@tourbillon/shared';
 import { requireBoardCompany } from '@/lib/board-route-auth';
-import { APPROVAL_ACTORS, approvalDecidedActivity } from '@/lib/approval-activity';
+import { APPROVAL_ACTORS, approvalActivityScrubber, approvalDecidedActivity } from '@/lib/approval-activity';
 import { approvalDetailHref } from '@/lib/approval-links';
 import { isValidApprovalId } from '@/lib/approval-detail';
 
@@ -78,6 +78,7 @@ export async function POST(
   const priorStatuses = payload.priorStatuses ?? {};
   const issueIds = approval.issueIds ?? [];
 
+  const activityNote = approvalActivityScrubber(approval.payload)(note) ?? undefined;
   const updated = await db.transaction(async (tx) => {
     // Only a still-pending row is decided (a concurrent decide gets 409, and writes no second
     // approval.decided row).
@@ -132,7 +133,8 @@ export async function POST(
             boardApprovalId: null,
             approvalId,
             decision,
-            note,
+            // Scrubbed like the approval.decided row (no resume token or secret stored).
+            note: activityNote,
           },
         });
       }

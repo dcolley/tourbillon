@@ -4,7 +4,7 @@ import { and, eq, inArray } from 'drizzle-orm';
 import { enqueueApprovalWake } from '@/lib/wake-client';
 import { addIssueComment } from '@/lib/issue-comments';
 import type { HitlyResumePayload } from '@/lib/hitly/client';
-import { APPROVAL_ACTORS, approvalDecidedActivity } from '@/lib/approval-activity';
+import { APPROVAL_ACTORS, approvalActivityScrubber, approvalDecidedActivity } from '@/lib/approval-activity';
 
 type ApprovalPayload = Record<string, unknown> & {
   title?: string;
@@ -95,6 +95,7 @@ export async function POST(
   const issueIds = approval.issueIds ?? [];
 
   const decidedStatus: 'approved' | 'rejected' = tourbillonStatus;
+  const activityNote = approvalActivityScrubber(approval.payload)(note) ?? undefined;
   const updated = await db.transaction(async (tx) => {
     const [row] = await tx
       .update(approvals)
@@ -151,7 +152,8 @@ export async function POST(
             boardApprovalId: null,
             approvalId,
             decision: tourbillonStatus,
-            note,
+            // Scrubbed like the approval.decided row (no resume token or secret stored).
+            note: activityNote,
           },
         });
       }

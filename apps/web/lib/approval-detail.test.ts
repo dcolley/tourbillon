@@ -15,7 +15,7 @@ import {
   type ApprovalIssueRow,
   type ApprovalRow,
 } from './approval-detail';
-import { PLANTED_VALUES, plantedRepo } from './approval-detail-secrets.fixture';
+import { PLANTED, PLANTED_VALUES, plantedRepo } from './approval-detail-secrets.fixture';
 
 const T = (hhmm: string) => new Date(`2026-10-08T${hhmm}:00.000Z`);
 
@@ -226,6 +226,44 @@ describe('approval details: redaction of every field (#130 B1/B2)', () => {
     const d = await loadApprovalDetail(memoryRepo(s), 'company-a', 'appr-a');
     assert.equal(d?.approval.title.length, 301);
     assert.equal(d?.approval.summary?.length, 2_001);
+  });
+});
+
+describe('approval details: #131 fields go through the same scrubber', () => {
+  it('decision note (Board feedback), created note and related approval titles: secrets absent from the loader output and JSON', async () => {
+    const d = await loadApprovalDetail(plantedRepo(), 'company-a', 'appr-a');
+    assert.ok(d);
+    const decided = d.history.find((e) => e.kind === 'decided');
+    assert.deepEqual(
+      [decided?.source, decided?.noteLabel, decided?.note],
+      ['activity_log', 'Board feedback', 'Split it; vault [redacted]; Authorization: Bearer [redacted]'],
+    );
+    const created = d.history.find((e) => e.kind === 'created');
+    assert.equal(created?.note, 'Call with Authorization: Bearer [redacted]');
+    assert.deepEqual(
+      d.relatedApprovals.map((r) => [r.id, r.title]),
+      [['appr-r2', 'Use vault [redacted]'], ['appr-r1', 'Retry with [redacted]']],
+    );
+    const text = JSON.stringify(approvalDetailJson(d));
+    const planted131 = [PLANTED.decisionNote, PLANTED.decisionBearer, PLANTED.createdNote, PLANTED.relatedTitle, PLANTED.relatedVault];
+    assert.deepEqual(planted131.filter((v) => text.includes(v) || text.includes(encodeURIComponent(v))), []);
+  });
+
+  it('a related title is scrubbed before it is clipped (no half secret left at the cut)', async () => {
+    const secret = 'related-vault-secret-abcdefghijklmnop';
+    const s = store();
+    s.secretValues = [secret];
+    s.approvals.push(
+      approval({ id: 'appr-r', createdAt: T('11:00'), payload: { title: `${'x'.repeat(290)}${secret}` } }),
+    );
+    const d = await loadApprovalDetail(
+      { ...memoryRepo(s), getRelatedApprovals: async () => s.approvals },
+      'company-a',
+      'appr-a',
+    );
+    const title = d?.relatedApprovals.find((r) => r.id === 'appr-r')?.title ?? '';
+    assert.ok(title.length <= 301, `${title.length}`);
+    assert.ok(!title.includes(secret.slice(0, 10)), title);
   });
 });
 
