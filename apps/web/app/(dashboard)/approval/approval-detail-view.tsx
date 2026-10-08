@@ -4,15 +4,36 @@ import { PageHeader } from '@/components/page-header';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { StatusBadge } from '@/lib/status-badges';
 import type { ApprovalDetail, ApprovalHistoryEvent } from '@/lib/approval-detail';
+import { approvalDetailHref } from '@/lib/approval-links';
 import { ApprovalDecisionForm } from './approval-decision-form';
+
+const REASON_ALERTS = {
+  reason_required: 'A reason is required to reject. It is sent to the requesting agent as Board feedback.',
+  reason_too_long: 'The reason is too long: at most 2,000 characters.',
+  reason_not_string: 'The reason must be text.',
+} as const;
 
 /**
  * Approval details view. `detail` comes from loadApprovalDetail, already redacted in every field
  * (lib/approval-redaction); this component renders nothing else from the database.
  */
-export function ApprovalDetailView({ detail }: { detail: ApprovalDetail }) {
-  const { approval, requester, decidedBy, linkedIssues, missingIssueIds, history } = detail;
+export function ApprovalDetailView({
+  detail,
+  reasonRequired = false,
+  reasonError,
+}: {
+  detail: ApprovalDetail;
+  /** Show the "a reason is required to reject" alert (decide route 303 with error=reason_required). */
+  reasonRequired?: boolean;
+  /** Decide route 303 error code for a refused reason (lib/approval-reason). */
+  reasonError?: 'reason_required' | 'reason_too_long' | 'reason_not_string';
+}) {
+  const reasonAlert = (reasonError ?? (reasonRequired ? 'reason_required' : undefined))
+    ? REASON_ALERTS[reasonError ?? 'reason_required']
+    : null;
+  const { approval, requester, decidedBy, linkedIssues, missingIssueIds, history, relatedApprovals } = detail;
   const pending = approval.status === 'pending';
+  const noteLabel = approval.status === 'rejected' ? 'Board feedback' : 'Board decision note';
 
   return (
     <div className="space-y-6">
@@ -70,9 +91,17 @@ export function ApprovalDetailView({ detail }: { detail: ApprovalDetail }) {
             <p className="text-sm text-destructive">HITLy ingest error: {approval.hitlyError}</p>
           ) : null}
           <div>
-            <p className="text-xs text-muted-foreground">Board decision note</p>
+            <p className="text-xs text-muted-foreground">{noteLabel}</p>
             {approval.note ? (
-              <p className="mt-1 text-sm whitespace-pre-wrap break-words">{approval.note}</p>
+              <p
+                className={
+                  approval.status === 'rejected'
+                    ? 'mt-1 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm whitespace-pre-wrap break-words'
+                    : 'mt-1 text-sm whitespace-pre-wrap break-words'
+                }
+              >
+                {approval.note}
+              </p>
             ) : (
               <p className="mt-1 text-sm text-muted-foreground">{pending ? 'Not decided yet.' : 'No note.'}</p>
             )}
@@ -85,7 +114,12 @@ export function ApprovalDetailView({ detail }: { detail: ApprovalDetail }) {
           <CardHeader className="pb-3">
             <CardTitle className="text-base">Decision</CardTitle>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-3">
+            {reasonAlert ? (
+              <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+                {reasonAlert}
+              </p>
+            ) : null}
             <ApprovalDecisionForm approvalId={approval.id} />
           </CardContent>
         </Card>
@@ -119,6 +153,33 @@ export function ApprovalDetailView({ detail }: { detail: ApprovalDetail }) {
           )}
         </CardContent>
       </Card>
+
+      {relatedApprovals.length > 0 ? (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">Related approvals on this issue</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <ul className="space-y-1 text-sm">
+              {relatedApprovals.map((r) => (
+                <li key={r.id} className="flex flex-wrap items-center gap-2">
+                  <Link href={approvalDetailHref(r.id)} className="hover:underline">
+                    {r.title}
+                  </Link>
+                  <StatusBadge status={r.status} />
+                  <span className="text-xs text-muted-foreground">
+                    <Time value={r.createdAt} />
+                    {' · '}
+                    {r.sharedIssueIds
+                      .map((id) => linkedIssues.find((i) => i.id === id)?.identifier ?? id.slice(0, 8))
+                      .join(', ')}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </CardContent>
+        </Card>
+      ) : null}
 
       <Card>
         <CardHeader className="pb-3">
@@ -179,7 +240,14 @@ function HistoryItem({ event, fallbackAt }: { event: ApprovalHistoryEvent; fallb
           event.text
         )}
       </p>
-      {event.note ? <p className="mt-1 whitespace-pre-wrap break-words text-muted-foreground">{event.note}</p> : null}
+      {event.note && event.noteLabel === 'Board feedback' ? (
+        <div className="mt-1 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2">
+          <p className="text-xs font-semibold uppercase tracking-wider text-destructive">Board feedback</p>
+          <p className="mt-0.5 whitespace-pre-wrap break-words">{event.note}</p>
+        </div>
+      ) : event.note ? (
+        <p className="mt-1 whitespace-pre-wrap break-words text-muted-foreground">{event.note}</p>
+      ) : null}
     </li>
   );
 }

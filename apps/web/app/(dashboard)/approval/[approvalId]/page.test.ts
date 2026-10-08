@@ -20,7 +20,10 @@ import {
   withVaultKey,
 } from '@/lib/approval-detail-vault.fixture';
 
-type PageFn = (p: { params: Promise<{ approvalId: string }> }) => Promise<React.ReactElement | null>;
+type PageFn = (p: {
+  params: Promise<{ approvalId: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) => Promise<React.ReactElement | null>;
 
 describe('approval details page (page.tsx)', () => {
   let Page: PageFn;
@@ -50,7 +53,7 @@ describe('approval details page (page.tsx)', () => {
   });
 
   const render = async (approvalId = 'appr-a') => {
-    const el = await Page({ params: Promise.resolve({ approvalId }) });
+    const el = await Page({ params: Promise.resolve({ approvalId }), searchParams: Promise.resolve({}) });
     assert.ok(el);
     return { el, html: renderToStaticMarkup(el) };
   };
@@ -98,12 +101,15 @@ describe('approval details page (page.tsx)', () => {
       assert.match(html, /request_board_approval/);
       assert.match(html, /2026/); // dates
       assert.match(html, /[Rr]ejected/);
+      // #131: related approvals still listed (link + status), titles hidden.
+      assert.match(html, /href="\/approval\/appr-r1"/);
+      assert.match(html, /href="\/approval\/appr-r2"/);
     });
   }
 
   it('unknown id and malformed id → not found', async () => {
     repo = plantedRepo();
-    await assert.rejects(Page({ params: Promise.resolve({ approvalId: 'appr-zzz' }) }), /NEXT_HTTP_ERROR_FALLBACK|NEXT_NOT_FOUND/);
-    await assert.rejects(Page({ params: Promise.resolve({ approvalId: 'a\u0000b' }) }), /NEXT_HTTP_ERROR_FALLBACK|NEXT_NOT_FOUND/);
+    await assert.rejects(Page({ params: Promise.resolve({ approvalId: 'appr-zzz' }), searchParams: Promise.resolve({}) }), /NEXT_HTTP_ERROR_FALLBACK|NEXT_NOT_FOUND/);
+    await assert.rejects(Page({ params: Promise.resolve({ approvalId: 'a\u0000b' }), searchParams: Promise.resolve({}) }), /NEXT_HTTP_ERROR_FALLBACK|NEXT_NOT_FOUND/);
   });
 });

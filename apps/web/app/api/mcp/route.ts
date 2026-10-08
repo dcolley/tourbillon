@@ -8,7 +8,7 @@ import {
   updateAgentModel,
   type UpdateAgentObservationalMemoryInput,
 } from '@/lib/agents';
-import { db, agents, llmProviders, companies, issues, goals, projects, approvals } from '@tourbillon/db';
+import { db, agents, llmProviders, companies, issues, goals, projects, approvals, activityLog } from '@tourbillon/db';
 import { and, eq, inArray, desc } from 'drizzle-orm';
 import { getLlmProviderRecordById } from '@/lib/llm-providers';
 import { getHeartbeatList, getHeartbeatRun } from '@/lib/heartbeats';
@@ -20,6 +20,8 @@ import { createProject, updateProject, listProjectsForAgent, type CreateProjectI
 import { addIssueComment } from '@/lib/issue-comments';
 import { triggerAgentHeartbeat } from '@/lib/heartbeat';
 import { enqueueApprovalWake } from '@/lib/wake-client';
+import { APPROVAL_ACTORS, approvalDecidedActivity } from '@/lib/approval-activity';
+import { checkDecisionReason } from '@/lib/approval-reason';
 
 interface McpRequest {
   jsonrpc: '2.0';
@@ -610,7 +612,7 @@ const MCP_TOOLS: McpTool[] = [
   },
   {
     name: 'decide_approval',
-    description: 'Decide a pending board approval (approve or reject). Reject restores blocked status; issues must be manually cancelled via set_issue_status if needed.',
+    description: 'Decide a pending board approval (approve or reject). Reject requires a non-blank reason (sent to the requesting agent as Board feedback; a blank reject is refused with no change). Reject leaves linked issues blocked; cancel them via set_issue_status if needed.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -629,7 +631,8 @@ const MCP_TOOLS: McpTool[] = [
         },
         reason: {
           type: 'string',
-          description: 'Decision reason/note',
+          maxLength: 2000,
+          description: 'Decision reason/note (string, trimmed, at most 2000 characters; longer is refused). Required (non-blank) when decision is rejected: it is the Board feedback the requesting agent gets. Optional for approved.',
         },
       },
       required: ['company_id', 'approval_id', 'decision'],
@@ -1478,7 +1481,7 @@ async function handleListApprovals(tokenCompanyId: string, params: any) {
 }
 
 async function handleDecideApproval(tokenCompanyId: string, params: any) {
-  const { company_id, approval_id, decision, reason } = params;
+  const { company_id, approval_id, decision, reason: rawReason } = params;
   if (!company_id) {
     throw new Error('company_id is required');
   }
@@ -1489,6 +1492,18 @@ async function handleDecideApproval(tokenCompanyId: string, params: any) {
     throw new Error('decision must be approved or rejected');
   }
   validateCompanyAccess(tokenCompanyId, company_id);
+  // Same rule as the board decide route: a reject is the board's "request changes", and the
+  // reason is the feedback the requesting agent gets. Checked before any read or write, so a
+  // blank reject changes nothing and writes no activity row.
+  const checkedReason = checkDecisionReason(decision, rawReason);
+  if (!checkedReason.ok) {
+    throw new Error(
+      checkedReason.code === 'reason_required'
+        ? 'reason is required to reject (it is sent to the requesting agent as Board feedback)'
+        : checkedReason.message,
+    );
+  }
+  const reason = checkedReason.reason;
 
   const approval = await db.query.approvals.findFirst({
     where: eq(approvals.id, approval_id),
@@ -1518,8 +1533,13 @@ async function handleDecideApproval(tokenCompanyId: string, params: any) {
         decidedByUserId: 'mcp',
         updatedAt: new Date(),
       })
-      .where(eq(approvals.id, approval_id))
+      .where(and(eq(approvals.id, approval_id), eq(approvals.companyId, company_id), eq(approvals.status, 'pending')))
       .returning();
+    if (!row) return null;
+
+    await tx.insert(activityLog).values(
+      approvalDecidedActivity({ approval, decision, note: reason, actor: APPROVAL_ACTORS.mcp }),
+    );
 
     if (issueIds.length > 0) {
       const linked = await tx
@@ -1553,6 +1573,7 @@ async function handleDecideApproval(tokenCompanyId: string, params: any) {
 
     return row;
   });
+  if (!updated) throw new Error('Approval already decided');
 
   // Trigger approval wake
   if (approval.requestedByAgentId) {

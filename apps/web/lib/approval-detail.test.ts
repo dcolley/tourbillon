@@ -2,8 +2,10 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  RELATED_APPROVALS_LIMIT,
   approvalDetailJson,
   buildApprovalHistory,
+  relatedApprovalsFor,
   decidedByLabel,
   isValidApprovalId,
   loadApprovalDetail,
@@ -14,7 +16,7 @@ import {
   type ApprovalIssueRow,
   type ApprovalRow,
 } from './approval-detail';
-import { PLANTED_VALUES, plantedRepo } from './approval-detail-secrets.fixture';
+import { PLANTED, PLANTED_VALUES, plantedRepo } from './approval-detail-secrets.fixture';
 import { REDACTION_UNAVAILABLE } from './approval-redaction';
 
 const T = (hhmm: string) => new Date(`2026-10-08T${hhmm}:00.000Z`);
@@ -230,6 +232,44 @@ describe('approval details: redaction of every field (#130 B1/B2)', () => {
   });
 });
 
+describe('approval details: #131 fields go through the same scrubber', () => {
+  it('decision note (Board feedback), created note and related approval titles: secrets absent from the loader output and JSON', async () => {
+    const d = await loadApprovalDetail(plantedRepo(), 'company-a', 'appr-a');
+    assert.ok(d);
+    const decided = d.history.find((e) => e.kind === 'decided');
+    assert.deepEqual(
+      [decided?.source, decided?.noteLabel, decided?.note],
+      ['activity_log', 'Board feedback', 'Split it; vault [redacted]; Authorization: Bearer [redacted]'],
+    );
+    const created = d.history.find((e) => e.kind === 'created');
+    assert.equal(created?.note, 'Call with Authorization: Bearer [redacted]');
+    assert.deepEqual(
+      d.relatedApprovals.map((r) => [r.id, r.title]),
+      [['appr-r2', 'Use vault [redacted]'], ['appr-r1', 'Retry with [redacted]']],
+    );
+    const text = JSON.stringify(approvalDetailJson(d));
+    const planted131 = [PLANTED.decisionNote, PLANTED.decisionBearer, PLANTED.createdNote, PLANTED.relatedTitle, PLANTED.relatedVault];
+    assert.deepEqual(planted131.filter((v) => text.includes(v) || text.includes(encodeURIComponent(v))), []);
+  });
+
+  it('a related title is scrubbed before it is clipped (no half secret left at the cut)', async () => {
+    const secret = 'related-vault-secret-abcdefghijklmnop';
+    const s = store();
+    s.secretValues = [secret];
+    s.approvals.push(
+      approval({ id: 'appr-r', createdAt: T('11:00'), payload: { title: `${'x'.repeat(290)}${secret}` } }),
+    );
+    const d = await loadApprovalDetail(
+      { ...memoryRepo(s), getRelatedApprovals: async () => s.approvals },
+      'company-a',
+      'appr-a',
+    );
+    const title = d?.relatedApprovals.find((r) => r.id === 'appr-r')?.title ?? '';
+    assert.ok(title.length <= 301, `${title.length}`);
+    assert.ok(!title.includes(secret.slice(0, 10)), title);
+  });
+});
+
 describe('approval details: malformed ids (Test S3)', () => {
   it('NUL/control characters, empty and >128 chars are invalid; the repo is never asked', async () => {
     for (const bad of ['appr\u0000a', '\u0000', 'a\nb', 'a\u007fb', '', 'x'.repeat(129)]) {
@@ -293,14 +333,72 @@ describe('approval details: history ordering', () => {
     assert.deepEqual(h.map((e) => e.issue?.id ?? e.kind), ['created', 'issue-2', 'issue-1']);
   });
 
-  it('approval.created / approval.decided activity rows do not duplicate the row events', () => {
-    const a = approval({ status: 'rejected', decidedAt: T('11:00') });
-    const h = buildApprovalHistory(a, [
-      activity({ createdAt: T('09:00'), entityType: 'approval', entityId: 'appr-a', action: 'approval.created' }),
-      activity({ createdAt: T('11:00'), entityType: 'approval', entityId: 'appr-a', action: 'approval.decided' }),
+  it('approval.created / approval.decided rows replace the row-derived events (actor + note), never twice', () => {
+    const a = approval({ status: 'rejected', decidedAt: T('11:00'), note: 'row note', decidedByUserId: null });
+    const h = buildApprovalHistory(
+      a,
+      [
+        activity({ createdAt: T('11:00'), entityType: 'approval', entityId: 'appr-a', action: 'approval.decided', actorType: 'user', actorId: 'mcp', actorName: 'Board (via MCP)', details: { decision: 'rejected', note: 'Too costly' } }),
+        activity({ createdAt: T('09:00'), entityType: 'approval', entityId: 'appr-a', action: 'approval.created', actorName: 'Alice', details: { note: 'Please ship' } }),
+        // a stray second decided row (should never be written) is not shown twice
+        activity({ createdAt: T('11:01'), entityType: 'approval', entityId: 'appr-a', action: 'approval.decided', actorName: 'Board', details: { decision: 'approved' } }),
+      ],
+      { requesterName: 'Alice' },
+    );
+    assert.deepEqual(h.map((e) => [e.kind, e.source, e.actor, e.text, e.note]), [
+      ['created', 'activity_log', 'Alice', 'Requested (request_board_approval)', 'Please ship'],
+      ['decided', 'activity_log', 'Board (via MCP)', 'Rejected', 'Too costly'],
     ]);
-    assert.deepEqual(h.map((e) => e.kind), ['created', 'decided']);
-    assert.equal(h[1].text, 'Rejected');
+  });
+
+  it('older approvals without lifecycle rows keep the row-derived created/decided events', () => {
+    const a = approval({ status: 'approved', decidedAt: T('10:00'), note: 'ok', decidedByUserId: 'hitly' });
+    const h = buildApprovalHistory(a, [], { requesterName: 'Alice' });
+    assert.deepEqual(h.map((e) => [e.kind, e.source, e.actor, e.note]), [
+      ['created', 'approvals', 'Alice', undefined],
+      ['decided', 'approvals', 'HITLy', 'ok'],
+    ]);
+  });
+
+  it('only one of the two lifecycle rows present: the other event falls back to the approvals row', () => {
+    const a = approval({ status: 'approved', decidedAt: T('10:00'), note: 'ok' });
+    const h = buildApprovalHistory(a, [
+      activity({ createdAt: T('10:00'), entityType: 'approval', entityId: 'appr-a', action: 'approval.decided', actorName: 'Board', details: { decision: 'approved', note: 'ok' } }),
+    ]);
+    assert.deepEqual(h.map((e) => [e.kind, e.source]), [['created', 'approvals'], ['decided', 'activity_log']]);
+  });
+
+  it("another company's or another approval's lifecycle rows are ignored", () => {
+    const a = approval();
+    const h = buildApprovalHistory(a, [
+      activity({ companyId: 'company-b', createdAt: T('09:30'), entityType: 'approval', entityId: 'appr-a', action: 'approval.decided', actorName: 'Mallory', details: { decision: 'approved' } }),
+      activity({ createdAt: T('09:30'), entityType: 'approval', entityId: 'appr-z', action: 'approval.created', actorName: 'Zed' }),
+    ]);
+    assert.deepEqual(h.map((e) => [e.kind, e.source]), [['created', 'approvals']]);
+  });
+
+  it('history ordering with lifecycle rows, halts and releases interleaved', () => {
+    const a = approval({ status: 'approved', decidedAt: T('10:30') });
+    const h = buildApprovalHistory(a, [
+      activity({ createdAt: T('10:30'), actorName: 'Board', details: { approvalId: 'appr-a', decision: 'approved', status: 'todo' } }),
+      activity({ createdAt: T('10:30'), entityType: 'approval', entityId: 'appr-a', action: 'approval.decided', actorName: 'Board', details: { decision: 'approved' } }),
+      activity({ createdAt: T('09:00'), details: { boardApprovalId: 'appr-a', status: 'blocked' } }),
+      activity({ createdAt: T('09:00'), entityType: 'approval', entityId: 'appr-a', action: 'approval.created', actorName: 'Alice' }),
+    ]);
+    assert.deepEqual(h.map((e) => e.kind), ['created', 'issue_halted', 'decided', 'issue_released']);
+  });
+
+  it("a rejection reason is labelled 'Board feedback' (row-derived and activity-row events); approval notes are 'Note'", () => {
+    const rejected = buildApprovalHistory(approval({ status: 'rejected', decidedAt: T('10:00'), note: 'Split it up' }), []);
+    assert.deepEqual([rejected[1].text, rejected[1].note, rejected[1].noteLabel], ['Rejected', 'Split it up', 'Board feedback']);
+    const fromRow = buildApprovalHistory(approval({ status: 'rejected', decidedAt: T('10:00') }), [
+      activity({ createdAt: T('10:00'), entityType: 'approval', entityId: 'appr-a', action: 'approval.decided', actorName: 'Board', details: { decision: 'rejected', note: 'Add tests' } }),
+    ]);
+    assert.equal(fromRow[1].noteLabel, 'Board feedback');
+    const approved = buildApprovalHistory(approval({ status: 'approved', decidedAt: T('10:00'), note: 'ok' }), []);
+    assert.equal(approved[1].noteLabel, 'Note');
+    const noNote = buildApprovalHistory(approval({ status: 'rejected', decidedAt: T('10:00') }), []);
+    assert.equal(noNote[1].noteLabel, undefined);
   });
 
   it('decided-by labels', () => {
@@ -308,6 +406,53 @@ describe('approval details: history ordering', () => {
     assert.equal(decidedByLabel({ status: 'approved', decidedByUserId: null }), 'Board');
     assert.equal(decidedByLabel({ status: 'approved', decidedByUserId: 'hitly' }), 'HITLy');
     assert.equal(decidedByLabel({ status: 'rejected', decidedByUserId: 'mcp' }), 'Board (via MCP)');
+  });
+});
+
+describe('approval details: related approvals on the same issues', () => {
+  const rel = (id: string, over: Partial<ApprovalRow> = {}) =>
+    approval({ id, issueIds: ['issue-a1'], payload: { title: `t-${id}` }, ...over });
+
+  it('same company, shares a linked issue, not itself; newest first', () => {
+    const me = approval({ issueIds: ['issue-a1', 'issue-a2'] });
+    const out = relatedApprovalsFor(me, [
+      rel('old', { createdAt: T('08:00'), status: 'rejected' }),
+      rel('appr-a'), // itself
+      rel('other-co', { companyId: 'company-b', createdAt: T('11:00') }),
+      rel('no-overlap', { issueIds: ['issue-zz'], createdAt: T('11:30') }),
+      rel('new', { createdAt: T('10:00'), issueIds: ['issue-a2', 'issue-x'] }),
+      rel('new'), // duplicate row
+    ]);
+    assert.deepEqual(out.map((r) => [r.id, r.title, r.status, r.sharedIssueIds]), [
+      ['new', 't-new', 'pending', ['issue-a2']],
+      ['old', 't-old', 'rejected', ['issue-a1']],
+    ]);
+  });
+
+  it(`capped at ${RELATED_APPROVALS_LIMIT}`, () => {
+    const rows = Array.from({ length: 30 }, (_, i) => rel(`r${i}`, { createdAt: new Date(Date.UTC(2026, 9, 1, 0, i)) }));
+    const out = relatedApprovalsFor(approval(), rows);
+    assert.equal(out.length, RELATED_APPROVALS_LIMIT);
+    assert.equal(out[0].id, 'r29');
+  });
+
+  it('loader: related approvals are company-scoped even if the repo returns other companies; none without linked issues', async () => {
+    const s = store();
+    s.approvals.push(
+      approval({ id: 'appr-a-old', issueIds: ['issue-a1'], status: 'rejected', createdAt: T('08:00'), payload: { title: 'First try' } }),
+      approval({ id: 'appr-b-x', companyId: 'company-b', issueIds: ['issue-a1'], payload: { title: 'B secret' } }),
+    );
+    const repo = { ...memoryRepo(s), getRelatedApprovals: async () => s.approvals };
+    const d = await loadApprovalDetail(repo, 'company-a', 'appr-a');
+    assert.ok(d);
+    assert.deepEqual(d.relatedApprovals.map((r) => [r.id, r.title, r.status]), [['appr-a-old', 'First try', 'rejected']]);
+    assert.ok(!JSON.stringify(d).includes('B secret'));
+
+    s.approvals[0] = approval({ issueIds: [] });
+    let called = false;
+    const d2 = await loadApprovalDetail({ ...memoryRepo(s), getRelatedApprovals: async () => ((called = true), s.approvals) }, 'company-a', 'appr-a');
+    assert.deepEqual(d2?.relatedApprovals, []);
+    assert.equal(called, false);
   });
 });
 

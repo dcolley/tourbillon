@@ -1,8 +1,8 @@
 /** Drizzle implementation of ApprovalDetailRepo. Every query filters on company_id. */
 import { db, approvals, agents, issues, activityLog, companies, llmProviders, vaultSecrets } from '@tourbillon/db';
-import { and, asc, eq, inArray, or, sql } from 'drizzle-orm';
+import { and, arrayOverlaps, asc, desc, eq, inArray, ne, or, sql } from 'drizzle-orm';
 import { collectSecretValueEntries } from '@tourbillon/shared';
-import type { ApprovalDetailRepo } from './approval-detail';
+import { RELATED_APPROVALS_LIMIT, type ApprovalDetailRepo } from './approval-detail';
 import { vaultValuesForRedaction } from './approval-redaction';
 import { providerSecretValues } from './provider-safety';
 
@@ -65,6 +65,21 @@ export function createApprovalDetailRepo(database: Db = db): ApprovalDetailRepo 
         .where(and(eq(activityLog.companyId, companyId), issueRowsCitingIt ? or(aboutApproval, issueRowsCitingIt) : aboutApproval))
         .orderBy(asc(activityLog.createdAt))
         .limit(500);
+    },
+    async getRelatedApprovals(companyId, approvalId, issueIds) {
+      if (issueIds.length === 0) return [];
+      return database
+        .select()
+        .from(approvals)
+        .where(
+          and(
+            eq(approvals.companyId, companyId),
+            ne(approvals.id, approvalId),
+            arrayOverlaps(approvals.issueIds, issueIds),
+          ),
+        )
+        .orderBy(desc(approvals.createdAt))
+        .limit(RELATED_APPROVALS_LIMIT);
     },
     async getCompanySettings(companyId) {
       const [row] = await database

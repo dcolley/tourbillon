@@ -1,7 +1,8 @@
 /**
  * Test fixture (#130 B1/B2): an approval with a distinct dummy secret planted in every field the
  * details page or JSON route renders. Used by the loader, route and page render tests. All values
- * are fake.
+ * are fake. #131 adds approval.created / approval.decided activity notes (the decision note
+ * shown as Board feedback) and related approvals' titles.
  */
 import type { ApprovalActivityRow, ApprovalDetailRepo, ApprovalRow } from './approval-detail';
 
@@ -27,6 +28,11 @@ export const PLANTED = {
   historyNote: 'plant-history-note-0019',
   actorName: 'plant-actor-0020',
   nestedCookie: 'plant-cookie-0021',
+  decisionNote: 'plant-decision-note-0022',
+  decisionBearer: 'plantdecisionbearer0023',
+  createdNote: 'plantcreatednotebearer0024',
+  relatedTitle: 'plant-related-title-0025',
+  relatedVault: 'plant-related-vault-0026',
 } as const;
 
 export const PLANTED_VALUES: string[] = Object.values(PLANTED);
@@ -79,6 +85,50 @@ export function plantedActivity(): ApprovalActivityRow[] {
       action: 'approval.commented', entityType: 'approval', entityId: 'appr-a',
       details: { note: `password was ${p.password}; vault ${p.historyNote}` }, createdAt: T('09:30'),
     },
+    {
+      id: 'l3', companyId: 'company-a', actorType: 'agent', actorId: 'agent-a', actorName: 'Alice',
+      action: 'approval.created', entityType: 'approval', entityId: 'appr-a',
+      details: { note: `Call with Authorization: Bearer ${p.createdNote}` }, createdAt: T('09:00'),
+    },
+    {
+      id: 'l4', companyId: 'company-a', actorType: 'user', actorId: 'board', actorName: 'Board',
+      action: 'approval.decided', entityType: 'approval', entityId: 'appr-a',
+      details: {
+        decision: 'rejected',
+        note: `Split it; vault ${p.decisionNote}; Authorization: Bearer ${p.decisionBearer}`,
+      },
+      createdAt: T('10:30'),
+    },
+  ];
+}
+
+/** Other approvals sharing issue-a1 (#131 "Related approvals on this issue"). */
+export function plantedRelatedApprovals(): ApprovalRow[] {
+  const p = PLANTED;
+  const base = plantedApproval();
+  return [
+    {
+      ...base,
+      id: 'appr-r1',
+      status: 'rejected',
+      // The title echoes a value the payload holds under a credential key.
+      payload: { title: `Retry with ${p.relatedTitle}`, apiKey: p.relatedTitle },
+      note: null,
+      hitlyApprovalId: null,
+      hitlyError: null,
+      createdAt: T('08:00'),
+    },
+    {
+      ...base,
+      id: 'appr-r2',
+      status: 'pending',
+      payload: { title: `Use vault ${p.relatedVault}` },
+      note: null,
+      decidedAt: null,
+      hitlyApprovalId: null,
+      hitlyError: null,
+      createdAt: T('11:00'),
+    },
   ];
 }
 
@@ -107,7 +157,13 @@ export function plantedRepo(over: Partial<ApprovalRow> = {}): ApprovalDetailRepo
       return { hitlyGate: { apiKey: p.settings }, mcpCredentials: { github: p.actorName } };
     },
     async getSecretValues() {
-      return { values: [p.vault, p.title, p.historyNote, p.provider, p.issueTitle], vaultUnavailable: false };
+      return {
+        values: [p.vault, p.title, p.historyNote, p.provider, p.issueTitle, p.decisionNote, p.relatedVault],
+        vaultUnavailable: false,
+      };
+    },
+    async getRelatedApprovals(companyId, approvalId) {
+      return companyId === 'company-a' ? plantedRelatedApprovals().filter((r) => r.id !== approvalId) : [];
     },
   };
 }

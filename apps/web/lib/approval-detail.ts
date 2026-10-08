@@ -77,6 +77,25 @@ export interface ApprovalDetailRepo {
    * `vaultUnavailable` when vault rows could not be decrypted: free text is then hidden.
    */
   getSecretValues(companyId: string): Promise<KnownSecretValues>;
+  /**
+   * Other approvals in this company that share at least one linked issue (newest first).
+   * Optional so older repos/tests without it simply show no related approvals.
+   */
+  getRelatedApprovals?(companyId: string, approvalId: string, issueIds: string[]): Promise<ApprovalRow[]>;
+}
+
+/** Max related approvals listed on the details page. */
+export const RELATED_APPROVALS_LIMIT = 20;
+
+export interface RelatedApproval {
+  id: string;
+  /** Redacted (lib/approval-redaction) and clipped to APPROVAL_TITLE_MAX_CHARS. */
+  title: string;
+  type: string;
+  status: string;
+  createdAt: Date;
+  /** Linked issue ids shared with the approval being viewed. */
+  sharedIssueIds: string[];
 }
 
 export type ApprovalHistoryKind =
@@ -95,6 +114,8 @@ export interface ApprovalHistoryEvent {
   actor: string;
   text: string;
   note?: string;
+  /** How to label `note`: a rejection reason is the board's feedback to the agent. */
+  noteLabel?: 'Board feedback' | 'Note';
   issue?: { id: string; identifier: string };
   source: 'approvals' | 'activity_log';
 }
@@ -113,6 +134,8 @@ export interface ApprovalDetail {
   /** Linked ids with no issue in this company (deleted, or never valid). */
   missingIssueIds: string[];
   history: ApprovalHistoryEvent[];
+  /** Other approvals on the same linked issues (resubmissions show up here), newest first. */
+  relatedApprovals: RelatedApproval[];
   /**
    * True when vault values could not be loaded: payload, title, summary, notes, HITLy error and
    * issue titles show REDACTION_UNAVAILABLE; status, dates, actors and ids still render.
@@ -171,6 +194,11 @@ const str = (v: unknown) => (typeof v === 'string' ? v : null);
  * Chronological timeline (oldest first) from the approval row and activity_log. Ties on time
  * are broken by event kind (creation → halt → HITLy → … → decision → release), then by input
  * order, so the result is deterministic.
+ *
+ * `approval.created` / `approval.decided` activity rows (written by every create/decide path
+ * since #130's follow-up) are the source for those two events when present: they carry the
+ * actor and note. Older approvals without them fall back to events derived from the approvals
+ * row. At most one created and one decided event is ever shown.
  */
 export function buildApprovalHistory(
   approval: ApprovalRow,
@@ -183,14 +211,33 @@ export function buildApprovalHistory(
     const issue = opts.issuesById?.get(id);
     return issue ? { id: issue.id, identifier: issue.identifier } : { id, identifier: id.slice(0, 8) };
   };
+  const own = (row: ApprovalActivityRow) =>
+    row.companyId === approval.companyId && row.entityType === 'approval' && row.entityId === approval.id;
+  const actorOf = (row: ApprovalActivityRow) =>
+    row.actorName ?? (row.actorId === approval.requestedByAgentId ? requester : row.actorId);
+  const detailsOf = (row: ApprovalActivityRow) => (isPlainObject(row.details) ? row.details : {});
+  const createdRow = activity.find((r) => own(r) && r.action === 'approval.created');
+  const decidedRow = activity.find((r) => own(r) && r.action === 'approval.decided');
+  const decisionText = (status: string | null) =>
+    status === 'approved' ? 'Approved' : status === 'rejected' ? 'Rejected' : `Decided: ${status ?? 'unknown'}`;
+
   const events: ApprovalHistoryEvent[] = [
-    {
-      at: approval.createdAt,
-      kind: 'created',
-      actor: requester,
-      text: `Requested (${approval.type})`,
-      source: 'approvals',
-    },
+    createdRow
+      ? {
+          at: createdRow.createdAt,
+          kind: 'created',
+          actor: actorOf(createdRow),
+          text: `Requested (${approval.type})`,
+          note: str(detailsOf(createdRow).note) ?? undefined,
+          source: 'activity_log',
+        }
+      : {
+          at: approval.createdAt,
+          kind: 'created',
+          actor: requester,
+          text: `Requested (${approval.type})`,
+          source: 'approvals',
+        },
   ];
   if (approval.hitlyApprovalId) {
     events.push({ at: null, kind: 'hitly_sent', actor: 'System', text: `Sent to HITLy (${approval.hitlyApprovalId})`, source: 'approvals' });
@@ -198,15 +245,14 @@ export function buildApprovalHistory(
   if (approval.hitlyError) {
     events.push({ at: null, kind: 'hitly_error', actor: 'System', text: `HITLy error: ${approval.hitlyError}`, source: 'approvals' });
   }
-  const hasDecision = approval.status !== 'pending' && approval.decidedAt;
   for (const row of activity) {
     if (row.companyId !== approval.companyId) continue; // defence in depth
-    const d = isPlainObject(row.details) ? row.details : {};
-    const actor = row.actorName ?? (row.actorId === approval.requestedByAgentId ? requester : row.actorId);
+    const d = detailsOf(row);
+    const actor = actorOf(row);
     if (row.entityType === 'approval') {
       if (row.entityId !== approval.id) continue;
-      if (row.action === 'approval.created') continue; // same as the row's own creation event
-      if (row.action === 'approval.decided' && hasDecision) continue; // same as the decision event
+      // Lifecycle rows are handled once, above and below (never twice).
+      if (row.action === 'approval.created' || row.action === 'approval.decided') continue;
       events.push({ at: row.createdAt, kind: 'activity', actor, text: row.action, note: str(d.note) ?? undefined, source: 'activity_log' });
       continue;
     }
@@ -232,15 +278,29 @@ export function buildApprovalHistory(
       });
     }
   }
-  if (hasDecision) {
+  if (decidedRow) {
+    const d = detailsOf(decidedRow);
+    events.push({
+      at: decidedRow.createdAt,
+      kind: 'decided',
+      actor: actorOf(decidedRow),
+      text: decisionText(str(d.decision) ?? str(d.status) ?? approval.status),
+      note: str(d.note) ?? undefined,
+      source: 'activity_log',
+    });
+  } else if (approval.status !== 'pending' && approval.decidedAt) {
     events.push({
       at: approval.decidedAt,
       kind: 'decided',
       actor: decidedByLabel(approval) ?? 'Board',
-      text: approval.status === 'approved' ? 'Approved' : approval.status === 'rejected' ? 'Rejected' : `Decided: ${approval.status}`,
+      text: decisionText(approval.status),
       note: approval.note ?? undefined,
       source: 'approvals',
     });
+  }
+  // A rejection reason is the board's feedback to the requesting agent ("request changes").
+  for (const e of events) {
+    if (e.kind === 'decided' && e.note) e.noteLabel = e.text === 'Rejected' ? 'Board feedback' : 'Note';
   }
   // Untimed HITLy events sit right after creation.
   const time = (e: ApprovalHistoryEvent) => (e.at ?? approval.createdAt).getTime();
@@ -328,12 +388,15 @@ export async function loadApprovalDetail(
   if (!approval || approval.companyId !== companyId) return null;
 
   const issueIds = Array.isArray(approval.issueIds) ? approval.issueIds : [];
-  const [agent, issueRows, activity, known] = await Promise.all([
+  const [agent, issueRows, activity, known, relatedRows] = await Promise.all([
     approval.requestedByAgentId ? repo.getAgent(companyId, approval.requestedByAgentId) : Promise.resolve(null),
     issueIds.length ? repo.getIssues(companyId, issueIds) : Promise.resolve([]),
     repo.getActivity(companyId, approval.id, issueIds),
     // B3: if the secret values can't be loaded (query error…), free text is hidden; never a 500.
     loadApprovalKnownSecrets(repo, companyId),
+    issueIds.length && repo.getRelatedApprovals
+      ? repo.getRelatedApprovals(companyId, approval.id, issueIds)
+      : Promise.resolve([] as ApprovalRow[]),
   ]);
   const requester = agent && agent.companyId === companyId ? agent : null;
   const issuesById = new Map(
@@ -342,13 +405,13 @@ export async function loadApprovalDetail(
 
   // B1: one redactor for every field. Known values: vault + agent runtime secrets + provider
   // keys (repo), company settings, the requester, and anything held under a credential key in
-  // the payload or activity details (e.g. hitlyResumeToken), so the same value is also scrubbed
-  // where it was echoed (title, HITLy error, notes…).
+  // the payload, activity details or a related approval's payload (e.g. hitlyResumeToken), so the
+  // same value is also scrubbed where it was echoed (title, HITLy error, notes, related titles…).
   // B3: if the vault values can't all be loaded, every free-text field that could echo one is
   // hidden (redact.freeText) instead of rendered with an incomplete list.
   const redact = approvalRedactorFor(known, {
     requesterRuntimeConfig: requester?.runtimeConfig,
-    payloads: [approval.payload, ...activity.map((row) => row.details)],
+    payloads: [approval.payload, ...activity.map((row) => row.details), ...relatedRows.map((row) => row.payload)],
   });
   const hidden = redact.unavailable;
 
@@ -388,10 +451,41 @@ export async function loadApprovalDetail(
         }))
       : history,
     redactionUnavailable: hidden,
+    relatedApprovals: relatedApprovalsFor(approval, relatedRows, redact.freeText),
   };
   // B2: the same scrub over the whole object (note, hitlyError, issue titles, history text/notes,
   // actor names…), so the page, its RSC data and the JSON route all get this one copy.
   return redact.deep(detail);
+}
+
+/**
+ * Same company, not this approval, shares a linked issue; newest first; capped. `scrub` is the
+ * detail's redactor (titles are scrubbed before clipping, so a cut never leaves half a secret);
+ * loadApprovalDetail also runs its deep redaction over the result.
+ */
+export function relatedApprovalsFor(
+  approval: ApprovalRow,
+  rows: ApprovalRow[],
+  scrub: (s: string) => string = (s) => s,
+): RelatedApproval[] {
+  const mine = new Set(Array.isArray(approval.issueIds) ? approval.issueIds : []);
+  const seen = new Set<string>();
+  return rows
+    .filter((r) => r.companyId === approval.companyId && r.id !== approval.id && !seen.has(r.id) && seen.add(r.id))
+    .map((r) => {
+      const payload = isPlainObject(r.payload) ? r.payload : {};
+      return {
+        id: r.id,
+        title: clip(scrub(str(payload.title)?.trim() || r.type), APPROVAL_TITLE_MAX_CHARS),
+        type: r.type,
+        status: r.status,
+        createdAt: r.createdAt,
+        sharedIssueIds: (Array.isArray(r.issueIds) ? r.issueIds : []).filter((id) => mine.has(id)),
+      };
+    })
+    .filter((r) => r.sharedIssueIds.length > 0)
+    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || (a.id < b.id ? -1 : 1))
+    .slice(0, RELATED_APPROVALS_LIMIT);
 }
 
 /** JSON body for `GET /api/approvals/:id` (dates as ISO strings). */
@@ -409,6 +503,7 @@ export function approvalDetailJson(d: ApprovalDetail) {
     linkedIssues: d.linkedIssues,
     missingIssueIds: d.missingIssueIds,
     history: d.history.map((e) => ({ ...e, at: iso(e.at) })),
+    relatedApprovals: d.relatedApprovals.map((r) => ({ ...r, createdAt: iso(r.createdAt) })),
     redactionUnavailable: d.redactionUnavailable,
   };
 }

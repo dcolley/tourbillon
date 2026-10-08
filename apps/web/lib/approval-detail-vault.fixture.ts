@@ -53,18 +53,27 @@ export async function withVaultKey<T>(key: string | null, fn: () => T | Promise<
 }
 
 /** Planted values that only the vault knows (the planted approval echoes each of them). */
-export const VAULT_ONLY_VALUES = [PLANTED.vault, PLANTED.title, PLANTED.historyNote, PLANTED.issueTitle];
+export const VAULT_ONLY_VALUES = [
+  PLANTED.vault,
+  PLANTED.title,
+  PLANTED.historyNote,
+  PLANTED.issueTitle,
+  PLANTED.decisionNote,
+  PLANTED.relatedVault,
+];
 
 /**
  * Vault rows (encrypted with DUMMY_VAULT_KEY) holding VAULT_ONLY_VALUES, one of them as OAuth
  * tokens, plus one provider row; `corrupt` adds a row that never decrypts.
  */
 export async function plantedSecretRows(opts: { corrupt?: boolean } = {}): Promise<SecretRows> {
-  const [vault, title, historyNote, issueTitle] = VAULT_ONLY_VALUES;
+  const [vault, title, historyNote, issueTitle, decisionNote, relatedVault] = VAULT_ONLY_VALUES;
   const vaultRows = await withVaultKey(DUMMY_VAULT_KEY, () => [
     { id: 'vault-row-1', encryptedValue: encryptCredential(vault) },
     { id: 'vault-row-2', encryptedValue: encryptCredential({ accessToken: title, refreshToken: historyNote }) },
     { id: 'vault-row-3', encryptedValue: encryptCredential(issueTitle) },
+    { id: 'vault-row-4', encryptedValue: encryptCredential(decisionNote) },
+    { id: 'vault-row-5', encryptedValue: encryptCredential(relatedVault) },
   ]);
   if (opts.corrupt) vaultRows.push({ id: 'vault-row-bad', encryptedValue: 'bm90LWEtY2lwaGVydGV4dC1hdC1hbGwtMDAwMDAwMDAwMDAwMDAwMA==' });
   return {

@@ -366,6 +366,10 @@ describe('#106 board-guarded routes', () => {
           const text = await res.text();
           assert.deepEqual(PLANTED_VALUES.filter((v) => text.includes(v) || text.includes(encodeURIComponent(v))), []);
           assert.match(text, /Deploy with \[redacted\]/);
+          // #131: decision note (Board feedback) and related approval titles, scrubbed but present.
+          assert.match(text, /Split it; vault \[redacted\]; Authorization: Bearer \[redacted\]/);
+          assert.match(text, /Retry with \[redacted\]/);
+          assert.match(text, /Use vault \[redacted\]/);
         }
       } finally {
         approvalRepoOverride = null;
