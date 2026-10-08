@@ -159,7 +159,7 @@ describe('approval.created / approval.decided activity rows (every path)', () =>
   before(async () => {
     const Module = require('module');
     const originalRequire = Module.prototype.require;
-    const REAL_LIB = new Set(['approval-activity', 'approval-detail']);
+    const REAL_LIB = new Set(['approval-activity', 'approval-detail', 'approval-links']);
     Module.prototype.require = function (id: string) {
       if (id === '@tourbillon/db') return { db: fakeDb, ...tables };
       if (id === 'drizzle-orm') return fakeDrizzle;
@@ -249,8 +249,8 @@ describe('approval.created / approval.decided activity rows (every path)', () =>
 
     it('a second decide on an already-decided approval → 409, no second row', async () => {
       pending('appr-a', 'company-a');
-      await decide('company-a', 'appr-a', 'rejected');
-      assert.equal((await decide('company-a', 'appr-a', 'approved')).status, 409);
+      await decide('company-a', 'appr-a', 'approved');
+      assert.equal((await decide('company-a', 'appr-a', 'rejected', 'late')).status, 409);
       assert.equal(lifecycle('approval.decided').length, 1);
       assert.equal((lifecycle('approval.decided')[0].details as Row).note, null);
     });
@@ -258,7 +258,7 @@ describe('approval.created / approval.decided activity rows (every path)', () =>
     it('a decide racing another (stale pending read) → 409, no row, approval unchanged', async () => {
       pending('appr-a', 'company-a', { status: 'approved', decidedAt: new Date(clock) });
       stalePending = true;
-      assert.equal((await decide('company-a', 'appr-a', 'rejected')).status, 409);
+      assert.equal((await decide('company-a', 'appr-a', 'rejected', 'needs work')).status, 409);
       assert.equal(lifecycle('approval.decided').length, 0);
       assert.equal(store.approvals[0].status, 'approved');
     });
@@ -268,6 +268,50 @@ describe('approval.created / approval.decided activity rows (every path)', () =>
       assert.equal((await decide('company-a', 'appr-b', 'approved')).status, 404);
       assert.equal(store.activityLog.length, 0);
       assert.equal(store.approvals[0].status, 'pending');
+    });
+  });
+
+  describe('reject requires a reason (board UI + board API)', () => {
+    for (const note of [undefined, '', '   \n ']) {
+      it(`JSON reject with reason ${JSON.stringify(note)} → 400, approval still pending, no row`, async () => {
+        pending('appr-a', 'company-a');
+        const res = await decide('company-a', 'appr-a', 'rejected', note);
+        assert.equal(res.status, 400);
+        assert.match(((await res.json()) as { error: string }).error, /reason is required/);
+        assert.equal(store.approvals[0].status, 'pending');
+        assert.equal(store.activityLog.length, 0);
+      });
+    }
+
+    it('HTML form reject without a reason → 303 back to the details page with error=reason_required', async () => {
+      pending('appr-a', 'company-a');
+      const req = new NextRequest('http://localhost/api/approvals/appr-a/decide', {
+        method: 'POST',
+        headers: { accept: 'text/html', 'x-test-board-company': 'company-a', 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ decision: 'rejected', note: '  ' }).toString(),
+      });
+      const res = await routes.decide(req, ctx({ approvalId: 'appr-a' }));
+      assert.equal(res.status, 303);
+      const loc = new URL(res.headers.get('location') ?? '');
+      assert.equal(loc.pathname, '/approval/appr-a');
+      assert.equal(loc.searchParams.get('error'), 'reason_required');
+      assert.equal(store.approvals[0].status, 'pending');
+    });
+
+    it('reject with a reason → 200 and the reason is the decided row note; approve still needs none', async () => {
+      pending('appr-a', 'company-a');
+      pending('appr-c', 'company-a');
+      assert.equal((await decide('company-a', 'appr-a', 'rejected', 'Split the migration')).status, 200);
+      assert.equal((await decide('company-a', 'appr-c', 'approved')).status, 200);
+      const notes = lifecycle('approval.decided').map((r) => [r.entityId, (r.details as Row).note]);
+      assert.deepEqual(notes, [['appr-a', 'Split the migration'], ['appr-c', null]]);
+    });
+
+    it('MCP decide_approval contract unchanged: reject without a reason still works', async () => {
+      pending('appr-a', 'company-a');
+      const r = await mcp('company-a', { company_id: 'company-a', approval_id: 'appr-a', decision: 'rejected' });
+      assert.equal(r.error, undefined, JSON.stringify(r));
+      assert.equal(store.approvals[0].status, 'rejected');
     });
   });
 

@@ -7,21 +7,30 @@ import { StatusBadge } from '@/lib/status-badges';
 import { getActiveCompanyOrNull } from '@/lib/company';
 import { loadApprovalDetail, type ApprovalHistoryEvent } from '@/lib/approval-detail';
 import { createApprovalDetailRepo } from '@/lib/approval-detail-repo';
+import { approvalDetailHref } from '@/lib/approval-links';
 import { ApprovalDecisionForm } from '../approval-decision-form';
 
 /**
  * Approval details (board only: the #105 proxy gates every dashboard page on the board session,
  * and the lookup is scoped to the active company, so another company's id is a 404).
  */
-export default async function ApprovalDetailPage({ params }: { params: Promise<{ approvalId: string }> }) {
+export default async function ApprovalDetailPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ approvalId: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
   const company = await getActiveCompanyOrNull();
   if (!company) return null;
   const { approvalId } = await params;
   const detail = await loadApprovalDetail(createApprovalDetailRepo(), company.id, approvalId);
   if (!detail) notFound();
 
-  const { approval, requester, decidedBy, linkedIssues, missingIssueIds, history } = detail;
+  const { approval, requester, decidedBy, linkedIssues, missingIssueIds, history, relatedApprovals } = detail;
   const pending = approval.status === 'pending';
+  const reasonRequired = (await searchParams).error === 'reason_required';
+  const noteLabel = approval.status === 'rejected' ? 'Board feedback' : 'Board decision note';
 
   return (
     <div className="space-y-6">
@@ -73,9 +82,17 @@ export default async function ApprovalDetailPage({ params }: { params: Promise<{
             <p className="text-sm text-destructive">HITLy ingest error: {approval.hitlyError}</p>
           ) : null}
           <div>
-            <p className="text-xs text-muted-foreground">Board decision note</p>
+            <p className="text-xs text-muted-foreground">{noteLabel}</p>
             {approval.note ? (
-              <p className="mt-1 text-sm whitespace-pre-wrap break-words">{approval.note}</p>
+              <p
+                className={
+                  approval.status === 'rejected'
+                    ? 'mt-1 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm whitespace-pre-wrap break-words'
+                    : 'mt-1 text-sm whitespace-pre-wrap break-words'
+                }
+              >
+                {approval.note}
+              </p>
             ) : (
               <p className="mt-1 text-sm text-muted-foreground">{pending ? 'Not decided yet.' : 'No note.'}</p>
             )}
@@ -88,7 +105,12 @@ export default async function ApprovalDetailPage({ params }: { params: Promise<{
           <CardHeader className="pb-3">
             <CardTitle className="text-base">Decision</CardTitle>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-3">
+            {reasonRequired ? (
+              <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+                A reason is required to reject. It is sent to the requesting agent as Board feedback.
+              </p>
+            ) : null}
             <ApprovalDecisionForm approvalId={approval.id} />
           </CardContent>
         </Card>
@@ -122,6 +144,33 @@ export default async function ApprovalDetailPage({ params }: { params: Promise<{
           )}
         </CardContent>
       </Card>
+
+      {relatedApprovals.length > 0 ? (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">Related approvals on this issue</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <ul className="space-y-1 text-sm">
+              {relatedApprovals.map((r) => (
+                <li key={r.id} className="flex flex-wrap items-center gap-2">
+                  <Link href={approvalDetailHref(r.id)} className="hover:underline">
+                    {r.title}
+                  </Link>
+                  <StatusBadge status={r.status} />
+                  <span className="text-xs text-muted-foreground">
+                    <Time value={r.createdAt} />
+                    {' · '}
+                    {r.sharedIssueIds
+                      .map((id) => linkedIssues.find((i) => i.id === id)?.identifier ?? id.slice(0, 8))
+                      .join(', ')}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </CardContent>
+        </Card>
+      ) : null}
 
       <Card>
         <CardHeader className="pb-3">
@@ -179,7 +228,14 @@ function HistoryItem({ event, fallbackAt }: { event: ApprovalHistoryEvent; fallb
           event.text
         )}
       </p>
-      {event.note ? <p className="mt-1 whitespace-pre-wrap break-words text-muted-foreground">{event.note}</p> : null}
+      {event.note && event.noteLabel === 'Board feedback' ? (
+        <div className="mt-1 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2">
+          <p className="text-xs font-semibold uppercase tracking-wider text-destructive">Board feedback</p>
+          <p className="mt-0.5 whitespace-pre-wrap break-words">{event.note}</p>
+        </div>
+      ) : event.note ? (
+        <p className="mt-1 whitespace-pre-wrap break-words text-muted-foreground">{event.note}</p>
+      ) : null}
     </li>
   );
 }

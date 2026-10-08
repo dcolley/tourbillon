@@ -2,7 +2,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  RELATED_APPROVALS_LIMIT,
   buildApprovalHistory,
+  relatedApprovalsFor,
   decidedByLabel,
   loadApprovalDetail,
   redactApprovalPayload,
@@ -288,10 +290,70 @@ describe('approval details: history ordering', () => {
     assert.deepEqual(h.map((e) => e.kind), ['created', 'issue_halted', 'decided', 'issue_released']);
   });
 
+  it("a rejection reason is labelled 'Board feedback' (row-derived and activity-row events); approval notes are 'Note'", () => {
+    const rejected = buildApprovalHistory(approval({ status: 'rejected', decidedAt: T('10:00'), note: 'Split it up' }), []);
+    assert.deepEqual([rejected[1].text, rejected[1].note, rejected[1].noteLabel], ['Rejected', 'Split it up', 'Board feedback']);
+    const fromRow = buildApprovalHistory(approval({ status: 'rejected', decidedAt: T('10:00') }), [
+      activity({ createdAt: T('10:00'), entityType: 'approval', entityId: 'appr-a', action: 'approval.decided', actorName: 'Board', details: { decision: 'rejected', note: 'Add tests' } }),
+    ]);
+    assert.equal(fromRow[1].noteLabel, 'Board feedback');
+    const approved = buildApprovalHistory(approval({ status: 'approved', decidedAt: T('10:00'), note: 'ok' }), []);
+    assert.equal(approved[1].noteLabel, 'Note');
+    const noNote = buildApprovalHistory(approval({ status: 'rejected', decidedAt: T('10:00') }), []);
+    assert.equal(noNote[1].noteLabel, undefined);
+  });
+
   it('decided-by labels', () => {
     assert.equal(decidedByLabel({ status: 'pending', decidedByUserId: null }), null);
     assert.equal(decidedByLabel({ status: 'approved', decidedByUserId: null }), 'Board');
     assert.equal(decidedByLabel({ status: 'approved', decidedByUserId: 'hitly' }), 'HITLy');
     assert.equal(decidedByLabel({ status: 'rejected', decidedByUserId: 'mcp' }), 'Board (via MCP)');
+  });
+});
+
+describe('approval details: related approvals on the same issues', () => {
+  const rel = (id: string, over: Partial<ApprovalRow> = {}) =>
+    approval({ id, issueIds: ['issue-a1'], payload: { title: `t-${id}` }, ...over });
+
+  it('same company, shares a linked issue, not itself; newest first', () => {
+    const me = approval({ issueIds: ['issue-a1', 'issue-a2'] });
+    const out = relatedApprovalsFor(me, [
+      rel('old', { createdAt: T('08:00'), status: 'rejected' }),
+      rel('appr-a'), // itself
+      rel('other-co', { companyId: 'company-b', createdAt: T('11:00') }),
+      rel('no-overlap', { issueIds: ['issue-zz'], createdAt: T('11:30') }),
+      rel('new', { createdAt: T('10:00'), issueIds: ['issue-a2', 'issue-x'] }),
+      rel('new'), // duplicate row
+    ]);
+    assert.deepEqual(out.map((r) => [r.id, r.title, r.status, r.sharedIssueIds]), [
+      ['new', 't-new', 'pending', ['issue-a2']],
+      ['old', 't-old', 'rejected', ['issue-a1']],
+    ]);
+  });
+
+  it(`capped at ${RELATED_APPROVALS_LIMIT}`, () => {
+    const rows = Array.from({ length: 30 }, (_, i) => rel(`r${i}`, { createdAt: new Date(Date.UTC(2026, 9, 1, 0, i)) }));
+    const out = relatedApprovalsFor(approval(), rows);
+    assert.equal(out.length, RELATED_APPROVALS_LIMIT);
+    assert.equal(out[0].id, 'r29');
+  });
+
+  it('loader: related approvals are company-scoped even if the repo returns other companies; none without linked issues', async () => {
+    const s = store();
+    s.approvals.push(
+      approval({ id: 'appr-a-old', issueIds: ['issue-a1'], status: 'rejected', createdAt: T('08:00'), payload: { title: 'First try' } }),
+      approval({ id: 'appr-b-x', companyId: 'company-b', issueIds: ['issue-a1'], payload: { title: 'B secret' } }),
+    );
+    const repo = { ...memoryRepo(s), getRelatedApprovals: async () => s.approvals };
+    const d = await loadApprovalDetail(repo, 'company-a', 'appr-a');
+    assert.ok(d);
+    assert.deepEqual(d.relatedApprovals.map((r) => [r.id, r.title, r.status]), [['appr-a-old', 'First try', 'rejected']]);
+    assert.ok(!JSON.stringify(d).includes('B secret'));
+
+    s.approvals[0] = approval({ issueIds: [] });
+    let called = false;
+    const d2 = await loadApprovalDetail({ ...memoryRepo(s), getRelatedApprovals: async () => ((called = true), s.approvals) }, 'company-a', 'appr-a');
+    assert.deepEqual(d2?.relatedApprovals, []);
+    assert.equal(called, false);
   });
 });

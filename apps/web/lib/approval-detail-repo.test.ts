@@ -42,6 +42,19 @@ describe('approval details repo: company scoping in SQL', () => {
     assert.match(settings.sql, /from "companies" where "companies"\."id" = \$1/);
   });
 
+  it('related approvals: same company, not this approval, overlapping issue ids, newest first, capped', async () => {
+    calls.length = 0;
+    await repo.getRelatedApprovals!('company-a', 'appr-a', ['issue-1', 'issue-2']);
+    assert.equal(calls.length, 1);
+    const [q] = calls;
+    assert.match(q.sql, /from "approvals" where \("approvals"\."company_id" = \$1 and "approvals"\."id" <> \$2 and "approvals"\."issue_ids" && \$3\)/);
+    assert.match(q.sql, /order by "approvals"\."created_at" desc limit \$4/);
+    assert.deepEqual(q.params.slice(0, 2), ['company-a', 'appr-a']);
+    calls.length = 0;
+    assert.deepEqual(await repo.getRelatedApprovals!('company-a', 'appr-a', []), []);
+    assert.equal(calls.length, 0);
+  });
+
   it('no linked issues: activity is only rows about the approval itself; no issue query', async () => {
     calls.length = 0;
     assert.deepEqual(await repo.getIssues('company-a', []), []);

@@ -6,6 +6,7 @@ import { addIssueComment } from '@/lib/issue-comments';
 import { publicOriginFromRequest } from '@tourbillon/shared';
 import { requireBoardCompany } from '@/lib/board-route-auth';
 import { APPROVAL_ACTORS, approvalDecidedActivity } from '@/lib/approval-activity';
+import { approvalDetailHref } from '@/lib/approval-links';
 
 type ApprovalPayload = Record<string, unknown> & {
   title?: string;
@@ -48,6 +49,19 @@ export async function POST(
 
   if (!['approved', 'rejected'].includes(decision)) {
     return NextResponse.json({ error: 'decision must be approved or rejected' }, { status: 400 });
+  }
+  // A reject is the board's "request changes": the reason is the feedback the requesting agent
+  // gets, so it is required (board UI and this board API; MCP decide_approval is unchanged).
+  if (decision === 'rejected' && !note?.trim()) {
+    if ((req.headers.get('accept') ?? '').includes('text/html')) {
+      const back = new URL(approvalDetailHref(approvalId), publicOriginFromRequest(req));
+      back.searchParams.set('error', 'reason_required');
+      return NextResponse.redirect(back, 303);
+    }
+    return NextResponse.json(
+      { error: 'A reason is required to reject (it is sent to the requesting agent as Board feedback)' },
+      { status: 400 },
+    );
   }
 
   const approval = await db.query.approvals.findFirst({

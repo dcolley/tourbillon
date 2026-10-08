@@ -67,6 +67,24 @@ export interface ApprovalDetailRepo {
   getActivity(companyId: string, approvalId: string, issueIds: string[]): Promise<ApprovalActivityRow[]>;
   /** Company settings, used only to collect secret values to scrub from the payload. */
   getCompanySettings(companyId: string): Promise<unknown>;
+  /**
+   * Other approvals in this company that share at least one linked issue (newest first).
+   * Optional so older repos/tests without it simply show no related approvals.
+   */
+  getRelatedApprovals?(companyId: string, approvalId: string, issueIds: string[]): Promise<ApprovalRow[]>;
+}
+
+/** Max related approvals listed on the details page. */
+export const RELATED_APPROVALS_LIMIT = 20;
+
+export interface RelatedApproval {
+  id: string;
+  title: string;
+  type: string;
+  status: string;
+  createdAt: Date;
+  /** Linked issue ids shared with the approval being viewed. */
+  sharedIssueIds: string[];
 }
 
 export type ApprovalHistoryKind =
@@ -85,6 +103,8 @@ export interface ApprovalHistoryEvent {
   actor: string;
   text: string;
   note?: string;
+  /** How to label `note`: a rejection reason is the board's feedback to the agent. */
+  noteLabel?: 'Board feedback' | 'Note';
   issue?: { id: string; identifier: string };
   source: 'approvals' | 'activity_log';
 }
@@ -97,6 +117,8 @@ export interface ApprovalDetail {
   /** Linked ids with no issue in this company (deleted, or never valid). */
   missingIssueIds: string[];
   history: ApprovalHistoryEvent[];
+  /** Other approvals on the same linked issues (resubmissions show up here), newest first. */
+  relatedApprovals: RelatedApproval[];
 }
 
 /** Payload keys that hold credentials for this approval flow (not covered by the shared helper). */
@@ -261,6 +283,10 @@ export function buildApprovalHistory(
       source: 'approvals',
     });
   }
+  // A rejection reason is the board's feedback to the requesting agent ("request changes").
+  for (const e of events) {
+    if (e.kind === 'decided' && e.note) e.noteLabel = e.text === 'Rejected' ? 'Board feedback' : 'Note';
+  }
   // Untimed HITLy events sit right after creation.
   const time = (e: ApprovalHistoryEvent) => (e.at ?? approval.createdAt).getTime();
   return events
@@ -283,11 +309,14 @@ export async function loadApprovalDetail(
   if (!approval || approval.companyId !== companyId) return null;
 
   const issueIds = Array.isArray(approval.issueIds) ? approval.issueIds : [];
-  const [agent, issueRows, activity, settings] = await Promise.all([
+  const [agent, issueRows, activity, settings, relatedRows] = await Promise.all([
     approval.requestedByAgentId ? repo.getAgent(companyId, approval.requestedByAgentId) : Promise.resolve(null),
     issueIds.length ? repo.getIssues(companyId, issueIds) : Promise.resolve([]),
     repo.getActivity(companyId, approval.id, issueIds),
     repo.getCompanySettings(companyId),
+    issueIds.length && repo.getRelatedApprovals
+      ? repo.getRelatedApprovals(companyId, approval.id, issueIds)
+      : Promise.resolve([] as ApprovalRow[]),
   ]);
   const requester = agent && agent.companyId === companyId ? agent : null;
   const issuesById = new Map(
@@ -313,7 +342,30 @@ export async function loadApprovalDetail(
       .map(({ companyId: _c, ...i }) => ({ ...i, haltedByThis: i.boardApprovalId === approval.id })),
     missingIssueIds: issueIds.filter((id) => !issuesById.has(id)),
     history: buildApprovalHistory(approval, activity, { requesterName: requester?.name ?? null, issuesById }),
+    relatedApprovals: relatedApprovalsFor(approval, relatedRows),
   };
+}
+
+/** Same company, not this approval, shares a linked issue; newest first; capped. */
+export function relatedApprovalsFor(approval: ApprovalRow, rows: ApprovalRow[]): RelatedApproval[] {
+  const mine = new Set(Array.isArray(approval.issueIds) ? approval.issueIds : []);
+  const seen = new Set<string>();
+  return rows
+    .filter((r) => r.companyId === approval.companyId && r.id !== approval.id && !seen.has(r.id) && seen.add(r.id))
+    .map((r) => {
+      const payload = isPlainObject(r.payload) ? r.payload : {};
+      return {
+        id: r.id,
+        title: str(payload.title)?.trim() || r.type,
+        type: r.type,
+        status: r.status,
+        createdAt: r.createdAt,
+        sharedIssueIds: (Array.isArray(r.issueIds) ? r.issueIds : []).filter((id) => mine.has(id)),
+      };
+    })
+    .filter((r) => r.sharedIssueIds.length > 0)
+    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || (a.id < b.id ? -1 : 1))
+    .slice(0, RELATED_APPROVALS_LIMIT);
 }
 
 /** JSON body for `GET /api/approvals/:id` (dates as ISO strings). */
@@ -331,5 +383,6 @@ export function approvalDetailJson(d: ApprovalDetail) {
     linkedIssues: d.linkedIssues,
     missingIssueIds: d.missingIssueIds,
     history: d.history.map((e) => ({ ...e, at: iso(e.at) })),
+    relatedApprovals: d.relatedApprovals.map((r) => ({ ...r, createdAt: iso(r.createdAt) })),
   };
 }

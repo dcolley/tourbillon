@@ -1,7 +1,7 @@
 /** Drizzle implementation of ApprovalDetailRepo. Every query filters on company_id. */
 import { db, approvals, agents, issues, activityLog, companies } from '@tourbillon/db';
-import { and, asc, eq, inArray, or, sql } from 'drizzle-orm';
-import type { ApprovalDetailRepo } from './approval-detail';
+import { and, arrayOverlaps, asc, desc, eq, inArray, ne, or, sql } from 'drizzle-orm';
+import { RELATED_APPROVALS_LIMIT, type ApprovalDetailRepo } from './approval-detail';
 
 type Db = typeof db;
 
@@ -62,6 +62,21 @@ export function createApprovalDetailRepo(database: Db = db): ApprovalDetailRepo 
         .where(and(eq(activityLog.companyId, companyId), issueRowsCitingIt ? or(aboutApproval, issueRowsCitingIt) : aboutApproval))
         .orderBy(asc(activityLog.createdAt))
         .limit(500);
+    },
+    async getRelatedApprovals(companyId, approvalId, issueIds) {
+      if (issueIds.length === 0) return [];
+      return database
+        .select()
+        .from(approvals)
+        .where(
+          and(
+            eq(approvals.companyId, companyId),
+            ne(approvals.id, approvalId),
+            arrayOverlaps(approvals.issueIds, issueIds),
+          ),
+        )
+        .orderBy(desc(approvals.createdAt))
+        .limit(RELATED_APPROVALS_LIMIT);
     },
     async getCompanySettings(companyId) {
       const [row] = await database
