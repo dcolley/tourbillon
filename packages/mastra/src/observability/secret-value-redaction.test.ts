@@ -14,6 +14,19 @@ import { createHeartbeatRuntimeContext } from '../tools/api-client';
 import { buildSpanOutputProcessors } from '../mastra-instance';
 import { clearKnownSecretValues, registerKnownSecretValues } from './secret-value-redaction';
 
+// Workspace sources under packages/shared import @tourbillon/db, which is linked into this
+// package's node_modules but not into packages/shared's. Let the loader find it from here so the
+// agent-factory import chain resolves (same setup as tool-gate.test.ts).
+{
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const nodeModule = require('node:module') as { _initPaths?: () => void };
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const nodePath = require('node:path') as typeof import('node:path');
+  const local = nodePath.resolve(__dirname, '..', '..', 'node_modules');
+  process.env.NODE_PATH = [local, process.env.NODE_PATH].filter(Boolean).join(nodePath.delimiter);
+  nodeModule._initPaths?.();
+}
+
 /**
  * #100 regression: Cyber called listAgents and received TestSuper's runtimeConfig.secrets
  * values, which were then persisted in observability payloads. Values below are fakes.
@@ -122,16 +135,8 @@ describe('#100 agent secrets redaction', () => {
   });
 
   it('assembleAgentTools is the choke point: every assembled tool returns redacted runtimeConfig', async (t) => {
-    // agent-factory pulls the MCP/vault import chain (@tourbillon/shared → @tourbillon/db), which
-    // does not resolve in every local checkout; skip there rather than fake the import.
-    let agentFactory: typeof import('../agent-factory');
-    try {
-      agentFactory = await import('../agent-factory');
-    } catch (err) {
-      if ((err as { code?: string })?.code !== 'MODULE_NOT_FOUND') throw err;
-      t.skip('agent-factory import chain unavailable in this checkout (MODULE_NOT_FOUND)');
-      return;
-    }
+    // Runs for real (never skipped): an import failure here fails the test.
+    const agentFactory = await import('../agent-factory');
     // Assembled tools also run the live permission check; serve this agent's row in memory.
     const now = new Date();
     setToolGateDepsForTests({
