@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   PAYLOAD_DISPLAY_CAP,
+  REDACTION_UNAVAILABLE,
   collectValuesUnderSensitiveKeys,
   createApprovalRedactor,
   isSensitiveKey,
@@ -154,5 +155,83 @@ describe('approval redaction: values under credential keys', () => {
       deep,
     });
     assert.deepEqual(found.sort(), ['deep-resume-000001', 'sec-bbbbbbbbbb', 'tok-aaaaaaaaaaaa']);
+  });
+});
+
+describe('approval redaction: more key names (Test S9)', () => {
+  it('pwd, pass, x-auth, dsn and connectionString, any case/separator', () => {
+    for (const k of ['pwd', 'PWD', 'dbPwd', 'pass', 'Pass', 'x-auth', 'X-Auth', 'dsn', 'DSN', 'sentryDsn', 'connectionString', 'connection_string', 'ConnectionString']) {
+      assert.ok(isSensitiveKey(k), k);
+    }
+    for (const k of ['passenger', 'compass', 'bypass', 'passed', 'author']) assert.ok(!isSensitiveKey(k), k);
+  });
+
+  it('values under them are removed, in objects and in free text', () => {
+    const r = createApprovalRedactor();
+    const out = r.deep({ pwd: 'pwd-value-0001', Pass: 'pass-value-0002', 'X-Auth': 'xauth-value-0003', dsn: 'dsn-value-0004', connectionString: 'conn-value-0005' });
+    assert.deepEqual(Object.values(out), ['[redacted]', '[redacted]', '[redacted]', '[redacted]', '[redacted]']);
+    for (const [input, secret] of [
+      ['pwd=pwd-text-0001 next', 'pwd-text-0001'],
+      ['pass: pass-text-0002', 'pass-text-0002'],
+      ['X-Auth: xauth-text-0003', 'xauth-text-0003'],
+      ['SENTRY_DSN=dsn-text-0004', 'dsn-text-0004'],
+      ['"connectionString": "conn-text-0005"', 'conn-text-0005'],
+    ] as const) {
+      const t = r.text(input);
+      assert.ok(!t.includes(secret), t);
+      assert.match(t, /\[redacted\]/);
+    }
+    assert.equal(r.text('bypass=1 compass: north'), 'bypass=1 compass: north');
+  });
+});
+
+describe('approval redaction: URL userinfo of any scheme (Test S10)', () => {
+  const r = createApprovalRedactor();
+  for (const [input, secret, expected] of [
+    ['db postgres://app:pg-pass-0001@db.example.test:5432/app ok', 'pg-pass-0001', 'db postgres://app:[redacted]@db.example.test:5432/app ok'],
+    ['cache redis://:redis-pass-0002@cache.example.test:6379/0', 'redis-pass-0002', 'cache redis://:[redacted]@cache.example.test:6379/0'],
+    ['ws wss://u:wss-pass-0003@ws.example.test/feed', 'wss-pass-0003', 'ws wss://u:[redacted]@ws.example.test/feed'],
+    ['amqp://guest:p@ss-0004@mq.example.test', 'ss-0004', 'amqp://guest:[redacted]@mq.example.test'],
+    ['git ssh://tok-userinfo-0005@git.example.test/repo', 'tok-userinfo-0005', 'git ssh://[redacted]@git.example.test/repo'],
+  ] as const) {
+    it(`scrubs ${secret}`, () => {
+      const out = r.text(input);
+      assert.ok(!out.includes(secret), out);
+      assert.equal(out, expected);
+      assert.equal(r.text(out), out, 'idempotent');
+    });
+  }
+  it('URLs without userinfo and e-mail addresses are untouched', () => {
+    const s = 'see postgres://db.example.test:5432/app and mail ops@example.test';
+    assert.equal(r.text(s), s);
+  });
+});
+
+describe('approval redaction: PEM blocks (Test S11)', () => {
+  const r = createApprovalRedactor();
+  it('whole block removed, any label, text around it kept', () => {
+    const pem = '-----BEGIN RSA PRIVATE KEY-----\nMIIEpemBODY0001abc\nline2pemBODY\n-----END RSA PRIVATE KEY-----';
+    const out = r.text(`key:\n${pem}\nthanks`);
+    assert.ok(!out.includes('pemBODY'), out);
+    assert.equal(out, 'key:\n[redacted]\nthanks');
+    const cert = r.text('a -----BEGIN CERTIFICATE-----MIIcertBODY0002-----END CERTIFICATE----- b');
+    assert.equal(cert, 'a [redacted] b');
+  });
+  it('JSON-escaped newlines and an unterminated block', () => {
+    assert.ok(!r.text('{"k":"-----BEGIN PRIVATE KEY-----\\nescBODY0003\\n-----END PRIVATE KEY-----"}').includes('escBODY'));
+    assert.equal(r.text('cut -----BEGIN OPENSSH PRIVATE KEY-----\nopenBODY0004 no end'), 'cut [redacted]');
+  });
+});
+
+describe('approval redaction: vault values unavailable (#130 B3)', () => {
+  it('freeText hides non-empty text; text() and deep() still scrub', () => {
+    const r = createApprovalRedactor(['known-vault-value-123'], { vaultUnavailable: true });
+    assert.equal(r.unavailable, true);
+    assert.equal(r.freeText('anything at all'), REDACTION_UNAVAILABLE);
+    assert.equal(r.freeText(''), '');
+    assert.equal(r.text('apiKey=abcdefghijkl'), 'apiKey=[redacted]');
+    const ok = createApprovalRedactor(['known-vault-value-123']);
+    assert.equal(ok.unavailable, false);
+    assert.equal(ok.freeText('vault known-vault-value-123'), 'vault [redacted]');
   });
 });

@@ -107,7 +107,7 @@ export function plantedRepo(over: Partial<ApprovalRow> = {}): ApprovalDetailRepo
       return { hitlyGate: { apiKey: p.settings }, mcpCredentials: { github: p.actorName } };
     },
     async getSecretValues() {
-      return [p.vault, p.title, p.historyNote, p.provider, p.issueTitle];
+      return { values: [p.vault, p.title, p.historyNote, p.provider, p.issueTitle], vaultUnavailable: false };
     },
   };
 }

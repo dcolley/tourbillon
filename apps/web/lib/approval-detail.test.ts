@@ -60,6 +60,7 @@ interface Store {
   activity: ApprovalActivityRow[];
   settings: Record<string, unknown>;
   secretValues?: string[];
+  vaultUnavailable?: boolean;
 }
 
 /**
@@ -92,7 +93,7 @@ function memoryRepo(s: Store): ApprovalDetailRepo & { calls: string[] } {
     },
     async getSecretValues() {
       calls.push('getSecretValues');
-      return s.secretValues ?? [];
+      return { values: s.secretValues ?? [], vaultUnavailable: s.vaultUnavailable ?? false };
     },
   };
 }
