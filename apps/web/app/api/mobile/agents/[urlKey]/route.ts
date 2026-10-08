@@ -148,7 +148,7 @@ export async function PATCH(
       case 'profile':
         updated = await updateAgentProfile(agent.id, {
           name: String(body.name ?? ''),
-          // Omitted/null/blank (whitespace or zero-width only) keeps the current value
+          // Omitted/null/blank (whitespace or invisible only, per lib/edge-blank) keeps the current value
           // so a profile save can never wipe it. Non-strings are passed through and
           // refused by normalizeAgentTitle (400), not coerced.
           title:

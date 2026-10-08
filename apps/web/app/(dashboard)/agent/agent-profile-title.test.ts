@@ -238,6 +238,40 @@ describe('dashboard updateAgentProfileAction title validation', () => {
     }
   });
 
+  function profileForm(title: unknown, name = 'Alice') {
+    return formWith({ agentId: 'agent-1', currentUrlKey: 'alice', name, title, urlKey: 'alice', reportsToId: '' });
+  }
+
+  it('B1: title made only of the new invisible set → Title is required', async () => {
+    for (const title of ['\u00AD', '\u180E ', '\u200E\u200F', '\u202A\u202E', ' \u2066\u2069 ', '\u3164', '\u2800', '\u061C\u115F\uFFA0\u034F']) {
+      setPayloads = [];
+      const res = await action(null, profileForm(title));
+      assert.equal(res.ok, false, JSON.stringify(title));
+      if (!res.ok) assert.equal(res.error, 'Title is required.');
+      assert.equal(setPayloads.length, 0);
+    }
+  });
+
+  it('S3: stored 250×L, send 250×M → validation error', async () => {
+    agentRow = { ...agentRow, title: 'L'.repeat(250) };
+    const res = await action(null, profileForm('M'.repeat(250)));
+    assert.equal(res.ok, false);
+    if (!res.ok) assert.equal(res.error, 'Title must be at most 200 characters.');
+    assert.equal(setPayloads.length, 0);
+  });
+
+  it('S2: unchanged legacy blank / zero-width stored title does not block a name-only save', async () => {
+    for (const stored of ['   ', '\u200B', '\u3164 ']) {
+      for (const title of ['', stored]) {
+        setPayloads = [];
+        agentRow = { ...agentRow, title: stored, name: 'Alice' };
+        const res = await action(null, profileForm(title, 'Alice Renamed'));
+        assert.equal(res.ok, true, JSON.stringify([stored, title]));
+        assert.equal(setPayloads[0].title, stored);
+      }
+    }
+  });
+
   it('S3: unchanged over-cap title does not block a name-only save', async () => {
     const legacy = 'L'.repeat(AGENT_TITLE_MAX_CHARS + 50);
     agentRow = { ...agentRow, title: legacy };

@@ -24,6 +24,14 @@ let nextAgentFind: Row | null;
 
 const company = { id: 'company-a', name: 'Company A' };
 
+/** PM's added invisible set (B1), beyond `\s` + U+200B–200D/U+2060/U+FEFF. */
+const NEW_INVISIBLES = [
+  '\u00AD', '\u180E', '\u200E', '\u200F',
+  '\u202A', '\u202B', '\u202C', '\u202D', '\u202E',
+  '\u2066', '\u2067', '\u2068', '\u2069',
+  '\u3164', '\u2800', '\u061C', '\u115F', '\uFFA0', '\u034F',
+];
+
 describe('agent title validation', () => {
   let normalizeAgentTitle: typeof import('./agents').normalizeAgentTitle;
   let AGENT_TITLE_MAX_CHARS: typeof import('./agents').AGENT_TITLE_MAX_CHARS;
@@ -166,6 +174,58 @@ describe('agent title validation', () => {
       assert.equal(normalizeAgentTitle('  \u200BChief Technology Officer\uFEFF\n'), 'Chief Technology Officer');
     });
 
+    it('B1: refuses a title made only of the new invisible set (alone, mixed, with spaces)', () => {
+      const cases = [...NEW_INVISIBLES, ...NEW_INVISIBLES.map((c) => ` ${c} ${c} `), NEW_INVISIBLES.join(''), NEW_INVISIBLES.join(' ')];
+      for (const raw of cases) {
+        assert.throws(() => normalizeAgentTitle(raw), {
+          name: 'AgentValidationError',
+          message: 'Title is required.',
+        }, JSON.stringify(raw));
+      }
+    });
+
+    it('B1: trims the new invisible set from the edges', () => {
+      for (const ch of NEW_INVISIBLES) {
+        assert.equal(normalizeAgentTitle(`${ch} CTO ${ch}`), 'CTO', JSON.stringify(ch));
+      }
+    });
+
+    it('keeps a U+200B in the middle of a real title (edge trim only)', () => {
+      assert.equal(normalizeAgentTitle('Chief\u200BOfficer'), 'Chief\u200BOfficer');
+      assert.equal(normalizeAgentTitle('\u200E Chief\u200BOfficer \u200B'), 'Chief\u200BOfficer');
+    });
+
+    it('S2: unchanged blank / invisible-only current title is not re-validated', () => {
+      for (const current of ['', '   ', '\u200B', '\u3164', ' \u202E\u2069 ']) {
+        for (const raw of ['', '  ', '\u200B', '\u00AD\u2800', current]) {
+          assert.equal(normalizeAgentTitle(raw, { currentTitle: current }), current, JSON.stringify([raw, current]));
+        }
+      }
+    });
+
+    it('S2: a blank incoming title against a real current title is still required', () => {
+      for (const raw of ['', '   ', '\u200E', '\uFFA0 \u115F']) {
+        assert.throws(() => normalizeAgentTitle(raw, { currentTitle: 'CEO' }), {
+          name: 'AgentValidationError',
+          message: 'Title is required.',
+        });
+      }
+    });
+
+    it('S3: same-length different over-cap title is refused (equality is by content)', () => {
+      const current = 'L'.repeat(250);
+      assert.throws(() => normalizeAgentTitle('M'.repeat(250), { currentTitle: current }), {
+        name: 'AgentValidationError',
+        message: 'Title must be at most 200 characters.',
+      });
+    });
+
+    it('S2/S3: compares against the trimmed current title', () => {
+      const current = ` \u200B${'L'.repeat(250)}\u2069 `;
+      assert.equal(normalizeAgentTitle('L'.repeat(250), { currentTitle: current }), current);
+      assert.equal(normalizeAgentTitle('', { currentTitle: ' \u200B\u3164 ' }), ' \u200B\u3164 ');
+    });
+
     it('trims and accepts a normal title', () => {
       assert.equal(normalizeAgentTitle('  Chief Technology Officer  '), 'Chief Technology Officer');
     });
@@ -236,9 +296,70 @@ describe('agent title validation', () => {
       );
       assert.equal(inserts.length, 0);
     });
+
+    it('B1: invisible-only title → Title is required before insert', async () => {
+      nextAgentFind = null;
+      for (const title of NEW_INVISIBLES) {
+        await assert.rejects(
+          () => createAgent({ name: 'Bob', title: ` ${title} `, role: 'engineer' }),
+          { name: 'AgentValidationError', message: 'Title is required.' },
+        );
+      }
+      assert.equal(inserts.length, 0);
+    });
   });
 
   describe('updateAgentProfile title', () => {
+    it('B1: invisible-only title → Title is required, no write', async () => {
+      for (const title of ['\u200E\u200F', ' \u00AD ', '\u3164', '\u2800\u202A', '\u061C\u034F']) {
+        nextAgentFind = agentRow;
+        await assert.rejects(
+          () => updateAgentProfile('agent-1', { name: 'Alice', title, urlKey: 'alice' }),
+          { name: 'AgentValidationError', message: 'Title is required.' },
+        );
+      }
+      assert.equal(setPayloads.length, 0);
+    });
+
+    it('S3: stored 250×L, send 250×M → refused (not a same-length match)', async () => {
+      agentRow = { ...agentRow, title: 'L'.repeat(250) };
+      nextAgentFind = agentRow;
+      await assert.rejects(
+        () => updateAgentProfile('agent-1', { name: 'Alice', title: 'M'.repeat(250), urlKey: 'alice' }),
+        { name: 'AgentValidationError', message: 'Title must be at most 200 characters.' },
+      );
+      assert.equal(setPayloads.length, 0);
+    });
+
+    it('stored title with edge blanks: compared trimmed; a different real title replaces it trimmed', async () => {
+      const stored = ` \u200B${'L'.repeat(250)}\u202C\n`;
+      agentRow = { ...agentRow, title: stored };
+      nextAgentFind = agentRow;
+      const same = await updateAgentProfile('agent-1', { name: 'Alice', title: 'L'.repeat(250), urlKey: 'alice' });
+      assert.equal(same.title, stored);
+      assert.equal(setPayloads[0].title, stored);
+
+      setPayloads = [];
+      agentRow = { ...agentRow, title: '  \u200ECTO\uFEFF ' };
+      nextAgentFind = agentRow;
+      const changed = await updateAgentProfile('agent-1', { name: 'Alice', title: '\u2066Chief\u200BOfficer\u2069', urlKey: 'alice' });
+      assert.equal(changed.title, 'Chief\u200BOfficer');
+      assert.equal(setPayloads[0].title, 'Chief\u200BOfficer');
+    });
+
+    it('S2: legacy blank / zero-width stored title does not block a name-only save', async () => {
+      for (const stored of ['', '   ', '\u200B', '\u3164\u2800']) {
+        for (const title of [stored, '', '\u200B']) {
+          setPayloads = [];
+          agentRow = { ...agentRow, title: stored, name: 'Alice' };
+          nextAgentFind = agentRow;
+          const updated = await updateAgentProfile('agent-1', { name: 'Alice Renamed', title, urlKey: 'alice' });
+          assert.equal(updated.name, 'Alice Renamed', JSON.stringify([stored, title]));
+          assert.equal(setPayloads[0].title, stored);
+        }
+      }
+    });
+
     it('non-string title → AgentValidationError, no write', async () => {
       for (const title of [99, false, { x: 1 }, ['CTO'], null]) {
         nextAgentFind = agentRow;

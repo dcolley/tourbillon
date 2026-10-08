@@ -34,6 +34,14 @@ type Row = Record<string, unknown> & {
   updatedAt?: Date;
 };
 
+/** PM's added invisible set (B1), beyond `\s` + U+200B–200D/U+2060/U+FEFF. */
+const NEW_INVISIBLES = [
+  '\u00AD', '\u180E', '\u200E', '\u200F',
+  '\u202A', '\u202B', '\u202C', '\u202D', '\u202E',
+  '\u2066', '\u2067', '\u2068', '\u2069',
+  '\u3164', '\u2800', '\u061C', '\u115F', '\uFFA0', '\u034F',
+];
+
 let agentRow: Row;
 let inserts: Array<Record<string, unknown>>;
 let setPayloads: Array<Record<string, unknown>>;
@@ -309,7 +317,87 @@ describe('agent title validation surfaces (REST + mobile)', () => {
     });
   });
 
+  describe('REST POST — B1 invisible set', () => {
+    it('title made only of the new invisibles (or with spaces) → 400 Title is required', async () => {
+      nextAgentFind = null;
+      const cases = [...NEW_INVISIBLES, ...NEW_INVISIBLES.map((c) => `  ${c}\t${c} `), NEW_INVISIBLES.join(' ')];
+      for (const [i, title] of cases.entries()) {
+        const res = await restCreate({ name: 'Bob', title, role: 'engineer', urlKey: `bob-inv-${i}` });
+        assert.equal(res.status, 400, JSON.stringify(title));
+        assert.equal(res.body.error, 'Title is required.');
+      }
+      assert.equal(inserts.length, 0);
+    });
+
+    it('new invisibles are trimmed from the edges; U+200B in the middle is kept', async () => {
+      nextAgentFind = null;
+      const res = await restCreate({
+        name: 'Bob',
+        title: '\u202E\u2066 Chief\u200BOfficer \u2069\u00AD\u3164',
+        role: 'engineer',
+        urlKey: 'bob-edges',
+      });
+      assert.equal(res.status, 201);
+      assert.equal(res.body.title, 'Chief\u200BOfficer');
+      assert.equal(inserts[0].title, 'Chief\u200BOfficer');
+    });
+  });
+
   describe('mobile PATCH profile', () => {
+    it('B1: title made only of the new invisibles keeps the current title (D2), never replaces it', async () => {
+      for (const ch of NEW_INVISIBLES) {
+        for (const title of [ch, ` ${ch} ${ch} `]) {
+          agentRow = agentFixture();
+          nextAgentFind = agentRow;
+          setPayloads = [];
+          const res = await mobileProfile({ title });
+          assert.equal(res.status, 200, JSON.stringify(title));
+          assert.equal(res.body.agent?.title, 'CEO');
+          assert.equal(setPayloads[0].title, 'CEO');
+        }
+      }
+    });
+
+    it('S3: stored 250×L, send 250×M → 400', async () => {
+      agentRow = { ...agentFixture(), title: 'L'.repeat(250) };
+      nextAgentFind = agentRow;
+      const res = await mobileProfile({ title: 'M'.repeat(250) });
+      assert.equal(res.status, 400);
+      assert.equal(res.body.error, 'Title must be at most 200 characters.');
+      assert.equal(setPayloads.length, 0);
+    });
+
+    it('stored title with edge blanks is compared trimmed; a different real title replaces it', async () => {
+      const stored = `\u200E ${'L'.repeat(250)} \uFEFF`;
+      agentRow = { ...agentFixture(), title: stored };
+      nextAgentFind = agentRow;
+      const same = await mobileProfile({ title: 'L'.repeat(250) });
+      assert.equal(same.status, 200);
+      assert.equal(setPayloads[0].title, stored);
+
+      setPayloads = [];
+      agentRow = { ...agentFixture(), title: ' \u200BCEO\u2069 ' };
+      nextAgentFind = agentRow;
+      const changed = await mobileProfile({ title: ' Chief\u200BOfficer\u00AD' });
+      assert.equal(changed.status, 200);
+      assert.equal(changed.body.agent?.title, 'Chief\u200BOfficer');
+      assert.equal(setPayloads[0].title, 'Chief\u200BOfficer');
+    });
+
+    it('S2: name-only save passes when the stored title is legacy blank / zero-width / invisible', async () => {
+      for (const stored of ['', '   ', '\u200B', '\u200B\uFEFF', '\u3164', ' \u2800\u202A ']) {
+        for (const body of [{}, { title: null }, { title: '' }, { title: '\u200B' }, { title: stored }]) {
+          agentRow = { ...agentFixture(), title: stored };
+          nextAgentFind = agentRow;
+          setPayloads = [];
+          const res = await mobileProfile({ name: 'Alice Renamed', ...body });
+          assert.equal(res.status, 200, JSON.stringify([stored, body, res.body]));
+          assert.equal(setPayloads[0].title, stored);
+          assert.equal(setPayloads[0].name, 'Alice Renamed');
+        }
+      }
+    });
+
     it('non-string title → 400 (no coercion / no keep-current)', async () => {
       for (const title of [42, true, { t: 1 }, ['CTO']]) {
         nextAgentFind = agentRow;

@@ -115,8 +115,8 @@ export const AGENT_TITLE_MAX_CHARS = 200;
 export type NormalizeAgentTitleOptions = {
   /**
    * When set (profile update), a title that matches the current one after edge-blank trim
-   * is kept as-is and the 200-char cap is not re-applied — so a legacy over-cap title does
-   * not block a name-only save.
+   * is kept as-is and not re-validated (no required check, no 200-char cap) — so a legacy
+   * blank, invisible-only or over-cap title does not block a name-only save (S2/S3).
    */
   currentTitle?: string;
 };
@@ -125,9 +125,10 @@ export type NormalizeAgentTitleOptions = {
  * Validate and normalise an agent title for create/update:
  * - missing (undefined/null) or empty after edge-blank trim is refused (title is required);
  * - any other non-string (number, boolean, object, array) is refused, never coerced;
- * - edge-blank trimmed (whitespace + zero-width; same helper as approval reasons);
- * - at most AGENT_TITLE_MAX_CHARS after trim when the value *changes*; unchanged current
- *   titles skip the length check (S3).
+ * - edge-blank trimmed (whitespace + invisible set in lib/edge-blank; same helper as approval reasons);
+ * - unchanged current title (trimmed vs trimmed) is returned as stored, skipping every check
+ *   below (S2: required; S3: length);
+ * - at most AGENT_TITLE_MAX_CHARS after trim when the value changes.
  */
 export function normalizeAgentTitle(raw: unknown, opts?: NormalizeAgentTitleOptions): string {
   if (raw === undefined || raw === null) throw new AgentValidationError('Title is required.');
@@ -135,11 +136,13 @@ export function normalizeAgentTitle(raw: unknown, opts?: NormalizeAgentTitleOpti
     throw new AgentValidationError('Title must be a string.');
   }
   const title = trimEdgeBlank(raw);
-  if (!title) throw new AgentValidationError('Title is required.');
+  // S2/S3: an unchanged title (trimmed vs trimmed) is never re-validated — neither the
+  // required check (legacy blank / invisible-only) nor the 200 cap — so name-only saves pass.
   const current = opts?.currentTitle;
   if (typeof current === 'string' && title === trimEdgeBlank(current)) {
     return current;
   }
+  if (!title) throw new AgentValidationError('Title is required.');
   if (title.length > AGENT_TITLE_MAX_CHARS) {
     throw new AgentValidationError(
       `Title must be at most ${AGENT_TITLE_MAX_CHARS} characters.`,
