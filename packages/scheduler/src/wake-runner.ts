@@ -45,8 +45,11 @@ import {
   notifyRunSlotFreed,
   removeDeferredWake,
   runCapBackoffMs,
+  sameWakeTarget,
   startRunUnderCap,
+  takeDeferredWakeAfterAttempt,
   waitForRunSlot,
+  wakeTargetForLog,
   type DeferredWake,
 } from './run-cap';
 import { buildRunWakeMessage, createDrizzleWakeContextRepo } from './wake-context';
@@ -116,6 +119,56 @@ type RunCapTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 /** In-process single-flight + follow-up queue per agent (replaces BullMQ dedupe). */
 const agentLocks = new Map<string, Promise<void>>();
 const agentFollowUps = new Map<string, WakeRequest[]>();
+
+/**
+ * One follow-up per agent, latest wins (unchanged behaviour). When the wake that loses is not
+ * the same as the one kept and either is a non-timer wake, log a warning (ids only) so a replaced
+ * assignment / mention / approval wake is visible rather than silent.
+ */
+function warnFollowUpReplaced(kept: WakeRequest, dropped: WakeRequest): void {
+  if (sameWakeTarget(kept, dropped)) return;
+  if (kept.wakeReason === 'timer' && dropped.wakeReason === 'timer') return;
+  createTraceLogger('wake', { agentId: kept.agentId, companyId: kept.companyId }).warn(
+    'follow-up wake replaced (one follow-up per agent, latest wins)',
+    {
+      agentId: kept.agentId,
+      wakeType: kept.wakeReason,
+      target: wakeTargetForLog(kept),
+      replacedWakeType: dropped.wakeReason,
+      replacedTarget: wakeTargetForLog(dropped),
+    },
+  );
+}
+
+/** Queue `wake` as the agent's follow-up; it replaces any earlier one (latest wins). */
+function setAgentFollowUp(wake: WakeRequest): void {
+  const prev = agentFollowUps.get(wake.agentId)?.[0];
+  agentFollowUps.set(wake.agentId, [wake]);
+  if (prev) warnFollowUpReplaced(wake, prev);
+}
+
+/**
+ * Queue a wake that was folded into a deferred entry after its attempt had already read the
+ * entry. A follow-up already set arrived later than it, so that one wins (latest wins).
+ */
+function setAgentFollowUpUnlessNewer(wake: WakeRequest): void {
+  const newer = agentFollowUps.get(wake.agentId)?.[0];
+  if (newer) {
+    warnFollowUpReplaced(newer, wake);
+    return;
+  }
+  agentFollowUps.set(wake.agentId, [wake]);
+}
+
+/** Agent or company row is gone (deleted). The message is unchanged from before. */
+class WakeTargetMissingError extends Error {
+  constructor(
+    readonly missing: 'agent' | 'company',
+    message: string,
+  ) {
+    super(message);
+  }
+}
 
 /** In-flight AbortControllers keyed by runId for operator force-kill. */
 const runAbortControllers = new Map<string, AbortController>();
@@ -317,7 +370,7 @@ export async function startWake(wake: WakeRequest): Promise<StartWakeResult> {
         done: Promise.resolve({ runId: '', status: 'skipped', errorText }),
       };
     }
-    agentFollowUps.set(wake.agentId, [wake]);
+    setAgentFollowUp(wake);
     createTraceLogger('wake', {
       agentId: wake.agentId,
       companyId: wake.companyId,
@@ -406,37 +459,63 @@ async function runWakeDeferringAtCap(
   opts: { onRunCreated?: (runId: string) => void; onDeferred?: (reason: string) => void },
 ): Promise<WakeResult> {
   let entry: DeferredWake<WakeRequest> | undefined;
-  const leaveQueue = () => {
-    if (entry) removeDeferredWake(entry);
+  let attempt = 0;
+  /** The wake the current attempt read at its start (compared with entry.wake when it ends). */
+  let usedWake: WakeRequest = wake;
+  /** Last wake logged in full: retries of the same wake log a short line only. */
+  let loggedWake: WakeRequest | undefined;
+  const tracer = () => createTraceLogger('wake', { agentId: wake.agentId, companyId: wake.companyId });
+
+  const leaveQueue = (runId?: string) => {
+    if (!entry) return;
+    const queued = entry;
     entry = undefined;
+    // Atomic with coalescing: a wake folded in after this attempt read the entry is returned here
+    // and becomes the agent's follow-up (it runs after this run), instead of being lost.
+    const replacement = takeDeferredWakeAfterAttempt(queued, usedWake);
+    if (replacement) setAgentFollowUpUnlessNewer(replacement);
+    if (runId !== undefined) {
+      tracer().info('deferred wake resumed', {
+        attempts: attempt,
+        waitedMs: Date.now() - queued.enqueuedAt,
+        wakeReason: usedWake.wakeReason,
+        status: runId ? 'started' : 'skipped',
+        runId,
+        ...(replacement ? { followUpWakeReason: replacement.wakeReason } : {}),
+      });
+    }
   };
   const onRunCreated = (runId: string) => {
-    leaveQueue(); // run row written (or skipped): free the front for the next oldest wake
+    leaveQueue(runId); // run row written (or skipped): free the front for the next oldest wake
     opts.onRunCreated?.(runId);
   };
   try {
-    for (let attempt = 0; ; attempt++) {
+    for (; ; attempt++) {
       if (entry && deferredWakesAhead(wake.companyId, entry) > 0) {
         await waitForRunSlot(wake.companyId, runCapBackoffMs(attempt));
         continue;
       }
-      const queued = entry;
-      const result = await runWake(entry?.wake ?? wake, { onRunCreated, deferredEntry: entry });
-      if (result.status !== 'deferred') {
-        if (queued) {
-          createTraceLogger('wake', { agentId: wake.agentId, companyId: wake.companyId }).info(
-            'deferred wake resumed',
-            { attempts: attempt, waitedMs: Date.now() - queued.enqueuedAt, reasons: queued.reasons, runId: result.runId, status: result.status },
-          );
-        }
-        return result;
-      }
+      usedWake = entry?.wake ?? wake;
+      const quiet = usedWake === loggedWake;
+      loggedWake = usedWake;
+      const result = await runWake(usedWake, { onRunCreated, deferredEntry: entry, quiet, attempt });
+      if (result.status !== 'deferred') return result;
       if (!entry) {
         entry = enqueueDeferredWake(wake);
         opts.onDeferred?.(result.errorText ?? 'deferred: company concurrent-run cap reached');
       }
       await waitForRunSlot(wake.companyId, runCapBackoffMs(attempt));
     }
+  } catch (err) {
+    if (entry && err instanceof WakeTargetMissingError) {
+      tracer().warn('deferred wake dropped: agent or company no longer exists', {
+        missing: err.missing,
+        wakeType: entry.wake.wakeReason,
+        attempts: attempt,
+        waitedMs: Date.now() - entry.enqueuedAt,
+      });
+    }
+    throw err;
   } finally {
     leaveQueue();
   }
@@ -444,7 +523,13 @@ async function runWakeDeferringAtCap(
 
 async function runWake(
   wake: WakeRequest,
-  opts: { onRunCreated?: (runId: string) => void; deferredEntry?: DeferredWake } = {},
+  opts: {
+    onRunCreated?: (runId: string) => void;
+    deferredEntry?: DeferredWake;
+    /** Retry of a deferred wake already logged in full: log a short line only. */
+    quiet?: boolean;
+    attempt?: number;
+  } = {},
 ): Promise<WakeResult> {
   const { agentId, companyId, invocationSource, wakeReason, taskId } = wake;
   const tracer = createTraceLogger('wake', {
@@ -454,21 +539,25 @@ async function runWake(
     wakeReason,
   });
 
-  tracer.info('processing wake', {
-    invocationSource,
-    apiBase: getInternalApiUrl(),
-    wake,
-  });
+  if (opts.quiet) {
+    tracer.info('retrying deferred wake', { invocationSource, attempt: opts.attempt });
+  } else {
+    tracer.info('processing wake', {
+      invocationSource,
+      apiBase: getInternalApiUrl(),
+      wake,
+    });
+  }
 
   const agentRecord = await db.query.agents.findFirst({
     where: and(eq(agents.id, agentId), eq(agents.companyId, companyId)),
   });
-  if (!agentRecord) throw new Error(`Agent ${agentId} not found`);
+  if (!agentRecord) throw new WakeTargetMissingError('agent', `Agent ${agentId} not found`);
 
   const agentTracer = tracer.child({ agentName: agentRecord.name });
 
   const company = await db.query.companies.findFirst({ where: eq(companies.id, companyId) });
-  if (!company) throw new Error(`Company ${companyId} not found`);
+  if (!company) throw new WakeTargetMissingError('company', `Company ${companyId} not found`);
 
   // #100: register every company secret value (all agents' runtimeConfig + company settings)
   // so observability scrubs a peer's secret even if it reaches this run's spans.
@@ -515,7 +604,7 @@ async function runWake(
   let assignedIssue: Awaited<ReturnType<typeof db.query.issues.findFirst>> | undefined;
   if (taskId) {
     assignedIssue = await db.query.issues.findFirst({ where: eq(issues.id, taskId) });
-    agentTracer.info('assignment wake target issue', {
+    if (!opts.quiet) agentTracer.info('assignment wake target issue', {
       taskId,
       found: Boolean(assignedIssue),
       identifier: assignedIssue?.identifier,

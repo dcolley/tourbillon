@@ -8,7 +8,7 @@
  */
 import { describe, it, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { runCapTiming, warnDroppedDeferredWakes } from './run-cap';
+import { notifyRunSlotFreed, runCapTiming, warnDroppedDeferredWakes } from './run-cap';
 
 const env = process.env as Record<string, string | undefined>;
 
@@ -23,6 +23,8 @@ const store: Record<string, Row[]> = {};
 let txCount = 0;
 let lockStatements = 0;
 let updateDelayMs = 0;
+/** Optional hook awaited at the start of every db.query.<table>.findFirst (to hold a read open). */
+let findFirstHook: ((table: string, where?: Cond) => Promise<void>) | undefined;
 /** Highest number of simultaneously `running` rows seen per company. */
 const maxRunning: Record<string, number> = {};
 const runningIn = (companyId: string) =>
@@ -67,7 +69,12 @@ describe('company concurrent-run cap (wake-runner)', () => {
     const fakeDb = {
       query: new Proxy({}, {
         get: (_t, name: string) => ({
-          findFirst: async ({ where }: { where?: Cond } = {}) => (store[name] ?? []).find((r) => match(r, where)),
+          // Copies, like a real query: code that skips a re-read on retry can't see later changes.
+          findFirst: async ({ where }: { where?: Cond } = {}) => {
+            if (findFirstHook) await findFirstHook(name, where);
+            const row = (store[name] ?? []).find((r) => match(r, where));
+            return row ? structuredClone(row) : undefined;
+          },
         }),
       }),
       insert,
@@ -136,6 +143,7 @@ describe('company concurrent-run cap (wake-runner)', () => {
     txCount = 0;
     lockStatements = 0;
     updateDelayMs = 0;
+    findFirstHook = undefined;
     for (const k of Object.keys(maxRunning)) delete maxRunning[k];
     store.agents = [
       agent('a1', 'company-a'), agent('a2', 'company-a'), agent('a3', 'company-a'), agent('a4', 'company-a'),
@@ -245,6 +253,7 @@ describe('company concurrent-run cap (wake-runner)', () => {
     store.heartbeatRuns.push(running('r1', 'a2', 'company-a'));
     const started = await startWake(wake('a1', 'company-a'));
     assert.equal(started.deferred, true);
+    await sleep(30); // at least one retry has read the (active) agent: the next one must re-read it
     store.agents.find((r) => r.id === 'a1')!.status = 'paused';
     store.heartbeatRuns[0].status = 'succeeded';
     const result = await started.done;
@@ -318,23 +327,215 @@ describe('company concurrent-run cap (wake-runner)', () => {
 
   it('no starvation: repeated timer wakes never jump an older deferred wake, even right after a slot frees', async () => {
     setCap('company-a', 1);
-    runCapTiming.baseMs = 150; // the deferred wake has not retried yet when the timers arrive
-    runCapTiming.maxMs = 150;
+    // Deterministic: backoff far longer than the test, so a1 retries only when told a slot freed.
+    runCapTiming.baseMs = 30_000;
+    runCapTiming.maxMs = 30_000;
     store.heartbeatRuns.push(running('r1', 'a2', 'company-a'));
     const onDemand = await startWake(wakeOf('a1', 'company-a', 'on_demand'));
     assert.equal(onDemand.deferred, true);
-    store.heartbeatRuns[0].status = 'succeeded'; // slot is free, a1 is still sleeping
+    store.heartbeatRuns[0].status = 'succeeded'; // slot is free, a1 has not retried (no notification)
     const timers = [];
-    for (let i = 0; i < 5; i++) {
-      timers.push(await startWake(wakeOf('a3', 'company-a', 'timer')));
-      await sleep(5);
-    }
+    for (let i = 0; i < 5; i++) timers.push(await startWake(wakeOf('a3', 'company-a', 'timer')));
     assert.ok(timers.every((t) => t.deferred), 'every timer wake deferred behind a1');
     assert.equal(rowsFor('a3').length, 0, 'no timer run jumped the queue');
+    assert.equal(rowsFor('a1').length, 0, 'a1 still waiting');
+    notifyRunSlotFreed('company-a');
     await onDemand.done;
+    for (let i = 0; i < 300 && rowsFor('a3').length === 0; i++) {
+      notifyRunSlotFreed('company-a'); // stands in for the slot-freed signal; no timing dependence
+      await sleep(5);
+    }
     await Promise.all(timers.map((t) => t.done));
-    await waitFor(() => rowsFor('a3').length >= 1);
     assert.deepEqual(runOrder(), ['a1', 'a3'], 'a1 first, then ONE coalesced timer run');
+  });
+
+  const captureLogs = () => {
+    const lines: string[] = [];
+    const { log, warn } = console;
+    console.log = (...args: unknown[]) => void lines.push(args.map(String).join(' '));
+    console.warn = (...args: unknown[]) => void lines.push(args.map(String).join(' '));
+    return { lines, restore: () => Object.assign(console, { log, warn }) };
+  };
+
+  /** Hold the next a1 agent read (the start of a retry); `onHold` runs when it is reached. */
+  const holdNextAgentRead = (agentId: string, onHold: () => void = () => {}) => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let reached!: () => void;
+    const atStart = new Promise<void>((r) => (reached = r));
+    let armed = true;
+    findFirstHook = async (table, where) => {
+      if (!armed || table !== 'agents' || !JSON.stringify(where).includes(`"${agentId}"`)) return;
+      armed = false;
+      onHold();
+      reached();
+      await held;
+    };
+    return { atStart, release };
+  };
+
+  it('a wake folded in while the deferred retry is starting is not lost: it runs as the follow-up', async () => {
+    setCap('company-a', 1);
+    store.heartbeatRuns.push(running('r1', 'a2', 'company-a'));
+    const first = await startWake(wakeOf('a1', 'company-a', 'timer'));
+    assert.equal(first.deferred, true);
+    // The next retry frees the slot and is held right after it read its wake (before any insert).
+    const hold = holdNextAgentRead('a1', () => {
+      store.heartbeatRuns[0].status = 'succeeded';
+    });
+    await hold.atStart;
+    const late = await startWake(wakeOf('a1', 'company-a', 'assignment', { taskId: 'task-9' }));
+    assert.equal(late.status, 'queued');
+    hold.release();
+    await first.done;
+    await waitFor(() => rowsFor('a1').length >= 2);
+    await sleep(30);
+    const snaps = rowsFor('a1').map((r) => r.contextSnapshot as Row);
+    assert.deepEqual(
+      snaps.map((x) => [x.wakeReason, x.taskId]),
+      [['timer', undefined], ['assignment', 'task-9']],
+      'the retry ran the wake it had read, then the folded-in assignment ran as the follow-up',
+    );
+    assert.ok((maxRunning['company-a'] ?? 0) <= 1);
+  });
+
+  it('a wake folded in while a retry is in flight that defers again joins the entry: the next retry runs it', async () => {
+    setCap('company-a', 1);
+    store.heartbeatRuns.push(running('r1', 'a2', 'company-a'));
+    const first = await startWake(wakeOf('a1', 'company-a', 'timer'));
+    assert.equal(first.deferred, true);
+    const hold = holdNextAgentRead('a1'); // slot stays taken: this retry defers again
+    await hold.atStart;
+    const late = await startWake(wakeOf('a1', 'company-a', 'assignment', { taskId: 'task-9' }));
+    assert.equal(late.status, 'queued');
+    assert.equal(late.deferred, true, 'folded into the deferred entry');
+    hold.release();
+    await sleep(40); // that retry deferred; no run yet
+    assert.equal(rowsFor('a1').length, 0);
+    store.heartbeatRuns[0].status = 'succeeded';
+    await first.done;
+    await sleep(40);
+    const snaps = rowsFor('a1').map((r) => r.contextSnapshot as Row);
+    assert.deepEqual(snaps.map((x) => [x.wakeReason, x.taskId]), [['assignment', 'task-9']], 'one run, the assignment');
+  });
+
+  it('follow-up slot is latest-wins (as without a cap): a replaced non-timer wake logs a warning with ids only', async () => {
+    setCap('company-a', 1);
+    store.heartbeatRuns.push(running('r1', 'a2', 'company-a'));
+    const first = await startWake(wakeOf('a1', 'company-a', 'on_demand'));
+    assert.equal(first.deferred, true);
+    const logs = captureLogs();
+    try {
+      await startWake(wakeOf('a1', 'company-a', 'assignment', { taskId: 'task-2', wakePayloadJson: { note: 'sk-secret-9' } }));
+      assert.equal(logs.lines.filter((l) => /follow-up wake replaced/.test(l)).length, 0, 'nothing replaced yet');
+      await startWake(wakeOf('a1', 'company-a', 'assignment', { taskId: 'task-3' }));
+    } finally {
+      logs.restore();
+    }
+    const warned = logs.lines.filter((l) => /follow-up wake replaced/.test(l));
+    assert.equal(warned.length, 1);
+    const data = JSON.parse(warned[0].slice(warned[0].indexOf('{')));
+    assert.deepEqual(data, {
+      agentId: 'a1',
+      wakeType: 'assignment',
+      target: { taskId: 'task-3' },
+      replacedWakeType: 'assignment',
+      replacedTarget: { taskId: 'task-2' },
+    });
+    assert.doesNotMatch(warned[0], /sk-secret/);
+    store.heartbeatRuns[0].status = 'succeeded';
+    await first.done;
+    await waitFor(() => rowsFor('a1').length >= 2);
+    await sleep(30);
+    const snaps = rowsFor('a1').map((r) => r.contextSnapshot as Row);
+    assert.deepEqual(snaps.map((x) => [x.wakeReason, x.taskId]), [['on_demand', undefined], ['assignment', 'task-3']]);
+  });
+
+  it('a deferred retry logs the full wake once, then short retry lines; resumed is logged when the run row is written', async () => {
+    setCap('company-a', 1);
+    store.heartbeatRuns.push(running('r1', 'a2', 'company-a'));
+    updateDelayMs = 80; // the run "lasts" a while after its row is written
+    const logs = captureLogs();
+    let statusWhenResumedLogged: unknown;
+    const origLog = console.log;
+    console.log = (...args: unknown[]) => {
+      origLog(...args);
+      if (/deferred wake resumed/.test(String(args[0]))) statusWhenResumedLogged = rowsFor('a1')[0]?.status;
+    };
+    let done: Promise<unknown> | undefined;
+    try {
+      const started = await startWake(wakeOf('a1', 'company-a', 'on_demand', { wakePayloadJson: { note: 'payload-sentinel' } }));
+      assert.equal(started.deferred, true);
+      done = started.done;
+      await sleep(80); // several retries at 5–20 ms
+      store.heartbeatRuns[0].status = 'succeeded';
+      await done;
+    } finally {
+      logs.restore();
+    }
+    const a1Lines = logs.lines.filter((l) => l.includes('agent=a1'));
+    assert.equal(a1Lines.filter((l) => /processing wake/.test(l)).length, 1, 'full wake logged once');
+    assert.ok(a1Lines.filter((l) => /retrying deferred wake/.test(l)).length >= 2, 'retries log a short line');
+    assert.equal(a1Lines.filter((l) => l.includes('payload-sentinel')).length, 1, 'payload only in the one full line');
+    assert.equal(statusWhenResumedLogged, 'running', 'resumed is logged when the run starts, not when it ends');
+    const resumed = a1Lines.find((l) => /deferred wake resumed/.test(l))!;
+    const data = JSON.parse(resumed.slice(resumed.indexOf('{')));
+    assert.equal(data.status, 'started');
+    assert.ok(data.waitedMs < 1000);
+  });
+
+  it('agent deleted while deferred: the dropped wake is logged (no run)', async () => {
+    setCap('company-a', 1);
+    store.heartbeatRuns.push(running('r1', 'a2', 'company-a'));
+    const started = await startWake(wakeOf('a1', 'company-a', 'assignment', { taskId: 'task-5' }));
+    assert.equal(started.deferred, true);
+    const logs = captureLogs();
+    let result: { status: string; errorText?: string };
+    try {
+      store.agents = store.agents.filter((r) => r.id !== 'a1');
+      store.heartbeatRuns[0].status = 'succeeded';
+      result = await started.done;
+    } finally {
+      logs.restore();
+    }
+    assert.equal(result.status, 'failed');
+    assert.match(result.errorText ?? '', /Agent a1 not found/);
+    assert.equal(rowsFor('a1').length, 0);
+    const dropped = logs.lines.filter((l) => /deferred wake dropped/.test(l));
+    assert.equal(dropped.length, 1);
+    assert.match(dropped[0], /"missing":"agent"/);
+    assert.match(dropped[0], /"wakeType":"assignment"/);
+  });
+
+  it('company deleted while deferred: the dropped wake is logged (no run)', async () => {
+    setCap('company-a', 1);
+    store.heartbeatRuns.push(running('r1', 'a2', 'company-a'));
+    const started = await startWake(wakeOf('a1', 'company-a', 'on_demand'));
+    assert.equal(started.deferred, true);
+    const logs = captureLogs();
+    try {
+      store.companies = store.companies.filter((r) => r.id !== 'company-a');
+      store.heartbeatRuns[0].status = 'succeeded';
+      await started.done;
+    } finally {
+      logs.restore();
+    }
+    assert.equal(rowsFor('a1').length, 0);
+    assert.match(logs.lines.find((l) => /deferred wake dropped/.test(l)) ?? '', /"missing":"company"/);
+  });
+
+  it('company paused while deferred: the retry re-reads the company and skips (no run)', async () => {
+    setCap('company-a', 1);
+    store.heartbeatRuns.push(running('r1', 'a2', 'company-a'));
+    const started = await startWake(wakeOf('a1', 'company-a', 'on_demand'));
+    assert.equal(started.deferred, true);
+    await sleep(30); // at least one retry has read the (active) company
+    store.companies.find((r) => r.id === 'company-a')!.status = 'paused';
+    store.heartbeatRuns[0].status = 'succeeded';
+    const result = await started.done;
+    assert.equal(result.status, 'skipped');
+    assert.match(result.errorText ?? '', /company status paused/);
+    assert.equal(rowsFor('a1').length, 0);
   });
 
   it('shutdown: ONE warning line with the count, agentId + wake type of non-timer drops, timers counted; no payloads', async () => {

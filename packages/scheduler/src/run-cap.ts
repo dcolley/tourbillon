@@ -133,6 +133,22 @@ export function enqueueDeferredWake<W extends DeferrableWake>(wake: W, now = Dat
   return entry;
 }
 
+/**
+ * The attempt that used `usedWake` has written its run row (or was skipped / errored): drop the
+ * entry and return the wake that was folded in after the attempt read it, if any. The check and the
+ * removal happen in one synchronous step, so a coalesce either landed before it (and is returned
+ * here for the caller to queue as the follow-up) or finds no entry and becomes the follow-up
+ * itself. Nothing folded into the entry can be lost.
+ */
+export function takeDeferredWakeAfterAttempt<W extends DeferrableWake>(
+  entry: DeferredWake<W>,
+  usedWake: W,
+): W | undefined {
+  const replacement = entry.wake !== usedWake ? entry.wake : undefined;
+  removeDeferredWake(entry);
+  return replacement;
+}
+
 /** Drop an entry (its run started, was skipped or errored) and let the next oldest try now. */
 export function removeDeferredWake(entry: DeferredWake): void {
   const queue = deferredQueues.get(entry.companyId);
@@ -156,19 +172,34 @@ export function deferredWakeForAgent(agentId: string): DeferredWake | undefined 
   return deferredByAgent.get(agentId);
 }
 
+/** Same wake type and same target (task / approval / comment ids). */
+export function sameWakeTarget(a: DeferrableWake, b: DeferrableWake): boolean {
+  return (
+    a.wakeReason === b.wakeReason &&
+    a.taskId === b.taskId &&
+    a.approvalId === b.approvalId &&
+    a.wakeCommentId === b.wakeCommentId
+  );
+}
+
+/** Ids-only description of a wake's target for log lines (no payloads, notes or titles). */
+export function wakeTargetForLog(wake: DeferrableWake): Record<string, string> {
+  const target: Record<string, string> = {};
+  if (wake.taskId) target.taskId = wake.taskId;
+  if (wake.approvalId) target.approvalId = wake.approvalId;
+  if (wake.wakeCommentId) target.wakeCommentId = wake.wakeCommentId;
+  return target;
+}
+
 /**
  * Fold a further wake for an agent into its deferred entry (keeps the earliest enqueue time).
  * A non-timer wake replaces a timer one; two non-timer wakes merge only when they target the same
- * thing. Returns false when they differ (the caller keeps it as the usual follow-up, never lost).
+ * thing. Returns false when they differ: the caller keeps it as the usual per-agent follow-up
+ * (one follow-up per agent, latest wins, same as without a cap).
  */
 export function coalesceIntoDeferredWake<W extends DeferrableWake>(entry: DeferredWake<W>, wake: W): boolean {
   const cur = entry.wake;
-  const sameTarget =
-    cur.wakeReason === wake.wakeReason &&
-    cur.taskId === wake.taskId &&
-    cur.approvalId === wake.approvalId &&
-    cur.wakeCommentId === wake.wakeCommentId;
-  if (cur.wakeReason !== 'timer' && wake.wakeReason !== 'timer' && !sameTarget) return false;
+  if (cur.wakeReason !== 'timer' && wake.wakeReason !== 'timer' && !sameWakeTarget(cur, wake)) return false;
   if (cur.wakeReason === 'timer' && wake.wakeReason !== 'timer') entry.wake = wake;
   if (!entry.reasons.includes(wake.wakeReason)) entry.reasons.push(wake.wakeReason);
   return true;

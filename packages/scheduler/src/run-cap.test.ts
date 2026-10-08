@@ -14,8 +14,11 @@ import {
   notifyRunSlotFreed,
   runCapBackoffMs,
   runCapTiming,
+  sameWakeTarget,
   startRunUnderCap,
+  takeDeferredWakeAfterAttempt,
   waitForRunSlot,
+  wakeTargetForLog,
 } from './run-cap';
 
 const tick = () => new Promise<void>((r) => setImmediate(r));
@@ -182,5 +185,34 @@ describe('deferred-wake FIFO queue', () => {
     } finally {
       removeDeferredWake(e);
     }
+  });
+
+  it('take after attempt: returns a wake folded in after the attempt read the entry, and removes it in the same step', () => {
+    const e = enqueueDeferredWake(w('qe', 'timer'), 1);
+    const used = e.wake;
+    assert.equal(coalesceIntoDeferredWake(e, w('qe', 'assignment', { taskId: 't9' })), true);
+    const replacement = takeDeferredWakeAfterAttempt(e, used);
+    assert.deepEqual(replacement, w('qe', 'assignment', { taskId: 't9' }));
+    assert.equal(deferredWakeForAgent('qe'), undefined, 'entry gone: later wakes become the follow-up');
+    assert.equal(deferredWakesAhead('q-co'), 0);
+  });
+
+  it('take after attempt: nothing folded in (or only merged into the same wake) → no replacement', () => {
+    const e = enqueueDeferredWake(w('qf', 'on_demand'), 1);
+    assert.equal(coalesceIntoDeferredWake(e, w('qf', 'timer')), true);
+    assert.equal(coalesceIntoDeferredWake(e, w('qf', 'on_demand')), true);
+    assert.equal(takeDeferredWakeAfterAttempt(e, e.wake), undefined);
+    assert.equal(deferredWakeForAgent('qf'), undefined);
+  });
+
+  it('same target / log target: ids only, no payload fields', () => {
+    assert.equal(sameWakeTarget(w('x', 'assignment', { taskId: 't1' }), w('x', 'assignment', { taskId: 't1' })), true);
+    assert.equal(sameWakeTarget(w('x', 'assignment', { taskId: 't1' }), w('x', 'assignment', { taskId: 't2' })), false);
+    assert.equal(sameWakeTarget(w('x', 'timer'), w('x', 'on_demand')), false);
+    assert.deepEqual(
+      wakeTargetForLog({ ...w('x', 'approval', { approvalId: 'ap1', note: 'secret-note' }) } as never),
+      { approvalId: 'ap1' },
+    );
+    assert.deepEqual(wakeTargetForLog(w('x', 'timer')), {});
   });
 });

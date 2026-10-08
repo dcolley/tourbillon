@@ -3,6 +3,7 @@ import { createTraceLogger, isObservabilityEnabled, isPhoenixCollectorEnabled } 
 import { startWakeServer, startStaleSweepInterval } from './wake-server';
 import { bootMastraSchedules } from './schedule-boot';
 import { warnDroppedDeferredWakes } from './run-cap';
+import { onShutdownSignals } from './shutdown-once';
 
 async function main(): Promise<void> {
   // Defence-in-depth: unlink dead egress proxy socks left by prior crashes.
@@ -12,10 +13,8 @@ async function main(): Promise<void> {
   const staleSweep = startStaleSweepInterval();
   await bootMastraSchedules();
 
-  let shuttingDown = false;
-  async function shutdown(): Promise<void> {
-    if (shuttingDown) return;
-    shuttingDown = true;
+  // SIGTERM/SIGINT: runs once, repeated signals reuse the first shutdown (shutdown-once.test.ts).
+  onShutdownSignals(process, async (): Promise<void> => {
     // Deferred (over-cap) wakes are in memory only: say what is dropped, never silently.
     warnDroppedDeferredWakes(createTraceLogger('scheduler', {}));
     clearInterval(staleSweep);
@@ -24,13 +23,6 @@ async function main(): Promise<void> {
       wakeServer.close(() => resolve());
     });
     process.exit(0);
-  }
-
-  process.on('SIGTERM', () => {
-    void shutdown();
-  });
-  process.on('SIGINT', () => {
-    void shutdown();
   });
 
   createTraceLogger('scheduler', {}).info('scheduler started (no BullMQ heartbeats)', {
