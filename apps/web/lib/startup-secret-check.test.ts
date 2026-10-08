@@ -99,7 +99,10 @@ describe('instrumentation register()', () => {
   const env = process.env as Record<string, string | undefined>;
   const KEYS = ['NEXT_RUNTIME', 'NEXT_PHASE', 'BETTER_AUTH_SECRET'];
   let saved: Record<string, string | undefined>;
+  // Every console.error line register() writes. register() may run other startup checks too,
+  // so assertions about this check only look at lines naming BETTER_AUTH_SECRET.
   let lines: string[];
+  const authLines = () => lines.filter((l) => l.includes('BETTER_AUTH_SECRET'));
   let originalError: typeof console.error;
 
   beforeEach(() => {
@@ -123,16 +126,15 @@ describe('instrumentation register()', () => {
     env.NEXT_RUNTIME = 'nodejs';
     env.BETTER_AUTH_SECRET = SHORT;
     await register();
-    assert.equal(lines.length, 1);
-    assert.match(lines[0], /BETTER_AUTH_SECRET/);
-    assert.ok(!lines[0].includes(SHORT));
+    assert.equal(authLines().length, 1);
+    assert.ok(lines.every((l) => !l.includes(SHORT)), 'no output line contains the value');
   });
 
   it('is silent with a strong secret', async () => {
     env.NEXT_RUNTIME = 'nodejs';
     env.BETTER_AUTH_SECRET = STRONG;
     await register();
-    assert.equal(lines.length, 0);
+    assert.equal(authLines().length, 0);
   });
 
   it('is silent during next build and in the edge runtime', async () => {
@@ -144,6 +146,6 @@ describe('instrumentation register()', () => {
     await register();
     delete env.NEXT_RUNTIME;
     await register();
-    assert.equal(lines.length, 0);
+    assert.equal(authLines().length, 0);
   });
 });
