@@ -75,7 +75,8 @@ describe('Mobile API Routes - New JWT endpoints', () => {
         mcpServerIds: [],
         budgetMonthlyTokens: 100000,
         spentMonthlyTokens: 0,
-        runtimeConfig: {},
+        // #100: seeded secret so the GET test can assert values never leave the route.
+        runtimeConfig: { secrets: { GITHUB_TOKEN: 'ghp_alice_secret_value' } },
         createdAt: new Date(),
         updatedAt: new Date(),
       },
@@ -252,6 +253,8 @@ describe('Mobile API Routes - New JWT endpoints', () => {
           isSearxngConfigured: () => false,
           isTavilyConfigured: () => false,
           parseCompanySettings: (settings: any) => settings || {},
+          // #100: use the real redactor so the route's redaction is actually exercised.
+          redactRuntimeConfigSecrets: originalRequire.apply(this, ['@tourbillon/shared']).redactRuntimeConfigSecrets,
         };
       }
 
@@ -476,6 +479,17 @@ describe('Mobile API Routes - New JWT endpoints', () => {
       assert.ok(data.agent);
       assert.strictEqual(data.agent.urlKey, 'alice');
       assert.strictEqual(data.agent.name, 'Alice');
+      // #100: runtimeConfig.secrets must come back as key names only, never values.
+      const secrets = data.agent.runtimeConfig?.secrets;
+      assert.deepStrictEqual(Object.keys(secrets ?? {}), ['GITHUB_TOKEN']);
+      assert.ok(
+        Object.values(secrets).every((v) => v !== 'ghp_alice_secret_value'),
+        'runtimeConfig.secrets must not contain secret values'
+      );
+      assert.ok(
+        !JSON.stringify(data).includes('ghp_alice_secret_value'),
+        'response body must not contain the secret value anywhere'
+      );
       // Ensure catalog peers has Company A data and excludes Company B
       if (data.catalog?.peerAgents && Array.isArray(data.catalog.peerAgents)) {
         // Must have Company A agents in catalog

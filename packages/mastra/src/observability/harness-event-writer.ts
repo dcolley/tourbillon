@@ -14,6 +14,7 @@ import {
   observabilityPreviewChars,
 } from '@tourbillon/shared';
 import type { AgentControllerEvent } from '@mastra/core/agent-controller';
+import { scrubKnownSecretValues } from './secret-value-redaction';
 
 /** @deprecated Prefer AgentControllerEvent — wire name kept for observability helpers. */
 type HarnessEvent = AgentControllerEvent;
@@ -207,9 +208,12 @@ function mapHarnessEventType(event: HarnessEvent): string {
 
 export function writeHarnessObservabilityEvent(
   ctx: HarnessObservabilityContext,
-  event: HarnessEvent,
+  rawEvent: HarnessEvent,
 ): void {
-  if (!HARNESS_OBSERVABLE_EVENT_TYPES.has(event.type)) return;
+  if (!HARNESS_OBSERVABLE_EVENT_TYPES.has(rawEvent.type)) return;
+  // #100: harness rows bypass the Mastra span pipeline, so scrub known secret values here
+  // (before previews are truncated) as well.
+  const event = scrubKnownSecretValues(rawEvent);
 
   // message_update replays the full accumulated assistant message on every
   // stream tick — tool_start/tool_end rows already capture the useful signal.
@@ -258,7 +262,7 @@ export function writeHarnessObservabilityEvent(
   }
   if (event.type === 'error') {
     status = 'error';
-    errorText = event.error.message;
+    errorText = scrubKnownSecretValues(event.error.message);
   }
   if (
     event.type === 'om_observation_failed' ||
