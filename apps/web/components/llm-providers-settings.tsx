@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { PasswordInput } from '@/components/ui/password-input';
 import {
   defaultBaseURLForProviderType,
   LLM_PROVIDER_TYPE_LABELS,
@@ -384,8 +385,7 @@ export function LlmProvidersSettings() {
 
             <div className="space-y-1.5">
               <label className="text-sm font-medium">API key</label>
-              <input
-                type="password"
+              <PasswordInput
                 value={form.apiKey}
                 onChange={(e) => setForm((f) => ({ ...f, apiKey: e.target.value }))}
                 placeholder={editingId === 'new' ? 'Optional' : 'Leave blank to keep existing'}
@@ -498,8 +498,10 @@ export function LlmProvidersSettings() {
                       placeholder="Header name"
                       className="flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
                     />
-                    <input
-                      type="text"
+                    <PasswordInput
+                      wrapperClassName="flex-1"
+                      autoComplete="off"
+                      aria-label={row.key ? `Value for header ${row.key}` : 'Header value'}
                       value={row.value}
                       onChange={(e) =>
                         setForm((f) => {
@@ -516,7 +518,7 @@ export function LlmProvidersSettings() {
                             : 'Value'
                       }
                       required={!isStoredHeader(row.key)}
-                      className="flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+                      className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
                     />
                     <button
                       type="button"

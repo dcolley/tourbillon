@@ -3,6 +3,7 @@
 import { useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
+import { PasswordInput } from '@/components/ui/password-input';
 
 interface VaultCredentialInputProps {
   serverId: string;
@@ -183,9 +184,8 @@ export function VaultCredentialInput({
           {isConfigured ? 'Configured' : 'Not configured'}
         </span>
       </div>
-      <input
+      <PasswordInput
         id={serverId}
-        type="password"
         value={value}
         onChange={(e) => setValue(e.target.value)}
         placeholder={configured ? '••••••••' : placeholder || 'Enter API key'}
