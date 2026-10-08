@@ -11,6 +11,7 @@ import {
   resolveHeartbeatLivenessConfig,
 } from '@tourbillon/shared';
 import { heartbeatAbortedError } from './heartbeat-abort';
+import { toolCallSignature } from './tool-call-signature';
 
 export interface HarnessDriveResult {
   inputTokens: number;
@@ -107,7 +108,11 @@ export async function driveSessionHeadless(
     let settled = false;
     let lastEvent: { type: string; at: Date } | null = null;
     let modelStepCount = 0;
-    const recentToolNames: string[] = [];
+    // Loop breaker: trips only on N consecutive calls with the same tool name AND
+    // the same canonical args hash. Same tool with different args (paging through
+    // files, distinct searches) is legitimate progress and resets the streak.
+    let lastToolSignature: string | null = null;
+    let repeatedToolStreak = 0;
     const REPEATED_TOOL_BREAKER_THRESHOLD = 5;
     let tripwireRegistered = false;
 
@@ -209,25 +214,21 @@ export async function driveSessionHeadless(
         case 'tool_start': {
           const toolName = (event as { toolName?: string }).toolName;
           if (toolName) {
-            recentToolNames.push(toolName);
-            if (recentToolNames.length > REPEATED_TOOL_BREAKER_THRESHOLD) {
-              recentToolNames.shift();
-            }
+            const signature = toolCallSignature(toolName, (event as { args?: unknown }).args);
+            repeatedToolStreak = signature === lastToolSignature ? repeatedToolStreak + 1 : 1;
+            lastToolSignature = signature;
 
-            if (recentToolNames.length >= REPEATED_TOOL_BREAKER_THRESHOLD) {
-              const allSame = recentToolNames.every((name) => name === recentToolNames[0]);
-              if (allSame) {
-                session.abort();
-                finishReason = 'repeated_tool_loop';
-                onEvent({
-                  type: 'error',
-                  error: new Error(
-                    `Repeated tool loop detected: ${toolName} called ${REPEATED_TOOL_BREAKER_THRESHOLD} times in a row`,
-                  ),
-                } as AgentControllerEvent);
-                finish({ inputTokens, outputTokens, finishReason, suspendedToolCallId });
-                return;
-              }
+            if (repeatedToolStreak >= REPEATED_TOOL_BREAKER_THRESHOLD) {
+              session.abort();
+              finishReason = 'repeated_tool_loop';
+              onEvent({
+                type: 'error',
+                error: new Error(
+                  `Repeated tool loop detected: ${toolName} called ${REPEATED_TOOL_BREAKER_THRESHOLD} times in a row`,
+                ),
+              } as AgentControllerEvent);
+              finish({ inputTokens, outputTokens, finishReason, suspendedToolCallId });
+              return;
             }
           }
           break;
@@ -258,6 +259,13 @@ export async function driveSessionHeadless(
 
         case 'error': {
           const err = event.error;
+          // Stop the controller stream: without this the run is marked failed but the
+          // model keeps calling tools (TEST 36cf8ea4 wrote to TOUR-468 13 min after failing).
+          try {
+            session.abort();
+          } catch {
+            // ignore
+          }
           if (isTokenLimiterTripwireError(err)) {
             fail(tripwireErrorFromUnknown(err));
           } else {

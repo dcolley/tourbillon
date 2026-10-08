@@ -13,9 +13,11 @@ import { JobDetailLive } from '../../jobs/[queue]/[jobId]/job-detail-live';
 import { ChatPageContext } from '@/components/chat/chat-page-context';
 import { HeartbeatRunHeaderActions } from './heartbeat-run-header-actions';
 import { HeartbeatRunQueryToast } from './heartbeat-run-query-toast';
+import { requireBoardSession } from '@/lib/company';
 
 async function dismissHeartbeatAction(_formData: FormData) {
   'use server';
+  await requireBoardSession();
   // Heartbeat runs are immutable audit rows — no queue-level retry/remove here.
   // Failed runs offer "Retry in new heartbeat" in the page header instead
   // (starts a NEW run; this failed row is never rewritten).

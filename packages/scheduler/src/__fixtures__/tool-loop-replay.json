@@ -1,0 +1,1063 @@
+{
+ "_source": "Exported heartbeat observability events (eventType=tool_call_start, payload.type=tool_start), saved during 2026-10-07 triage as /workspace/tb-om-clone/loop-<runId>-tool_call_start.json. Each run listed here was failed by the old name-only breaker with \"Repeated tool loop detected\". Only toolName + args are kept, in emitted order; string values over 120 chars are replaced by \"<redacted len=N sha256=PREFIX>\" (equality between calls is preserved, content is not). Anonymised: every string arg value (UUIDs, paths, titles, queries, redacted-text markers) is replaced by a stable placeholder (uuid-NNN / path-NNN / text-NNN / str-NNN), one per distinct original value across the whole file, so equal values stay equal and different values stay different. Tool names, arg keys, numbers, booleans, run ids and the generic \"memory.jsonl\" are kept.",
+ "runs": {
+  "153999d0-2a44-44f3-8a4c-3298bfc727ba": {
+   "heartbeatRunStatus": "failed",
+   "heartbeatRunErrorText": "Repeated tool loop detected",
+   "toolStarts": [
+    {
+     "toolName": "getIdentityTool",
+     "args": {
+      "timezone": "str-001"
+     }
+    },
+    {
+     "toolName": "checkoutIssueTool",
+     "args": {
+      "issueId": "uuid-001"
+     }
+    },
+    {
+     "toolName": "getHeartbeatContextTool",
+     "args": {
+      "issueId": "uuid-001"
+     }
+    },
+    {
+     "toolName": "getCommentsTool",
+     "args": {
+      "issueId": "uuid-001"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-001"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-002"
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "str-002",
+      "recursive": true
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "str-002"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-002"
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "str-003"
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "path-003",
+      "recursive": true
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "str-002",
+      "recursive": false
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-004"
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "path-005",
+      "recursive": true
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-001"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-002"
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "str-003",
+      "recursive": true
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-001"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-002"
+     }
+    },
+    {
+     "toolName": "mastra_workspace_execute_command",
+     "args": {
+      "command": "text-001",
+      "timeout": "str-004"
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "path-005",
+      "recursive": true
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "str-005"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-006"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-007"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-008"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-002"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-001"
+     }
+    }
+   ]
+  },
+  "99d2a8e1-75dc-4ddf-b0de-ba31ad5ce609": {
+   "heartbeatRunStatus": "failed",
+   "heartbeatRunErrorText": "Repeated tool loop detected",
+   "toolStarts": [
+    {
+     "toolName": "getIdentityTool",
+     "args": {}
+    },
+    {
+     "toolName": "getInboxTool",
+     "args": {}
+    },
+    {
+     "toolName": "getHeartbeatContextTool",
+     "args": {
+      "issueId": "uuid-001"
+     }
+    },
+    {
+     "toolName": "getHeartbeatContextTool",
+     "args": {
+      "issueId": "uuid-002"
+     }
+    },
+    {
+     "toolName": "getCommentsTool",
+     "args": {
+      "issueId": "uuid-002"
+     }
+    },
+    {
+     "toolName": "searchTool",
+     "args": {
+      "q": "str-006",
+      "limit": 20,
+      "types": [
+       "str-007",
+       "str-008"
+      ]
+     }
+    },
+    {
+     "toolName": "searchTool",
+     "args": {
+      "q": "str-009",
+      "limit": 20,
+      "types": [
+       "str-007",
+       "str-008",
+       "str-010"
+      ]
+     }
+    },
+    {
+     "toolName": "searchTool",
+     "args": {
+      "q": "str-011",
+      "limit": 20
+     }
+    },
+    {
+     "toolName": "getCommentsTool",
+     "args": {
+      "after": "uuid-003",
+      "issueId": "uuid-002"
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "str-012"
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "path-009"
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "path-010"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-011"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-012"
+     }
+    },
+    {
+     "toolName": "listApprovalsTool",
+     "args": {
+      "limit": 50,
+      "status": "str-013"
+     }
+    },
+    {
+     "toolName": "listApprovalsTool",
+     "args": {
+      "q": "str-014",
+      "limit": 10,
+      "status": "str-015"
+     }
+    },
+    {
+     "toolName": "listApprovalsTool",
+     "args": {
+      "q": "str-016",
+      "limit": 20,
+      "status": "str-013"
+     }
+    },
+    {
+     "toolName": "getCommentsTool",
+     "args": {
+      "limit": "str-017",
+      "issueId": "uuid-004"
+     }
+    },
+    {
+     "toolName": "searchTool",
+     "args": {
+      "q": "str-018",
+      "limit": 12,
+      "types": [
+       "str-007",
+       "str-010"
+      ]
+     }
+    },
+    {
+     "toolName": "searchTool",
+     "args": {
+      "q": "str-019",
+      "limit": 15
+     }
+    },
+    {
+     "toolName": "searchTool",
+     "args": {
+      "q": "str-020",
+      "limit": 15,
+      "types": [
+       "str-007",
+       "str-008",
+       "str-010"
+      ]
+     }
+    },
+    {
+     "toolName": "listSkillsTool",
+     "args": {}
+    },
+    {
+     "toolName": "getSkillTool",
+     "args": {
+      "slug": "str-021"
+     }
+    },
+    {
+     "toolName": "mastra_workspace_execute_command",
+     "args": {
+      "command": "text-002",
+      "timeout": "str-022"
+     }
+    },
+    {
+     "toolName": "mastra_workspace_execute_command",
+     "args": {
+      "command": "text-003",
+      "timeout": "str-022"
+     }
+    },
+    {
+     "toolName": "mastra_workspace_execute_command",
+     "args": {
+      "command": "text-004",
+      "timeout": "str-004"
+     }
+    },
+    {
+     "toolName": "mastra_workspace_execute_command",
+     "args": {
+      "command": "text-005",
+      "timeout": "str-023"
+     }
+    },
+    {
+     "toolName": "mastra_workspace_execute_command",
+     "args": {
+      "command": "text-006",
+      "timeout": "str-023"
+     }
+    }
+   ]
+  },
+  "a4a63c99-7837-4b45-b89f-d490ada4d1e1": {
+   "heartbeatRunStatus": "failed",
+   "heartbeatRunErrorText": "Repeated tool loop detected",
+   "toolStarts": [
+    {
+     "toolName": "getIdentityTool",
+     "args": {}
+    },
+    {
+     "toolName": "getInboxTool",
+     "args": {}
+    },
+    {
+     "toolName": "checkoutIssueTool",
+     "args": {
+      "issueId": "uuid-002"
+     }
+    },
+    {
+     "toolName": "getHeartbeatContextTool",
+     "args": {
+      "issueId": "uuid-002"
+     }
+    },
+    {
+     "toolName": "getCommentsTool",
+     "args": {
+      "issueId": "uuid-002"
+     }
+    },
+    {
+     "toolName": "getCommentsTool",
+     "args": {
+      "after": "uuid-005",
+      "issueId": "uuid-002"
+     }
+    },
+    {
+     "toolName": "listApprovalsTool",
+     "args": {
+      "q": "str-024",
+      "limit": 20,
+      "status": "str-013"
+     }
+    },
+    {
+     "toolName": "listApprovalsTool",
+     "args": {
+      "q": "str-025",
+      "limit": 20,
+      "status": "str-013"
+     }
+    },
+    {
+     "toolName": "listApprovalsTool",
+     "args": {
+      "q": "str-026",
+      "limit": 10,
+      "status": "str-015"
+     }
+    },
+    {
+     "toolName": "getToolDetailsTool",
+     "args": {
+      "id": "str-027"
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "str-012"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-013"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-011"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-012"
+     }
+    },
+    {
+     "toolName": "listAgentsTool",
+     "args": {}
+    },
+    {
+     "toolName": "updateIssueTool",
+     "args": {
+      "status": "str-028",
+      "comment": "text-007",
+      "issueId": "uuid-002",
+      "assigneeAgentId": "uuid-006"
+     }
+    },
+    {
+     "toolName": "createSubtaskTool",
+     "args": {
+      "title": "str-029",
+      "goalId": "uuid-007",
+      "parentId": "uuid-002",
+      "priority": "str-030",
+      "billingCode": "str-031",
+      "description": "text-008",
+      "assigneeAgentId": "uuid-008",
+      "blockedByIssueIds": [
+       "uuid-001",
+       "uuid-009"
+      ]
+     }
+    },
+    {
+     "toolName": "updateIssueTool",
+     "args": {
+      "status": "str-032",
+      "comment": "text-009",
+      "issueId": "uuid-010"
+     }
+    },
+    {
+     "toolName": "sendToAgentTool",
+     "args": {
+      "body": "text-010",
+      "inReplyTo": "uuid-011",
+      "toAgentId": "uuid-006"
+     }
+    },
+    {
+     "toolName": "updateIssueTool",
+     "args": {
+      "comment": "text-011",
+      "issueId": "uuid-001",
+      "assigneeAgentId": "uuid-006",
+      "blockedByIssueIds": [
+       "uuid-010"
+      ]
+     }
+    },
+    {
+     "toolName": "getInboxTool",
+     "args": {}
+    },
+    {
+     "toolName": "getInboxTool",
+     "args": {}
+    },
+    {
+     "toolName": "getInboxTool",
+     "args": {}
+    },
+    {
+     "toolName": "sendToAgentTool",
+     "args": {
+      "body": "text-012",
+      "toAgentId": "uuid-006"
+     }
+    },
+    {
+     "toolName": "getCommentsTool",
+     "args": {
+      "after": "uuid-005",
+      "issueId": "uuid-002"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-011"
+     }
+    },
+    {
+     "toolName": "writeWorkspaceFileTool",
+     "args": {
+      "path": "memory.jsonl",
+      "content": "text-013"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "memory.jsonl"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "memory.jsonl"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "memory.jsonl"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "memory.jsonl"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "memory.jsonl"
+     }
+    }
+   ]
+  },
+  "d1a4d5ed-456d-44f6-9155-905ec8045318": {
+   "heartbeatRunStatus": "failed",
+   "heartbeatRunErrorText": "Repeated tool loop detected",
+   "toolStarts": [
+    {
+     "toolName": "getIdentityTool",
+     "args": {}
+    },
+    {
+     "toolName": "getInboxTool",
+     "args": {}
+    },
+    {
+     "toolName": "getHeartbeatContextTool",
+     "args": {
+      "issueId": "uuid-002"
+     }
+    },
+    {
+     "toolName": "getCommentsTool",
+     "args": {
+      "issueId": "uuid-002"
+     }
+    },
+    {
+     "toolName": "getCommentsTool",
+     "args": {
+      "after": "uuid-012",
+      "issueId": "uuid-002"
+     }
+    },
+    {
+     "toolName": "listApprovalsTool",
+     "args": {
+      "limit": 50,
+      "status": "str-015"
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "str-012"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-014"
+     }
+    },
+    {
+     "toolName": "listAgentsTool",
+     "args": {}
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "str-033"
+     }
+    },
+    {
+     "toolName": "listProjectsTool",
+     "args": {
+      "status": "str-034"
+     }
+    },
+    {
+     "toolName": "getProjectDetailTool",
+     "args": {
+      "projectId": "uuid-013"
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "path-015"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-014"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-011"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-013"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-012"
+     }
+    },
+    {
+     "toolName": "getIdentityTool",
+     "args": {}
+    },
+    {
+     "toolName": "listApprovalsTool",
+     "args": {
+      "limit": 50,
+      "status": "str-015"
+     }
+    },
+    {
+     "toolName": "listApprovalsTool",
+     "args": {
+      "q": "str-025",
+      "limit": 10,
+      "status": "str-015"
+     }
+    },
+    {
+     "toolName": "listApprovalsTool",
+     "args": {
+      "q": "str-035",
+      "limit": 10,
+      "status": "str-036"
+     }
+    },
+    {
+     "toolName": "searchTool",
+     "args": {
+      "q": "str-037",
+      "limit": 10,
+      "types": [
+       "str-007"
+      ]
+     }
+    },
+    {
+     "toolName": "listApprovalsTool",
+     "args": {
+      "q": "str-025",
+      "limit": 10,
+      "status": "str-015"
+     }
+    },
+    {
+     "toolName": "task_check",
+     "args": {}
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "str-012"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-014"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-016"
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "str-033"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-017"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-018"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-014"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-019"
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "str-012"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-011"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-013"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-012"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-001"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-020"
+     }
+    }
+   ]
+  },
+  "e357a53c-ada7-441a-b509-ef7c3fff5d76": {
+   "heartbeatRunStatus": "failed",
+   "heartbeatRunErrorText": "Repeated tool loop detected",
+   "toolStarts": [
+    {
+     "toolName": "getIdentityTool",
+     "args": {}
+    },
+    {
+     "toolName": "getInboxTool",
+     "args": {}
+    },
+    {
+     "toolName": "checkoutIssueTool",
+     "args": {
+      "issueId": "uuid-002"
+     }
+    },
+    {
+     "toolName": "checkoutIssueTool",
+     "args": {
+      "issueId": "uuid-001"
+     }
+    },
+    {
+     "toolName": "getHeartbeatContextTool",
+     "args": {
+      "issueId": "uuid-001"
+     }
+    },
+    {
+     "toolName": "getCommentsTool",
+     "args": {
+      "issueId": "uuid-001"
+     }
+    },
+    {
+     "toolName": "getCommentsTool",
+     "args": {
+      "after": "uuid-014",
+      "issueId": "uuid-001"
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "str-012"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-001"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-021"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-022"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-002"
+     }
+    },
+    {
+     "toolName": "listSkillsTool",
+     "args": {}
+    },
+    {
+     "toolName": "getSkillTool",
+     "args": {
+      "slug": "str-021"
+     }
+    },
+    {
+     "toolName": "mastra_workspace_execute_command",
+     "args": {
+      "command": "path-023",
+      "timeout": "str-004"
+     }
+    },
+    {
+     "toolName": "mastra_workspace_execute_command",
+     "args": {
+      "command": "text-014",
+      "timeout": "str-004"
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "path-024"
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "path-009"
+     }
+    },
+    {
+     "toolName": "mastra_workspace_execute_command",
+     "args": {
+      "command": "text-015",
+      "timeout": "str-038"
+     }
+    },
+    {
+     "toolName": "mastra_workspace_execute_command",
+     "args": {
+      "command": "text-016",
+      "timeout": "str-022"
+     }
+    },
+    {
+     "toolName": "createSubtaskTool",
+     "args": {
+      "body": "str-039",
+      "title": "str-040",
+      "action": "str-041",
+      "issueId": "uuid-002"
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "str-002",
+      "recursive": true
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "path-003"
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "str-012"
+     }
+    },
+    {
+     "toolName": "getInboxTool",
+     "args": {}
+    },
+    {
+     "toolName": "getHeartbeatContextTool",
+     "args": {
+      "issueId": "uuid-001"
+     }
+    },
+    {
+     "toolName": "getCommentsTool",
+     "args": {
+      "issueId": "uuid-001"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-013"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-004"
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "path-005"
+     }
+    },
+    {
+     "toolName": "readWorkspaceFileTool",
+     "args": {
+      "path": "path-008"
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "path-025"
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "path-026"
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "path-027"
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "path-028"
+     }
+    },
+    {
+     "toolName": "listWorkspaceFilesTool",
+     "args": {
+      "path": "path-029",
+      "recursive": true
+     }
+    }
+   ]
+  }
+ }
+}

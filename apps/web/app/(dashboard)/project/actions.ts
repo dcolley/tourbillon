@@ -4,6 +4,7 @@ import { revalidatePath } from 'next/cache';
 import { assigneesFromFormSelect } from '@tourbillon/shared';
 import { createProject, updateProject, ProjectValidationError, getProjectDetail } from '@/lib/projects';
 import { createIssue, IssueValidationError } from '@/lib/issues';
+import { requireBoardSession } from '@/lib/company';
 
 export type CreateProjectState = { error: string | null; success?: boolean };
 
@@ -11,6 +12,7 @@ export async function createProjectAction(
   _prev: CreateProjectState,
   formData: FormData
 ): Promise<CreateProjectState> {
+  await requireBoardSession();
   const goalId = formData.get('goalId') as string;
   const ownerAgentId = formData.get('ownerAgentId') as string;
 
@@ -41,6 +43,7 @@ export async function updateProjectAction(
   _prev: UpdateProjectState,
   formData: FormData
 ): Promise<UpdateProjectState> {
+  await requireBoardSession();
   const projectId = formData.get('projectId') as string;
   const goalId = formData.get('goalId') as string;
   const ownerAgentId = formData.get('ownerAgentId') as string;
@@ -79,6 +82,7 @@ export async function createProjectIssueAction(
   _prev: CreateProjectIssueState,
   formData: FormData
 ): Promise<CreateProjectIssueState> {
+  await requireBoardSession();
   const projectId = formData.get('projectId') as string;
   const assignees = assigneesFromFormSelect(formData.get('assigneeAgentId') as string);
 

@@ -5,6 +5,7 @@ import {
   updateCompanyIntegrations,
   updateCompanyObservationalMemory,
   updateCompanyHitlyGate,
+  requireBoardSession,
 } from '@/lib/company';
 import { getVaultCredentialStatus } from '@/lib/vault';
 import {
@@ -28,6 +29,7 @@ async function saveSettings(
   formData: FormData,
 ): Promise<ActionResult> {
   'use server';
+  await requireBoardSession();
 
   const company = await getActiveCompany();
 
@@ -50,6 +52,7 @@ async function saveIntegrations(
   formData: FormData,
 ): Promise<ActionResult> {
   'use server';
+  await requireBoardSession();
 
   const company = await getActiveCompany();
 
@@ -75,6 +78,7 @@ async function saveObservationalMemory(
   formData: FormData,
 ): Promise<ActionResult> {
   'use server';
+  await requireBoardSession();
 
   try {
     const company = await getActiveCompany();
@@ -137,6 +141,7 @@ async function saveHitlyGate(
   formData: FormData,
 ): Promise<ActionResult> {
   'use server';
+  await requireBoardSession();
 
   const company = await getActiveCompany();
 

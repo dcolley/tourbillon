@@ -3,6 +3,7 @@ import { db, agents } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
 import { authenticateAgentToken } from '@/lib/auth/agent-token-auth';
 import { AgentValidationError, createAgent } from '@/lib/agents';
+import { redactAgentRuntimeSecrets } from '@tourbillon/shared';
 
 function unauthorized() {
   return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -26,7 +27,8 @@ export async function GET(
     .from(agents)
     .where(eq(agents.companyId, companyId));
 
-  return NextResponse.json(companyAgents);
+  // #100: agents read peers via listAgents — secret key names only, never values.
+  return NextResponse.json(companyAgents.map((agent) => redactAgentRuntimeSecrets(agent)));
 }
 
 export async function POST(
@@ -56,7 +58,7 @@ export async function POST(
       ...body,
       companyId: companyId,
     });
-    return NextResponse.json(agent, { status: 201 });
+    return NextResponse.json(redactAgentRuntimeSecrets(agent), { status: 201 });
   } catch (err) {
     if (err instanceof AgentValidationError) {
       return NextResponse.json({ error: err.message }, { status: 400 });

@@ -511,6 +511,36 @@ describe('driveSessionHeadless', () => {
     assert.equal(abortCalled, true);
   });
 
+  it('aborts the session when the controller emits an error event (no zombie stream)', async () => {
+    const listeners = new Set<(event: AgentControllerEvent) => void>();
+    let abortCalled = false;
+    const session = {
+      subscribe(listener: (event: AgentControllerEvent) => void) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      abort() {
+        abortCalled = true;
+      },
+      getCurrentRunId() {
+        return null;
+      },
+      run: { isRunning: () => true },
+      sendMessage: () => new Promise(() => undefined),
+    };
+
+    const drive = driveSessionHeadless(session as never, 'wake', {}, () => undefined, undefined, undefined, 60);
+    for (const listener of listeners) {
+      listener({
+        type: 'error',
+        error: new Error('function () { [native code] } could not be cloned.'),
+      } as AgentControllerEvent);
+    }
+
+    await assert.rejects(drive, /could not be cloned/);
+    assert.equal(abortCalled, true);
+  });
+
   it('does not abort when different tools are called', async () => {
     const listeners = new Set<(event: AgentControllerEvent) => void>();
     let abortCalled = false;

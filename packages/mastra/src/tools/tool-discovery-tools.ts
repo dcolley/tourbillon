@@ -5,6 +5,7 @@ import { extractToolRuntimeContext } from './api-client';
 import { assembleAgentTools } from '../agent-factory';
 import { parseCompanySettings } from '@tourbillon/shared';
 import type { CompanySettings } from '@tourbillon/shared';
+import { serializeToolInputSchema } from './tool-schema-serialize';
 
 async function loadAgentRecord(agentId: string | undefined) {
   if (!agentId) return null;
@@ -30,7 +31,8 @@ function extractToolSchema(tool: unknown): unknown {
   if (!tool || typeof tool !== 'object') return null;
   
   if ('inputSchema' in tool && tool.inputSchema) {
-    return tool.inputSchema;
+    // Never return the live Zod object: tool results must be structuredClone-safe.
+    return serializeToolInputSchema(tool.inputSchema);
   }
   
   return null;

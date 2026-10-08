@@ -7,6 +7,7 @@ import {
   getActiveCompanyOrNull,
   getCompanyById,
   setActiveCompanyCookie,
+  requireBoardSession,
 } from '@/lib/company';
 
 export type CreateCompanyResult =
@@ -17,6 +18,7 @@ export async function syncActiveCompanyAction(
   companyId: string,
   opts: { revalidate?: boolean } = {},
 ): Promise<{ ok: boolean; error?: string; changed?: boolean }> {
+  await requireBoardSession();
   const company = await getCompanyById(companyId);
   if (!company) {
     return { ok: false, error: 'Company not found.' };
@@ -35,6 +37,7 @@ export async function syncActiveCompanyAction(
 }
 
 export async function createCompanyAction(formData: FormData): Promise<CreateCompanyResult> {
+  await requireBoardSession();
   if (!(formData instanceof FormData)) {
     return { ok: false, error: 'Invalid form submission.' };
   }

@@ -5,6 +5,7 @@ import {
   GRANULAR_TOOL_GROUPS,
   SKILL_CATALOG,
   TOOLSET_CATALOG,
+  redactRuntimeConfigSecrets,
   type AgentRuntimeConfig,
 } from '@tourbillon/shared';
 import { listToggleableMcpServerDefinitions } from '@tourbillon/shared/mcp-registry';
@@ -50,7 +51,8 @@ function serializeAgent(agent: Agent) {
     spentMonthlyTokens: agent.spentMonthlyTokens,
     instructionsBundleSoulMd: agent.instructionsBundleSoulMd,
     instructionsBundleAgentsMd: agent.instructionsBundleAgentsMd,
-    runtimeConfig: safeRuntime,
+    // #100: `secrets` were passed through with values; return key names only.
+    runtimeConfig: redactRuntimeConfigSecrets(safeRuntime),
     secrets: {
       hasTavilyApiKey: Boolean(tavilyApiKey),
       hasSearxngApiKey: Boolean(searxngApiKey),

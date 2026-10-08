@@ -3,6 +3,12 @@ import assert from 'node:assert/strict';
 import { SignJWT } from 'jose';
 import { verifyMobileToken } from './mobile-auth';
 
+// #105 B3: board JWTs signed with the public default BETTER_AUTH_SECRET are rejected
+// whatever NODE_ENV is, so tests sign with a non-default secret.
+if (!process.env.BETTER_AUTH_SECRET || process.env.BETTER_AUTH_SECRET.startsWith('change-me-in-production')) {
+  process.env.BETTER_AUTH_SECRET = 'test-better-auth-secret-not-default';
+}
+
 // Must match the secret used in mobile-auth.ts
 const SESSION_SECRET = new TextEncoder().encode(
   process.env.BETTER_AUTH_SECRET || 'change-me-in-production'

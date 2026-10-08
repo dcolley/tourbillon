@@ -17,6 +17,7 @@ import {
   tripwireDetectorRegistry,
   runWithHeartbeatContext,
   destroyCodeExecutionWorkspace,
+  registerKnownSecretValues,
 } from '@tourbillon/mastra';
 import type { HeartbeatJobData, AgentRuntimeConfig } from '@tourbillon/shared';
 import {
@@ -376,6 +377,23 @@ async function runWake(
 
   const company = await db.query.companies.findFirst({ where: eq(companies.id, companyId) });
   if (!company) throw new Error(`Company ${companyId} not found`);
+
+  // #100: register every company secret value (all agents' runtimeConfig + company settings)
+  // so observability scrubs a peer's secret even if it reaches this run's spans.
+  try {
+    const peerConfigs = await db
+      .select({ runtimeConfig: agents.runtimeConfig })
+      .from(agents)
+      .where(eq(agents.companyId, companyId));
+    registerKnownSecretValues(`company:${companyId}`, [
+      company.settings,
+      ...peerConfigs.map((row) => row.runtimeConfig),
+    ]);
+  } catch (err) {
+    agentTracer.warn('known-secret registration failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 
   if (agentRecord.status !== 'active') {
     agentTracer.warn('skipped: agent not active', { status: agentRecord.status });
