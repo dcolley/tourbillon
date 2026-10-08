@@ -125,9 +125,30 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
-/** `apiKey=…`, `"password": "…"`, `x-api-key: …` inside free text (Bearer/Basic handled later). */
+/**
+ * Bare `key=value` / `key: value` / `"key": "value"` inside free text. Key kept, value masked when
+ * the key name looks secret (isSensitiveKey). Skips token-count keys (`token_count=5`) and
+ * Authorization: Bearer/Basic (those go through scrubProviderSecrets). Quoted values may contain
+ * spaces; unquoted values stop at whitespace or common separators.
+ */
 const SENSITIVE_ASSIGNMENT_RE =
-  /(\b(?:[\w-]*(?:token|api[-_]?key|passw(?:or)?d|pwd|secret|authorization|credential|private[-_]?key|access[-_]?key|dsn|connection[-_]?string|x-auth)|pass)["']?\s*[:=]\s*["']?)(?!\[redacted\])(?!(?:Bearer|Basic)\s)[^\s"'&,;}<>()[\]]+/gi;
+  /(?<![\w.-])(["']?)([A-Za-z_][\w.-]{0,63})\1([ \t]*[:=][ \t]*)(?!(?:Bearer|Basic)\s)(?:"([^"\r\n]*)"|'([^'\r\n]*)'|([^\s"'&,;}<>()[\]]+))/g;
+
+function scrubSensitiveAssignments(s: string): string {
+  return s.replace(
+    SENSITIVE_ASSIGNMENT_RE,
+    (match, q: string, key: string, sep: string, dq: string | undefined, sq: string | undefined, bare: string | undefined) => {
+      if (!isSensitiveKey(key) || isTokenCountKey(key)) return match;
+      const val = dq ?? sq ?? bare ?? '';
+      if (val === REDACTED) return match;
+      // Leave Authorization: Bearer/Basic … for scrubProviderSecrets.
+      if (/^(?:Bearer|Basic)\s/i.test(val)) return match;
+      if (dq !== undefined) return `${q}${key}${q}${sep}"${REDACTED}"`;
+      if (sq !== undefined) return `${q}${key}${q}${sep}'${REDACTED}'`;
+      return `${q}${key}${q}${sep}${REDACTED}`;
+    },
+  );
+}
 /** Whole `Cookie:` / `Set-Cookie:` header lines. */
 const COOKIE_HEADER_RE = /(\b(?:set-)?cookie\s*:\s*)(?!\[redacted\])[^\r\n]+/gi;
 /** PEM blocks (keys, certificates); an unterminated block is cut to the end of the string. */
@@ -212,11 +233,11 @@ export function createApprovalRedactor(
     for (const [v, secret] of variants) if (s.includes(v)) present.add(secret);
     // Known values (whole, all encodings), Bearer/Basic and URL userinfo/query first (#125),
     // then credential-looking assignments, Cookie headers and token shapes.
-    return scrubProviderSecrets(s.replace(PEM_BLOCK_RE, REDACTED), present)
-      .replace(URL_USERINFO_RE, scrubUserinfo)
-      .replace(COOKIE_HEADER_RE, `$1${REDACTED}`)
-      .replace(SENSITIVE_ASSIGNMENT_RE, `$1${REDACTED}`)
-      .replace(TOKEN_SHAPES_RE, REDACTED);
+    return scrubSensitiveAssignments(
+      scrubProviderSecrets(s.replace(PEM_BLOCK_RE, REDACTED), present)
+        .replace(URL_USERINFO_RE, scrubUserinfo)
+        .replace(COOKIE_HEADER_RE, `$1${REDACTED}`),
+    ).replace(TOKEN_SHAPES_RE, REDACTED);
   };
 
   type State = { left: number; truncated: boolean };
