@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db, agents } from '@tourbillon/db';
 import { and, eq } from 'drizzle-orm';
+import { isEnvCredentialHostError } from '@tourbillon/shared';
 import { getDefaultLlmProviderRecord, getLlmProviderRecordById } from '@/lib/llm-providers';
 import {
   listProviderModelsForAgent,
@@ -57,7 +58,8 @@ export async function GET(req: NextRequest) {
     // errors instead of a bare 502 (see lib/default-provider-models.ts).
     return await defaultProviderModelsResponse();
   } catch (err) {
-    if (err instanceof ProviderConfigError) {
+    // Includes an env API key refused for an agent base URL on another host (409, no key sent).
+    if (err instanceof ProviderConfigError || isEnvCredentialHostError(err)) {
       return NextResponse.json({ error: err.message, code: err.code }, { status: err.status });
     }
     const message = redactUrlsInText(err instanceof Error ? err.message : 'Failed to list models');

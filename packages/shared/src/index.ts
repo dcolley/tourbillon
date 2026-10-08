@@ -7,6 +7,7 @@ export * from './heartbeat-schedule';
 export * from './timeout-config';
 export * from './trace';
 export * from './model-provider';
+export * from './env-credential-host';
 export * from './model-settings';
 export * from './context-budget';
 export * from './reasoning-capabilities';

@@ -1,4 +1,5 @@
 import { parseAgentModelSettings, type AgentModelSettings } from './model-settings';
+import { envCredentialHostRefusal, type EnvCredentialResolveOptions } from './env-credential-host';
 
 export type ModelProviderKind =
   | 'lmstudio'
@@ -262,28 +263,25 @@ function envBaseURL(provider: ModelProviderKind): string {
   }
 }
 
+/** Env vars that hold the API key for each provider kind, first set one wins. */
+const API_KEY_ENV: Record<ModelProviderKind, readonly string[]> = {
+  ollama: ['OLLAMA_API_KEY', 'LLM_API_KEY'],
+  vllm: ['LLM_API_KEY'],
+  openai: ['LLM_API_KEY', 'OPENAI_API_KEY'],
+  'openai-compatible': ['LLM_API_KEY', 'OPENAI_API_KEY'],
+  lmstudio: ['LM_STUDIO_API_KEY', 'LLM_API_KEY'],
+};
+
+/** Name of the env var the API key comes from, or null when the built-in placeholder is used. */
+function envApiKeyName(provider: ModelProviderKind): string | null {
+  const names = API_KEY_ENV[provider] ?? API_KEY_ENV.lmstudio;
+  return names.find((name) => process.env[name] !== undefined) ?? null;
+}
+
 function envApiKey(provider: ModelProviderKind): string {
-  switch (provider) {
-    case 'ollama':
-      return (
-        process.env.OLLAMA_API_KEY ??
-        process.env.LLM_API_KEY ??
-        PROVIDER_DEFAULTS.ollama.apiKey
-      );
-    case 'vllm':
-      return process.env.LLM_API_KEY ?? PROVIDER_DEFAULTS.vllm.apiKey;
-    case 'openai':
-      return process.env.LLM_API_KEY ?? process.env.OPENAI_API_KEY ?? '';
-    case 'openai-compatible':
-      return process.env.LLM_API_KEY ?? process.env.OPENAI_API_KEY ?? '';
-    case 'lmstudio':
-    default:
-      return (
-        process.env.LM_STUDIO_API_KEY ??
-        process.env.LLM_API_KEY ??
-        PROVIDER_DEFAULTS.lmstudio.apiKey
-      );
-  }
+  const name = envApiKeyName(provider);
+  if (name) return process.env[name] ?? '';
+  return (PROVIDER_DEFAULTS[provider] ?? PROVIDER_DEFAULTS.lmstudio).apiKey;
 }
 
 function envDefaultModel(): string {
@@ -327,10 +325,11 @@ export function resolveModelProviderConfig(
   overrides?: ModelProviderOverrides | null,
   modelId?: string | null,
   providerRecord?: LlmProviderRecord | null,
+  options?: EnvCredentialResolveOptions,
 ): ModelProviderConfig {
   const base = providerRecord
     ? resolveModelProviderConfigFromRecord(providerRecord, modelId)
-    : resolveModelProviderConfigFromEnv(overrides, modelId);
+    : resolveModelProviderConfigFromEnv(overrides, modelId, options);
 
   return applyOverrides(base, overrides, modelId);
 }
@@ -339,11 +338,31 @@ export function resolveModelProviderConfig(
 export function resolveModelProviderConfigFromEnv(
   overrides?: ModelProviderOverrides | null,
   modelId?: string | null,
+  options?: EnvCredentialResolveOptions,
 ): ModelProviderConfig {
   const provider = overrides?.provider ?? envProviderKind();
   const apiMode = overrides?.apiMode ?? envApiMode(provider);
-  const baseURL = overrides?.baseURL?.trim() || envBaseURL(provider);
-  const apiKey = overrides?.apiKey ?? envApiKey(provider);
+  // An env API key is only attached when the request goes to the env base URL's host for that
+  // provider (built-in default when unset). An agent base URL override on another host throws
+  // EnvCredentialHostError (409), or with `onEnvCredentialHostMismatch: 'omit-key'` resolves
+  // without the key.
+  const configuredBaseURL = envBaseURL(provider);
+  const overrideBaseURL = overrides?.baseURL?.trim();
+  const baseURL = overrideBaseURL || configuredBaseURL;
+  let apiKey = overrides?.apiKey ?? envApiKey(provider);
+  const keyEnvName = overrides?.apiKey === undefined ? envApiKeyName(provider) : null;
+  if (keyEnvName && apiKey !== '' && overrideBaseURL) {
+    const refusal = envCredentialHostRefusal({
+      providerLabel: LLM_PROVIDER_TYPE_LABELS[provider] ?? provider,
+      keyEnvName,
+      configuredBaseURL,
+      requestBaseURL: overrideBaseURL,
+    });
+    if (refusal) {
+      if (options?.onEnvCredentialHostMismatch !== 'omit-key') throw refusal;
+      apiKey = '';
+    }
+  }
   const defaultModel = modelId ?? overrides?.modelId ?? envDefaultModel();
 
   return {
