@@ -6,7 +6,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { approvalDetailJson, loadApprovalDetail } from './approval-detail';
 import { REDACTION_UNAVAILABLE } from './approval-redaction';
-import { PLANTED_VALUES } from './approval-detail-secrets.fixture';
+import { PLANTED_VALUES, plantedRepo } from './approval-detail-secrets.fixture';
 import {
   DUMMY_VAULT_KEY,
   OTHER_DUMMY_VAULT_KEY,
@@ -95,4 +95,24 @@ describe('approval details: vault values unavailable (#130 B3)', () => {
       for (const v of VAULT_ONLY_VALUES) assert.ok(!logs.includes(v));
     });
   }
+});
+
+describe('approval details: secret values load fails (#130 B3)', () => {
+  it('query error: page-level loader hides free text (no throw), status/ids kept', async () => {
+    const repo = {
+      ...plantedRepo(),
+      getSecretValues: async () => {
+        throw new Error('db down');
+      },
+    };
+    const { result: d, logs } = await captureLogs(() => loadApprovalDetail(repo, 'company-a', 'appr-a'));
+    assert.ok(d);
+    assert.equal(d.redactionUnavailable, true);
+    assert.equal(d.approval.payload, H);
+    assert.equal(d.approval.title, H);
+    assert.equal(d.approval.id, 'appr-a');
+    assert.equal(d.approval.status, 'rejected');
+    assert.match(logs, /secret values unavailable/);
+    assert.deepEqual(leaks(JSON.stringify(approvalDetailJson(d))), []);
+  });
 });

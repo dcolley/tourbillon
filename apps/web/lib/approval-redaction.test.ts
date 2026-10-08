@@ -235,3 +235,46 @@ describe('approval redaction: vault values unavailable (#130 B3)', () => {
     assert.equal(ok.freeText('vault known-vault-value-123'), 'vault [redacted]');
   });
 });
+
+describe('approval redaction: key=value pairs with secret-looking key names (PM)', () => {
+  const r = createApprovalRedactor();
+  const families = [
+    'secret', 'client_secret', 'aws_secret_access_key', 'token', 'refresh-token', 'password', 'passwd', 'pwd',
+    'api_key', 'apikey', 'api-key', 'x-api-key', 'private_key', 'auth', 'authorization', 'access_key', 'AWS_ACCESS_KEY',
+    'Client-Secret', 'DB_PASSWORD',
+  ];
+  for (const key of families) {
+    it(`${key}: value masked, key kept (=, :, JSON-ish, quoted)`, () => {
+      const v = `kv-${key.replace(/[^a-z]/gi, '')}-0001`;
+      assert.equal(r.text(`${key}=${v} next`), `${key}=[redacted] next`);
+      assert.equal(r.text(`${key}: ${v}`), `${key}: [redacted]`);
+      assert.equal(r.text(`{"${key}": "${v}", "n": 1}`), `{"${key}": "[redacted]", "n": 1}`);
+      assert.equal(r.text(`${key}='${v}'`), `${key}='[redacted]'`);
+    });
+  }
+  it('quoted values with spaces are masked whole', () => {
+    assert.equal(r.text('password="correct horse battery" ok'), 'password="[redacted]" ok');
+    assert.equal(r.text("client_secret: 'two words here'"), "client_secret: '[redacted]'");
+    assert.equal(r.text('{"api_key":"a b c d"}'), '{"api_key":"[redacted]"}');
+  });
+  it('case-insensitive and inside longer text', () => {
+    const out = r.text('set SECRET=abc-0001, Token: def-0002; and x-API-KEY=ghi-0003 done');
+    assert.equal(out, 'set SECRET=[redacted], Token: [redacted]; and x-API-KEY=[redacted] done');
+  });
+  it('no false positives: token counts and unrelated keys stay', () => {
+    const s = 'token_count=5 max_tokens: 4000 tokens=12 author=ann status: ok bypass=1 key_count=3 title: "a b"';
+    assert.equal(r.text(s), s);
+  });
+  it('Authorization: Bearer/Basic still masked once, idempotent', () => {
+    const out = r.text('Authorization: Basic dXNlcjpwYXNzd29yZA==');
+    assert.ok(!out.includes('dXNlcjpwYXNzd29yZA'), out);
+    assert.equal(r.text(out), out);
+    assert.equal(r.text('password=[redacted]'), 'password=[redacted]');
+  });
+  it('linear on a long unbroken string', () => {
+    const big = 'a'.repeat(200_000);
+    const t0 = Date.now();
+    r.text(big);
+    assert.ok(Date.now() - t0 < 1000);
+  });
+});
