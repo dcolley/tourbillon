@@ -5,11 +5,15 @@ import {
   LlmProviderValidationError,
   updateLlmProvider,
 } from '@/lib/llm-providers';
+import { requireBoardIdentity } from '@/lib/board-route-auth';
 
+// #106: board only (provider config is instance-global).
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const auth = await requireBoardIdentity(req);
+  if (!auth.ok) return auth.response;
   const { id } = await params;
   try {
     const provider = await getLlmProviderPublic(id);
@@ -27,6 +31,8 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const auth = await requireBoardIdentity(req);
+  if (!auth.ok) return auth.response;
   const { id } = await params;
   try {
     const body = (await req.json()) as {
@@ -56,9 +62,11 @@ export async function PATCH(
 }
 
 export async function DELETE(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const auth = await requireBoardIdentity(req);
+  if (!auth.ok) return auth.response;
   const { id } = await params;
   try {
     await deleteLlmProvider(id);

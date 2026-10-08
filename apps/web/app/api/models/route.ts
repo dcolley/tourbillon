@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db, agents } from '@tourbillon/db';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import {
   getLlmProviderRecordById,
   listLlmProvidersPublic,
@@ -10,10 +10,15 @@ import {
   listProviderModelsForAgent,
   listProviderModelsForRecord,
 } from '@/lib/model-catalog';
+import { requireBoardCompany, requireBoardIdentity } from '@/lib/board-route-auth';
 
 export async function GET(req: NextRequest) {
   const agentId = req.nextUrl.searchParams.get('agentId');
   const providerId = req.nextUrl.searchParams.get('providerId');
+
+  // #106: board only. Agent-scoped lookups are limited to the board's company (other → 404).
+  const auth = agentId && !providerId ? await requireBoardCompany(req) : await requireBoardIdentity(req);
+  if (!auth.ok) return auth.response;
 
   try {
     if (providerId) {
@@ -26,7 +31,11 @@ export async function GET(req: NextRequest) {
     }
 
     if (agentId) {
-      const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+      const companyId = auth.value === true ? null : auth.value.id;
+      if (!companyId) return NextResponse.json({ error: 'Agent not found' }, { status: 404 });
+      const agent = await db.query.agents.findFirst({
+        where: and(eq(agents.id, agentId), eq(agents.companyId, companyId)),
+      });
       if (!agent) {
         return NextResponse.json({ error: 'Agent not found' }, { status: 404 });
       }

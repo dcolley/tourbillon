@@ -36,7 +36,12 @@ export interface LlmProviderPublic {
   type: LlmProviderType;
   baseURL: string;
   hasApiKey: boolean;
+  /**
+   * #106: write-only. Header *names* with empty values; real values never leave the server
+   * (they often carry auth). Use `headerNames` for display.
+   */
   headers: Record<string, string>;
+  headerNames: string[];
   apiMode: 'chat' | 'responses';
   isDefault: boolean;
   defaultModelSettings: AgentModelSettings;
@@ -76,6 +81,27 @@ export interface UpdateLlmProviderInput {
   stickinessHeaderName?: string;
 }
 
+/** #106: header names only, values blanked. */
+export function redactHeaderValues(headers: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.keys(headers).map((name) => [name, '']));
+}
+
+/**
+ * #106: headers are write-only, so the UI round-trips blank values for headers it did not
+ * change. A blank value for an existing header keeps the stored value; headers left out are
+ * removed; non-blank values replace.
+ */
+export function mergeWriteOnlyHeaders(
+  existing: Record<string, string>,
+  submitted: Record<string, string>,
+): Record<string, string> {
+  const merged: Record<string, string> = {};
+  for (const [name, value] of Object.entries(submitted)) {
+    merged[name] = value === '' && name in existing ? existing[name] : value;
+  }
+  return merged;
+}
+
 function toPublic(row: LlmProvider): LlmProviderPublic {
   const record = toLlmProviderRecord(row);
   return {
@@ -84,7 +110,8 @@ function toPublic(row: LlmProvider): LlmProviderPublic {
     type: record.type,
     baseURL: record.baseURL,
     hasApiKey: Boolean(record.apiKey),
-    headers: record.headers,
+    headers: redactHeaderValues(record.headers),
+    headerNames: Object.keys(record.headers),
     apiMode: record.apiMode,
     isDefault: record.isDefault,
     defaultModelSettings: record.defaultModelSettings,
@@ -248,7 +275,9 @@ export async function updateLlmProvider(
   if (input.name !== undefined) updates.name = validateName(input.name);
   if (input.type !== undefined) updates.type = parseProviderType(input.type);
   if (input.baseURL !== undefined) updates.baseURL = validateBaseURL(input.baseURL);
-  if (input.headers !== undefined) updates.headers = input.headers;
+  if (input.headers !== undefined) {
+    updates.headers = mergeWriteOnlyHeaders(parseHeaders(existing.headers), input.headers);
+  }
   if (input.apiMode !== undefined) {
     const apiMode = parseModelApiMode(input.apiMode);
     if (!apiMode) throw new LlmProviderValidationError('API mode must be chat or responses.');

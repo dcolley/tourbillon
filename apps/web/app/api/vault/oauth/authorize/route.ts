@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { createHmac } from 'crypto';
+import { db, agents } from '@tourbillon/db';
+import { and, eq } from 'drizzle-orm';
+import { requireBoardCompany } from '@/lib/board-route-auth';
 
 const authorizeSchema = z.object({
   serverId: z.string().min(1),
@@ -22,6 +25,10 @@ function verifyOAuthState(payload: string, signature: string): boolean {
 }
 
 export async function GET(req: NextRequest) {
+  // #106: board only (starts an OAuth grant that stores credentials for the active company).
+  const auth = await requireBoardCompany(req);
+  if (!auth.ok) return auth.response;
+
   try {
     const { searchParams } = new URL(req.url);
     
@@ -33,6 +40,14 @@ export async function GET(req: NextRequest) {
     };
     
     const validated = authorizeSchema.parse(params);
+
+    // Agent-scoped grants must target an agent in the board's company (other company → 404).
+    if (validated.agentId) {
+      const agent = await db.query.agents.findFirst({
+        where: and(eq(agents.id, validated.agentId), eq(agents.companyId, auth.value.id)),
+      });
+      if (!agent) return NextResponse.json({ error: 'Agent not found' }, { status: 404 });
+    }
     
     if (validated.serverId === 'github-mcp') {
       const clientId = process.env.GITHUB_OAUTH_CLIENT_ID;

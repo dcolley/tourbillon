@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db, agents, companies } from '@tourbillon/db';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { listMcpToolsForAgent } from '@tourbillon/mastra/mcp-tools';
 import { parseCompanySettings } from '@tourbillon/shared';
+import { requireBoardCompany } from '@/lib/board-route-auth';
 
 export async function GET(
   req: NextRequest,
@@ -10,7 +11,13 @@ export async function GET(
 ) {
   const { agentId } = await context.params;
 
-  const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+  // #106: board only; agent lookup scoped to the board's company (other company → 404).
+  const auth = await requireBoardCompany(req);
+  if (!auth.ok) return auth.response;
+
+  const agent = await db.query.agents.findFirst({
+    where: and(eq(agents.id, agentId), eq(agents.companyId, auth.value.id)),
+  });
   if (!agent) {
     return NextResponse.json({ error: 'Agent not found' }, { status: 404 });
   }
