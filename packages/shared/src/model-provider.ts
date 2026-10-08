@@ -335,6 +335,21 @@ export function resolveModelProviderConfig(
   return applyOverrides(base, overrides, modelId);
 }
 
+/**
+ * {@link resolveModelProviderConfig} for config that is about to be used to call the provider
+ * (runs, chat, model listing). Throws `llm_provider_base_url_host_mismatch` (409) instead of
+ * combining an agent base URL override on another host with the provider's key or headers.
+ * Display-only callers keep using resolveModelProviderConfig.
+ */
+export function resolveAgentModelProviderConfig(
+  overrides?: ModelProviderOverrides | null,
+  modelId?: string | null,
+  providerRecord?: LlmProviderRecord | null,
+): ModelProviderConfig {
+  assertAgentOverrideWithinProviderBoundary(overrides, providerRecord);
+  return resolveModelProviderConfig(overrides, modelId, providerRecord);
+}
+
 /** Resolve from env only (no registry record). */
 export function resolveModelProviderConfigFromEnv(
   overrides?: ModelProviderOverrides | null,
@@ -445,4 +460,135 @@ export function defaultAgentAdapterType(): 'lmstudio' | 'ollama' {
 /** Display name for env-based default provider seeding. */
 export function defaultProviderSeedName(type: LlmProviderType): string {
   return `Default (${LLM_PROVIDER_TYPE_LABELS[type]})`;
+}
+
+// ---------------------------------------------------------------------------------------------
+/**
+ * runs-follow-default: credential boundary for LLM provider calls (shared by the web app, the wake-runner and mastra).
+ *
+ * - {@link ProviderConfigError}: a provider config that can never work safely (409 + code).
+ * - {@link sameCredentialBoundary}: same host and port, no https → http downgrade.
+ * - {@link assertAgentOverrideWithinProviderBoundary}: an agent's `adapterConfig.baseURL` on a
+ *   different host from its provider never receives the provider's API key or header values.
+ * - {@link resolveAgentProviderRow}: agent's provider → registry default → env (null).
+ */
+
+export type ProviderConfigErrorCode =
+  | 'llm_provider_base_url_credentials'
+  | 'llm_provider_base_url_host_mismatch';
+
+/** A provider config that can never work (not an upstream failure): maps to 409. */
+export class ProviderConfigError extends Error {
+  readonly status = 409;
+  constructor(
+    message: string,
+    readonly code: ProviderConfigErrorCode,
+  ) {
+    super(message);
+    this.name = 'ProviderConfigError';
+  }
+}
+
+/**
+ * Structural check (works across bundles that may hold separate copies of this module, e.g. the
+ * web app vs @tourbillon/mastra in Next.js).
+ */
+export function isProviderConfigError(err: unknown): err is ProviderConfigError {
+  if (err instanceof ProviderConfigError) return true;
+  if (!(err instanceof Error) || err.name !== 'ProviderConfigError') return false;
+  const e = err as Error & { code?: unknown; status?: unknown };
+  return typeof e.code === 'string' && e.code.startsWith('llm_provider_') && e.status === 409;
+}
+
+function tryParseURL(raw: string): URL | null {
+  try {
+    return new URL(raw.trim());
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Same trust boundary for credentials: same host (hostname and port) and not an https → http
+ * downgrade. http → https on the same hostname with default ports is allowed.
+ */
+export function sameCredentialBoundary(from: string | URL, to: string | URL): boolean {
+  const a = typeof from === 'string' ? tryParseURL(from) : from;
+  const b = typeof to === 'string' ? tryParseURL(to) : to;
+  if (!a || !b) return false;
+  if (a.hostname.toLowerCase() !== b.hostname.toLowerCase()) return false;
+  if (a.protocol === b.protocol) return a.port === b.port;
+  // Upgrade only, and only between default ports (http://h → https://h).
+  return a.protocol === 'http:' && b.protocol === 'https:' && a.port === '' && b.port === '';
+}
+
+/** `scheme://host[:port]` for messages: never userinfo, path or query. */
+function originForMessage(raw: string): string {
+  const u = tryParseURL(raw);
+  return u ? `${u.protocol}//${u.host}` : 'an unparseable URL';
+}
+
+/** Provider credentials (key, header values) that would be sent along with these overrides. */
+export function providerCredentialsSentWithOverrides(
+  record: Pick<LlmProviderRecord, 'apiKey' | 'headers'>,
+  overrides?: Pick<ModelProviderOverrides, 'apiKey' | 'headers'> | null,
+): { apiKey: boolean; headerNames: string[] } {
+  // Same rule as the merge in resolveModelProviderConfig ({ ...record.headers, ...overrides }):
+  // only an exact-name override replaces a provider header. A different-case name does not
+  // (both would be sent), so it doesn't count as replaced.
+  const overridden = overrides?.headers ?? {};
+  return {
+    apiKey: overrides?.apiKey === undefined && Boolean(record.apiKey),
+    headerNames: Object.keys(record.headers ?? {}).filter((k) => !Object.hasOwn(overridden, k)),
+  };
+}
+
+/**
+ * Fail closed when an agent's base URL override sits outside its provider's credential boundary
+ * and the provider's API key or header values would be sent to it. A same-host override (or an
+ * override that brings its own key and no provider headers are left) is allowed.
+ * Throws {@link ProviderConfigError} `llm_provider_base_url_host_mismatch` (409).
+ */
+export function assertAgentOverrideWithinProviderBoundary(
+  overrides: ModelProviderOverrides | null | undefined,
+  record: LlmProviderRecord | null | undefined,
+): void {
+  const overrideURL = overrides?.baseURL?.trim();
+  if (!record || !overrideURL) return;
+  const sent = providerCredentialsSentWithOverrides(record, overrides);
+  if (!sent.apiKey && sent.headerNames.length === 0) return;
+  if (sameCredentialBoundary(record.baseURL, overrideURL)) return;
+  const what = [sent.apiKey ? 'API key' : null, sent.headerNames.length ? 'custom headers' : null]
+    .filter(Boolean)
+    .join(' and ');
+  throw new ProviderConfigError(
+    `The agent's base URL override (${originForMessage(overrideURL)}) is on a different host from ` +
+      `its LLM provider "${record.name}" (${originForMessage(record.baseURL)}); refusing to send ` +
+      `the provider's ${what} there. Remove the agent's base URL override, or point the agent at ` +
+      'a provider for that host.',
+    'llm_provider_base_url_host_mismatch',
+  );
+}
+
+export type AgentProviderSource = 'agent' | 'registry_default' | 'env';
+
+/**
+ * Provider row used for an agent's runs and chat: the agent's own provider, else the registry
+ * default (`llm_providers.is_default`, the same default `/api/models` lists), else null → env.
+ * An agent provider id whose row is gone falls through to the registry default.
+ */
+export async function resolveAgentProviderRow<T>(
+  providerId: string | null | undefined,
+  lookup: {
+    byId: (id: string) => Promise<T | null | undefined>;
+    registryDefault: () => Promise<T | null | undefined>;
+  },
+): Promise<{ row: T | null; source: AgentProviderSource }> {
+  if (providerId) {
+    const own = await lookup.byId(providerId);
+    if (own) return { row: own, source: 'agent' };
+  }
+  const fallback = await lookup.registryDefault();
+  if (fallback) return { row: fallback, source: 'registry_default' };
+  return { row: null, source: 'env' };
 }

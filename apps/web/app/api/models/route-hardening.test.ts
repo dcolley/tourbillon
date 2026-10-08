@@ -165,14 +165,19 @@ describe('GET /api/models provider hardening', () => {
 
   // ------------------------------------------------------------------ S4: bounded error read
   describe('S4: the error body read is bounded', () => {
-    it('an endless 500 body is read only up to the cap, then cancelled', async () => {
+    // #125 S6: if the cap regresses this must fail, not hang. The stream ends by itself after
+    // 1 MiB (16× the cap; the cap check then fails on pulledChunks) and yields to the event loop
+    // between chunks, and the test has its own timeout as a last resort.
+    it('an endless 500 body is read only up to the cap, then cancelled', { timeout: 30_000 }, async () => {
       rows = [provider()];
       handler = () => {
         const chunk = new Uint8Array(16 * 1024).fill(0x61);
         return new Response(new ReadableStream<Uint8Array>({
-          pull(c) {
+          async pull(c) {
             pulledChunks++;
-            c.enqueue(chunk);
+            await new Promise((r) => setImmediate(r));
+            if (pulledChunks > 64) c.close();
+            else c.enqueue(chunk);
           },
         }), { status: 500 });
       };
@@ -379,6 +384,71 @@ describe('GET /api/models provider hardening', () => {
       handler = () => modelsBody('m');
       await call();
       assert.deepEqual(inserted, []);
+    });
+  });
+
+  // ------------------------------------------------------------------ #125 Test softs S1–S3
+  describe('#125 softs on the route', () => {
+    it('S1: a 200 with a non-JSON body → 502 "provider returned invalid JSON", nothing of the body echoed', async () => {
+      for (const [label, setup, qs] of PATHS) {
+        rows = [provider()];
+        setup();
+        fetched = [];
+        handler = () => new Response(`${API_KEY} <html>`, { status: 200 });
+        const { status, text } = await call(qs);
+        assert.equal(status, 502, label);
+        assert.match(text, /provider returned invalid JSON/, label);
+        assert.ok(!text.includes(API_KEY.slice(0, 6)) && !text.includes('<html>'), text);
+      }
+    });
+
+    it('S2: an error body padded past the 64 KiB cap with the key cut at the cap → no part of the key shown', async () => {
+      rows = [provider()];
+      // The cap keeps the first 6 key characters; `.trim()` would have moved them into the snippet.
+      handler = () => new Response(`${' '.repeat(64 * 1024 - 6)}${API_KEY} tail`, { status: 500 });
+      const { status, text } = await call();
+      assert.equal(status, 502);
+      assert.ok(!text.includes(API_KEY.slice(0, 6)), text);
+    });
+
+    it('S3: a same-host redirect whose Location has user:pass@ is refused; not followed, password not echoed', async () => {
+      rows = [provider()];
+      handler = (url) =>
+        url === 'http://gw.test/v1/models'
+          ? new Response(null, { status: 302, headers: { location: 'http://admin:loc-pass-9@gw.test/v2/models' } })
+          : modelsBody('m');
+      const { status, text } = await call();
+      assert.equal(status, 502);
+      assert.match(text, /username or password/);
+      assert.ok(!text.includes('loc-pass-9'), text);
+      assert.deepEqual(urls(), ['http://gw.test/v1/models']);
+    });
+  });
+
+  // ------------------------------------------------- agent base URL override vs provider host
+  describe('?agentId= with adapterConfig.baseURL (llm_provider_base_url_host_mismatch)', () => {
+    it('override on another host → 409 with the code; nothing fetched, so no key or header leaves', async () => {
+      rows = [provider()];
+      for (const providerId of ['prov-def', null]) {
+        agent = agentRow({ providerId, adapterConfig: { baseURL: 'http://elsewhere.test/v1' } });
+        const { status, body, text } = await call('?agentId=agent-1');
+        assert.equal(status, 409, String(providerId));
+        assert.equal(body.code, 'llm_provider_base_url_host_mismatch');
+        assert.ok(!text.includes(API_KEY) && !text.includes(HEADER_SECRET), text);
+      }
+      assert.deepEqual(fetched, []);
+    });
+
+    it('same-host override still gets the key and headers', async () => {
+      rows = [provider()];
+      agent = agentRow({ providerId: 'prov-def', adapterConfig: { baseURL: 'http://gw.test/v2' } });
+      handler = () => modelsBody('m');
+      const { status } = await call('?agentId=agent-1');
+      assert.equal(status, 200);
+      assert.deepEqual(urls(), ['http://gw.test/v2/models']);
+      const sent = fetched[0].init.headers as Record<string, string>;
+      assert.equal(sent.Authorization, `Bearer ${API_KEY}`);
+      assert.equal(sent['X-Team-Token'], HEADER_SECRET);
     });
   });
 });

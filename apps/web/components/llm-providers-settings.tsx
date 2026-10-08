@@ -16,6 +16,7 @@ import {
   type ModelSettingsFormValues,
   emptyModelSettingsFormValues,
 } from '@/components/model-settings-fields';
+import { apiKeySavePayload } from '@/lib/llm-provider-form';
 
 interface LlmProviderPublic {
   id: string;
@@ -39,6 +40,8 @@ interface ProviderFormState {
   type: LlmProviderType;
   baseURL: string;
   apiKey: string;
+  /** Clear the stored key on save (existing providers only). */
+  clearApiKey: boolean;
   apiMode: 'chat' | 'responses';
   isDefault: boolean;
   defaultModel: string;
@@ -53,6 +56,7 @@ const EMPTY_FORM: ProviderFormState = {
   type: 'lmstudio',
   baseURL: defaultBaseURLForProviderType('lmstudio'),
   apiKey: '',
+  clearApiKey: false,
   apiMode: 'chat',
   isDefault: false,
   defaultModel: '',
@@ -84,6 +88,8 @@ export function LlmProvidersSettings() {
   // header values write-only (blank = keep the stored value).
   const [storedHeaderNames, setStoredHeaderNames] = useState<string[]>([]);
   const [headersWriteOnly, setHeadersWriteOnly] = useState(false);
+  // Whether the provider being edited has a stored API key (offers the clear control).
+  const [editingHasApiKey, setEditingHasApiKey] = useState(false);
   const [form, setForm] = useState<ProviderFormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
   const [testingId, setTestingId] = useState<string | null>(null);
@@ -117,6 +123,7 @@ export function LlmProvidersSettings() {
 
   function startCreate() {
     setEditingId('new');
+    setEditingHasApiKey(false);
     setStoredHeaderNames([]);
     setHeadersWriteOnly(false);
     setForm(EMPTY_FORM);
@@ -126,6 +133,7 @@ export function LlmProvidersSettings() {
 
   function startEdit(provider: LlmProviderPublic) {
     setEditingId(provider.id);
+    setEditingHasApiKey(provider.hasApiKey);
     setStoredHeaderNames(provider.headerNames ?? Object.keys(provider.headers));
     setHeadersWriteOnly(Array.isArray(provider.headerNames));
     setModelSuggestions([]);
@@ -140,6 +148,7 @@ export function LlmProvidersSettings() {
       type: provider.type,
       baseURL: provider.baseURL,
       apiKey: '',
+      clearApiKey: false,
       apiMode: provider.apiMode,
       isDefault: provider.isDefault,
       defaultModel: provider.defaultModel ?? '',
@@ -153,6 +162,7 @@ export function LlmProvidersSettings() {
 
   function cancelEdit() {
     setEditingId(null);
+    setEditingHasApiKey(false);
     setStoredHeaderNames([]);
     setHeadersWriteOnly(false);
     setForm(EMPTY_FORM);
@@ -185,7 +195,7 @@ export function LlmProvidersSettings() {
         defaultModel: form.defaultModel.trim(),
         stickiness: form.stickiness,
         stickinessHeaderName: form.stickinessHeaderName,
-        ...(form.apiKey.trim() ? { apiKey: form.apiKey.trim() } : {}),
+        ...apiKeySavePayload(form, editingId === 'new'),
       };
 
       const res = await fetch(
@@ -388,10 +398,30 @@ export function LlmProvidersSettings() {
               <PasswordInput
                 value={form.apiKey}
                 onChange={(e) => setForm((f) => ({ ...f, apiKey: e.target.value }))}
-                placeholder={editingId === 'new' ? 'Optional' : 'Leave blank to keep existing'}
+                placeholder={
+                  form.clearApiKey
+                    ? 'Stored key will be cleared'
+                    : editingId === 'new'
+                      ? 'Optional'
+                      : 'Leave blank to keep existing'
+                }
+                disabled={form.clearApiKey}
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
               />
               <p className="text-xs text-muted-foreground">Sent as Bearer token when set.</p>
+              {editingId !== 'new' && editingHasApiKey && (
+                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={form.clearApiKey}
+                    onChange={(e) =>
+                      setForm((f) => ({ ...f, clearApiKey: e.target.checked, apiKey: '' }))
+                    }
+                    className="rounded border-input"
+                  />
+                  Clear the stored API key on save
+                </label>
+              )}
             </div>
 
             <div className="space-y-1.5">

@@ -3,7 +3,6 @@
  * No control-plane inline; same tools as heartbeat; dedicated thread storage.
  */
 import type { Agent as AgentRecord } from '@tourbillon/db';
-import { getLlmProviderRowById } from '@tourbillon/db';
 import type {
   AgentController,
   AgentControllerMode,
@@ -14,8 +13,6 @@ import { Agent } from '@mastra/core/agent';
 import { PostgresStore } from '@mastra/pg';
 import {
   formatTrace,
-  modelProviderOverridesFromAgent,
-  resolveModelProviderConfig,
   resolveObservationalMemoryModel,
   isMastraTracingEnabled,
   type CompanySettings,
@@ -30,7 +27,11 @@ import {
   formatChatSkillsCatalogSection,
   prepareAgentSkills,
 } from './skills/on-demand-skills';
-import { getLanguageModelForAgent, llmProviderRowToRecord } from './provider';
+import {
+  getLanguageModelForAgent,
+  resolveAgentModelProvider,
+  resolveAgentProviderRecord,
+} from './provider';
 import {
   resolveAgentContextBudget,
   resolveAgentGenerationOptions,
@@ -190,19 +191,9 @@ export async function createChatAgentWithSkills(
     .filter((id): id is string => Boolean(id));
   const systemPrompt = assembleChatSystemPrompt(effectiveRecord, prepared, toolIds);
 
-  const providerOverrides = modelProviderOverridesFromAgent(
-    effectiveRecord.adapterType,
-    effectiveRecord.adapterConfig,
-  );
-  const providerRow = effectiveRecord.providerId
-    ? await getLlmProviderRowById(effectiveRecord.providerId)
-    : null;
-  const providerRecord = providerRow ? llmProviderRowToRecord(providerRow) : null;
-  const providerConfig = resolveModelProviderConfig(
-    providerOverrides,
-    effectiveRecord.modelId,
-    providerRecord,
-  );
+  // Agent's provider → registry default → env; host-mismatched base URL override → 409 error.
+  const { record: providerRecord, config: providerConfig } =
+    await resolveAgentModelProvider(effectiveRecord);
   const generationOptions = resolveAgentGenerationOptions(effectiveRecord, providerRecord);
   const contextBudget = resolveAgentContextBudget(effectiveRecord, providerRecord, 'chat');
 
@@ -292,10 +283,7 @@ export async function createChatController(
     agentRecord.runtimeConfig as AgentRuntimeConfig,
   );
   const memory = await getAgentMemory(options?.companySettings ?? null, agentRecord.runtimeConfig as AgentRuntimeConfig);
-  const providerRow = agentRecord.providerId
-    ? await getLlmProviderRowById(agentRecord.providerId)
-    : null;
-  const providerRecord = providerRow ? llmProviderRowToRecord(providerRow) : null;
+  const { record: providerRecord } = await resolveAgentProviderRecord(agentRecord);
   const contextBudget = resolveAgentContextBudget(agentRecord, providerRecord, 'chat');
 
   // Session always requires a Workspace instance (Mastra AgentController contract).

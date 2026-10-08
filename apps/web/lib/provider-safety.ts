@@ -7,7 +7,21 @@
  * - S3: no automatic redirects. Same-host redirects are followed by hand (bounded); a redirect
  *   to another host, or from https to http, is refused with a clear error.
  * - S4: bounded body reads (error snippets and the models JSON), never a full res.text().
+ * #125 Test softs:
+ * - S1: a non-JSON success body is reported as a fixed "provider returned invalid JSON" (the
+ *   JSON.parse message would echo the start of the body).
+ * - S2: a truncated error body loses its tail (longest secret form) before it is scrubbed, so a
+ *   secret cut at the byte cap can't leak its first characters.
+ * - S3: a redirect whose Location carries user:pass@ is refused (undici would echo the URL).
+ * - S4: secrets are matched case-insensitively, and base64 forms of each secret are scrubbed too.
  */
+
+// ProviderConfigError (409 + code) and sameCredentialBoundary live in @tourbillon/shared so the
+// wake-runner and mastra fail closed with the same codes (llm_provider_base_url_host_mismatch).
+import { ProviderConfigError, sameCredentialBoundary } from '@tourbillon/shared';
+
+export { ProviderConfigError, sameCredentialBoundary };
+export type { ProviderConfigErrorCode } from '@tourbillon/shared';
 
 /** Error-body bytes read before giving up; only the first ERROR_SNIPPET_CHARS are shown. */
 export const PROVIDER_ERROR_BODY_MAX_BYTES = 64 * 1024;
@@ -16,20 +30,6 @@ export const PROVIDER_MODELS_BODY_MAX_BYTES = 4 * 1024 * 1024;
 export const PROVIDER_ERROR_SNIPPET_CHARS = 200;
 export const PROVIDER_MAX_REDIRECTS = 3;
 export const REDACTED = '[redacted]';
-
-export type ProviderConfigErrorCode = 'llm_provider_base_url_credentials';
-
-/** A provider config that can never work (not an upstream failure): maps to 409. */
-export class ProviderConfigError extends Error {
-  readonly status = 409;
-  constructor(
-    message: string,
-    readonly code: ProviderConfigErrorCode,
-  ) {
-    super(message);
-    this.name = 'ProviderConfigError';
-  }
-}
 
 export const BASE_URL_CREDENTIALS_MESSAGE =
   'The base URL contains a username or password (user:pass@host). Credentials in the URL are not ' +
@@ -92,20 +92,6 @@ export function providerEndpoint(baseURL: string, path: string): string {
   return u.toString();
 }
 
-/**
- * Same trust boundary for credentials: same host (hostname and port) and not an https → http
- * downgrade. http → https on the same hostname with default ports is allowed.
- */
-export function sameCredentialBoundary(from: string | URL, to: string | URL): boolean {
-  const a = typeof from === 'string' ? tryParse(from) : from;
-  const b = typeof to === 'string' ? tryParse(to) : to;
-  if (!a || !b) return false;
-  if (a.hostname.toLowerCase() !== b.hostname.toLowerCase()) return false;
-  if (a.protocol === b.protocol) return a.port === b.port;
-  // Upgrade only, and only between default ports (http://h → https://h).
-  return a.protocol === 'http:' && b.protocol === 'https:' && a.port === '' && b.port === '';
-}
-
 /** `origin` of a URL for messages (never userinfo/query). */
 function originOf(u: URL): string {
   return `${u.protocol}//${u.host}`;
@@ -117,13 +103,38 @@ function escapeRegExp(s: string): string {
 
 /** Secrets shorter than this are not scrubbed (they'd mangle the text and protect nothing). */
 const MIN_SECRET_LENGTH = 3;
+/** Base64 forms are only scrubbed for secrets at least this long (short cores over-match). */
+const MIN_BASE64_SECRET_LENGTH = 8;
+
+function base64OfBytes(bytes: Uint8Array): string {
+  let bin = '';
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin);
+}
 
 /**
- * S1: remove secrets from upstream text before it reaches a response or a log: every given
- * secret (raw, JSON-escaped and URL-encoded forms), any `Bearer …`/`Basic …` credential, and
- * userinfo/query strings of URLs.
+ * #125 S4: base64 forms of a secret wherever it sits in an encoded stream (e.g. `user:key` in a
+ * Basic credential without the `Basic ` prefix). For each of the 3 byte alignments, the
+ * characters that depend only on the secret's bytes (no neighbours, no padding).
  */
-export function scrubProviderSecrets(text: string, secrets: Iterable<string | null | undefined>): string {
+function base64SecretForms(secret: string): string[] {
+  const bytes = new TextEncoder().encode(secret);
+  if (bytes.length < MIN_BASE64_SECRET_LENGTH) return [];
+  const out = new Set<string>([base64OfBytes(bytes)]);
+  for (let offset = 0; offset < 3; offset++) {
+    const padded = new Uint8Array(offset + bytes.length);
+    padded.set(bytes, offset);
+    const encoded = base64OfBytes(padded).replace(/=+$/, '');
+    const head = offset === 0 ? 0 : offset === 1 ? 2 : 3;
+    const tail = padded.length % 3 === 0 ? 0 : 1;
+    const core = encoded.slice(head, encoded.length - tail);
+    if (core.length >= MIN_BASE64_SECRET_LENGTH) out.add(core);
+  }
+  return [...out];
+}
+
+/** Every form of the given secrets that scrubProviderSecrets removes, longest first. */
+function secretVariants(secrets: Iterable<string | null | undefined>): string[] {
   const variants = new Set<string>();
   for (const s of secrets) {
     if (typeof s !== 'string') continue;
@@ -136,16 +147,44 @@ export function scrubProviderSecrets(text: string, secrets: Iterable<string | nu
       } catch {
         // lone surrogate: skip the encoded form
       }
+      for (const b64 of base64SecretForms(candidate)) variants.add(b64);
     }
   }
+  return [...variants].filter((v) => v.length >= MIN_SECRET_LENGTH).sort((x, y) => y.length - x.length);
+}
+
+/**
+ * S1: remove secrets from upstream text before it reaches a response or a log: every given
+ * secret (raw, JSON-escaped, URL-encoded and base64 forms, in any letter case), any
+ * `Bearer …`/`Basic …` credential, and userinfo/query strings of URLs.
+ */
+export function scrubProviderSecrets(text: string, secrets: Iterable<string | null | undefined>): string {
   let out = text;
   // Longest first so a secret that contains another is replaced whole.
-  for (const v of [...variants].sort((x, y) => y.length - x.length)) {
-    if (v.length < MIN_SECRET_LENGTH) continue;
-    out = out.replace(new RegExp(escapeRegExp(v), 'g'), REDACTED);
+  for (const v of secretVariants(secrets)) {
+    out = out.replace(new RegExp(escapeRegExp(v), 'gi'), REDACTED);
   }
   out = out.replace(/\b(Bearer|Basic)\s+(?!\[redacted\])\S+/gi, `$1 ${REDACTED}`);
   return redactUrlsInText(out);
+}
+
+/**
+ * #125 S2: error-body snippet safe to show: when the body was cut at the byte cap, the last
+ * (longest secret form) characters are dropped first so a secret split by the cut can't survive
+ * the scrub; then scrub, trim and cut to `maxChars`.
+ */
+export function providerErrorSnippet(
+  body: { text: string; truncated: boolean },
+  secrets: Iterable<string | null | undefined>,
+  maxChars: number = PROVIDER_ERROR_SNIPPET_CHARS,
+): string {
+  const list = [...secrets];
+  let text = body.text;
+  if (body.truncated) {
+    const longest = secretVariants(list).reduce((n, v) => Math.max(n, v.length), 0);
+    text = text.slice(0, Math.max(0, text.length - longest));
+  }
+  return scrubProviderSecrets(text, list).trim().slice(0, maxChars);
 }
 
 /** Every value that must never be echoed for a provider config: key, header values, URL parts. */
@@ -165,6 +204,16 @@ export function providerSecretValues(config: {
     for (const v of u.searchParams.values()) out.push(v);
   }
   return out;
+}
+
+export const PROVIDER_INVALID_JSON_MESSAGE = 'provider returned invalid JSON';
+
+/** #125 S1: fixed message, nothing from the body. */
+export class ProviderInvalidJsonError extends Error {
+  constructor() {
+    super(PROVIDER_INVALID_JSON_MESSAGE);
+    this.name = 'ProviderInvalidJsonError';
+  }
 }
 
 export class ResponseTooLargeError extends Error {
@@ -223,7 +272,12 @@ export async function readJsonCapped<T>(res: Response, maxBytes: number): Promis
   }
   const { text, truncated } = await readBodyCapped(res, maxBytes);
   if (truncated) throw new ResponseTooLargeError(maxBytes);
-  return JSON.parse(text) as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    // #125 S1: never the JSON.parse message, which quotes the start of the body.
+    throw new ProviderInvalidJsonError();
+  }
 }
 
 export class ProviderRedirectError extends Error {
@@ -269,6 +323,13 @@ export async function fetchWithoutCrossHostRedirects(
         `provider redirected (${res.status}) from ${originOf(current)} to a different host ` +
           `(${originOf(next)}); refusing to follow it with the provider's credentials. ` +
           'Point the base URL at the final address instead.',
+      );
+    }
+    // Same host, but with userinfo.
+    if (next.username || next.password) {
+      // #125 S3: undici throws on user:pass@ URLs with the full URL in its message.
+      throw new ProviderRedirectError(
+        `provider redirected (${res.status}) to a URL with a username or password; refusing to follow it.`,
       );
     }
     if (hop + 1 > PROVIDER_MAX_REDIRECTS) {

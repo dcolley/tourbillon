@@ -3,7 +3,7 @@ import {
   inferReasoningCapabilities,
   modelProviderOverridesFromAgent,
   reasoningCapabilitiesFromNative,
-  resolveModelProviderConfig,
+  resolveAgentModelProviderConfig,
   resolveModelProviderConfigFromRecord,
   type LlmProviderRecord,
   type ModelProviderConfig,
@@ -18,9 +18,8 @@ import {
   readBodyCapped,
   readJsonCapped,
   redactBaseURL,
-  scrubProviderSecrets,
+  providerErrorSnippet,
   PROVIDER_ERROR_BODY_MAX_BYTES,
-  PROVIDER_ERROR_SNIPPET_CHARS,
   PROVIDER_MODELS_BODY_MAX_BYTES,
 } from './provider-safety';
 
@@ -166,11 +165,10 @@ export async function listProviderModelsFromConfig(
   });
 
   if (!res.ok) {
-    // S4: bounded read; S1: scrub key, header values and Bearer strings before the snippet is cut.
-    const { text } = await readBodyCapped(res, PROVIDER_ERROR_BODY_MAX_BYTES);
-    const detail = scrubProviderSecrets(text, providerSecretValues(config, requestHeaders))
-      .trim()
-      .slice(0, PROVIDER_ERROR_SNIPPET_CHARS);
+    // S4: bounded read; S1: scrub key, header values and Bearer strings before the snippet is cut;
+    // #125 S2: a body cut at the cap loses its tail first (see providerErrorSnippet).
+    const body = await readBodyCapped(res, PROVIDER_ERROR_BODY_MAX_BYTES);
+    const detail = providerErrorSnippet(body, providerSecretValues(config, requestHeaders));
     throw new Error(
       `Could not list models from ${config.provider} (${res.status})${detail ? `: ${detail}` : ''}`,
     );
@@ -205,7 +203,8 @@ export async function listProviderModels(
   modelId?: string | null,
   providerRecord?: LlmProviderRecord | null,
 ): Promise<ListProviderModelsResult> {
-  const config = resolveModelProviderConfig(overrides, modelId, providerRecord);
+  // Agent overrides on another host never get the record's key/headers (409 host mismatch).
+  const config = resolveAgentModelProviderConfig(overrides, modelId, providerRecord);
   return listProviderModelsFromConfig(config);
 }
 

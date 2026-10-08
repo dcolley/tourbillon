@@ -37,7 +37,8 @@ export type DefaultModelsErrorCode =
   | 'llm_provider_not_configured'
   | 'llm_provider_unreachable'
   | 'llm_provider_error'
-  | 'llm_provider_base_url_credentials';
+  | 'llm_provider_base_url_credentials'
+  | 'llm_provider_base_url_host_mismatch';
 
 /** Network failure or timeout from fetch (as opposed to an HTTP error response). */
 export function isUnreachableError(err: unknown): boolean {

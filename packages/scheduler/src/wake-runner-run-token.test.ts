@@ -66,7 +66,7 @@ describe('#110 wake-runner run token', () => {
         return originalRequire.apply(this, arguments as unknown as [string]);
       }
       if (id === '@tourbillon/db') {
-        return { db: fakeDb, ...tables, getLlmProviderRowById: async () => null };
+        return { db: fakeDb, ...tables, getLlmProviderRowById: async () => null, getDefaultLlmProviderRow: async () => null };
       }
       if (id === 'drizzle-orm') {
         return {
