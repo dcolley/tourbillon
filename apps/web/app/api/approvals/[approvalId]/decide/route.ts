@@ -7,6 +7,7 @@ import { publicOriginFromRequest } from '@tourbillon/shared';
 import { requireBoardCompany } from '@/lib/board-route-auth';
 import { APPROVAL_ACTORS, approvalDecidedActivity } from '@/lib/approval-activity';
 import { approvalDetailHref } from '@/lib/approval-links';
+import { isValidApprovalId } from '@/lib/approval-detail';
 
 type ApprovalPayload = Record<string, unknown> & {
   title?: string;
@@ -42,6 +43,8 @@ export async function POST(
   const auth = await requireBoardCompany(req);
   if (!auth.ok) return auth.response;
   const company = auth.value;
+  // NUL/control characters made Postgres throw (500); malformed ids are a 400.
+  if (!isValidApprovalId(approvalId)) return NextResponse.json({ error: 'Invalid approval id' }, { status: 400 });
   const body = await parseDecisionBody(req);
 
   const decision = body.decision as 'approved' | 'rejected';
@@ -51,7 +54,7 @@ export async function POST(
     return NextResponse.json({ error: 'decision must be approved or rejected' }, { status: 400 });
   }
   // A reject is the board's "request changes": the reason is the feedback the requesting agent
-  // gets, so it is required (board UI and this board API; MCP decide_approval is unchanged).
+  // gets, so it is required (board UI, this board API and MCP decide_approval).
   if (decision === 'rejected' && !note?.trim()) {
     if ((req.headers.get('accept') ?? '').includes('text/html')) {
       const back = new URL(approvalDetailHref(approvalId), publicOriginFromRequest(req));

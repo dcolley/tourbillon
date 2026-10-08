@@ -1,15 +1,12 @@
 /**
  * Approval details (board UI `/approval/[approvalId]` and `GET /api/approvals/:id`).
  *
- * Pure logic over a small repo interface: company scoping, payload redaction and the history
- * timeline. The Drizzle repo lives in ./approval-detail-repo so this file stays testable.
+ * Pure logic over a small repo interface: company scoping, redaction (./approval-redaction, over
+ * every field) and the history timeline. The Drizzle repo lives in ./approval-detail-repo so
+ * this file stays testable.
  */
-import {
-  REDACTED_SECRET_PLACEHOLDER,
-  collectSecretValueEntries,
-  redactAgentSecretsDeep,
-  scrubSecretValues,
-} from '@tourbillon/shared';
+import { collectSecretValueEntries } from '@tourbillon/shared';
+import { collectValuesUnderSensitiveKeys, createApprovalRedactor, PAYLOAD_DISPLAY_CAP } from './approval-redaction';
 
 export interface ApprovalRow {
   id: string;
@@ -65,8 +62,13 @@ export interface ApprovalDetailRepo {
   getIssues(companyId: string, issueIds: string[]): Promise<ApprovalIssueRow[]>;
   /** activity_log rows about this approval or about its linked issues that cite it. */
   getActivity(companyId: string, approvalId: string, issueIds: string[]): Promise<ApprovalActivityRow[]>;
-  /** Company settings, used only to collect secret values to scrub from the payload. */
+  /** Company settings, used only to collect secret values to scrub. */
   getCompanySettings(companyId: string): Promise<unknown>;
+  /**
+   * Secret values to scrub (vault secrets and agent runtime secrets of this company, LLM provider
+   * keys/header values). Held in memory for redaction only: never logged or returned.
+   */
+  getSecretValues(companyId: string): Promise<string[]>;
   /**
    * Other approvals in this company that share at least one linked issue (newest first).
    * Optional so older repos/tests without it simply show no related approvals.
@@ -79,6 +81,7 @@ export const RELATED_APPROVALS_LIMIT = 20;
 
 export interface RelatedApproval {
   id: string;
+  /** Redacted (lib/approval-redaction) and clipped to APPROVAL_TITLE_MAX_CHARS. */
   title: string;
   type: string;
   status: string;
@@ -110,7 +113,13 @@ export interface ApprovalHistoryEvent {
 }
 
 export interface ApprovalDetail {
-  approval: Omit<ApprovalRow, 'payload'> & { payload: unknown; title: string; summary: string | null };
+  approval: Omit<ApprovalRow, 'payload'> & {
+    payload: unknown;
+    /** True when the payload was cut for display (size/depth cap). */
+    payloadTruncated: boolean;
+    title: string;
+    summary: string | null;
+  };
   requester: { id: string; name: string; urlKey: string } | null;
   decidedBy: string | null;
   linkedIssues: Array<Omit<ApprovalIssueRow, 'companyId'> & { haltedByThis: boolean }>;
@@ -121,33 +130,22 @@ export interface ApprovalDetail {
   relatedApprovals: RelatedApproval[];
 }
 
-/** Payload keys that hold credentials for this approval flow (not covered by the shared helper). */
-const APPROVAL_SECRET_KEYS = new Set(['hitlyResumeToken']);
-
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return v !== null && typeof v === 'object' && !Array.isArray(v);
 }
 
-function redactApprovalKeys(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(redactApprovalKeys);
-  if (!isPlainObject(value)) return value;
-  return Object.fromEntries(
-    Object.entries(value).map(([k, v]) => [
-      k,
-      APPROVAL_SECRET_KEYS.has(k) && v != null && v !== '' ? REDACTED_SECRET_PLACEHOLDER : redactApprovalKeys(v),
-    ]),
-  );
-}
+export const APPROVAL_TITLE_MAX_CHARS = 300;
+export const APPROVAL_SUMMARY_MAX_CHARS = 2_000;
+
+const clip = (s: string, max: number) => (s.length > max ? `${s.slice(0, max)}…` : s);
 
 /**
- * Payload for display. Same helper the approvals list uses over MCP (`redactAgentSecretsDeep`:
- * every runtimeConfig's secrets/API keys), plus the HITLy resume token, plus value-based
- * scrubbing of known secret values (company settings and the requesting agent's runtime config).
+ * Approval ids are opaque text (createId). Anything empty, longer than 128 chars or holding a
+ * control character (Postgres refuses NUL in text, which was a 500) is rejected up front:
+ * 400 from the API routes, not-found on the page.
  */
-export function redactApprovalPayload(payload: unknown, secretSources: unknown[] = []): unknown {
-  const structural = redactApprovalKeys(redactAgentSecretsDeep(payload ?? {}));
-  const entries = secretSources.flatMap((s) => collectSecretValueEntries(s));
-  return entries.length ? scrubSecretValues(structural, entries) : structural;
+export function isValidApprovalId(id: unknown): id is string {
+  return typeof id === 'string' && id.length > 0 && id.length <= 128 && !/[\u0000-\u001f\u007f]/.test(id);
 }
 
 /** Who decided, from `decidedByUserId` (null for in-app board decisions). */
@@ -304,16 +302,17 @@ export async function loadApprovalDetail(
   companyId: string,
   approvalId: string,
 ): Promise<ApprovalDetail | null> {
-  if (!companyId || !approvalId) return null;
+  if (!companyId || !isValidApprovalId(approvalId)) return null;
   const approval = await repo.getApproval(companyId, approvalId);
   if (!approval || approval.companyId !== companyId) return null;
 
   const issueIds = Array.isArray(approval.issueIds) ? approval.issueIds : [];
-  const [agent, issueRows, activity, settings, relatedRows] = await Promise.all([
+  const [agent, issueRows, activity, settings, secretValues, relatedRows] = await Promise.all([
     approval.requestedByAgentId ? repo.getAgent(companyId, approval.requestedByAgentId) : Promise.resolve(null),
     issueIds.length ? repo.getIssues(companyId, issueIds) : Promise.resolve([]),
     repo.getActivity(companyId, approval.id, issueIds),
     repo.getCompanySettings(companyId),
+    repo.getSecretValues(companyId),
     issueIds.length && repo.getRelatedApprovals
       ? repo.getRelatedApprovals(companyId, approval.id, issueIds)
       : Promise.resolve([] as ApprovalRow[]),
@@ -323,17 +322,28 @@ export async function loadApprovalDetail(
     issueRows.filter((i) => i.companyId === companyId).map((i) => [i.id, i] as const),
   );
 
-  const payload = isPlainObject(approval.payload) ? approval.payload : {};
-  const title = str(payload.title)?.trim() || approval.type;
-  const summary = str(payload.summary)?.trim() || null;
+  // B1: one redactor for every field. Known values: vault + agent runtime secrets + provider
+  // keys (repo), company settings, the requester, and anything held under a credential key in
+  // the payload, activity details or a related approval's payload (e.g. hitlyResumeToken), so the
+  // same value is also scrubbed where it was echoed (title, HITLy error, notes, related titles…).
+  const redact = createApprovalRedactor([
+    ...secretValues,
+    ...collectSecretValueEntries(settings).map(([, v]) => v),
+    ...collectSecretValueEntries(requester?.runtimeConfig).map(([, v]) => v),
+    ...collectValuesUnderSensitiveKeys(approval.payload),
+    ...activity.flatMap((row) => collectValuesUnderSensitiveKeys(row.details)),
+    ...relatedRows.flatMap((row) => collectValuesUnderSensitiveKeys(row.payload)),
+  ]);
 
-  return {
-    approval: {
-      ...approval,
-      payload: redactApprovalPayload(approval.payload, [settings, requester?.runtimeConfig]),
-      title,
-      summary,
-    },
+  const rawPayload = isPlainObject(approval.payload) ? approval.payload : {};
+  const { value: payload, truncated: payloadTruncated } = redact.capped(approval.payload ?? {}, PAYLOAD_DISPLAY_CAP);
+  // Scrub before clipping, so a cut can never leave half a secret behind.
+  const title = clip(redact.text(str(rawPayload.title)?.trim() || approval.type), APPROVAL_TITLE_MAX_CHARS);
+  const rawSummary = str(rawPayload.summary)?.trim();
+  const summary = rawSummary ? clip(redact.text(rawSummary), APPROVAL_SUMMARY_MAX_CHARS) : null;
+
+  const detail: ApprovalDetail = {
+    approval: { ...approval, payload, payloadTruncated, title, summary },
     requester: requester ? { id: requester.id, name: requester.name, urlKey: requester.urlKey } : null,
     decidedBy: decidedByLabel(approval),
     linkedIssues: issueIds
@@ -342,12 +352,23 @@ export async function loadApprovalDetail(
       .map(({ companyId: _c, ...i }) => ({ ...i, haltedByThis: i.boardApprovalId === approval.id })),
     missingIssueIds: issueIds.filter((id) => !issuesById.has(id)),
     history: buildApprovalHistory(approval, activity, { requesterName: requester?.name ?? null, issuesById }),
-    relatedApprovals: relatedApprovalsFor(approval, relatedRows),
+    relatedApprovals: relatedApprovalsFor(approval, relatedRows, redact.text),
   };
+  // B2: the same scrub over the whole object (note, hitlyError, issue titles, history text/notes,
+  // actor names…), so the page, its RSC data and the JSON route all get this one copy.
+  return redact.deep(detail);
 }
 
-/** Same company, not this approval, shares a linked issue; newest first; capped. */
-export function relatedApprovalsFor(approval: ApprovalRow, rows: ApprovalRow[]): RelatedApproval[] {
+/**
+ * Same company, not this approval, shares a linked issue; newest first; capped. `scrub` is the
+ * detail's redactor (titles are scrubbed before clipping, so a cut never leaves half a secret);
+ * loadApprovalDetail also runs its deep redaction over the result.
+ */
+export function relatedApprovalsFor(
+  approval: ApprovalRow,
+  rows: ApprovalRow[],
+  scrub: (s: string) => string = (s) => s,
+): RelatedApproval[] {
   const mine = new Set(Array.isArray(approval.issueIds) ? approval.issueIds : []);
   const seen = new Set<string>();
   return rows
@@ -356,7 +377,7 @@ export function relatedApprovalsFor(approval: ApprovalRow, rows: ApprovalRow[]):
       const payload = isPlainObject(r.payload) ? r.payload : {};
       return {
         id: r.id,
-        title: str(payload.title)?.trim() || r.type,
+        title: clip(scrub(str(payload.title)?.trim() || r.type), APPROVAL_TITLE_MAX_CHARS),
         type: r.type,
         status: r.status,
         createdAt: r.createdAt,

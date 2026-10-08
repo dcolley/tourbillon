@@ -1,7 +1,22 @@
 /** Drizzle implementation of ApprovalDetailRepo. Every query filters on company_id. */
-import { db, approvals, agents, issues, activityLog, companies } from '@tourbillon/db';
+import { db, approvals, agents, issues, activityLog, companies, llmProviders, vaultSecrets } from '@tourbillon/db';
 import { and, arrayOverlaps, asc, desc, eq, inArray, ne, or, sql } from 'drizzle-orm';
+import { collectSecretValueEntries } from '@tourbillon/shared';
+import { decryptCredential } from '@tourbillon/shared/vault-encryption';
 import { RELATED_APPROVALS_LIMIT, type ApprovalDetailRepo } from './approval-detail';
+import { providerSecretValues } from './provider-safety';
+
+/** Plain strings from a decrypted vault value (API key string, or OAuth access/refresh tokens). */
+export function vaultValueStrings(encryptedValue: string): string[] {
+  try {
+    const v = decryptCredential(encryptedValue);
+    if (typeof v === 'string') return [v];
+    return [v.accessToken, v.refreshToken].filter((s): s is string => typeof s === 'string');
+  } catch {
+    // No/odd VAULT_ENCRYPTION_KEY or a corrupt row: nothing to add (never log the value).
+    return [];
+  }
+}
 
 type Db = typeof db;
 
@@ -85,6 +100,33 @@ export function createApprovalDetailRepo(database: Db = db): ApprovalDetailRepo 
         .where(eq(companies.id, companyId))
         .limit(1);
       return row?.settings ?? null;
+    },
+    async getSecretValues(companyId) {
+      const [vaultRows, agentRows, providerRows] = await Promise.all([
+        database
+          .select({ encryptedValue: vaultSecrets.encryptedValue })
+          .from(vaultSecrets)
+          .where(eq(vaultSecrets.companyId, companyId)),
+        database
+          .select({ runtimeConfig: agents.runtimeConfig })
+          .from(agents)
+          .where(eq(agents.companyId, companyId)),
+        // llm_providers is the instance-wide registry (no company_id): every key is scrubbed.
+        database
+          .select({ apiKey: llmProviders.apiKey, headers: llmProviders.headers, baseURL: llmProviders.baseURL })
+          .from(llmProviders),
+      ]);
+      return [
+        ...vaultRows.flatMap((r) => vaultValueStrings(r.encryptedValue)),
+        ...agentRows.flatMap((r) => collectSecretValueEntries(r.runtimeConfig).map(([, v]) => v)),
+        ...providerRows.flatMap((r) =>
+          providerSecretValues({
+            apiKey: r.apiKey,
+            headers: (r.headers ?? {}) as Record<string, string>,
+            baseURL: r.baseURL,
+          }),
+        ),
+      ];
     },
   };
 }

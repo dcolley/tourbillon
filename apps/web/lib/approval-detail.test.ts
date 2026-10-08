@@ -1,19 +1,21 @@
-/** Approval details: company isolation, 404 cases, payload redaction and history ordering. */
+/** Approval details: company isolation, 404 cases, redaction of every field and history ordering. */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   RELATED_APPROVALS_LIMIT,
+  approvalDetailJson,
   buildApprovalHistory,
   relatedApprovalsFor,
   decidedByLabel,
+  isValidApprovalId,
   loadApprovalDetail,
-  redactApprovalPayload,
   type ApprovalActivityRow,
   type ApprovalAgentRow,
   type ApprovalDetailRepo,
   type ApprovalIssueRow,
   type ApprovalRow,
 } from './approval-detail';
+import { PLANTED_VALUES, plantedRepo } from './approval-detail-secrets.fixture';
 
 const T = (hhmm: string) => new Date(`2026-10-08T${hhmm}:00.000Z`);
 
@@ -59,6 +61,7 @@ interface Store {
   issues: ApprovalIssueRow[];
   activity: ApprovalActivityRow[];
   settings: Record<string, unknown>;
+  secretValues?: string[];
 }
 
 /**
@@ -88,6 +91,10 @@ function memoryRepo(s: Store): ApprovalDetailRepo & { calls: string[] } {
     async getCompanySettings(companyId) {
       calls.push('getCompanySettings');
       return s.settings[companyId] ?? null;
+    },
+    async getSecretValues() {
+      calls.push('getSecretValues');
+      return s.secretValues ?? [];
     },
   };
 }
@@ -154,33 +161,83 @@ describe('approval details: company isolation and 404s', () => {
   });
 });
 
-describe('approval details: payload redaction', () => {
-  it('redacts the HITLy resume token, runtimeConfig secrets and known secret values', () => {
-    const out = redactApprovalPayload(
-      {
-        title: 'Hire',
-        hitlyResumeToken: 'resume-token-abcdefghijkl',
-        agent: { runtimeConfig: { secrets: { GH_TOKEN: 'ghp_supersecretvalue1' }, tavilyApiKey: 'tvly-123456789' } },
-        notes: 'uses key hitly-api-key-0123456789 inline',
-        priorStatuses: { 'issue-a1': 'todo' },
-      },
-      [{ hitlyGate: { apiKey: 'hitly-api-key-0123456789' } }, null],
-    ) as Record<string, unknown>;
-    const text = JSON.stringify(out);
-    for (const leak of ['resume-token-abcdefghijkl', 'ghp_supersecretvalue1', 'tvly-123456789', 'hitly-api-key-0123456789']) {
-      assert.ok(!text.includes(leak), leak);
-    }
-    assert.equal(out.hitlyResumeToken, '[redacted]');
-    assert.equal(out.title, 'Hire');
-    assert.deepEqual(out.priorStatuses, { 'issue-a1': 'todo' });
-    assert.match(String(out.notes), /\[REDACTED:hitlyGate\.apiKey\]/);
+describe('approval details: redaction of every field (#130 B1/B2)', () => {
+  it('no planted secret survives anywhere in the loader output or the JSON body', async () => {
+    const d = await loadApprovalDetail(plantedRepo(), 'company-a', 'appr-a');
+    assert.ok(d);
+    const text = JSON.stringify(approvalDetailJson(d));
+    const leaked = PLANTED_VALUES.filter((v) => text.includes(v) || text.includes(encodeURIComponent(v)));
+    assert.deepEqual(leaked, []);
   });
 
-  it('the loader returns the redacted payload', async () => {
+  it('each field is scrubbed but still readable', async () => {
+    const d = await loadApprovalDetail(plantedRepo(), 'company-a', 'appr-a');
+    assert.ok(d);
+    const payload = d.approval.payload as Record<string, any>;
+    assert.equal(d.approval.title, 'Deploy with [redacted]');
+    assert.equal(d.approval.summary, 'Call it with Authorization: Bearer [redacted]');
+    assert.equal(payload.token, '[redacted]');
+    assert.equal(payload.list[0].apiKey, '[redacted]');
+    assert.equal(payload.list[1].deeper[0].Cookie, '[redacted]');
+    assert.deepEqual(payload.auth, { password: '[redacted]', nested: { secret: '[redacted]' } });
+    assert.equal(payload.resumeToken, '[redacted]');
+    assert.equal(payload.hitlyResumeToken, '[redacted]');
+    assert.deepEqual(payload.headers, { 'x-api-key': '[redacted]', Authorization: '[redacted]' });
+    assert.equal(payload.callback, 'https://hooks.example.test/resume');
+    assert.equal(payload.notes, 'vault [redacted], provider [redacted], runtime [redacted], settings [redacted]');
+    assert.deepEqual(payload.priorStatuses, { 'issue-a1': 'todo' });
+    assert.equal(d.approval.note, 'Rejected: see https://ci.example.test/run');
+    assert.equal(d.approval.hitlyError, '401 for resume token [redacted] (apiKey=[redacted])');
+    assert.equal(d.linkedIssues[0].title, 'Rotate [redacted]');
+    const comment = d.history.find((e) => e.text === 'approval.commented');
+    assert.equal(comment?.note, 'password was [redacted]; vault [redacted]');
+    assert.equal(comment?.actor, 'Board via [redacted]');
+    assert.ok(d.history.some((e) => e.text === 'HITLy error: 401 for resume token [redacted] (apiKey=[redacted])'));
+    assert.equal(d.approval.payloadTruncated, false);
+  });
+
+  it('secret values are loaded once, company-scoped, and never returned as such', async () => {
     const s = store();
-    s.approvals[0] = approval({ payload: { title: 'X', hitlyResumeToken: 'resume-token-abcdefghijkl' } });
+    s.secretValues = ['vault-value-abcdefgh'];
+    s.approvals[0] = approval({ payload: { title: 'Use vault-value-abcdefgh' } });
+    const repo = memoryRepo(s);
+    const d = await loadApprovalDetail(repo, 'company-a', 'appr-a');
+    assert.equal(d?.approval.title, 'Use [redacted]');
+    assert.equal(repo.calls.filter((c) => c === 'getSecretValues').length, 1);
+    assert.ok(!JSON.stringify(d).includes('vault-value-abcdefgh'));
+  });
+
+  it('a 1,500-deep payload is cut for display (Test S1) and flagged', async () => {
+    let deep: unknown = { leaf: 1 };
+    for (let i = 0; i < 1500; i++) deep = { n: deep };
+    const s = store();
+    s.approvals[0] = approval({ payload: { title: 'Deep', deep } });
     const d = await loadApprovalDetail(memoryRepo(s), 'company-a', 'appr-a');
-    assert.ok(!JSON.stringify(d).includes('resume-token-abcdefghijkl'));
+    assert.ok(d);
+    assert.equal(d.approval.payloadTruncated, true);
+    const json = JSON.stringify(approvalDetailJson(d), null, 2);
+    assert.ok(json.length < 5_000, `${json.length}`);
+    assert.match(json, /\[truncated: nested deeper than 12 levels\]/);
+  });
+
+  it('title and summary are capped', async () => {
+    const s = store();
+    s.approvals[0] = approval({ payload: { title: 't'.repeat(5_000), summary: 's'.repeat(50_000) } });
+    const d = await loadApprovalDetail(memoryRepo(s), 'company-a', 'appr-a');
+    assert.equal(d?.approval.title.length, 301);
+    assert.equal(d?.approval.summary?.length, 2_001);
+  });
+});
+
+describe('approval details: malformed ids (Test S3)', () => {
+  it('NUL/control characters, empty and >128 chars are invalid; the repo is never asked', async () => {
+    for (const bad of ['appr\u0000a', '\u0000', 'a\nb', 'a\u007fb', '', 'x'.repeat(129)]) {
+      assert.equal(isValidApprovalId(bad), false, JSON.stringify(bad));
+      const repo = memoryRepo(store());
+      assert.equal(await loadApprovalDetail(repo, 'company-a', bad), null);
+      assert.deepEqual(repo.calls, []);
+    }
+    for (const ok of ['appr-a', 'clx0123abc', '..', 'x'.repeat(128), 'ü✓']) assert.equal(isValidApprovalId(ok), true, ok);
   });
 });
 

@@ -10,7 +10,7 @@ import { Textarea } from '@/components/ui/textarea';
  */
 export function ApprovalDecisionForm({ approvalId }: { approvalId: string }) {
   return (
-    <form action={`/api/approvals/${approvalId}/decide`} method="POST" className="space-y-3">
+    <form action={`/api/approvals/${encodeURIComponent(approvalId)}/decide`} method="POST" className="space-y-3">
       <div className="space-y-2">
         <Label htmlFor={`approval-note-${approvalId}`}>Reason (required to reject)</Label>
         <Textarea

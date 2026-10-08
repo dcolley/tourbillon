@@ -381,6 +381,7 @@ describe('approval.created / approval.decided activity rows (every path)', () =>
         getIssues: async (c: string, ids: string[]) => scoped('issues', c).filter((r) => ids.includes(r.id as string)) as never,
         getActivity: async (c: string) => scoped('activityLog', c) as never,
         getCompanySettings: async () => ({}),
+        getSecretValues: async () => [],
       };
       const d = await detail.loadApprovalDetail(repo, 'company-a', id);
       assert.ok(d);
