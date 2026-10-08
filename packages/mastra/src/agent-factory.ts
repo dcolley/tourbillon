@@ -3,11 +3,8 @@ import { createDurableAgent } from '@mastra/core/agent/durable';
 import { Memory } from '@mastra/memory';
 import { PostgresStore, PgVector } from '@mastra/pg';
 import type { Agent as AgentRecord } from '@tourbillon/db';
-import { getLlmProviderRowById } from '@tourbillon/db';
 import {
   formatTrace,
-  modelProviderOverridesFromAgent,
-  resolveModelProviderConfig,
   resolveAssignedTools,
   resolveObservationalMemoryModel,
   resolveObservationalMemorySettings,
@@ -21,7 +18,7 @@ import {
   getEmbeddingModel,
   getLanguageModelForAgent,
   getLanguageModelForProviderRecord,
-  llmProviderRowToRecord,
+  resolveAgentModelProvider,
 } from './provider';
 import { CONTROL_PLANE_TOOLS } from './tools/control-plane-tools';
 import { ROLE_TOOLS } from './tools/role-tools';
@@ -229,19 +226,9 @@ export async function createAgentWithSkills(
   const prepared = await prepareAgentSkills(agentRecord);
   const systemPrompt = assembleSystemPrompt(agentRecord, prepared);
 
-  const providerOverrides = modelProviderOverridesFromAgent(
-    agentRecord.adapterType,
-    agentRecord.adapterConfig,
-  );
-  const providerRow = agentRecord.providerId
-    ? await getLlmProviderRowById(agentRecord.providerId)
-    : null;
-  const providerRecord = providerRow ? llmProviderRowToRecord(providerRow) : null;
-  const providerConfig = resolveModelProviderConfig(
-    providerOverrides,
-    agentRecord.modelId,
-    providerRecord,
-  );
+  // Agent's provider → registry default → env; host-mismatched base URL override → 409 error.
+  const { record: providerRecord, config: providerConfig } =
+    await resolveAgentModelProvider(agentRecord);
 
   const codeExecutionEnabled = await shouldAttachCodeExecutionWorkspace(agentRecord);
   const generationOptions = resolveAgentGenerationOptions(agentRecord, providerRecord);

@@ -1,4 +1,4 @@
-import { db, agents, heartbeatRuns, companies, costEvents, issues, activityLog, approvals, getLlmProviderRowById } from '@tourbillon/db';
+import { db, agents, heartbeatRuns, companies, costEvents, issues, activityLog, approvals, getLlmProviderRowById, getDefaultLlmProviderRow } from '@tourbillon/db';
 import { eq, and, sql, lt } from 'drizzle-orm';
 import {
   createDurableAgentWithSkills,
@@ -24,6 +24,10 @@ import {
   heartbeatStaleErrorText,
   resolveHeartbeatLivenessConfig,
   resolveModelProviderConfig,
+  resolveAgentModelProviderConfig,
+  resolveAgentProviderRow,
+  isProviderConfigError,
+  type ProviderConfigError,
   modelProviderOverridesFromAgent,
   toLlmProviderRecord,
   isAgentBudgetExceeded,
@@ -438,15 +442,26 @@ async function runWake(
   const runTracer = agentTracer.child({ runId, taskId });
   const runStartedAt = new Date();
 
-  const providerRow = agentRecord.providerId
-    ? await getLlmProviderRowById(agentRecord.providerId)
-    : null;
-  const providerRecord = providerRow ? toLlmProviderRecord(providerRow) : null;
-  const providerConfig = resolveModelProviderConfig(
-    modelProviderOverridesFromAgent(agentRecord.adapterType, agentRecord.adapterConfig),
-    agentRecord.modelId,
-    providerRecord,
+  // Agent's provider → registry default (same default /api/models lists) → env.
+  const { row: providerRow, source: providerSource } = await resolveAgentProviderRow(
+    agentRecord.providerId,
+    { byId: getLlmProviderRowById, registryDefault: getDefaultLlmProviderRow },
   );
+  const providerRecord = providerRow ? toLlmProviderRecord(providerRow) : null;
+  // An adapterConfig.baseURL on another host never gets the provider's key/headers: the run is
+  // recorded as failed (llm_provider_base_url_host_mismatch) once its row exists, below.
+  let providerConfigError: ProviderConfigError | null = null;
+  let resolvedProviderConfig: ReturnType<typeof resolveModelProviderConfig> | null = null;
+  try {
+    resolvedProviderConfig = resolveAgentModelProviderConfig(
+      modelProviderOverridesFromAgent(agentRecord.adapterType, agentRecord.adapterConfig),
+      agentRecord.modelId,
+      providerRecord,
+    );
+  } catch (err) {
+    if (!isProviderConfigError(err)) throw err;
+    providerConfigError = err;
+  }
 
   // WC1–6: wake message built at run start. With the live context on, the header is read from the
   // DB now (fresher than the enqueue-time payload); if that read fails the run continues on the
@@ -480,8 +495,10 @@ async function runWake(
       approvalNote: wake.approvalNote,
       linkedIssueIds: wake.linkedIssueIds,
       ...(wake.resumeOfRunId ? { resumeOfRunId: wake.resumeOfRunId } : {}),
-      providerId: agentRecord.providerId ?? null,
-      providerName: providerRow?.name ?? providerConfig.providerName ?? providerConfig.provider,
+      providerId: providerRow?.id ?? null,
+      providerSource,
+      providerName:
+        providerRow?.name ?? resolvedProviderConfig?.providerName ?? resolvedProviderConfig?.provider,
       modelId: agentRecord.modelId ?? null,
     },
     startedAt: runStartedAt,
@@ -500,6 +517,16 @@ async function runWake(
     await recordHeartbeatFailure(runId, errorText, companyId, agentId);
     return { runId, status: 'failed', errorText };
   }
+
+  if (providerConfigError || !resolvedProviderConfig) {
+    const errorText = providerConfigError
+      ? `${providerConfigError.code}: ${providerConfigError.message}`
+      : 'LLM provider config could not be resolved';
+    runTracer.error('provider config refused', { code: providerConfigError?.code });
+    await recordHeartbeatFailure(runId, errorText, companyId, agentId);
+    return { runId, status: 'failed', errorText };
+  }
+  const providerConfig = resolvedProviderConfig;
 
   // #110: signed, expiring run token. No secret → fail this run cleanly (never mint unsigned).
   let apiKey: string;

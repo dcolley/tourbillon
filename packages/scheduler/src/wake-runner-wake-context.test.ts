@@ -66,7 +66,7 @@ describe('WC6 wake-runner records contextSnapshot.wakeContext', () => {
     };
     Module.prototype.require = function (this: { filename?: string }, id: string) {
       if (!this?.filename?.endsWith('wake-runner.ts')) return originalRequire.apply(this, arguments as unknown as [string]);
-      if (id === '@tourbillon/db') return { db: fakeDb, ...tables, getLlmProviderRowById: async () => null };
+      if (id === '@tourbillon/db') return { db: fakeDb, ...tables, getLlmProviderRowById: async () => null, getDefaultLlmProviderRow: async () => null };
       if (id === 'drizzle-orm') {
         return {
           eq: (col: { c: string }, val: unknown) => ({ op: 'eq', c: col.c, val }),

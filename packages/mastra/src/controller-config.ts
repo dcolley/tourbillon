@@ -1,5 +1,4 @@
 import type { Agent as AgentRecord } from '@tourbillon/db';
-import { getLlmProviderRowById } from '@tourbillon/db';
 import type {
   AgentController,
   AgentControllerEvent,
@@ -23,7 +22,7 @@ import {
   shouldAttachCodeExecutionWorkspace,
   type AssembleAgentToolsOptions,
 } from './agent-factory';
-import { getLanguageModelForAgent, llmProviderRowToRecord } from './provider';
+import { getLanguageModelForAgent, resolveAgentProviderRecord } from './provider';
 import {
   resolveAgentContextBudget,
   resolveAgentGenerationOptions,
@@ -100,10 +99,7 @@ async function buildBackingAgent(
   const tools = await assembleAgentTools(agentRecord, options);
   const systemPrompt = await assembleAgentSystemPrompt(agentRecord);
   const codeExecutionEnabled = await shouldAttachCodeExecutionWorkspace(agentRecord);
-  const providerRow = agentRecord.providerId
-    ? await getLlmProviderRowById(agentRecord.providerId)
-    : null;
-  const providerRecord = providerRow ? llmProviderRowToRecord(providerRow) : null;
+  const { record: providerRecord } = await resolveAgentProviderRecord(agentRecord);
   const generationOptions = resolveAgentGenerationOptions(agentRecord, providerRecord);
   const contextBudget = resolveAgentContextBudget(agentRecord, providerRecord, 'harness');
 
@@ -179,10 +175,7 @@ export async function createTourbillonController(
     agentRecord.runtimeConfig as AgentRuntimeConfig,
   );
   const memory = await getAgentMemory(options?.companySettings ?? null, agentRecord.runtimeConfig as AgentRuntimeConfig);
-  const providerRow = agentRecord.providerId
-    ? await getLlmProviderRowById(agentRecord.providerId)
-    : null;
-  const providerRecord = providerRow ? llmProviderRowToRecord(providerRow) : null;
+  const { record: providerRecord } = await resolveAgentProviderRecord(agentRecord);
   const contextBudget = resolveAgentContextBudget(agentRecord, providerRecord, 'harness');
 
   // Session always requires a Workspace instance. Skip sandbox tool schemas

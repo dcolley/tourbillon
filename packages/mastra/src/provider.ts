@@ -1,5 +1,6 @@
 import { createOpenAI, type OpenAIProvider } from '@ai-sdk/openai';
 import type { Agent as AgentRecord } from '@tourbillon/db';
+import { getDefaultLlmProviderRow, getLlmProviderRowById } from '@tourbillon/db';
 
 // Infer model types from the provider methods (V4 types no longer exported directly)
 type LanguageModelV3 = ReturnType<OpenAIProvider['chat']>;
@@ -7,8 +8,11 @@ type EmbeddingModelV3 = ReturnType<OpenAIProvider['embedding']>;
 import {
   buildProviderRequestHeaders,
   modelProviderOverridesFromAgent,
+  resolveAgentModelProviderConfig,
+  resolveAgentProviderRow,
   resolveModelProviderConfig,
   toLlmProviderRecord,
+  type AgentProviderSource,
   type LlmProviderRecord,
   type ModelProviderConfig,
   type ModelProviderKind,
@@ -120,7 +124,8 @@ export function getLanguageModelForAgent(
   opts?: { apiModeOverride?: ModelProviderConfig['apiMode'] },
 ): LanguageModelV3 {
   const overrides = modelProviderOverridesFromAgent(agent.adapterType, agent.adapterConfig);
-  const config = resolveModelProviderConfig(overrides, agent.modelId, providerRecord);
+  // Never pairs a host-mismatched adapterConfig.baseURL with the record's key/headers (409).
+  const config = resolveAgentModelProviderConfig(overrides, agent.modelId, providerRecord);
   const effective =
     opts?.apiModeOverride && opts.apiModeOverride !== config.apiMode
       ? { ...config, apiMode: opts.apiModeOverride }
@@ -147,7 +152,6 @@ export async function getLanguageModelForProviderRecord(
   providerId: string,
   modelId: string,
 ): Promise<LanguageModelV3> {
-  const { getLlmProviderRowById } = await import('@tourbillon/db');
   const row = await getLlmProviderRowById(providerId);
   if (!row) {
     throw new Error(`LLM provider not found: ${providerId}`);
@@ -163,4 +167,41 @@ export function getModelId(overrideModelId?: string | null): string {
 /** @deprecated Use getLanguageModelFromEnv or getLanguageModelForAgent */
 export function getLanguageModel(overrideModelId?: string | null): LanguageModelV3 {
   return getLanguageModelFromEnv(null, overrideModelId);
+}
+
+/**
+ * runs-follow-default: LLM provider an agent's chat and heartbeats run against, in one place:
+ * the agent's own provider → the registry default (`llm_providers.is_default`, the same default
+ * /api/models lists) → env (no record). An agent `adapterConfig.baseURL` on a different host from
+ * that provider never receives the provider's key or headers: resolution throws
+ * ProviderConfigError `llm_provider_base_url_host_mismatch` (409) instead.
+ */
+export interface AgentProviderRecordResult {
+  row: LlmProvider | null;
+  record: LlmProviderRecord | null;
+  source: AgentProviderSource;
+}
+
+/** Provider row/record for the agent (agent → registry default → null = env). */
+export async function resolveAgentProviderRecord(
+  agent: Pick<AgentRecord, 'providerId'>,
+): Promise<AgentProviderRecordResult> {
+  const { row, source } = await resolveAgentProviderRow<LlmProvider>(agent.providerId, {
+    byId: getLlmProviderRowById,
+    registryDefault: getDefaultLlmProviderRow,
+  });
+  return { row, record: row ? toLlmProviderRecord(row) : null, source };
+}
+
+/** Record plus the merged config about to be used to call the model (host-mismatch checked). */
+export async function resolveAgentModelProvider(
+  agent: Pick<AgentRecord, 'providerId' | 'adapterType' | 'adapterConfig' | 'modelId'>,
+): Promise<AgentProviderRecordResult & { config: ModelProviderConfig }> {
+  const resolved = await resolveAgentProviderRecord(agent);
+  const config = resolveAgentModelProviderConfig(
+    modelProviderOverridesFromAgent(agent.adapterType, agent.adapterConfig),
+    agent.modelId,
+    resolved.record,
+  );
+  return { ...resolved, config };
 }

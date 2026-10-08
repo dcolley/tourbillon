@@ -14,7 +14,7 @@ import { ActionForm, ActionSubmitButton } from '@/components/action-form';
 import { getCompanyById, requireBoardSession } from '@/lib/company';
 import { parseCompanyIdFromSearchParams } from '@/lib/company-link';
 import { deleteAgentAction, updateAgentRoleAction } from '../actions';
-import { getLlmProviderRecordById, listLlmProvidersPublic } from '@/lib/llm-providers';
+import { getDefaultLlmProviderRecord, getLlmProviderRecordById, listLlmProvidersPublic } from '@/lib/llm-providers';
 import { redactBaseURL } from '@/lib/provider-safety';
 import { AgentModelForm } from './agent-model-form';
 import { AgentModelSettingsForm } from './agent-model-settings-form';
@@ -528,7 +528,10 @@ export default async function AgentDetailPage({
     listGoalOptions(false, agent.companyId),
     listProjectOptions(undefined, agent.companyId),
     listLlmProvidersPublic(),
-    agent.providerId ? getLlmProviderRecordById(agent.providerId) : Promise.resolve(null),
+    // Same order runs and chat use: the agent's provider → registry default → env (null).
+    (async () =>
+      (agent.providerId ? await getLlmProviderRecordById(agent.providerId) : null) ??
+      (await getDefaultLlmProviderRecord()))(),
     suggestCloneUrlKey(agent.companyId, agent.urlKey),
   ]);
 
