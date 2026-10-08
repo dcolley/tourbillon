@@ -18,7 +18,8 @@ import { createIssue, updateIssue, getIssueDetail, listIssues, type CreateIssueI
 import { createGoal, updateGoal, listGoalsForCompany, type CreateGoalInput, type UpdateGoalInput } from '@/lib/goals';
 import { createProject, updateProject, listProjectsForAgent, type CreateProjectInput, type UpdateProjectInput } from '@/lib/projects';
 import { addIssueComment } from '@/lib/issue-comments';
-import { triggerAgentHeartbeat } from '@/lib/heartbeat';
+import { wakeAgentForMcp, mcpToolErrorMessage } from '@/lib/mcp-scheduler';
+import { logSchedulerError } from '@/lib/scheduler-errors';
 import { enqueueApprovalWake } from '@/lib/wake-client';
 
 interface McpRequest {
@@ -1566,7 +1567,7 @@ async function handleDecideApproval(tokenCompanyId: string, params: any) {
         linkedIssueIds: approval.issueIds,
       });
     } catch (err) {
-      console.error('[mcp decide_approval] failed to trigger approval wake:', err);
+      logSchedulerError('mcp decide_approval wake', err);
     }
   }
 
@@ -1599,21 +1600,8 @@ async function handleWakeAgent(tokenCompanyId: string, params: any) {
     throw new Error('Agent not found');
   }
 
-  try {
-    const result = await triggerAgentHeartbeat(agent_id, company_id);
-    return {
-      runId: result.runId,
-      jobId: result.jobId,
-      outcome: result.outcome,
-      skipReason: result.skipReason ?? null,
-    };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Wake failed';
-    if (message.includes('a wake may already be in flight')) {
-      throw new Error('a wake may already be in flight');
-    }
-    throw err;
-  }
+  // Scheduler failures → fixed message; the detail is logged server-side, redacted.
+  return await wakeAgentForMcp(agent_id, company_id);
 }
 
 async function handleToolCall(tokenCompanyId: string, toolName: string, params: any) {
@@ -1768,7 +1756,7 @@ export async function POST(req: NextRequest) {
             id: body.id,
             error: {
               code: -32000,
-              message: err instanceof Error ? err.message : 'Tool execution failed',
+              message: mcpToolErrorMessage(err),
             },
           });
         }

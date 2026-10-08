@@ -4,6 +4,15 @@
 import type { HeartbeatJobData } from '@tourbillon/shared';
 import { formatTrace } from '@tourbillon/shared';
 import { enrichHeartbeatJob } from './wake-payload';
+import {
+  SchedulerRequestError,
+  WAKE_IN_FLIGHT_MESSAGE,
+  logSchedulerError,
+  logSchedulerResponseError,
+  redactSchedulerErrorDetail,
+  wakeSkipReason,
+  type WakeSkipCode,
+} from './scheduler-errors';
 
 function schedulerWakeBaseUrl(): string {
   return (
@@ -12,15 +21,34 @@ function schedulerWakeBaseUrl(): string {
   );
 }
 
-async function schedulerFetch(path: string, body: unknown): Promise<Response> {
-  return fetch(`${schedulerWakeBaseUrl()}${path}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${process.env.SCHEDULER_API_KEY ?? ''}`,
-    },
-    body: JSON.stringify(body),
-  });
+/**
+ * POST to the scheduler. If fetch() throws (network error, or an invalid header value whose
+ * text the runtime echoes into the message), log the redacted detail and throw a
+ * SchedulerRequestError with a fixed message instead of the original error.
+ */
+async function schedulerFetch(path: string, body: unknown, context: string): Promise<Response> {
+  try {
+    return await fetch(`${schedulerWakeBaseUrl()}${path}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${process.env.SCHEDULER_API_KEY ?? ''}`,
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    logSchedulerError(context, err);
+    throw new SchedulerRequestError('request_failed');
+  }
+}
+
+/** Read a response body for logging; never throws. */
+async function readBodyText(res: Response): Promise<string> {
+  try {
+    return await res.text();
+  } catch {
+    return '';
+  }
 }
 
 export type EnqueueOutcome = 'created' | 'deduplicated' | 'replaced' | 'skipped';
@@ -30,8 +58,13 @@ export interface EnqueueHeartbeatResult {
   jobId: string;
   runId: string;
   outcome: EnqueueOutcome;
-  /** Set when outcome is `skipped` (paused agent, budget, inactive company, etc.). */
+  /**
+   * Set when outcome is `skipped`: fixed client text from WAKE_SKIP_MESSAGES (paused agent,
+   * budget, inactive company, …). Never the scheduler's response text.
+   */
   skipReason?: string;
+  /** Fixed code for skipReason. */
+  skipCode?: WakeSkipCode;
 }
 
 /** Triggers WakeRunner on the scheduler — not BullMQ. Returns real heartbeat_runs.id. */
@@ -44,8 +77,8 @@ export async function enqueueHeartbeat(
     enriched.invocationSource = enriched.wakeReason;
   }
 
-  const res = await schedulerFetch('/internal/wake', enriched);
-  const bodyText = await res.text();
+  const res = await schedulerFetch('/internal/wake', enriched, 'wake');
+  const bodyText = await readBodyText(res);
   let json: {
     accepted?: boolean;
     agentId?: string;
@@ -70,19 +103,24 @@ export async function enqueueHeartbeat(
             wakeReason: enriched.wakeReason,
           },
           'wake skipped by scheduler',
-          { error: json.error },
+          { error: redactSchedulerErrorDetail(String(json.error ?? '')) },
         ),
       );
+      // Scheduler skip text → fixed client enum; unknown reasons → generic "Wake skipped."
+      const skip = wakeSkipReason(json.error);
       return {
         jobId: '',
         runId: '',
         outcome: 'skipped',
-        skipReason: json.error ?? 'wake skipped',
+        skipReason: skip.message,
+        skipCode: skip.code,
       };
     }
-    throw new Error(
-      `Wake trigger failed (${res.status}): ${json.error ?? (bodyText || 'unknown error')}`,
-    );
+    logSchedulerResponseError('wake', res.status, bodyText || 'unknown error');
+    if (typeof json.error === 'string' && json.error.includes(WAKE_IN_FLIGHT_MESSAGE)) {
+      throw new SchedulerRequestError('wake_in_flight', res.status);
+    }
+    throw new SchedulerRequestError('bad_status', res.status);
   }
 
   const runId = json.runId ?? '';
@@ -98,12 +136,13 @@ export async function enqueueHeartbeat(
             wakeReason: enriched.wakeReason,
           },
           'wake coalesced or deferred',
-          { status: json.status, error: json.error },
+          { status: json.status, error: redactSchedulerErrorDetail(String(json.error ?? '')) },
         ),
       );
       return { jobId: '', runId: '', outcome: 'deduplicated' };
     }
-    throw new Error(json.error ?? `Wake trigger failed: no runId (${res.status}): ${bodyText}`);
+    logSchedulerResponseError('wake (no runId)', res.status, bodyText);
+    throw new SchedulerRequestError('bad_status', res.status);
   }
 
   console.log(
@@ -155,10 +194,10 @@ export async function enqueueApprovalWake(data: {
 
 /** Ask the scheduler process to upsert/pause the agent timer Mastra schedule. */
 export async function requestAgentTimerScheduleSync(agentId: string): Promise<void> {
-  const res = await schedulerFetch('/internal/schedules/sync-agent', { agentId });
+  const res = await schedulerFetch('/internal/schedules/sync-agent', { agentId }, 'agent timer sync');
   if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Agent timer sync failed (${res.status}): ${body}`);
+    logSchedulerResponseError('agent timer sync', res.status, await readBodyText(res));
+    throw new SchedulerRequestError('bad_status', res.status);
   }
 }
 
@@ -167,14 +206,37 @@ export async function requestRoutineScheduleSync(
   routineId: string,
   opts: { delete?: boolean } = {},
 ): Promise<string | null> {
-  const res = await schedulerFetch('/internal/schedules/sync-routine', {
-    routineId,
-    delete: opts.delete ?? false,
-  });
+  const res = await schedulerFetch(
+    '/internal/schedules/sync-routine',
+    { routineId, delete: opts.delete ?? false },
+    'routine schedule sync',
+  );
   if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Routine schedule sync failed (${res.status}): ${body}`);
+    logSchedulerResponseError('routine schedule sync', res.status, await readBodyText(res));
+    throw new SchedulerRequestError('bad_status', res.status);
   }
   const json = (await res.json()) as { scheduleId?: string; deleted?: boolean };
   return json.scheduleId ?? null;
+}
+
+export type ForceKillOutcome =
+  | { ok: true }
+  | { ok: false; reason: 'not_configured' | 'not_found' | 'already_finished' };
+
+/**
+ * Ask the scheduler to force-kill an in-flight heartbeat run. Known refusals map to a fixed
+ * reason; anything else throws SchedulerRequestError (detail logged, redacted).
+ */
+export async function requestForceKill(runId: string, companyId: string): Promise<ForceKillOutcome> {
+  if (!process.env.SCHEDULER_API_KEY) return { ok: false, reason: 'not_configured' };
+  const res = await schedulerFetch(
+    `/internal/force-kill/${encodeURIComponent(runId)}`,
+    { companyId },
+    'force-kill',
+  );
+  if (res.ok) return { ok: true };
+  logSchedulerResponseError('force-kill', res.status, await readBodyText(res));
+  if (res.status === 404) return { ok: false, reason: 'not_found' };
+  if (res.status === 409) return { ok: false, reason: 'already_finished' };
+  throw new SchedulerRequestError('bad_status', res.status);
 }

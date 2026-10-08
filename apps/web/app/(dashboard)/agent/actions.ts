@@ -8,7 +8,11 @@ import {
   setAgentActive,
   updateAgentRole,
 } from '@/lib/agents';
-import { triggerAgentHeartbeat, retryFailedHeartbeat } from '@/lib/heartbeat';
+import {
+  forceKillRedirect,
+  retryHeartbeatRedirect,
+  runHeartbeatRedirect,
+} from '@/lib/heartbeat-actions';
 import { getHeartbeatRun, getInFlightHeartbeatRun } from '@/lib/heartbeats';
 import { actionError, actionSuccess, type ActionResult } from '@/lib/action-result';
 import { requireBoardSession } from '@/lib/company';
@@ -24,27 +28,8 @@ export async function triggerAgentHeartbeatAction(formData: FormData) {
 
   const errorBase = urlKey ? `/agent/${urlKey}` : '/agent';
 
-  let queueError: string | null = null;
-  let result: Awaited<ReturnType<typeof triggerAgentHeartbeat>> | undefined;
-  try {
-    result = await triggerAgentHeartbeat(agentId, companyId);
-  } catch (err) {
-    queueError = err instanceof Error ? err.message : 'Failed to queue heartbeat.';
-  }
-
-  if (queueError) {
-    redirect(`${errorBase}?error=${encodeURIComponent(queueError)}`);
-  }
-
-  if (!result?.jobId) {
-    const message =
-      result?.outcome === 'skipped'
-        ? (result.skipReason ?? 'Agent cannot be woken right now.')
-        : 'Heartbeat was not queued — a wake may already be in flight for this agent.';
-    redirect(`${errorBase}?error=${encodeURIComponent(message)}`);
-  }
-
-  redirect(`/heartbeat/${result.jobId}`);
+  // Scheduler failures redirect with a fixed message; the detail is logged, redacted.
+  redirect(await runHeartbeatRedirect(agentId, companyId, errorBase));
 }
 
 export async function toggleAgentActiveAction(formData: FormData) {
@@ -151,40 +136,10 @@ export async function forceKillHeartbeatAction(formData: FormData) {
     redirect(`${returnPath}?error=${encodeURIComponent(errorMessage)}`);
   }
 
-  const schedulerUrl = process.env.SCHEDULER_WAKE_URL ?? 'http://127.0.0.1:3003';
-  const apiKey = process.env.SCHEDULER_API_KEY;
-
-  if (!apiKey) {
-    redirect(`${returnPath}?error=${encodeURIComponent('SCHEDULER_API_KEY not configured')}`);
-  }
-
-  let errorMessage: string | null = null;
-
-  try {
-    const response = await fetch(`${schedulerUrl}/internal/force-kill/${runId}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({ companyId }),
-    });
-
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-      errorMessage = error.error ?? 'Failed to force-kill heartbeat';
-    }
-  } catch (err) {
-    errorMessage = err instanceof Error ? err.message : 'Failed to force-kill heartbeat';
-  }
-
+  // Scheduler failures redirect with a fixed message; the detail is logged, redacted.
+  const target = await forceKillRedirect(runId, companyId, returnPath);
   revalidatePath(returnPath);
-  
-  if (errorMessage) {
-    redirect(`${returnPath}?error=${encodeURIComponent(errorMessage)}`);
-  }
-  
-  redirect(`${returnPath}?killed=1`);
+  redirect(target);
 }
 
 /**
@@ -216,25 +171,6 @@ export async function retryFailedHeartbeatAction(formData: FormData) {
     );
   }
 
-  let queueError: string | null = null;
-  let result: Awaited<ReturnType<typeof retryFailedHeartbeat>> | undefined;
-  try {
-    result = await retryFailedHeartbeat(detail.run);
-  } catch (err) {
-    queueError = err instanceof Error ? err.message : 'Failed to queue retry heartbeat.';
-  }
-
-  if (queueError) {
-    redirect(`${returnPath}?error=${encodeURIComponent(queueError)}`);
-  }
-
-  if (!result?.jobId) {
-    const message =
-      result?.outcome === 'skipped'
-        ? (result.skipReason ?? 'Retry was not queued — a wake may already be in flight for this agent.')
-        : 'Retry was not queued — a wake may already be in flight for this agent.';
-    redirect(`${returnPath}?error=${encodeURIComponent(message)}`);
-  }
-
-  redirect(`/heartbeat/${result.jobId}`);
+  // Scheduler failures and skips redirect with fixed text; the detail is logged, redacted.
+  redirect(await retryHeartbeatRedirect(detail.run, returnPath));
 }
