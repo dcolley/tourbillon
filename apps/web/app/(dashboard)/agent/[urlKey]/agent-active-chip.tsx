@@ -14,7 +14,7 @@ import {
 } from '@/components/ui/dialog';
 import { setAgentActiveAction } from '../actions';
 import {
-  agentChipActionLabel,
+  agentChipAccessibleName,
   agentChipLabel,
   isAgentChipActive,
   runOptimisticAgentToggle,
@@ -80,7 +80,7 @@ export function AgentActiveChip({
         type="button"
         onClick={onClick}
         disabled={pending}
-        aria-label={agentChipActionLabel(active)}
+        aria-label={agentChipAccessibleName(active)}
         aria-busy={pending || undefined}
         title={active ? 'Active. Click to make this agent inactive.' : 'Inactive. Click to make this agent active.'}
         className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60 ${

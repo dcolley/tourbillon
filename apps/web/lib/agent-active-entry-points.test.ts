@@ -181,7 +181,10 @@ describe('#119 B1: archived agents cannot be activated through any entry point',
       }),
       { params: Promise.resolve({ urlKey }) },
     );
-    return { http: res.status, body: (await res.json()) as { error?: string; agent?: { status: string } } };
+    return {
+      http: res.status,
+      body: (await res.json()) as { error?: string; agent?: { status: string }; changed?: boolean; reason?: string },
+    };
   }
 
   function listForm(agentId: string, active: boolean) {
@@ -226,6 +229,43 @@ describe('#119 B1: archived agents cannot be activated through any entry point',
     assert.equal(res.body.result, undefined);
     assert.equal(status('agent-arch'), 'archived');
     assert.deepEqual(writes, []);
+  });
+
+  const mcpResult = (body: { result?: unknown }) =>
+    JSON.parse((body.result as { content: Array<{ text: string }> }).content[0].text) as Record<string, unknown>;
+
+  it('#119 soft: MCP set_agent_active false on an archived agent reports a no-op, not success; no write', async () => {
+    const res = await mcpSetActive('agent-arch', false);
+    assert.equal(res.body.error, undefined);
+    assert.deepEqual(mcpResult(res.body), {
+      success: false,
+      changed: false,
+      reason: 'archived',
+      status: 'archived',
+      message: 'Agent is archived; nothing changed.',
+    });
+    assert.equal(status('agent-arch'), 'archived');
+    assert.deepEqual(writes, []);
+  });
+
+  it('#119 soft: mobile PATCH active=false on an archived agent reports { changed: false, reason: "archived" }; no write', async () => {
+    const res = await mobileSetActive('arch', false);
+    assert.equal(res.http, 200);
+    assert.equal(res.body.changed, false);
+    assert.equal(res.body.reason, 'archived');
+    assert.equal(res.body.agent?.status, 'archived');
+    assert.equal(status('agent-arch'), 'archived');
+    assert.deepEqual(writes, []);
+  });
+
+  it('#119 soft: real changes report changed=true (MCP success, mobile) with no reason', async () => {
+    rows[1].status = 'active';
+    assert.deepEqual(mcpResult((await mcpSetActive('agent-off', false)).body), { success: true, changed: true, status: 'paused' });
+    const mobile = await mobileSetActive('off', true);
+    assert.equal(mobile.http, 200);
+    assert.equal(mobile.body.changed, true);
+    assert.equal(mobile.body.reason, undefined);
+    assert.equal(mobile.body.agent?.status, 'active');
   });
 
   it('controls: the same paths still activate a paused (inactive) agent', async () => {

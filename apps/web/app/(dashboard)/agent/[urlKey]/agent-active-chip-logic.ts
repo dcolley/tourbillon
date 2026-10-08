@@ -28,9 +28,15 @@ export function agentChipLabel(active: boolean): 'Active' | 'Inactive' {
   return active ? 'Active' : 'Inactive';
 }
 
-/** Accessible name: the action a click performs (the visible text shows the current state). */
-export function agentChipActionLabel(active: boolean): 'Deactivate agent' | 'Activate agent' {
-  return active ? 'Deactivate agent' : 'Activate agent';
+/**
+ * Accessible name: the visible text first, then the action a click performs, so screen readers
+ * and voice control hear what sighted users see (WCAG 2.5.3 label in name): "Active, deactivate
+ * agent" / "Inactive, activate agent".
+ */
+export function agentChipAccessibleName(
+  active: boolean,
+): 'Active, deactivate agent' | 'Inactive, activate agent' {
+  return active ? 'Active, deactivate agent' : 'Inactive, activate agent';
 }
 
 /** Confirm only when deactivating an agent whose heartbeat is running (not queued, not activating). */

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { verifyMobileToken } from '@/lib/mobile-auth';
 import { redactAgentSecretsDeep } from '@tourbillon/shared';
 import {
-  setAgentActive,
+  setAgentActiveWithOutcome,
   updateAgentRuntimeConfig,
   updateAgentObservationalMemory,
   updateAgentModel,
@@ -747,8 +747,18 @@ async function handleSetAgentActive(tokenCompanyId: string, params: any) {
     throw new Error('Agent not found');
   }
 
-  const updated = await setAgentActive(agent_id, active);
-  return { success: true, status: updated.status };
+  const outcome = await setAgentActiveWithOutcome(agent_id, active);
+  if (outcome.reason === 'archived') {
+    // #119 soft: deactivating an archived agent changes nothing; say so instead of success.
+    return {
+      success: false,
+      changed: false,
+      reason: 'archived',
+      status: outcome.agent.status,
+      message: 'Agent is archived; nothing changed.',
+    };
+  }
+  return { success: true, changed: outcome.changed, status: outcome.agent.status };
 }
 
 async function handleSetHeartbeat(tokenCompanyId: string, params: any) {

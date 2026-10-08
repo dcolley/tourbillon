@@ -782,7 +782,21 @@ export async function updateAgentProfile(
   return updated;
 }
 
+/**
+ * Result of an active toggle. `changed` is whether agents.status actually changed. Deactivating an
+ * archived agent is a no-op reported as `{ changed: false, reason: 'archived' }` so MCP and mobile
+ * can say so instead of claiming success.
+ */
+export type SetAgentActiveOutcome = { agent: Agent; changed: boolean; reason?: 'archived' };
+
 export async function setAgentActive(agentId: string, active: boolean): Promise<Agent> {
+  return (await setAgentActiveWithOutcome(agentId, active)).agent;
+}
+
+export async function setAgentActiveWithOutcome(
+  agentId: string,
+  active: boolean,
+): Promise<SetAgentActiveOutcome> {
   const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
   if (!agent) throw new AgentValidationError('Agent not found.');
 
@@ -799,9 +813,10 @@ export async function setAgentActive(agentId: string, active: boolean): Promise<
     if (active) {
       throw new AgentValidationError('Agent is archived and cannot be activated.');
     }
-    return agent;
+    return { agent, changed: false, reason: 'archived' };
   }
 
+  const previousStatus = agent.status;
   const status = active ? 'active' : 'paused';
 
   const [updated] = await db
@@ -810,7 +825,7 @@ export async function setAgentActive(agentId: string, active: boolean): Promise<
     .where(eq(agents.id, agentId))
     .returning();
 
-  return updated;
+  return { agent: updated, changed: updated.status !== previousStatus };
 }
 
 export async function updateAgentRole(agentId: string, roleInput: string): Promise<Agent> {
