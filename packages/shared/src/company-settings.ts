@@ -83,8 +83,19 @@ export function parseCompanySettings(raw: unknown): CompanySettings {
     hitlyGate: parseHitlyGateSettings(record.hitlyGate),
     ...(typeof record.wakeContextV2 === 'boolean' ? { wakeContextV2: record.wakeContextV2 } : {}),
     ...parseWakeContextBudgets(record.wakeContextBudgets),
+    ...parseMaxConcurrentRuns(record.maxConcurrentRuns),
   };
 }
+
+function parseMaxConcurrentRuns(raw: unknown): Pick<CompanySettings, 'maxConcurrentRuns'> {
+  const value = normalizeMaxConcurrentRuns(raw);
+  return value !== undefined ? { maxConcurrentRuns: value } : {};
+}
+
+/** Settings patch; `maxConcurrentRuns: null` clears the cap. */
+export type CompanySettingsPatch = Omit<Partial<CompanySettings>, 'maxConcurrentRuns'> & {
+  maxConcurrentRuns?: number | null;
+};
 
 function parseWakeContextBudgets(raw: unknown): Pick<CompanySettings, 'wakeContextBudgets'> {
   if (!raw || typeof raw !== 'object') return {};
@@ -99,7 +110,7 @@ function parseWakeContextBudgets(raw: unknown): Pick<CompanySettings, 'wakeConte
 
 export function mergeCompanySettings(
   current: unknown,
-  patch: Partial<CompanySettings>,
+  patch: CompanySettingsPatch,
 ): CompanySettings {
   const base = parseCompanySettings(current);
   const next: CompanySettings = { ...base };
@@ -146,6 +157,15 @@ export function mergeCompanySettings(
       ...(hg.apiKey?.trim() ? { apiKey: hg.apiKey.trim() } : {}),
       ...(hg.types && hg.types.length > 0 ? { types: hg.types } : {}),
     };
+  }
+  if (patch.maxConcurrentRuns !== undefined) {
+    if (patch.maxConcurrentRuns === null) {
+      delete next.maxConcurrentRuns;
+    } else {
+      const value = normalizeMaxConcurrentRuns(patch.maxConcurrentRuns);
+      if (value === undefined) throw new RangeError(MAX_CONCURRENT_RUNS_ERROR);
+      next.maxConcurrentRuns = value;
+    }
   }
 
   return next;
@@ -402,4 +422,43 @@ export function isHitlyGateConfigured(
   companySettings?: CompanySettings | null,
 ): boolean {
   return resolveHitlyGate(companySettings) !== null;
+}
+
+/**
+ * Company-wide concurrent-run cap (`companies.settings.maxConcurrentRuns`, jsonb — no migration).
+ * Unset / null means no cap: the scheduler starts runs exactly as before.
+ */
+
+export const MAX_CONCURRENT_RUNS_ERROR =
+  'Max concurrent runs must be a whole number of at least 1, or blank for no cap.';
+
+/** A stored or patched value counts only as a positive safe integer; anything else is "no cap". */
+export function normalizeMaxConcurrentRuns(raw: unknown): number | undefined {
+  return typeof raw === 'number' && Number.isSafeInteger(raw) && raw >= 1 ? raw : undefined;
+}
+
+/** The cap the scheduler enforces for a company, or null for no cap. */
+export function resolveMaxConcurrentRuns(settings?: CompanySettings | null): number | null {
+  return normalizeMaxConcurrentRuns(settings?.maxConcurrentRuns) ?? null;
+}
+
+export type MaxConcurrentRunsInput =
+  | { ok: true; value: number | null }
+  | { ok: false; error: string };
+
+/**
+ * Validate board input (form string or JSON number). Blank / null / undefined clears the cap.
+ * Rejects 0, negatives, fractions, exponents and anything non-numeric.
+ */
+export function parseMaxConcurrentRunsInput(raw: unknown): MaxConcurrentRunsInput {
+  if (raw === null || raw === undefined) return { ok: true, value: null };
+  let candidate: unknown = raw;
+  if (typeof raw === 'string') {
+    const s = raw.trim();
+    if (s === '') return { ok: true, value: null };
+    if (!/^\d+$/.test(s)) return { ok: false, error: MAX_CONCURRENT_RUNS_ERROR };
+    candidate = Number(s);
+  }
+  const value = normalizeMaxConcurrentRuns(candidate);
+  return value === undefined ? { ok: false, error: MAX_CONCURRENT_RUNS_ERROR } : { ok: true, value };
 }

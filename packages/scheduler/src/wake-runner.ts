@@ -33,8 +33,16 @@ import {
   createTraceLogger,
   canForceKillHeartbeat,
   effectiveHeartbeatTimeoutSec,
+  resolveMaxConcurrentRuns,
 } from '@tourbillon/shared';
 import { durableWakeOutcomeFromTripwire } from './durable-wake-outcome';
+import {
+  RUN_CAP_LOCK_NAMESPACE,
+  notifyRunSlotFreed,
+  runCapBackoffMs,
+  startRunUnderCap,
+  waitForRunSlot,
+} from './run-cap';
 import { buildRunWakeMessage, createDrizzleWakeContextRepo } from './wake-context';
 import type { Agent as AgentRecord } from '@tourbillon/db';
 import { randomUUID } from 'crypto';
@@ -91,11 +99,13 @@ export type WakeRequest = HeartbeatJobData;
 
 export interface WakeResult {
   runId: string;
-  status: 'succeeded' | 'failed' | 'skipped';
+  /** `deferred`: the company is at its maxConcurrentRuns cap; the wake is retried, not dropped. */
+  status: 'succeeded' | 'failed' | 'skipped' | 'deferred';
   errorText?: string;
 }
 
 type WakeTracer = ReturnType<typeof createTraceLogger>;
+type RunCapTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 /** In-process single-flight + follow-up queue per agent (replaces BullMQ dedupe). */
 const agentLocks = new Map<string, Promise<void>>();
@@ -258,6 +268,10 @@ async function recordHeartbeatFailure(
  */
 export async function triggerWake(wake: WakeRequest): Promise<WakeResult> {
   const started = await startWake(wake);
+  if (started.deferred) {
+    // Over the company cap: the wake keeps retrying in the background (started.done).
+    return { runId: '', status: 'deferred', errorText: started.errorText };
+  }
   if (started.status !== 'started') {
     return {
       runId: started.runId,
@@ -272,6 +286,8 @@ export interface StartWakeResult {
   runId: string;
   status: 'started' | 'queued' | 'skipped';
   errorText?: string;
+  /** True when the wake is waiting for a slot under the company's maxConcurrentRuns cap. */
+  deferred?: boolean;
   /** Resolves when the wake fully finishes. */
   done: Promise<WakeResult>;
 }
@@ -311,8 +327,12 @@ export async function startWake(wake: WakeRequest): Promise<StartWakeResult> {
   const runIdReady = new Promise<string>((resolve) => {
     resolveRunId = resolve;
   });
+  let resolveDeferred!: (reason: string) => void;
+  const deferredReady = new Promise<string>((resolve) => {
+    resolveDeferred = resolve;
+  });
 
-  const done = runWake(wake, { onRunCreated: resolveRunId })
+  const done = runWakeDeferringAtCap(wake, { onRunCreated: resolveRunId, onDeferred: resolveDeferred })
     .catch((err) => {
       const errorText = err instanceof Error ? err.message : String(err);
       resolveRunId('');
@@ -321,6 +341,8 @@ export async function startWake(wake: WakeRequest): Promise<StartWakeResult> {
     .finally(() => {
       agentLocks.delete(wake.agentId);
       release();
+      // A run slot may have freed: let this company's deferred wakes retry now, not at backoff.
+      notifyRunSlotFreed(wake.companyId);
       const next = agentFollowUps.get(wake.agentId);
       agentFollowUps.delete(wake.agentId);
       if (next?.[0]) {
@@ -332,10 +354,16 @@ export async function startWake(wake: WakeRequest): Promise<StartWakeResult> {
       }
     });
 
-  const runId = await Promise.race([
-    runIdReady,
-    done.then((r) => r.runId),
+  const first = await Promise.race([
+    runIdReady.then((id) => ({ runId: id, deferred: undefined as string | undefined })),
+    deferredReady.then((reason) => ({ runId: '', deferred: reason })),
+    done.then((r) => ({ runId: r.runId, deferred: undefined as string | undefined })),
   ]);
+  const runId = first.runId;
+
+  if (first.deferred !== undefined) {
+    return { runId: '', status: 'queued', deferred: true, errorText: first.deferred, done };
+  }
 
   if (!runId) {
     const result = await done;
@@ -348,6 +376,31 @@ export async function startWake(wake: WakeRequest): Promise<StartWakeResult> {
   }
 
   return { runId, status: 'started', done };
+}
+
+/**
+ * Run a wake; while the company is at its maxConcurrentRuns cap, wait (jittered backoff, or until
+ * a run of the company finishes here) and retry the whole wake. The per-agent lock stays held, so
+ * further wakes for this agent coalesce behind it exactly as they do behind a running wake.
+ */
+async function runWakeDeferringAtCap(
+  wake: WakeRequest,
+  opts: { onRunCreated?: (runId: string) => void; onDeferred?: (reason: string) => void },
+): Promise<WakeResult> {
+  for (let attempt = 0; ; attempt++) {
+    const result = await runWake(wake, opts);
+    if (result.status !== 'deferred') {
+      if (attempt > 0) {
+        createTraceLogger('wake', { agentId: wake.agentId, companyId: wake.companyId }).info(
+          'deferred wake resumed',
+          { attempts: attempt, runId: result.runId, status: result.status },
+        );
+      }
+      return result;
+    }
+    if (attempt === 0) opts.onDeferred?.(result.errorText ?? 'deferred: company concurrent-run cap reached');
+    await waitForRunSlot(wake.companyId, runCapBackoffMs(attempt));
+  }
 }
 
 async function runWake(
@@ -462,7 +515,7 @@ async function runWake(
     repo: () => createDrizzleWakeContextRepo({ db, issues, approvals, activityLog, agents }),
   });
 
-  await db.insert(heartbeatRuns).values({
+  const runRow: typeof heartbeatRuns.$inferInsert = {
     id: runId,
     agentId,
     companyId,
@@ -486,7 +539,41 @@ async function runWake(
     },
     startedAt: runStartedAt,
     lastSeenAt: runStartedAt,
+  };
+
+  // Company concurrent-run cap: count + insert under a per-company advisory lock (see run-cap.ts).
+  const maxConcurrentRuns = resolveMaxConcurrentRuns(parseCompanySettings(company.settings));
+  const slot = await startRunUnderCap<RunCapTx>({
+    cap: maxConcurrentRuns,
+    startUncapped: async () => {
+      await db.insert(heartbeatRuns).values(runRow);
+    },
+    withCompanyLock: (fn) =>
+      db.transaction(async (tx) => {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(${RUN_CAP_LOCK_NAMESPACE}::int4, hashtext(${companyId}::text))`,
+        );
+        return fn(tx);
+      }),
+    countInFlight: async (tx) => {
+      const [row] = await tx
+        .select({ n: sql<number>`count(*)::int` })
+        .from(heartbeatRuns)
+        .where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.status, 'running')));
+      return Number(row?.n ?? 0);
+    },
+    startRun: async (tx) => {
+      await tx.insert(heartbeatRuns).values(runRow);
+    },
   });
+  if (!slot.started) {
+    const errorText = `deferred: company concurrent-run cap reached (${slot.inFlight}/${slot.cap} running)`;
+    agentTracer.info('wake deferred: company concurrent-run cap reached', {
+      inFlight: slot.inFlight,
+      maxConcurrentRuns: slot.cap,
+    });
+    return { runId: '', status: 'deferred', errorText };
+  }
   runTracer.info('heartbeat run created');
   opts.onRunCreated?.(runId);
 

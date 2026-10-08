@@ -222,6 +222,11 @@ export interface CompanySettings {
     commentsMaxChars?: number;
     totalSoftMaxChars?: number;
   };
+  /**
+   * Company-wide cap on concurrently running heartbeat runs (positive integer). Unset = no cap.
+   * Wakes over the cap are deferred by the scheduler, never failed or dropped.
+   */
+  maxConcurrentRuns?: number;
 }
 
 export const DEFAULT_RUNTIME_CONFIG: AgentRuntimeConfig = {
