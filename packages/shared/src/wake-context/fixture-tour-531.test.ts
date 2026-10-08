@@ -25,26 +25,26 @@ describe('TOUR-531 fixture (run 6f24587d)', () => {
     assert.ok(message.length <= WAKE_TOTAL_SOFT_MAX_CHARS, String(message.length));
   });
 
-  it('WC1: contains "Board answered 686ede6c"; the stale 19:02Z comment is not shown', () => {
-    assert.ok(message.includes('Board answered 686ede6c'));
+  it('WC1: contains "Board answered a0000006"; the stale 19:02Z comment is not shown', () => {
+    assert.ok(message.includes('Board answered a0000006'));
     assert.ok(!message.includes('Oct 7 19:02Z'));
     assert.ok(!message.includes('Parked (re-verify, ~19:00Z wake)'));
     // T1 alone keeps the newest too.
     const t1 = buildWakeMessage(tour531Job(fx));
-    assert.ok(t1.includes('Board answered `686ede6c`'));
+    assert.ok(t1.includes('Board answered `a0000006`'));
     assert.ok(!t1.includes('2026-10-07T19:02:40.205Z'));
   });
 
   it('WC2: header lists live approval and issue state', () => {
     assert.ok(header.split('\n')[0].includes('trust this over anything said in comments'));
-    assert.ok(header.includes('23a36ba8 REJECTED'));
-    assert.ok(header.includes('686ede6c APPROVED'));
+    assert.ok(header.includes('a0000002 REJECTED'));
+    assert.ok(header.includes('a0000006 APPROVED'));
     assert.ok(header.includes('Pending among these: none'));
     assert.ok(header.includes('Parent TOUR-540: cancelled'));
     assert.ok(header.includes('Blocked by TOUR-468: blocked'));
     assert.match(header, /Board decisions since your last activity here \(Oct 7 21:04Z\): 9\b/);
     assert.ok(header.includes('assignee: you (Cyber)'));
-    assert.ok(!header.includes('6ea1e328'), 'a hex token that is not an approval is not listed');
+    assert.ok(!header.includes('a00000ff'), 'a hex token that is not an approval is not listed');
     assert.equal(stats.approvalsListed.length, 10);
   });
 
@@ -66,9 +66,9 @@ describe('TOUR-531 fixture (run 6f24587d)', () => {
   });
 
   it('WC5: stale "pending" claims are annotated inline; none is left unflagged', () => {
-    assert.ok(message.includes('25c411d5 ⟨now APPROVED 07:35Z⟩ (still pending'));
-    assert.ok(message.includes('ec9f7589 ⟨now APPROVED 07:35Z⟩ (TOUR-543 A/B, still pending)'));
-    assert.ok(message.includes('23a36ba8 ⟨now REJECTED 07:35Z⟩'));
+    assert.ok(message.includes('a0000003 ⟨now APPROVED 07:35Z⟩ (still pending'));
+    assert.ok(message.includes('a000000a ⟨now APPROVED 07:35Z⟩ (TOUR-543 A/B, still pending)'));
+    assert.ok(message.includes('a0000002 ⟨now REJECTED 07:35Z⟩'));
     assert.equal(stats.annotated, (message.match(/⟨now (APPROVED|REJECTED)/g) ?? []).length);
     assert.ok(stats.annotated >= 11, String(stats.annotated));
     // No decided approval id within 25 chars before / 60 after "pending" is left without ⟨now …⟩.
@@ -82,7 +82,7 @@ describe('TOUR-531 fixture (run 6f24587d)', () => {
     }
     // Annotation never changes the comment's own words.
     const ceo = commentLine('07:38Z', 'CEO')!;
-    assert.ok(ceo.replace(/ ⟨now [^⟩]+⟩/g, '').includes('Dependent issues close as accepted-UNVERIFIED via 25c411d5 (still pending — do not re-file'));
+    assert.ok(ceo.replace(/ ⟨now [^⟩]+⟩/g, '').includes('Dependent issues close as accepted-UNVERIFIED via a0000003 (still pending — do not re-file'));
   });
 
   it('WC6: stats match the rendered sections', () => {

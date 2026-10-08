@@ -1,5 +1,5 @@
 {
-  "_about": "Sanitised replay of wake run 6f24587d (TOUR-531, Demo TEST, 2026-10-08) from the wake-compression spec section 6. Issue, agent, comment and company ids are synthetic; the private IP is replaced with a documentation address (192.0.2.0/24). Approval ids are kept because the comments cite them by 8-hex prefix. Issue statuses are as of the run start; activity rows keep only actor, action, time and whether a comment body was present.",
+  "_about": "Sanitised replay of wake run 6f24587d (TOUR-531, Demo TEST, 2026-10-08) from the wake-compression spec section 6. Issue, agent, comment, company and approval ids are synthetic (approval ids keep their relative order; comments cite them by the synthetic 8-hex prefix); the private IP is replaced with a documentation address (192.0.2.0/24); account names, the proxy port and TEST auth-surface details are generalised. Issue statuses are as of the run start; activity rows keep only actor, action, time and whether a comment body was present.",
   "companyId": "company-demo",
   "runStartedAt": "2026-10-08T07:38:21.950Z",
   "agent": {
@@ -27,7 +27,7 @@
     "newComments": [
       {
         "id": "00000000-0000-4000-9000-000000000001",
-        "body": "⏸️ Parked (re-verify, ~19:00Z wake): no state change since my 18:50Z decision record, verified live rather than trusted from memory.\n\n**Gate re-check (all still fail):**\n1. Approvals `686ede6c` (TOUR-542 routing: Option A host-routed deploy+probe lane vs Option B descope-on-evidence) and `ec9f7589` (TOUR-543, same A/B at chain level, pair rule) are both **pending** — no Board answer, and neither `23a36ba8` nor any `531-EXEC-AUTHORIZED` grant exists.\n2. Cease-fire re-arm budget 2/3 spent; a 3rd re-arm is not self-grantable from any agent seat, and grantless execution aborts at 0 probes with `SKIP(531-CEASEFIRE)` (0-probe ≠ acceptance under the amended 534 wording).\n3. No executable environment: no host-routed egress lane, no `TOURBILLON_TEST_HOSTS` seed, and the `fix/auth-2fa-hardening` tree (with the dead-matcher `middleware.ts`) is checked out nowhere — the 534 fix lane (Engineer, blocked-by 507) carries the matcher + `getRateLimitTier` + vitest-glob fix.\n\n**Contravention check (per the 542/543 cards):** if the 542/543 A/B question were silently \"descoped\" while 531 sat `in_progress`, timer wakes would keep burning budget against a provably inert-on-TEST defect (depleted seat, no exec tooling) — that is precisely the TOUR-415 silent-park anti-pattern both cards warn on. Blocking makes the park explicit and budget-neutral; the board decision — not a wake — will flip 531's state.\n\n**Unblock trigger:** Board decision on `686ede6c`/`ec9f7589`. Option A → re-arm (re-author the 2 probe lines, don't replay; HOST-mode only, `curl --noproxy`, never :8118) + reassign to QA/534 lane. Option B → close 531 as accepted-UNVERIFIED on exhausted-prerequisite terms and archive `projects/TOUR-531-callback-cors-verify-2026-10-07-v2-spec.md` + `projects/auth-531-verify.sh` to `archives/`. Do not re-probe before a grant.",
+        "body": "⏸️ Parked (re-verify, ~19:00Z wake): no state change since my 18:50Z decision record, verified live rather than trusted from memory.\n\n**Gate re-check (all still fail):**\n1. Approvals `a0000006` (TOUR-542 routing: Option A host-routed deploy+probe lane vs Option B descope-on-evidence) and `a000000a` (TOUR-543, same A/B at chain level, pair rule) are both **pending** — no Board answer, and neither `a0000002` nor any `531-EXEC-AUTHORIZED` grant exists.\n2. Cease-fire re-arm budget 2/3 spent; a 3rd re-arm is not self-grantable from any agent seat, and grantless execution aborts at 0 probes with `SKIP(531-CEASEFIRE)` (0-probe ≠ acceptance under the amended 534 wording).\n3. No executable environment: no host-routed egress lane, no test-hosts seed, and the `fix/auth-2fa-hardening` tree (with the dead-matcher `middleware.ts`) is checked out nowhere — the 534 fix lane (Engineer, blocked-by 507) carries the matcher + `getRateLimitTier` + vitest-glob fix.\n\n**Contravention check (per the 542/543 cards):** if the 542/543 A/B question were silently \"descoped\" while 531 sat `in_progress`, timer wakes would keep burning budget against a provably inert-on-TEST defect (depleted seat, no exec tooling) — that is precisely the TOUR-415 silent-park anti-pattern both cards warn on. Blocking makes the park explicit and budget-neutral; the board decision — not a wake — will flip 531's state.\n\n**Unblock trigger:** Board decision on `a0000006`/`a000000a`. Option A → re-arm (re-author the 2 probe lines, don't replay; HOST-mode only, `curl --noproxy`, never via the proxy) + reassign to QA/534 lane. Option B → close 531 as accepted-UNVERIFIED on exhausted-prerequisite terms and archive `projects/TOUR-531-callback-cors-verify-2026-10-07-v2-spec.md` + `projects/auth-531-verify.sh` to `archives/`. Do not re-probe before a grant.",
         "authorType": "agent",
         "authorName": "Cyber",
         "createdAt": "2026-10-07T19:02:40.205Z"
@@ -41,14 +41,14 @@
       },
       {
         "id": "00000000-0000-4000-9000-000000000003",
-        "body": "⛔ Holding at blocked (2nd checkout today — deliberately not a park; CTO's 13:05 memo on 468 disqualified a pointer-permission park).\n\n📄 Added `projects/TOUR-468-531-sec-lane-status-2026-10-07.md` — cross-lane gate-chain + seat-constraint snapshot (COI #1 artifact).\n\nWhy blocked: (1) fix exists only on `fix/auth-2fa-hardening` while sandbox checkouts (`main`@913db0d + heartbeat branch) lack `middleware.ts` — the \"CORS is correctly wired\" observation is stale and untestable until a run inherits a correct checkout; (2) live probes are gated on the **TOUR-540 lane** — pending 23a36ba8 + 507 code gate — executed under TestSuper's parked `auth-531-verify.sh` (≤3-probe cease-fire, non_authorized default, 24h re-arm) and tracked by child tracker **TOUR-537**; (3) cost gate: this seat is ~11.68× over budget (enforcement off — informational, but conserving until the lane opens).\n\nNext: when 23a36ba8 resolves + 507 gate lifts, run the §3 matrix via 537/540, then close 468/531/537 together and re-scope 515 to the residual delta (YAGNI doc deprecation, process-local limiter hedges) or close it.\n\n💾 Memory (company KG): recorded the routing decision and the 5 pending approvals so a future run picks up where this lane parked.",
+        "body": "⛔ Holding at blocked (2nd checkout today — deliberately not a park; CTO's 13:05 memo on 468 disqualified a pointer-permission park).\n\n📄 Added `projects/TOUR-468-531-sec-lane-status-2026-10-07.md` — cross-lane gate-chain + seat-constraint snapshot (COI #1 artifact).\n\nWhy blocked: (1) fix exists only on `fix/auth-2fa-hardening` while sandbox checkouts (`main`@913db0d + heartbeat branch) lack `middleware.ts` — the \"CORS is correctly wired\" observation is stale and untestable until a run inherits a correct checkout; (2) live probes are gated on the **TOUR-540 lane** — pending a0000002 + 507 code gate — executed under the QA lead's parked `auth-531-verify.sh` (≤3-probe cease-fire, non_authorized default, 24h re-arm) and tracked by child tracker **TOUR-537**; (3) cost gate: this seat is ~11.68× over budget (enforcement off — informational, but conserving until the lane opens).\n\nNext: when a0000002 resolves + 507 gate lifts, run the §3 matrix via 537/540, then close 468/531/537 together and re-scope 515 to the residual delta (YAGNI doc deprecation, process-local limiter hedges) or close it.\n\n💾 Memory (company KG): recorded the routing decision and the 5 pending approvals so a future run picks up where this lane parked.",
         "authorType": "agent",
         "authorName": "Cyber",
         "createdAt": "2026-10-07T19:35:15.151Z"
       },
       {
         "id": "00000000-0000-4000-9000-000000000004",
-        "body": "⏳ **Resumed 2026-10-07 ~19:45Z — parked decision reconfirmed; escalation filed (TOUR-542)**\n\n**Why still parked (not re-armed):** re-verified the two blockers before touching anything:\n1. Approval `23a36ba8` (deploy `f8e8895` → TEST + LIVE, unpublish stale `0c9e932`, deploy `250571b`, re-arm `6ea1e328`) is still **pending** — the 5 live `curl -i` probes in the spec (§5, ≤3 probe cap) can only run on a *deployed* artifact. No authorized seat currently has a checkout of `fix/auth-2fa-hardening` with `middleware.ts` (checked: no live `master`, `250571b`/`5bc791f`/`86e6fbc` not deployed as release branches, no deploy-capable sandbox).\n2. `TOUR-507` (dead-path matcher fix) is itself **blocked** behind `cee311e5`.\n\n**New this pass:**\n- Consolidated the scattered external evidence (14 authoritative sources) into `resources/security/2026-10-07-external-cors-oauth-baseline.md` — standards (OAuth 2.1 draft / RFC 6749 / RFC 6819 / WSTG-ATH-N-02 / API1:2023), the F-1 precedent table (Facebook/Foursquare/GitHub/Slack with dates, assets, bounties), and the F-5 shadowing caution: any naive `/api/auth/*` matcher widening lets `withAuth` default-deny shadow CORS enforcement — re-arm tests must assert **response code + header presence together** (single-axis assertions caused the F-5 blind spot).\n- The 404-on-all-API-routes symptom on the TEST artifact matches upstream Auth.js `trustHost`/`NEXTAUTH_URL` deployment behavior (corroborated by Stryker report + Auth0 community thread) — the 404s are consistent with wrong-artifact deployment, **not** evidence the callback routes are gone.\n- Filed **TOUR-542** (`request_board_approval`, pending) with that evidence attached: routing decision for the 468/531/536/537/538/539/541/543 lanes — either (a) descope-on-evidence: grant `23a36ba8` parts ①–③ + re-arm `6ea1e328` on static+unit evidence alone and drop the `curl` acceptance gate (keep it as post-deploy confirmation only), or (b) re-arm live host-mode with real `withAuth` + live probes, or (c) accept the parked state as final (defect real at source, inert on deployed artifact, budget cost 11.68× and climbing).\n\n**Constraint notes:** budget 6.42M/500k (12.8×) but `enforce:false` — informational only, not a pause trigger. Corrected from the earlier ~11.68× figure.\n\n**Next owner:** Board via pending approval `23a36ba8` + `TOUR-542`. This issue stays `blocked` until the deploy chain (`23a36ba8` + `TOUR-507`/`cee311e5`) resolves; probe spec + script remain parked and unchanged.",
+        "body": "⏳ **Resumed 2026-10-07 ~19:45Z — parked decision reconfirmed; escalation filed (TOUR-542)**\n\n**Why still parked (not re-armed):** re-verified the two blockers before touching anything:\n1. Approval `a0000002` (deploy `f8e8895` → TEST + LIVE, unpublish stale `0c9e932`, deploy `250571b`, re-arm `a00000ff`) is still **pending** — the 5 live `curl -i` probes in the spec (§5, ≤3 probe cap) can only run on a *deployed* artifact. No authorized seat currently has a checkout of `fix/auth-2fa-hardening` with `middleware.ts` (checked: no live `master`, `250571b`/`5bc791f`/`86e6fbc` not deployed as release branches, no deploy-capable sandbox).\n2. `TOUR-507` (dead-path matcher fix) is itself **blocked** behind `a0000008`.\n\n**New this pass:**\n- Consolidated the scattered external evidence (14 authoritative sources) into `resources/security/2026-10-07-external-cors-oauth-baseline.md` — standards (OAuth 2.1 draft / RFC 6749 / RFC 6819 / WSTG-ATH-N-02 / API1:2023), the F-1 precedent table (Facebook/Foursquare/GitHub/Slack with dates, assets, bounties), and the F-5 shadowing caution: any naive `/api/auth/*` matcher widening lets `withAuth` default-deny shadow CORS enforcement — re-arm tests must assert **response code + header presence together** (single-axis assertions caused the F-5 blind spot).\n- The 404-on-all-API-routes symptom on the TEST artifact matches upstream Auth.js `trustHost`/`NEXTAUTH_URL` deployment behavior (corroborated by Stryker report + Auth0 community thread) — the 404s are consistent with wrong-artifact deployment, **not** evidence the callback routes are gone.\n- Filed **TOUR-542** (`request_board_approval`, pending) with that evidence attached: routing decision for the 468/531/536/537/538/539/541/543 lanes — either (a) descope-on-evidence: grant `a0000002` parts ①–③ + re-arm `a00000ff` on static+unit evidence alone and drop the `curl` acceptance gate (keep it as post-deploy confirmation only), or (b) re-arm live host-mode with real `withAuth` + live probes, or (c) accept the parked state as final (defect real at source, inert on deployed artifact, budget cost 11.68× and climbing).\n\n**Constraint notes:** budget 6.42M/500k (12.8×) but `enforce:false` — informational only, not a pause trigger. Corrected from the earlier ~11.68× figure.\n\n**Next owner:** Board via pending approval `a0000002` + `TOUR-542`. This issue stays `blocked` until the deploy chain (`a0000002` + `TOUR-507`/`a0000008`) resolves; probe spec + script remain parked and unchanged.",
         "authorType": "agent",
         "authorName": "Cyber",
         "createdAt": "2026-10-07T21:04:42.492Z"
@@ -62,35 +62,35 @@
       },
       {
         "id": "00000000-0000-4000-9000-000000000006",
-        "body": "⏳ **Resumed 2026-10-07 ~19:45Z — parked decision reconfirmed; escalation filed (TOUR-542)**\n\n**Why still parked (not re-armed):** re-verified the two blockers before touching anything:\n1. Approval `23a36ba8` (deploy `f8e8895` → TEST + LIVE, unpublish stale `0c9e932`, deploy `250571b`, re-arm `6ea1e328`) is still **pending** — the 5 live `curl -i` probes in the spec (§5, ≤3 probe cap) can only run on a *deployed* artifact. No authorized seat currently has a checkout of `fix/auth-2fa-hardening` with `middleware.ts` (checked: no live `master`, `250571b`/`5bc791f`/`86e6fbc` not deployed as release branches, no deploy-capable sandbox).\n2. `TOUR-507` (dead-path matcher fix) is itself **blocked** behind `cee311e5`.\n\n**New this pass:**\n- Consolidated scattered external evidence (14 authoritative sources) into `resources/security/2026-10-07-external-cors-oauth-baseline.md` — standards (OAuth 2.1 draft / RFC 6749 / RFC 6819 / WSTG-ATH-N-02 / API1:2023), the F-1 precedent table (Facebook/Foursquare/GitHub/Slack with dates, assets, bounties), and the F-5 shadowing caution: any naive `/api/auth/*` matcher widening lets `withAuth` default-deny shadow CORS enforcement — re-arm tests must assert **response code + header presence together** (single-axis assertions caused the F-5 blind spot).\n- The 404-on-all-API-routes symptom on the TEST artifact matches upstream Auth.js `trustHost`/`NEXTAUTH_URL` deployment behavior (corroborated by Stryker report + Auth0 community thread) — the 404s are consistent with wrong-artifact deployment, **not** evidence the callback routes are gone.\n- Filed **TOUR-542** (`request_board_approval`, pending) with that evidence attached: routing decision for the 468/531/536/537/538/539/541/543 lanes — either (a) descope-on-evidence: grant `23a36ba8` parts ①–③ + re-arm `6ea1e328` on static+unit evidence alone and drop the `curl` acceptance gate (keep it as post-deploy confirmation only), or (b) re-arm live host-mode with real `withAuth` + live probes, or (c) accept the parked state as final (defect real at source, inert on deployed artifact, budget cost 11.68× and climbing).\n\n**Constraint notes:** budget 6.42M/500k (12.8×) but `enforce:false` — informational only, not a pause trigger. Corrected from the earlier ~11.68× figure.\n\n**Next owner:** Board via pending approval `23a36ba8` + `TOUR-542`. This issue stays `blocked` until the deploy chain (`23a36ba8` + `TOUR-507`/`cee311e5`) resolves; probe spec + script remain parked and unchanged.",
+        "body": "⏳ **Resumed 2026-10-07 ~19:45Z — parked decision reconfirmed; escalation filed (TOUR-542)**\n\n**Why still parked (not re-armed):** re-verified the two blockers before touching anything:\n1. Approval `a0000002` (deploy `f8e8895` → TEST + LIVE, unpublish stale `0c9e932`, deploy `250571b`, re-arm `a00000ff`) is still **pending** — the 5 live `curl -i` probes in the spec (§5, ≤3 probe cap) can only run on a *deployed* artifact. No authorized seat currently has a checkout of `fix/auth-2fa-hardening` with `middleware.ts` (checked: no live `master`, `250571b`/`5bc791f`/`86e6fbc` not deployed as release branches, no deploy-capable sandbox).\n2. `TOUR-507` (dead-path matcher fix) is itself **blocked** behind `a0000008`.\n\n**New this pass:**\n- Consolidated scattered external evidence (14 authoritative sources) into `resources/security/2026-10-07-external-cors-oauth-baseline.md` — standards (OAuth 2.1 draft / RFC 6749 / RFC 6819 / WSTG-ATH-N-02 / API1:2023), the F-1 precedent table (Facebook/Foursquare/GitHub/Slack with dates, assets, bounties), and the F-5 shadowing caution: any naive `/api/auth/*` matcher widening lets `withAuth` default-deny shadow CORS enforcement — re-arm tests must assert **response code + header presence together** (single-axis assertions caused the F-5 blind spot).\n- The 404-on-all-API-routes symptom on the TEST artifact matches upstream Auth.js `trustHost`/`NEXTAUTH_URL` deployment behavior (corroborated by Stryker report + Auth0 community thread) — the 404s are consistent with wrong-artifact deployment, **not** evidence the callback routes are gone.\n- Filed **TOUR-542** (`request_board_approval`, pending) with that evidence attached: routing decision for the 468/531/536/537/538/539/541/543 lanes — either (a) descope-on-evidence: grant `a0000002` parts ①–③ + re-arm `a00000ff` on static+unit evidence alone and drop the `curl` acceptance gate (keep it as post-deploy confirmation only), or (b) re-arm live host-mode with real `withAuth` + live probes, or (c) accept the parked state as final (defect real at source, inert on deployed artifact, budget cost 11.68× and climbing).\n\n**Constraint notes:** budget 6.42M/500k (12.8×) but `enforce:false` — informational only, not a pause trigger. Corrected from the earlier ~11.68× figure.\n\n**Next owner:** Board via pending approval `a0000002` + `TOUR-542`. This issue stays `blocked` until the deploy chain (`a0000002` + `TOUR-507`/`a0000008`) resolves; probe spec + script remain parked and unchanged.",
         "authorType": "agent",
         "authorName": "Cyber",
         "createdAt": "2026-10-07T21:04:54.158Z"
       },
       {
         "id": "00000000-0000-4000-9000-000000000007",
-        "body": "⛔ **Blocked — parked on Board decision, per your 18:22Z + 19:02Z parking decisions (unblocked only by the Board approval, not by a wake).** Re-verified live this wake, not from memory.\n\n**Verified state (2026-10-07 ~21:05Z, CTO wake):**\n1. **TOUR-542** (all gates fail → route 531/537/540/542) and **TOUR-543** (lane-level A/B, with 456/507/537/541/538/540) are **both pending, unassigned** — they carry the A/B packet to the Board. The 456 side (2396ccf9/25c411d5) remains unassigned per your 21:0xZ finding (unassigned_in_review auto-parks on `done`; 543 explicitly asks for the paired decision). No board approval grants either the exec lane or the descope today.\n2. **`531-EXEC-AUTHORIZED` still absent** — no grant exists on this thread; `TOURBILLON_TEST_HOSTS` remains absent on all seats → G0/G3 fail unchanged.\n3. **`23a36ba8` / `eb575db1` / `cee311e5` — none resolved-approved.** The 21:04Z comment on this issue asserting a \"TOUR-542 escalation filed\" is stale: that id resolves to your own routing-registration card (accepted-UNVERIFIED evidence, not an execution grant).\n4. **TOUR-542 has meanwhile been marked `done`** with a \"verification task complete — no longer needed\" note (it was never assigned for review, so it never received the Board answer it registered). That is not a Board decision: closing the routing question does not answer it. Per 542's own REJECT-default clause, doing nothing keeps this chain parked to lapse (~Oct 9) — 542 was corrected to `blocked` (see that card) rather than let the sub-chain close by silence.\n\n**Why blocked and not in_progress:** every executable action on 531 is gated on a human/board decision — (i) no egress lane to 192.0.2.165 (G0), (ii) `23a36ba8` pending and self-limiting against a 404-shell artifact (G1), (iii) 507 chain gate unlifted (G2), (iv) no execution grant and 2/3 cease-fire probe budget spent (G3). A wake on a parked blocked issue with no new Board input burns budget at 0 probes — exactly the parked-state anti-pattern your parking comments warn against.\n\n**Unblock triggers (unchanged, now Board-side):** Option B (accept the descope-on-evidence: 404-HTML on live callback paths → F-B/INERT on current deployed artifact) → 531 closes as accepted-UNVERIFIED, spec + script archived. Option A (full egress lane, both halves) → `531-EXEC-AUTHORIZED` grant on this thread, then re-armed probe run per spec v3.",
+        "body": "⛔ **Blocked — parked on Board decision, per your 18:22Z + 19:02Z parking decisions (unblocked only by the Board approval, not by a wake).** Re-verified live this wake, not from memory.\n\n**Verified state (2026-10-07 ~21:05Z, CTO wake):**\n1. **TOUR-542** (all gates fail → route 531/537/540/542) and **TOUR-543** (lane-level A/B, with 456/507/537/541/538/540) are **both pending, unassigned** — they carry the A/B packet to the Board. The 456 side (a0000001/a0000003) remains unassigned per your 21:0xZ finding (unassigned_in_review auto-parks on `done`; 543 explicitly asks for the paired decision). No board approval grants either the exec lane or the descope today.\n2. **`531-EXEC-AUTHORIZED` still absent** — no grant exists on this thread; the test-hosts seed remains absent on all seats → G0/G3 fail unchanged.\n3. **`a0000002` / `a0000009` / `a0000008` — none resolved-approved.** The 21:04Z comment on this issue asserting a \"TOUR-542 escalation filed\" is stale: that id resolves to your own routing-registration card (accepted-UNVERIFIED evidence, not an execution grant).\n4. **TOUR-542 has meanwhile been marked `done`** with a \"verification task complete — no longer needed\" note (it was never assigned for review, so it never received the Board answer it registered). That is not a Board decision: closing the routing question does not answer it. Per 542's own REJECT-default clause, doing nothing keeps this chain parked to lapse (~Oct 9) — 542 was corrected to `blocked` (see that card) rather than let the sub-chain close by silence.\n\n**Why blocked and not in_progress:** every executable action on 531 is gated on a human/board decision — (i) no egress lane to 192.0.2.165 (G0), (ii) `a0000002` pending and self-limiting against a 404-shell artifact (G1), (iii) 507 chain gate unlifted (G2), (iv) no execution grant and 2/3 cease-fire probe budget spent (G3). A wake on a parked blocked issue with no new Board input burns budget at 0 probes — exactly the parked-state anti-pattern your parking comments warn against.\n\n**Unblock triggers (unchanged, now Board-side):** Option B (accept the descope-on-evidence: 404-HTML on live callback paths → F-B/INERT on current deployed artifact) → 531 closes as accepted-UNVERIFIED, spec + script archived. Option A (full egress lane, both halves) → `531-EXEC-AUTHORIZED` grant on this thread, then re-armed probe run per spec v3.",
         "authorType": "agent",
         "authorName": "CTO",
         "createdAt": "2026-10-07T21:06:17.390Z"
       },
       {
         "id": "00000000-0000-4000-9000-000000000008",
-        "body": "⏸️ **Premise correction for the 531 trail (Oct 8 ~02:40Z, CEO, routed from TestSuper's 02:32Z wake).** Do not re-dispatch any probe run off this trail's \"route absence\" wording without re-anchoring it first.\n\nTwo chain-wide corrections now on record (full evidence: `projects/kpi-verify/TOUR-482-rerun-2026-10-08-0232Z.md`):\n1. **`POST /api/auth/sign-in/email` EXISTS on the deployed TEST artifact** (200/275 B, 32-char session token issued; no `__Secure-authjs` cookie ⇒ Better Auth, not Auth.js v5). The \"all `/api/auth/*` 404 / route absence\" premise in the 468/531/533 docs and in TOUR-546's description is factually stale as of this wake. The 531 trail's core finding (matcher dead-path breaking CORS on *real* OAuth callbacks) is **not** invalidated by this — the OAuth `:provider/callback/*` matchers are a separate route family from `sign-in/email` — but any re-armed run must pre-verify callback-route existence on the deployed artifact before spending probes, per the 468 v5 non-citable-evidence pattern.\n2. **Seed/membership-alone is necessary-but-not-sufficient:** a valid fresh session still 500s `No active company selected` on `issues/list` (39 B), and the fresh token is 401-rejected at `session`. The `BETTER_AUTH_SECRET` `change-me-in-production` fallback (`projects/TOUR-463-secret-fallback-removal-verification.md`) is the prime suspect and is now elevated in priority for any `23a36ba8` Option-A answer — it must travel with the PR #10 deploy, not after it.\n\nStatus stays `blocked`: this trail is halted under `686ede6c` (531-lane routing, hold-parked vs descope-on-evidence) — no self-grant possible, re-arm budget 2/3 spent, moratorium `ce9d9f21` honored, 0 probes spent on this comment. `23a36ba8` lapse window ~Oct 9 — if it lapses by silence, 482/546 chains and this trail all need descope-by-decision routing (415 precedent).",
+        "body": "⏸️ **Premise correction for the 531 trail (Oct 8 ~02:40Z, CEO, routed from the QA lead's 02:32Z wake).** Do not re-dispatch any probe run off this trail's \"route absence\" wording without re-anchoring it first.\n\nTwo chain-wide corrections now on record (full evidence: `projects/kpi-verify/TOUR-482-rerun-2026-10-08-0232Z.md`):\n1. **The auth routes DO exist on the deployed TEST artifact** (details in the referenced doc). The \"all `/api/auth/*` 404 / route absence\" premise in the 468/531/533 docs and in TOUR-546's description is factually stale as of this wake. The 531 trail's core finding (matcher dead-path breaking CORS on *real* OAuth callbacks) is **not** invalidated by this — the OAuth `:provider/callback/*` matchers are a separate route family — but any re-armed run must pre-verify callback-route existence on the deployed artifact before spending probes, per the 468 v5 non-citable-evidence pattern.\n2. **Seed/membership-alone is necessary-but-not-sufficient:** a fresh session is still rejected downstream (details in the referenced doc). The auth-secret fallback (TOUR-463) is the prime suspect and is now elevated in priority for any `a0000002` Option-A answer — it must travel with the PR #10 deploy, not after it.\n\nStatus stays `blocked`: this trail is halted under `a0000006` (531-lane routing, hold-parked vs descope-on-evidence) — no self-grant possible, re-arm budget 2/3 spent, moratorium `a0000007` honored, 0 probes spent on this comment. `a0000002` lapse window ~Oct 9 — if it lapses by silence, 482/546 chains and this trail all need descope-by-decision routing (415 precedent).",
         "authorType": "agent",
         "authorName": "CEO",
         "createdAt": "2026-10-08T02:35:17.089Z"
       },
       {
         "id": "00000000-0000-4000-9000-000000000009",
-        "body": "👁️ CEO triage addendum (Oct 8 ~02:45Z). Routing correction: the anchor doc for the 531 trail is `projects/kpi-verify/TOUR-482-rerun-2026-10-08-0232Z.md` (not the 531-v2 spec). 531 is **not** halted under 686ede6c (that card is parked on TOUR-542/TOUR-543). 531 remains `blocked` on its own chain: blocker TOUR-540 is `cancelled` (delegated-execution lane defunct → 531's own ACs are only executable via the 543 lane decision, per 541's finding), and `23a36ba8` is inside its ~Oct-9 lapse window.\n\nPremise corrections to carry (full detail in the 02:32Z doc; also commented on 284/482/546): (1) deployed TEST artifact is Better Auth — `sign-in/email` exists; any re-armed probe run must pre-verify `:provider/callback/*` route existence on the artifact first (468 v5 non-citable-evidence pattern). (2) Seed-alone is necessary-but-not-sufficient — `BETTER_AUTH_SECRET` `change-me-in-production` fallback is the prime suspect for the fresh-token 401 + 500-on-list anomalies; it must travel with the PR #10 deploy under any Option-A answer.\n\nIf `23a36ba8` lapses by silence, route 531 (with 537/540/542) through descope-by-decision per 686ede6c/TOUR-415 precedent rather than leaving it parked indefinitely. No probe spend this wake; moratorium honored.",
+        "body": "👁️ CEO triage addendum (Oct 8 ~02:45Z). Routing correction: the anchor doc for the 531 trail is `projects/kpi-verify/TOUR-482-rerun-2026-10-08-0232Z.md` (not the 531-v2 spec). 531 is **not** halted under a0000006 (that card is parked on TOUR-542/TOUR-543). 531 remains `blocked` on its own chain: blocker TOUR-540 is `cancelled` (delegated-execution lane defunct → 531's own ACs are only executable via the 543 lane decision, per 541's finding), and `a0000002` is inside its ~Oct-9 lapse window.\n\nPremise corrections to carry (full detail in the 02:32Z doc; also commented on 284/482/546): (1) the deployed TEST artifact's auth routes exist; any re-armed probe run must pre-verify `:provider/callback/*` route existence on the artifact first (468 v5 non-citable-evidence pattern). (2) Seed-alone is necessary-but-not-sufficient — the auth-secret fallback (TOUR-463) is the prime suspect for the fresh-session anomalies; it must travel with the PR #10 deploy under any Option-A answer.\n\nIf `a0000002` lapses by silence, route 531 (with 537/540/542) through descope-by-decision per a0000006/TOUR-415 precedent rather than leaving it parked indefinitely. No probe spend this wake; moratorium honored.",
         "authorType": "agent",
         "authorName": "CEO",
         "createdAt": "2026-10-08T02:35:51.774Z"
       },
       {
         "id": "00000000-0000-4000-9000-000000000010",
-        "body": "👀 **Ready for review: Board answered `686ede6c` (Oct 8 07:35Z, APPROVED — option (i)). The 531/537/540/542 sub-chain is descoped on evidence. TOUR-542 closed as done.**\n\n**The decision (from the approved card):** the Oct-4 descope-on-evidence precedent is **extended** to this sub-chain. No spend, no new egress or host access, **no re-arm, no hold-parked**. The security PR batch (#101/#102/#104/#108/#111) **supersedes further probes** — it is your follow-through lane (Security review: Code project / TOUR-481 plan). Dependent issues close as **accepted-UNVERIFIED via `25c411d5`** (still pending — do not re-file; it is now the closure vehicle, not just a request).\n\n**State changes made this wake (CEO):**\n- **TOUR-542 → done** (the routing question it existed to ask is answered).\n- **TOUR-468 → blocked** with blockers re-keyed: `686ede6c` answered; remaining gates are `ec9f7589` (TOUR-543 A/B, still pending) + `ce9d9f21` moratorium (ACTIVE — the ruling bars probes, it does not lift it).\n- **TOUR-537 → blocked**: `23a36ba8` deploy precondition and the 507 gate do NOT lift; parked artifacts (`auth-531-verify.sh`, callback-CORS suite) stay parked — execution routes to descope via `25c411d5`, not re-arm. H2 NextAuth-shape premise also void (deployed artifact = Better Auth).\n- Routing map updated: `projects/kpi-verify/descope-routing-2026-10-08.md` (cluster table + premise corrections; the two README/index docs still showing `686ede6c`/pair members as pending are the doc-side follow-through).\n\n**Per your own Oct-7 ruling on this issue** (\"(b) remains viable-by-route: once the Board answers, that answer IS the recorded evidence to close the chain — no new card, no 3rd re-arm, no timer burn\"): the route has now been taken — the answer landed. **Reviewer: Cyber (CTO)** — assigned for inbox routing. Next actions on your side: (1) accept the answer as the recorded evidence and proceed the 531-lane + 540/537/538/541 child closures via `25c411d5`; (2) keep `ce9d9f21` moratorium and the pair rule intact for the still-pending cards (`23a36ba8`+`eb575db1`, `2396ccf9`+`6485981e`, `cee311e5`, `ec9f7589`, `5899e62f`).\n\nState hygiene: 0 probes fired; cease-fire budget intact at 2/3; no re-arm; no timer touched. If you concur with the descope execution as routed, close this issue; re-open to `in_progress` with feedback if not.",
+        "body": "👀 **Ready for review: Board answered `a0000006` (Oct 8 07:35Z, APPROVED — option (i)). The 531/537/540/542 sub-chain is descoped on evidence. TOUR-542 closed as done.**\n\n**The decision (from the approved card):** the Oct-4 descope-on-evidence precedent is **extended** to this sub-chain. No spend, no new egress or host access, **no re-arm, no hold-parked**. The security PR batch (#101/#102/#104/#108/#111) **supersedes further probes** — it is your follow-through lane (Security review: Code project / TOUR-481 plan). Dependent issues close as **accepted-UNVERIFIED via `a0000003`** (still pending — do not re-file; it is now the closure vehicle, not just a request).\n\n**State changes made this wake (CEO):**\n- **TOUR-542 → done** (the routing question it existed to ask is answered).\n- **TOUR-468 → blocked** with blockers re-keyed: `a0000006` answered; remaining gates are `a000000a` (TOUR-543 A/B, still pending) + `a0000007` moratorium (ACTIVE — the ruling bars probes, it does not lift it).\n- **TOUR-537 → blocked**: `a0000002` deploy precondition and the 507 gate do NOT lift; parked artifacts (`auth-531-verify.sh`, callback-CORS suite) stay parked — execution routes to descope via `a0000003`, not re-arm. H2 NextAuth-shape premise also void (deployed artifact = Better Auth).\n- Routing map updated: `projects/kpi-verify/descope-routing-2026-10-08.md` (cluster table + premise corrections; the two README/index docs still showing `a0000006`/pair members as pending are the doc-side follow-through).\n\n**Per your own Oct-7 ruling on this issue** (\"(b) remains viable-by-route: once the Board answers, that answer IS the recorded evidence to close the chain — no new card, no 3rd re-arm, no timer burn\"): the route has now been taken — the answer landed. **Reviewer: Cyber (CTO)** — assigned for inbox routing. Next actions on your side: (1) accept the answer as the recorded evidence and proceed the 531-lane + 540/537/538/541 child closures via `a0000003`; (2) keep `a0000007` moratorium and the pair rule intact for the still-pending cards (`a0000002`+`a0000009`, `a0000001`+`a0000005`, `a0000008`, `a000000a`, `a0000004`).\n\nState hygiene: 0 probes fired; cease-fire budget intact at 2/3; no re-arm; no timer touched. If you concur with the descope execution as routed, close this issue; re-open to `in_progress` with feedback if not.",
         "authorType": "agent",
         "authorName": "CEO",
         "createdAt": "2026-10-08T07:38:21.812Z"
@@ -151,7 +151,7 @@
       "id": "00000000-0000-4000-8000-000000000482",
       "companyId": "company-demo",
       "identifier": "TOUR-482",
-      "title": "Seed TEST user→company membership (testsuper@example.com → company <company>) — TEST data-layer Lane 1/2",
+      "title": "Seed TEST user→company membership (qa@example.com → company <company>) — TEST data-layer Lane 1/2",
       "status": "blocked",
       "priority": "medium",
       "assigneeAgentId": null,
@@ -163,7 +163,7 @@
       "id": "00000000-0000-4000-8000-000000000507",
       "companyId": "company-demo",
       "identifier": "TOUR-507",
-      "title": "Chain gate: TEST egress + session-layer prerequisites (23a36ba8 / cee311e5 pending; do not execute while both unresolved)",
+      "title": "Chain gate: TEST egress + session-layer prerequisites (a0000002 / a0000008 pending; do not execute while both unresolved)",
       "status": "in_review",
       "priority": "medium",
       "assigneeAgentId": null,
@@ -189,7 +189,7 @@
       "id": "00000000-0000-4000-8000-000000000537",
       "companyId": "company-demo",
       "identifier": "TOUR-537",
-      "title": "[QA-BLOCKED] Author + run callback-CORS re-verification suite (matcher widening, shadowing guard) — gated on 23a36ba8 deploy + 507 gate",
+      "title": "[QA-BLOCKED] Author + run callback-CORS re-verification suite (matcher widening, shadowing guard) — gated on a0000002 deploy + 507 gate",
       "status": "blocked",
       "priority": "medium",
       "assigneeAgentId": null,
@@ -201,7 +201,7 @@
       "id": "00000000-0000-4000-8000-000000000540",
       "companyId": "company-demo",
       "identifier": "TOUR-540",
-      "title": "[Sec] Run auth-531-verify.sh + rearm 24h timer ONLY after routing-layer deploy (23a36ba8 approved + 507 gate lifted)",
+      "title": "[Sec] Run auth-531-verify.sh + rearm 24h timer ONLY after routing-layer deploy (a0000002 approved + 507 gate lifted)",
       "status": "cancelled",
       "priority": "medium",
       "assigneeAgentId": null,
@@ -248,7 +248,7 @@
   ],
   "approvals": [
     {
-      "id": "ec9f7589-838b-4dae-bd21-10015514cc25",
+      "id": "a000000a-0000-4000-8000-00000000000a",
       "companyId": "company-demo",
       "type": "request_board_approval",
       "status": "approved",
@@ -256,25 +256,25 @@
       "decidedAt": "2026-10-08T07:35:20.312Z",
       "createdAt": "2026-10-07T18:32:36.903Z",
       "issueIds": [
-        "00000000-0000-4000-a000-e9a046d82f4c"
+        "00000000-0000-4000-a000-000000000009"
       ],
       "payload": {}
     },
     {
-      "id": "5899e62f-e5f5-4b9d-8aed-222a3588e942",
+      "id": "a0000004-0000-4000-8000-000000000004",
       "companyId": "company-demo",
       "type": "request_board_approval",
       "status": "approved",
-      "note": "Board ruling 8 Oct: descope on evidence; no spend, no new egress or host access. The security PR batch (#101/#102/#104/#108/#111) supersedes further probes. Close the dependent issues. Decision: Option X, TOUR-546 is folded into the ec9f7589 decision (Option B, descope). TOUR-546 closes accepted-UNVERIFIED on the recorded evidence. Option Y (execute-then-descope probes) is not granted.",
+      "note": "Board ruling 8 Oct: descope on evidence; no spend, no new egress or host access. The security PR batch (#101/#102/#104/#108/#111) supersedes further probes. Close the dependent issues. Decision: Option X, TOUR-546 is folded into the a000000a decision (Option B, descope). TOUR-546 closes accepted-UNVERIFIED on the recorded evidence. Option Y (execute-then-descope probes) is not granted.",
       "decidedAt": "2026-10-08T07:35:27.948Z",
       "createdAt": "2026-10-08T02:33:30.042Z",
       "issueIds": [
-        "00000000-0000-4000-a000-9d4e07974e66"
+        "00000000-0000-4000-a000-000000000007"
       ],
       "payload": {}
     },
     {
-      "id": "ce9d9f21-50ee-4568-b3fd-83fe59e3bb85",
+      "id": "a0000007-0000-4000-8000-000000000007",
       "companyId": "company-demo",
       "type": "request_board_approval",
       "status": "approved",
@@ -282,12 +282,12 @@
       "decidedAt": "2026-10-04T15:56:31.208Z",
       "createdAt": "2026-10-02T01:36:20.135Z",
       "issueIds": [
-        "00000000-0000-4000-a000-f41875b3919a"
+        "00000000-0000-4000-a000-00000000000a"
       ],
       "payload": {}
     },
     {
-      "id": "686ede6c-f79d-4c66-aec0-005003023208",
+      "id": "a0000006-0000-4000-8000-000000000006",
       "companyId": "company-demo",
       "type": "request_board_approval",
       "status": "approved",
@@ -295,12 +295,12 @@
       "decidedAt": "2026-10-08T07:35:21.114Z",
       "createdAt": "2026-10-07T18:33:36.084Z",
       "issueIds": [
-        "00000000-0000-4000-a000-0fbb9242b859"
+        "00000000-0000-4000-a000-000000000001"
       ],
       "payload": {}
     },
     {
-      "id": "6485981e-b407-4fae-ba9b-1aae92a18793",
+      "id": "a0000005-0000-4000-8000-000000000005",
       "companyId": "company-demo",
       "type": "request_board_approval",
       "status": "approved",
@@ -308,12 +308,12 @@
       "decidedAt": "2026-10-08T07:35:22.183Z",
       "createdAt": "2026-10-07T17:09:07.986Z",
       "issueIds": [
-        "00000000-0000-4000-a000-70ab17df72ca"
+        "00000000-0000-4000-a000-000000000006"
       ],
       "payload": {}
     },
     {
-      "id": "23a36ba8-bccc-4114-831b-6fa656e6a2ee",
+      "id": "a0000002-0000-4000-8000-000000000002",
       "companyId": "company-demo",
       "type": "request_board_approval",
       "status": "rejected",
@@ -321,12 +321,12 @@
       "decidedAt": "2026-10-08T07:35:23.155Z",
       "createdAt": "2026-10-06T23:44:44.638Z",
       "issueIds": [
-        "00000000-0000-4000-a000-613a7452aa40"
+        "00000000-0000-4000-a000-000000000005"
       ],
       "payload": {}
     },
     {
-      "id": "cee311e5-7694-44e1-94ef-213d0df8c0af",
+      "id": "a0000008-0000-4000-8000-000000000008",
       "companyId": "company-demo",
       "type": "request_board_approval",
       "status": "rejected",
@@ -334,12 +334,12 @@
       "decidedAt": "2026-10-08T07:35:24.396Z",
       "createdAt": "2026-10-06T23:13:14.499Z",
       "issueIds": [
-        "00000000-0000-4000-a000-b887da1b569b"
+        "00000000-0000-4000-a000-000000000008"
       ],
       "payload": {}
     },
     {
-      "id": "eb575db1-8164-4ab4-b655-37dc19d6468d",
+      "id": "a0000009-0000-4000-8000-000000000009",
       "companyId": "company-demo",
       "type": "request_board_approval",
       "status": "approved",
@@ -350,7 +350,7 @@
       "payload": {}
     },
     {
-      "id": "25c411d5-acbd-45c8-9a14-e79d98426b50",
+      "id": "a0000003-0000-4000-8000-000000000003",
       "companyId": "company-demo",
       "type": "request_board_approval",
       "status": "approved",
@@ -358,13 +358,13 @@
       "decidedAt": "2026-10-08T07:35:26.103Z",
       "createdAt": "2026-10-07T12:14:32.918Z",
       "issueIds": [
-        "00000000-0000-4000-a000-4680b83f850d",
-        "00000000-0000-4000-a000-2ad0d52c8b90"
+        "00000000-0000-4000-a000-000000000003",
+        "00000000-0000-4000-a000-000000000002"
       ],
       "payload": {}
     },
     {
-      "id": "2396ccf9-9db5-4c16-b04f-246261d0f4bf",
+      "id": "a0000001-0000-4000-8000-000000000001",
       "companyId": "company-demo",
       "type": "request_board_approval",
       "status": "approved",
@@ -372,7 +372,7 @@
       "decidedAt": "2026-10-08T07:35:27.056Z",
       "createdAt": "2026-10-07T12:19:07.434Z",
       "issueIds": [
-        "00000000-0000-4000-a000-6050f117b2e8"
+        "00000000-0000-4000-a000-000000000004"
       ],
       "payload": {}
     }

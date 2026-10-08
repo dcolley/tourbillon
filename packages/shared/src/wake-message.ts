@@ -10,8 +10,14 @@ import {
   type CommentSectionResult,
 } from './wake-context/comments';
 import { renderLiveStateHeader } from './wake-context/header';
+import { asText, flattenInline, neutraliseSystemMarkers, sanitizeWakeComments } from './wake-context/sanitize';
 import { DEFAULT_WAKE_CONTEXT_BUDGETS } from './wake-context/settings';
-import type { WakeContextBudgets, WakeContextStats, WakeLiveContext } from './wake-context/types';
+import type {
+  WakeContextBudgets,
+  WakeContextStats,
+  WakeLiveContext,
+  WakeRenderFallback,
+} from './wake-context/types';
 
 export interface BuildWakeMessageOptions {
   /** Live DB state from the scheduler's buildWakeContext. Absent/null → T1-only message. */
@@ -25,44 +31,79 @@ const FALLBACK_HINT =
   '\nFull comment history may be incomplete in this wake message. ' +
   'After checkout, call getComments without `after` for the full thread.';
 const HEARTBEAT_LINE = '\nBegin your heartbeat procedure. Follow SKILL: Control Plane Operations exactly.';
+/** S4: linked issue ids listed in the v2 lead (the lead counts against the total budget). */
+export const WAKE_V2_LEAD_MAX_LINKED_IDS = 10;
 
-function parsePayload(json: string | undefined): WakePayload | null {
-  if (!json) return null;
+/** Parsed payload with every field the renderers read made safe (B1). */
+interface SafePayload {
+  issue: { identifier: string; title: string; status: string; priority: string } | null;
+  newComments: ReturnType<typeof sanitizeWakeComments>;
+  fallbackFetchNeeded: boolean;
+}
+
+/**
+ * B1: malformed JSON → null; otherwise newComments is always a clean array (non-array → [], null
+ * or non-object entries dropped, fields coerced to strings) and issue is an object or null.
+ */
+function parsePayload(json: string | undefined): SafePayload | null {
+  if (!json || typeof json !== 'string') return null;
+  let p: unknown;
   try {
-    const p = JSON.parse(json) as WakePayload;
-    return p && typeof p === 'object' ? p : null;
+    p = JSON.parse(json);
   } catch {
     return null; /* ignore malformed payload */
   }
+  if (!p || typeof p !== 'object' || Array.isArray(p)) return null;
+  const raw = p as Partial<Record<keyof WakePayload, unknown>>;
+  const issueRaw = raw.issue;
+  const issue =
+    issueRaw && typeof issueRaw === 'object' && !Array.isArray(issueRaw)
+      ? (() => {
+          const i = issueRaw as Record<string, unknown>;
+          return {
+            identifier: asText(i.identifier),
+            title: asText(i.title),
+            status: asText(i.status),
+            priority: asText(i.priority),
+          };
+        })()
+      : null;
+  return {
+    issue,
+    newComments: sanitizeWakeComments(raw.newComments),
+    fallbackFetchNeeded: raw.fallbackFetchNeeded === true,
+  };
 }
 
-function leadParts(data: HeartbeatJobData): string[] {
+function leadParts(data: HeartbeatJobData, opts: { maxLinkedIds?: number } = {}): string[] {
   const parts = [`Wake reason: ${data.wakeReason}`];
   if (data.taskId) parts.push(`Assigned task ID: ${data.taskId}`);
   if (data.wakeReason === 'approval_resolved') {
     if (data.approvalId) parts.push(`Approval ID: ${data.approvalId}`);
     if (data.approvalStatus) parts.push(`Board decision: ${data.approvalStatus}`);
-    if (data.approvalNote?.trim()) {
-      const note = data.approvalNote.trim();
-      parts.push(`Board note: ${note.length > 500 ? `${note.slice(0, 500)}…` : note}`);
+    const noteText = asText(data.approvalNote).trim();
+    if (noteText) {
+      parts.push(`Board note: ${noteText.length > 500 ? `${noteText.slice(0, 500)}…` : noteText}`);
     }
-    if (data.linkedIssueIds?.length) {
-      parts.push(`Linked issue IDs: ${data.linkedIssueIds.join(', ')}`);
+    const linked = Array.isArray(data.linkedIssueIds) ? data.linkedIssueIds.map(asText).filter(Boolean) : [];
+    if (linked.length) {
+      const max = opts.maxLinkedIds ?? linked.length;
+      const head = linked.slice(0, max);
+      const more = linked.length - head.length;
+      parts.push(`Linked issue IDs: ${head.join(', ')}${more > 0 ? `, +${more} more` : ''}`);
     }
   }
   if (data.wakeReason === 'agent_mail') {
     if (data.mailId) parts.push(`Mail ID: ${data.mailId}`);
     if (data.mailFromAgentId) parts.push(`From agent ID: ${data.mailFromAgentId}`);
     if (data.mailFromAgentName) parts.push(`From: ${data.mailFromAgentName}`);
-    if (data.mailBody) {
-      const body = data.mailBody.trim();
-      parts.push(`Message: ${body}`);
-    }
+    const body = asText(data.mailBody).trim();
+    if (body) parts.push(`Message: ${body}`);
   }
   return parts;
 }
 
-function emptyStats(mode: 'v2' | 't1'): WakeContextStats {
+function emptyStats(mode: WakeContextStats['mode']): WakeContextStats {
   return {
     version: WAKE_CONTEXT_VERSION,
     mode,
@@ -101,8 +142,10 @@ function buildT1(data: HeartbeatJobData, budgets: WakeContextBudgets): { message
   const payload = parsePayload(data.wakePayloadJson);
   if (payload) {
     if (payload.issue) {
+      // S1: one line (a title can't start a fake block in this header-less layout).
+      const one = (v: string) => neutraliseSystemMarkers(flattenInline(v));
       parts.push(
-        `Task: ${payload.issue.identifier} — ${payload.issue.title} (${payload.issue.status}, ${payload.issue.priority})`,
+        `Task: ${one(payload.issue.identifier)} — ${one(payload.issue.title)} (${one(payload.issue.status)}, ${one(payload.issue.priority)})`,
       );
     }
     let section: CommentSectionResult | null = null;
@@ -126,7 +169,8 @@ function buildV2(
   ctx: WakeLiveContext,
   budgets: WakeContextBudgets,
 ): { message: string; stats: WakeContextStats } {
-  const lead = leadParts(data);
+  // S4: the lead is bounded (linked ids capped) and counted in fixedChars below.
+  const lead = leadParts(data, { maxLinkedIds: WAKE_V2_LEAD_MAX_LINKED_IDS });
   const payload = parsePayload(data.wakePayloadJson);
   const comments = payload?.newComments ?? [];
   const approvalMap = new Map<string, ApprovalClaimState>();
@@ -209,19 +253,51 @@ function buildV2(
   return { message, stats };
 }
 
+const MINIMAL_FALLBACK_MESSAGE = `Wake reason: unknown\n${HEARTBEAT_LINE}`;
+
+/** Last resort (B1): wake reason, task id and the heartbeat line; reads nothing else. */
+function buildMinimal(data: HeartbeatJobData): { message: string; stats: WakeContextStats } {
+  let message: string;
+  try {
+    const reason = flattenInline(asText(data?.wakeReason)) || 'unknown';
+    const taskId = flattenInline(asText(data?.taskId));
+    const parts = [`Wake reason: ${reason}`];
+    if (taskId) parts.push(`Assigned task ID: ${taskId}`);
+    parts.push('\nThe wake details could not be rendered. After checkout, call getComments for the thread.');
+    if (reason !== 'agent_mail') parts.push(HEARTBEAT_LINE);
+    message = parts.join('\n');
+  } catch {
+    message = MINIMAL_FALLBACK_MESSAGE;
+  }
+  return { message, stats: { ...emptyStats('minimal'), totalChars: message.length, fallback: 't1_render_failed' } };
+}
+
 /**
  * Wake message plus the counts recorded as contextSnapshot.wakeContext. Pure and deterministic:
  * the same job data, context and budgets always give the same output.
+ *
+ * Never throws (#122 follow-up B1): v2 failure → T1 layout (stats.fallback 'v2_render_failed');
+ * T1 failure → minimal message (mode 'minimal', stats.fallback 't1_render_failed').
  */
 export function buildWakeMessageWithStats(
   data: HeartbeatJobData,
   opts: BuildWakeMessageOptions = {},
 ): { message: string; stats: WakeContextStats } {
-  const budgets: WakeContextBudgets = { ...DEFAULT_WAKE_CONTEXT_BUDGETS, ...(opts.budgets ?? {}) };
-  if (opts.context && data.taskId && data.wakeReason !== 'agent_mail') {
-    return buildV2(data, opts.context, budgets);
+  let fallback: WakeRenderFallback | undefined;
+  try {
+    const budgets: WakeContextBudgets = { ...DEFAULT_WAKE_CONTEXT_BUDGETS, ...(opts?.budgets ?? {}) };
+    if (opts?.context && data.taskId && data.wakeReason !== 'agent_mail') {
+      try {
+        return buildV2(data, opts.context, budgets);
+      } catch {
+        fallback = 'v2_render_failed';
+      }
+    }
+    const t1 = buildT1(data, budgets);
+    return fallback ? { message: t1.message, stats: { ...t1.stats, fallback } } : t1;
+  } catch {
+    return buildMinimal(data);
   }
-  return buildT1(data, budgets);
 }
 
 export function buildWakeMessage(data: HeartbeatJobData, opts: BuildWakeMessageOptions = {}): string {

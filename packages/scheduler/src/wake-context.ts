@@ -13,6 +13,7 @@ import {
   resolveWakeContextConfig,
   type HeartbeatJobData,
   type WakePayload,
+  sanitizeWakeComments,
   WAKE_HEADER_MAX_BLOCKERS,
   extractApprovalTokens,
   extractIssueIdentifiers,
@@ -324,18 +325,46 @@ export function createDrizzleWakeContextRepo(t: WakeContextTables): WakeContextR
   };
 }
 
+/** Short, fixed reasons recorded instead of raw errors (S5: no SQL text or params persisted). */
+export type WakeContextErrorCode =
+  | 'wake_context_repo_unavailable'
+  | 'wake_context_query_failed'
+  | 'wake_context_config_failed'
+  | 'wake_message_build_failed';
+
 /** Persisted as contextSnapshot.wakeContext (WC6). */
 export interface WakeContextSnapshot extends Record<string, unknown> {
   enabled: boolean;
   source: 'company' | 'env' | 'default';
   messageSha256: string;
-  error?: string;
+  /** A WakeContextErrorCode, never the raw error message (which can carry SQL and params). */
+  error?: WakeContextErrorCode;
 }
+
+/** Error class name only (e.g. `DrizzleQueryError`), bounded; never the message. */
+function errorName(err: unknown): string {
+  const name = err instanceof Error ? err.name || err.constructor?.name : typeof err;
+  return String(name || 'Error').replace(/[^A-Za-z0-9_]/g, '').slice(0, 40) || 'Error';
+}
+
+/** A Postgres SQLSTATE (5 chars) from the error or its cause, if any. */
+function sqlState(err: unknown): string | undefined {
+  for (const e of [err, (err as { cause?: unknown } | null)?.cause]) {
+    const code = (e as { code?: unknown } | null | undefined)?.code;
+    if (typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code)) return code;
+  }
+  return undefined;
+}
+
+const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
 
 /**
  * Build the wake message for a run (WC1–6). The DB read happens only when the live context is on
  * (company setting `wakeContextV2`, else env TOURBILLON_WAKE_CONTEXT_V2) and the wake carries a
- * task. Never throws: a failed context read falls back to the T1-only message.
+ * task. Never throws (#122 follow-up B1): a failed context read → T1-only message; a failed
+ * render → T1, then a minimal message (both inside buildWakeMessageWithStats); anything else →
+ * the minimal message. Runs before the heartbeat_runs insert, so the run row is always written.
+ * Only short error codes are logged or persisted (S5).
  */
 export async function buildRunWakeMessage(
   wake: HeartbeatJobData,
@@ -352,49 +381,85 @@ export async function buildRunWakeMessage(
     buildContext?: typeof buildWakeContext;
   },
 ): Promise<{ wakeMessage: string; wakeContextSnapshot: WakeContextSnapshot }> {
-  const config = resolveWakeContextConfig(parseCompanySettings(opts.companySettings));
-  let context: Awaited<ReturnType<typeof buildWakeContext>> = null;
-  let error: string | undefined;
-  if (config.enabled && wake.taskId && wake.wakeReason !== 'agent_mail') {
+  const warn = (msg: string, data: Record<string, unknown>) => {
     try {
-      let commentBodies: string[] = [];
-      if (wake.wakePayloadJson) {
-        try {
-          const payload = JSON.parse(wake.wakePayloadJson) as WakePayload;
-          commentBodies = (payload.newComments ?? []).map((c) => c.body ?? '');
-        } catch {
-          /* malformed payload: header still built, no cited ids */
-        }
-      }
-      const repo = typeof opts.repo === 'function' ? opts.repo() : opts.repo;
-      context = await (opts.buildContext ?? buildWakeContext)(
-        repo,
-        {
-          companyId: opts.companyId,
-          agentId: opts.agentId,
-          agentName: opts.agentName,
-          agentUrlKey: opts.agentUrlKey,
-          taskId: wake.taskId,
-          wakeReason: wake.wakeReason,
-          runStartedAt: opts.runStartedAt,
-          commentBodies,
-        },
-      );
-    } catch (err) {
-      error = err instanceof Error ? err.message : String(err);
-      opts.tracer?.warn('wake_context_failed', { taskId: wake.taskId, error });
-      context = null;
+      opts.tracer?.warn(msg, data);
+    } catch {
+      /* logging must not break the wake */
     }
-  }
-  const { message, stats } = buildWakeMessageWithStats(wake, { context, budgets: config.budgets });
-  return {
-    wakeMessage: message,
-    wakeContextSnapshot: {
-      ...stats,
-      enabled: config.enabled,
-      source: config.source,
-      messageSha256: createHash('sha256').update(message).digest('hex'),
-      ...(error ? { error } : {}),
-    },
   };
+  let enabled = false;
+  let source: WakeContextSnapshot['source'] = 'default';
+  let error: WakeContextErrorCode | undefined;
+  try {
+    let config = resolveWakeContextConfig({});
+    try {
+      config = resolveWakeContextConfig(parseCompanySettings(opts.companySettings));
+    } catch (err) {
+      error = 'wake_context_config_failed';
+      warn('wake_context_failed', { taskId: wake?.taskId, error, errorName: errorName(err) });
+    }
+    enabled = config.enabled;
+    source = config.source;
+
+    let context: Awaited<ReturnType<typeof buildWakeContext>> = null;
+    if (config.enabled && wake.taskId && wake.wakeReason !== 'agent_mail') {
+      let stage: WakeContextErrorCode = 'wake_context_repo_unavailable';
+      try {
+        let commentBodies: string[] = [];
+        if (wake.wakePayloadJson) {
+          try {
+            const payload = JSON.parse(wake.wakePayloadJson) as WakePayload;
+            // B1: same clean-up the renderer applies (non-array, null entries, null bodies).
+            commentBodies = sanitizeWakeComments(payload?.newComments).map((c) => c.body);
+          } catch {
+            /* malformed payload: header still built, no cited ids */
+          }
+        }
+        const repo = typeof opts.repo === 'function' ? opts.repo() : opts.repo;
+        stage = 'wake_context_query_failed';
+        context = await (opts.buildContext ?? buildWakeContext)(
+          repo,
+          {
+            companyId: opts.companyId,
+            agentId: opts.agentId,
+            agentName: opts.agentName,
+            agentUrlKey: opts.agentUrlKey,
+            taskId: wake.taskId,
+            wakeReason: wake.wakeReason,
+            runStartedAt: opts.runStartedAt,
+            commentBodies,
+          },
+        );
+      } catch (err) {
+        error = stage;
+        const state = sqlState(err);
+        warn('wake_context_failed', {
+          taskId: wake.taskId, error, errorName: errorName(err), ...(state ? { sqlState: state } : {}),
+        });
+        context = null;
+      }
+    }
+    const { message, stats } = buildWakeMessageWithStats(wake, { context, budgets: config.budgets });
+    if (stats.fallback) warn('wake_message_render_fallback', { taskId: wake.taskId, fallback: stats.fallback });
+    return {
+      wakeMessage: message,
+      wakeContextSnapshot: {
+        ...stats,
+        enabled,
+        source,
+        messageSha256: sha256(message),
+        ...(error ? { error } : {}),
+      },
+    };
+  } catch (err) {
+    // Not reachable in practice (the builder never throws); the run must still get its row.
+    error = 'wake_message_build_failed';
+    warn('wake_context_failed', { taskId: wake?.taskId, error, errorName: errorName(err) });
+    const { message, stats } = buildWakeMessageWithStats(wake, {});
+    return {
+      wakeMessage: message,
+      wakeContextSnapshot: { ...stats, enabled, source, messageSha256: sha256(message), error },
+    };
+  }
 }

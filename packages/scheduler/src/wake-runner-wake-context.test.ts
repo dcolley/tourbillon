@@ -23,12 +23,14 @@ const table = (name: string) =>
 const env = process.env as Record<string, string | undefined>;
 const store: Record<string, Row[]> = {};
 const fx = loadTour531Fixture();
-let repoMode: 'ok' | 'throw' = 'ok';
+let repoMode: 'ok' | 'throw' | 'badTitle' = 'ok';
 
 const fixtureRepo = (): WakeContextRepo => ({
   async getIssue(companyId, id) {
     if (repoMode === 'throw') throw new Error('relation "approvals" does not exist');
-    return (fx.issues.find((i) => i.id === id && i.companyId === companyId) as never) ?? null;
+    const row = fx.issues.find((i) => i.id === id && i.companyId === companyId) ?? null;
+    // A non-string title makes the v2 header renderer throw (exercises the v2 → T1 fallback).
+    return (row && repoMode === 'badTitle' && id === fx.wake.taskId ? { ...row, title: 531 } : row) as never;
   },
   async getIssuesByIds(companyId, ids) { return fx.issues.filter((i) => i.companyId === companyId && ids.includes(i.id)) as never; },
   async getIssuesByIdentifiers(companyId, ids) { return fx.issues.filter((i) => i.companyId === companyId && ids.includes(i.identifier)) as never; },
@@ -102,8 +104,8 @@ describe('WC6 wake-runner records contextSnapshot.wakeContext', () => {
     store.heartbeatRuns = [];
   });
 
-  const run = async () => {
-    const result = await triggerWake(tour531Job(fx));
+  const run = async (job = tour531Job(fx)) => {
+    const result = await triggerWake(job);
     assert.equal(store.heartbeatRuns.length, 1);
     assert.equal(result.status, 'failed', 'stops at the token mint (no secret) — after the insert');
     return (store.heartbeatRuns[0].contextSnapshot as Record<string, unknown>).wakeContext as Record<string, unknown>;
@@ -130,9 +132,46 @@ describe('WC6 wake-runner records contextSnapshot.wakeContext', () => {
     const wc = await run();
     assert.equal(wc.mode, 't1');
     assert.equal(wc.enabled, true);
-    assert.match(String(wc.error), /does not exist/);
+    // S5: a short code, never the raw error (which can carry SQL and params).
+    assert.equal(wc.error, 'wake_context_query_failed');
+    assert.ok(!JSON.stringify(store.heartbeatRuns[0]).includes('does not exist'));
     assert.equal(wc.considered, 10);
     assert.equal(wc.headerChars, 0);
+  });
+
+  const malformed = () => {
+    const job = tour531Job(fx);
+    const payload = JSON.parse(job.wakePayloadJson!);
+    payload.newComments = [null, { ...payload.newComments[0], body: null }, ...payload.newComments.slice(1)];
+    return { ...job, wakePayloadJson: JSON.stringify(payload) };
+  };
+
+  it('B1 flag on: null comment entry and null body → run row written, v2 recorded', async () => {
+    const wc = await run(malformed());
+    assert.equal(wc.mode, 'v2');
+    assert.equal(wc.fallback, undefined);
+  });
+
+  it('B1 flag off: null comment entry and null body → run row written, T1 recorded', async () => {
+    store.companies = [{ id: fx.companyId, status: 'active', settings: {} }];
+    const wc = await run(malformed());
+    assert.equal(wc.mode, 't1');
+    assert.equal(wc.fallback, undefined);
+  });
+
+  it('B1 flag on: comments that are not a list → run row written', async () => {
+    const job = tour531Job(fx);
+    const wc = await run({ ...job, wakePayloadJson: JSON.stringify({ ...JSON.parse(job.wakePayloadJson!), newComments: 'x' }) });
+    assert.equal(wc.mode, 'v2');
+    assert.equal(wc.considered, 0);
+  });
+
+  it('B1 level 1: v2 render throws → T1 recorded with fallback, run row still written', async () => {
+    repoMode = 'badTitle';
+    const wc = await run();
+    assert.equal(wc.mode, 't1');
+    assert.equal(wc.fallback, 'v2_render_failed');
+    assert.equal(wc.considered, 10);
   });
 
   it('flag off: T1 counts recorded, no context read', async () => {

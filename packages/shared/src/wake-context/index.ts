@@ -9,3 +9,4 @@ export * from './types';
 export * from './header';
 export * from './comments';
 export * from './settings';
+export * from './sanitize';

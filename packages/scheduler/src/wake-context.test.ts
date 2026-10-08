@@ -105,7 +105,7 @@ describe('WC2 buildWakeContext: TOUR-531 fixture', () => {
     const msg = buildWakeMessage(tour531Job(fx), { context: ctx });
     assert.equal(msg, buildWakeMessage(tour531Job(fx), { context: expected }), 'same message as the fixture context');
     const h = header(msg);
-    for (const s of ['23a36ba8 REJECTED', '686ede6c APPROVED', 'Pending among these: none', 'Parent TOUR-540: cancelled', 'Blocked by TOUR-468: blocked']) {
+    for (const s of ['a0000002 REJECTED', 'a0000006 APPROVED', 'Pending among these: none', 'Parent TOUR-540: cancelled', 'Blocked by TOUR-468: blocked']) {
       assert.ok(h.includes(s), s);
     }
     assert.match(h, /Board decisions since your last activity here \(Oct 7 21:04Z\): 9\b/);
@@ -118,14 +118,14 @@ describe('WC2 buildWakeContext: approvals listed', () => {
     approvals: [
       approval('aaaa0001-0000-4000-8000-000000000001', { issueIds: ['task-1'] }), // linked, never cited
       approval('bbbb0002-0000-4000-8000-000000000002'), // cited only
-      approval('6ea1e328-ffff-4000-8000-000000000000', { companyId: 'other-co' }), // other company
+      approval('a00000ff-ffff-4000-8000-000000000000', { companyId: 'other-co' }), // other company
       approval('cccc0003-0000-4000-8000-000000000003'), // neither
       approval('dddd0004-0000-4000-8000-000000000004'), // ambiguous prefix
       approval('dddd0004-1111-4000-8000-000000000005'),
     ],
     activity: [],
   });
-  const bodies = ['Waiting on bbbb0002 and 6ea1e328; also dddd0004; commit 0123abcd4567ef89aa.'];
+  const bodies = ['Waiting on bbbb0002 and a00000ff; also dddd0004; commit 0123abcd4567ef89aa.'];
 
   it('referenced-only and issue_ids-linked approvals are listed; non-approval, other-company and ambiguous tokens are not', async () => {
     const ctx = await buildWakeContext(memoryRepo(data()), input(bodies));
@@ -134,20 +134,20 @@ describe('WC2 buildWakeContext: approvals listed', () => {
     const { message, stats } = buildWakeMessageWithStats(jobWith(bodies), { context: ctx });
     assert.deepEqual([...stats.approvalsListed].sort(), ['aaaa0001', 'bbbb0002']);
     const h = header(message);
-    assert.ok(!h.includes('6ea1e328') && !h.includes('cccc0003') && !h.includes('dddd0004'));
+    assert.ok(!h.includes('a00000ff') && !h.includes('cccc0003') && !h.includes('dddd0004'));
   });
 
   it('a token the repo leaks from another company is still dropped (defence in depth)', async () => {
     const leaky = memoryRepo(data());
-    leaky.getApprovalsByIdPrefixes = async () => [approval('6ea1e328-ffff-4000-8000-000000000000', { companyId: 'other-co' })];
+    leaky.getApprovalsByIdPrefixes = async () => [approval('a00000ff-ffff-4000-8000-000000000000', { companyId: 'other-co' })];
     const ctx = await buildWakeContext(leaky, input(bodies));
-    assert.ok(ctx && !ctx.approvals.some((a) => a.id.startsWith('6ea1e328')));
+    assert.ok(ctx && !ctx.approvals.some((a) => a.id.startsWith('a00000ff')));
   });
 
   it('only 8-hex tokens from the comments are queried, sorted and capped', async () => {
     const calls: string[] = [];
     await buildWakeContext(memoryRepo(data(), calls), input(bodies));
-    assert.ok(calls.includes('prefixes:6ea1e328,bbbb0002,dddd0004'), calls.join(' | '));
+    assert.ok(calls.includes('prefixes:a00000ff,bbbb0002,dddd0004'), calls.join(' | '));
   });
 });
 
@@ -258,10 +258,10 @@ describe('WC2/WC6 buildRunWakeMessage (wake-runner)', () => {
       ...base, companySettings: { wakeContextV2: true }, repo, tracer: { warn: (m, d) => warnings.push([m, d]) },
     });
     assert.equal(wakeContextSnapshot.mode, 't1');
-    assert.equal(wakeContextSnapshot.error, 'db down');
+    assert.equal(wakeContextSnapshot.error, 'wake_context_query_failed');
     assert.deepEqual(warnings.map((w) => w[0]), ['wake_context_failed']);
     assert.equal(wakeMessage, buildWakeMessage(tour531Job(fx)));
-    assert.ok(wakeMessage.includes('Board answered `686ede6c`'), 'T1 keeps the newest comment');
+    assert.ok(wakeMessage.includes('Board answered `a0000006`'), 'T1 keeps the newest comment');
   });
 
   it('flag off (default): no DB read, T1 message', async () => {
@@ -280,6 +280,103 @@ describe('WC2/WC6 buildRunWakeMessage (wake-runner)', () => {
     } finally {
       if (saved !== undefined) process.env.TOURBILLON_WAKE_CONTEXT_V2 = saved;
     }
+  });
+});
+
+describe('#122 follow-up: buildRunWakeMessage never throws, persists only short codes', () => {
+  const fx = loadTour531Fixture();
+  const base = {
+    agentId: fx.agent.id, companyId: fx.companyId, agentName: fx.agent.name, agentUrlKey: fx.agent.urlKey,
+    runStartedAt: new Date(fx.runStartedAt), companySettings: { wakeContextV2: true },
+  };
+  const tracer = () => {
+    const warnings: Array<[string, Record<string, unknown> | undefined]> = [];
+    return { warnings, tracer: { warn: (m: string, d?: Record<string, unknown>) => { warnings.push([m, d]); } } };
+  };
+  const SQL_ERR = Object.assign(
+    new Error(`Failed query: select "id", "title" from "issues" where "company_id" = $1 and "id" = $2\nparams: ${fx.companyId},${fx.wake.taskId}`),
+    { name: 'DrizzleQueryError', cause: Object.assign(new Error('relation "issues" does not exist'), { code: '42P01' }) },
+  );
+
+  it('S5: a query error is recorded as a code; no SQL text or params in the snapshot or the log', async () => {
+    const { warnings, tracer: t } = tracer();
+    const repo = fixtureRepo(fx);
+    repo.getIssue = async () => { throw SQL_ERR; };
+    const { wakeContextSnapshot } = await buildRunWakeMessage(tour531Job(fx), { ...base, repo, tracer: t });
+    assert.equal(wakeContextSnapshot.error, 'wake_context_query_failed');
+    assert.equal(wakeContextSnapshot.mode, 't1');
+    const persisted = JSON.stringify(wakeContextSnapshot);
+    const logged = JSON.stringify(warnings);
+    for (const leak of ['select', 'Failed query', 'params', fx.companyId, 'does not exist']) {
+      assert.ok(!persisted.includes(leak), `snapshot leaks ${leak}`);
+      assert.ok(!logged.includes(leak), `log leaks ${leak}`);
+    }
+    assert.deepEqual(warnings[0], ['wake_context_failed', {
+      taskId: fx.wake.taskId, error: 'wake_context_query_failed', errorName: 'DrizzleQueryError', sqlState: '42P01',
+    }]);
+  });
+
+  it('S5: the repo factory throwing is recorded as wake_context_repo_unavailable', async () => {
+    const { wakeContextSnapshot } = await buildRunWakeMessage(tour531Job(fx), {
+      ...base, repo: () => { throw new Error('DATABASE_URL=postgres://u:p@h/db is not reachable'); },
+    });
+    assert.equal(wakeContextSnapshot.error, 'wake_context_repo_unavailable');
+    assert.ok(!JSON.stringify(wakeContextSnapshot).includes('postgres://'));
+  });
+
+  it('B1: malformed comments in the payload (null body, null entry) → v2 renders, no throw', async () => {
+    const job = tour531Job(fx);
+    const payload = JSON.parse(job.wakePayloadJson!);
+    payload.newComments = [null, { ...payload.newComments[0], body: null }, ...payload.newComments.slice(1)];
+    const { wakeMessage, wakeContextSnapshot } = await buildRunWakeMessage(
+      { ...job, wakePayloadJson: JSON.stringify(payload) }, { ...base, repo: fixtureRepo(fx) },
+    );
+    assert.equal(wakeContextSnapshot.mode, 'v2');
+    assert.ok(wakeMessage.includes('LIVE STATE'));
+  });
+
+  it('B1: newComments that is not a list → v2 renders with no comments, no throw', async () => {
+    const job = tour531Job(fx);
+    const payload = { ...JSON.parse(job.wakePayloadJson!), newComments: 'oops' };
+    const { wakeMessage, wakeContextSnapshot } = await buildRunWakeMessage(
+      { ...job, wakePayloadJson: JSON.stringify(payload) }, { ...base, repo: fixtureRepo(fx) },
+    );
+    assert.equal(wakeContextSnapshot.mode, 'v2');
+    assert.ok(wakeMessage.includes('RECENT COMMENTS: none in this wake.'));
+  });
+
+  it('B1 level 1: v2 render throws → T1 message, fallback recorded and logged', async () => {
+    const { warnings, tracer: t } = tracer();
+    const { wakeMessage, wakeContextSnapshot } = await buildRunWakeMessage(tour531Job(fx), {
+      ...base, repo: fixtureRepo(fx), tracer: t,
+      buildContext: async (repo, input) => ({ ...(await buildWakeContext(repo, input))!, approvals: null as never }),
+    });
+    assert.equal(wakeContextSnapshot.mode, 't1');
+    assert.equal(wakeContextSnapshot.fallback, 'v2_render_failed');
+    assert.equal(wakeMessage, buildWakeMessage(tour531Job(fx)));
+    assert.deepEqual(warnings.map((w) => w[0]), ['wake_message_render_fallback']);
+  });
+
+  it('B1 level 2: T1 render throws → minimal message (flag on and off)', async () => {
+    for (const companySettings of [{ wakeContextV2: true }, {}]) {
+      const job = tour531Job(fx);
+      Object.defineProperty(job, 'wakePayloadJson', { get() { throw new Error('boom'); } });
+      const { wakeMessage, wakeContextSnapshot } = await buildRunWakeMessage(job, {
+        ...base, companySettings, repo: fixtureRepo(fx),
+      });
+      assert.equal(wakeContextSnapshot.mode, 'minimal');
+      assert.equal(wakeContextSnapshot.fallback, 't1_render_failed');
+      assert.ok(wakeMessage.includes(`Assigned task ID: ${fx.wake.taskId}`));
+      assert.match(String(wakeContextSnapshot.messageSha256), /^[0-9a-f]{64}$/);
+    }
+  });
+
+  it('a throwing tracer or unparsable company settings never break the wake', async () => {
+    const { wakeContextSnapshot } = await buildRunWakeMessage(tour531Job(fx), {
+      ...base, companySettings: new Proxy({}, { get() { throw new Error('bad settings'); } }),
+      repo: () => { throw new Error('x'); }, tracer: { warn: () => { throw new Error('log down'); } },
+    });
+    assert.ok(['t1', 'v2'].includes(String(wakeContextSnapshot.mode)));
   });
 });
 
@@ -307,7 +404,7 @@ describe('createDrizzleWakeContextRepo (SQL shape, fake client)', () => {
     await repo.getIssuesByIdentifiers(CO, ['TOUR-1']);
     await repo.getAgentName(CO, 'agent-9');
     await repo.getLinkedApprovals(CO, 'task-1');
-    await repo.getApprovalsByIdPrefixes(CO, ['23a36ba8', 'not-hex!', '686ede6c']);
+    await repo.getApprovalsByIdPrefixes(CO, ['a0000002', 'not-hex!', 'a0000006']);
     await repo.getAgentLastActivityAt(CO, 'agent-1', 'task-1', before);
     await repo.countUserCommentsSince(CO, 'task-1', new Date('2026-10-07T21:00:00Z'), before);
     assert.equal(calls.length, 8);
@@ -318,7 +415,7 @@ describe('createDrizzleWakeContextRepo (SQL shape, fake client)', () => {
     }
     assert.match(calls[4].sql, /"issue_ids" @> \$\d+/);
     assert.match(calls[5].sql, /"id" like \$\d+ or "approvals"\."id" like \$\d+/);
-    assert.ok(calls[5].params.includes('23a36ba8%') && calls[5].params.includes('686ede6c%'));
+    assert.ok(calls[5].params.includes('a0000002%') && calls[5].params.includes('a0000006%'));
     assert.ok(!calls[5].params.some((p) => String(p).startsWith('not-hex')));
     assert.match(calls[6].sql, /"actor_type" = \$\d+ and "activity_log"\."actor_id" = \$\d+ and "activity_log"\."created_at" < \$\d+/);
     assert.match(calls[7].sql, /"created_at" > \$\d+/);
