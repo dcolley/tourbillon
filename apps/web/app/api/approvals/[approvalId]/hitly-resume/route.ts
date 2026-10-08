@@ -4,6 +4,7 @@ import { and, eq, inArray } from 'drizzle-orm';
 import { enqueueApprovalWake } from '@/lib/wake-client';
 import { addIssueComment } from '@/lib/issue-comments';
 import type { HitlyResumePayload } from '@/lib/hitly/client';
+import { APPROVAL_ACTORS, approvalDecidedActivity } from '@/lib/approval-activity';
 
 type ApprovalPayload = Record<string, unknown> & {
   title?: string;
@@ -93,6 +94,7 @@ export async function POST(
   const priorStatuses = payload.priorStatuses ?? {};
   const issueIds = approval.issueIds ?? [];
 
+  const decidedStatus: 'approved' | 'rejected' = tourbillonStatus;
   const updated = await db.transaction(async (tx) => {
     const [row] = await tx
       .update(approvals)
@@ -103,8 +105,13 @@ export async function POST(
         decidedByUserId: 'hitly',
         updatedAt: new Date(),
       })
-      .where(eq(approvals.id, approvalId))
+      .where(and(eq(approvals.id, approvalId), eq(approvals.status, 'pending')))
       .returning();
+    if (!row) return null;
+
+    await tx.insert(activityLog).values(
+      approvalDecidedActivity({ approval, decision: decidedStatus, note, actor: APPROVAL_ACTORS.hitly }),
+    );
 
     if (issueIds.length > 0) {
       const linked = await tx
@@ -152,6 +159,10 @@ export async function POST(
 
     return row;
   });
+  if (!updated) {
+    // Decided concurrently — same idempotent answer as the pre-check above.
+    return NextResponse.json({ status: 'ok', alreadyDecided: true });
+  }
 
   const decisionLabel = tourbillonStatus === 'approved' ? 'Approved' : 'Rejected';
   const title = typeof payload.title === 'string' ? payload.title : approval.type;

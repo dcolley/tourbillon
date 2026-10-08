@@ -233,14 +233,59 @@ describe('approval details: history ordering', () => {
     assert.deepEqual(h.map((e) => e.issue?.id ?? e.kind), ['created', 'issue-2', 'issue-1']);
   });
 
-  it('approval.created / approval.decided activity rows do not duplicate the row events', () => {
-    const a = approval({ status: 'rejected', decidedAt: T('11:00') });
-    const h = buildApprovalHistory(a, [
-      activity({ createdAt: T('09:00'), entityType: 'approval', entityId: 'appr-a', action: 'approval.created' }),
-      activity({ createdAt: T('11:00'), entityType: 'approval', entityId: 'appr-a', action: 'approval.decided' }),
+  it('approval.created / approval.decided rows replace the row-derived events (actor + note), never twice', () => {
+    const a = approval({ status: 'rejected', decidedAt: T('11:00'), note: 'row note', decidedByUserId: null });
+    const h = buildApprovalHistory(
+      a,
+      [
+        activity({ createdAt: T('11:00'), entityType: 'approval', entityId: 'appr-a', action: 'approval.decided', actorType: 'user', actorId: 'mcp', actorName: 'Board (via MCP)', details: { decision: 'rejected', note: 'Too costly' } }),
+        activity({ createdAt: T('09:00'), entityType: 'approval', entityId: 'appr-a', action: 'approval.created', actorName: 'Alice', details: { note: 'Please ship' } }),
+        // a stray second decided row (should never be written) is not shown twice
+        activity({ createdAt: T('11:01'), entityType: 'approval', entityId: 'appr-a', action: 'approval.decided', actorName: 'Board', details: { decision: 'approved' } }),
+      ],
+      { requesterName: 'Alice' },
+    );
+    assert.deepEqual(h.map((e) => [e.kind, e.source, e.actor, e.text, e.note]), [
+      ['created', 'activity_log', 'Alice', 'Requested (request_board_approval)', 'Please ship'],
+      ['decided', 'activity_log', 'Board (via MCP)', 'Rejected', 'Too costly'],
     ]);
-    assert.deepEqual(h.map((e) => e.kind), ['created', 'decided']);
-    assert.equal(h[1].text, 'Rejected');
+  });
+
+  it('older approvals without lifecycle rows keep the row-derived created/decided events', () => {
+    const a = approval({ status: 'approved', decidedAt: T('10:00'), note: 'ok', decidedByUserId: 'hitly' });
+    const h = buildApprovalHistory(a, [], { requesterName: 'Alice' });
+    assert.deepEqual(h.map((e) => [e.kind, e.source, e.actor, e.note]), [
+      ['created', 'approvals', 'Alice', undefined],
+      ['decided', 'approvals', 'HITLy', 'ok'],
+    ]);
+  });
+
+  it('only one of the two lifecycle rows present: the other event falls back to the approvals row', () => {
+    const a = approval({ status: 'approved', decidedAt: T('10:00'), note: 'ok' });
+    const h = buildApprovalHistory(a, [
+      activity({ createdAt: T('10:00'), entityType: 'approval', entityId: 'appr-a', action: 'approval.decided', actorName: 'Board', details: { decision: 'approved', note: 'ok' } }),
+    ]);
+    assert.deepEqual(h.map((e) => [e.kind, e.source]), [['created', 'approvals'], ['decided', 'activity_log']]);
+  });
+
+  it("another company's or another approval's lifecycle rows are ignored", () => {
+    const a = approval();
+    const h = buildApprovalHistory(a, [
+      activity({ companyId: 'company-b', createdAt: T('09:30'), entityType: 'approval', entityId: 'appr-a', action: 'approval.decided', actorName: 'Mallory', details: { decision: 'approved' } }),
+      activity({ createdAt: T('09:30'), entityType: 'approval', entityId: 'appr-z', action: 'approval.created', actorName: 'Zed' }),
+    ]);
+    assert.deepEqual(h.map((e) => [e.kind, e.source]), [['created', 'approvals']]);
+  });
+
+  it('history ordering with lifecycle rows, halts and releases interleaved', () => {
+    const a = approval({ status: 'approved', decidedAt: T('10:30') });
+    const h = buildApprovalHistory(a, [
+      activity({ createdAt: T('10:30'), actorName: 'Board', details: { approvalId: 'appr-a', decision: 'approved', status: 'todo' } }),
+      activity({ createdAt: T('10:30'), entityType: 'approval', entityId: 'appr-a', action: 'approval.decided', actorName: 'Board', details: { decision: 'approved' } }),
+      activity({ createdAt: T('09:00'), details: { boardApprovalId: 'appr-a', status: 'blocked' } }),
+      activity({ createdAt: T('09:00'), entityType: 'approval', entityId: 'appr-a', action: 'approval.created', actorName: 'Alice' }),
+    ]);
+    assert.deepEqual(h.map((e) => e.kind), ['created', 'issue_halted', 'decided', 'issue_released']);
   });
 
   it('decided-by labels', () => {

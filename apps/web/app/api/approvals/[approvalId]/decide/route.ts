@@ -5,6 +5,7 @@ import { enqueueApprovalWake } from '@/lib/wake-client';
 import { addIssueComment } from '@/lib/issue-comments';
 import { publicOriginFromRequest } from '@tourbillon/shared';
 import { requireBoardCompany } from '@/lib/board-route-auth';
+import { APPROVAL_ACTORS, approvalDecidedActivity } from '@/lib/approval-activity';
 
 type ApprovalPayload = Record<string, unknown> & {
   title?: string;
@@ -61,11 +62,20 @@ export async function POST(
   const issueIds = approval.issueIds ?? [];
 
   const updated = await db.transaction(async (tx) => {
+    // Only a still-pending row is decided (a concurrent decide gets 409, and writes no second
+    // approval.decided row).
     const [row] = await tx
       .update(approvals)
       .set({ status: decision, note, decidedAt: new Date(), updatedAt: new Date() })
-      .where(and(eq(approvals.id, approvalId), eq(approvals.companyId, company.id)))
+      .where(
+        and(eq(approvals.id, approvalId), eq(approvals.companyId, company.id), eq(approvals.status, 'pending')),
+      )
       .returning();
+    if (!row) return null;
+
+    await tx
+      .insert(activityLog)
+      .values(approvalDecidedActivity({ approval, decision, note, actor: APPROVAL_ACTORS.board }));
 
     if (issueIds.length > 0) {
       const linked = await tx
@@ -113,6 +123,7 @@ export async function POST(
 
     return row;
   });
+  if (!updated) return NextResponse.json({ error: 'Already decided' }, { status: 409 });
 
   const decisionLabel = decision === 'approved' ? 'Approved' : 'Rejected';
   const title = typeof payload.title === 'string' ? payload.title : approval.type;

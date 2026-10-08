@@ -161,6 +161,11 @@ const str = (v: unknown) => (typeof v === 'string' ? v : null);
  * Chronological timeline (oldest first) from the approval row and activity_log. Ties on time
  * are broken by event kind (creation → halt → HITLy → … → decision → release), then by input
  * order, so the result is deterministic.
+ *
+ * `approval.created` / `approval.decided` activity rows (written by every create/decide path
+ * since #130's follow-up) are the source for those two events when present: they carry the
+ * actor and note. Older approvals without them fall back to events derived from the approvals
+ * row. At most one created and one decided event is ever shown.
  */
 export function buildApprovalHistory(
   approval: ApprovalRow,
@@ -169,14 +174,33 @@ export function buildApprovalHistory(
 ): ApprovalHistoryEvent[] {
   const requester = opts.requesterName ?? 'Unknown agent';
   const issueRef = (id: string) => opts.issuesById?.get(id) ?? { id, identifier: id.slice(0, 8) };
+  const own = (row: ApprovalActivityRow) =>
+    row.companyId === approval.companyId && row.entityType === 'approval' && row.entityId === approval.id;
+  const actorOf = (row: ApprovalActivityRow) =>
+    row.actorName ?? (row.actorId === approval.requestedByAgentId ? requester : row.actorId);
+  const detailsOf = (row: ApprovalActivityRow) => (isPlainObject(row.details) ? row.details : {});
+  const createdRow = activity.find((r) => own(r) && r.action === 'approval.created');
+  const decidedRow = activity.find((r) => own(r) && r.action === 'approval.decided');
+  const decisionText = (status: string | null) =>
+    status === 'approved' ? 'Approved' : status === 'rejected' ? 'Rejected' : `Decided: ${status ?? 'unknown'}`;
+
   const events: ApprovalHistoryEvent[] = [
-    {
-      at: approval.createdAt,
-      kind: 'created',
-      actor: requester,
-      text: `Requested (${approval.type})`,
-      source: 'approvals',
-    },
+    createdRow
+      ? {
+          at: createdRow.createdAt,
+          kind: 'created',
+          actor: actorOf(createdRow),
+          text: `Requested (${approval.type})`,
+          note: str(detailsOf(createdRow).note) ?? undefined,
+          source: 'activity_log',
+        }
+      : {
+          at: approval.createdAt,
+          kind: 'created',
+          actor: requester,
+          text: `Requested (${approval.type})`,
+          source: 'approvals',
+        },
   ];
   if (approval.hitlyApprovalId) {
     events.push({ at: null, kind: 'hitly_sent', actor: 'System', text: `Sent to HITLy (${approval.hitlyApprovalId})`, source: 'approvals' });
@@ -184,15 +208,14 @@ export function buildApprovalHistory(
   if (approval.hitlyError) {
     events.push({ at: null, kind: 'hitly_error', actor: 'System', text: `HITLy error: ${approval.hitlyError}`, source: 'approvals' });
   }
-  const hasDecision = approval.status !== 'pending' && approval.decidedAt;
   for (const row of activity) {
     if (row.companyId !== approval.companyId) continue; // defence in depth
-    const d = isPlainObject(row.details) ? row.details : {};
-    const actor = row.actorName ?? (row.actorId === approval.requestedByAgentId ? requester : row.actorId);
+    const d = detailsOf(row);
+    const actor = actorOf(row);
     if (row.entityType === 'approval') {
       if (row.entityId !== approval.id) continue;
-      if (row.action === 'approval.created') continue; // same as the row's own creation event
-      if (row.action === 'approval.decided' && hasDecision) continue; // same as the decision event
+      // Lifecycle rows are handled once, above and below (never twice).
+      if (row.action === 'approval.created' || row.action === 'approval.decided') continue;
       events.push({ at: row.createdAt, kind: 'activity', actor, text: row.action, note: str(d.note) ?? undefined, source: 'activity_log' });
       continue;
     }
@@ -218,12 +241,22 @@ export function buildApprovalHistory(
       });
     }
   }
-  if (hasDecision) {
+  if (decidedRow) {
+    const d = detailsOf(decidedRow);
+    events.push({
+      at: decidedRow.createdAt,
+      kind: 'decided',
+      actor: actorOf(decidedRow),
+      text: decisionText(str(d.decision) ?? str(d.status) ?? approval.status),
+      note: str(d.note) ?? undefined,
+      source: 'activity_log',
+    });
+  } else if (approval.status !== 'pending' && approval.decidedAt) {
     events.push({
       at: approval.decidedAt,
       kind: 'decided',
       actor: decidedByLabel(approval) ?? 'Board',
-      text: approval.status === 'approved' ? 'Approved' : approval.status === 'rejected' ? 'Rejected' : `Decided: ${approval.status}`,
+      text: decisionText(approval.status),
       note: approval.note ?? undefined,
       source: 'approvals',
     });

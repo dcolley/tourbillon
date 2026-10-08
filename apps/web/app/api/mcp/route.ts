@@ -8,7 +8,7 @@ import {
   updateAgentModel,
   type UpdateAgentObservationalMemoryInput,
 } from '@/lib/agents';
-import { db, agents, llmProviders, companies, issues, goals, projects, approvals } from '@tourbillon/db';
+import { db, agents, llmProviders, companies, issues, goals, projects, approvals, activityLog } from '@tourbillon/db';
 import { and, eq, inArray, desc } from 'drizzle-orm';
 import { getLlmProviderRecordById } from '@/lib/llm-providers';
 import { getHeartbeatList, getHeartbeatRun } from '@/lib/heartbeats';
@@ -20,6 +20,7 @@ import { createProject, updateProject, listProjectsForAgent, type CreateProjectI
 import { addIssueComment } from '@/lib/issue-comments';
 import { triggerAgentHeartbeat } from '@/lib/heartbeat';
 import { enqueueApprovalWake } from '@/lib/wake-client';
+import { APPROVAL_ACTORS, approvalDecidedActivity } from '@/lib/approval-activity';
 
 interface McpRequest {
   jsonrpc: '2.0';
@@ -1518,8 +1519,13 @@ async function handleDecideApproval(tokenCompanyId: string, params: any) {
         decidedByUserId: 'mcp',
         updatedAt: new Date(),
       })
-      .where(eq(approvals.id, approval_id))
+      .where(and(eq(approvals.id, approval_id), eq(approvals.companyId, company_id), eq(approvals.status, 'pending')))
       .returning();
+    if (!row) return null;
+
+    await tx.insert(activityLog).values(
+      approvalDecidedActivity({ approval, decision, note: reason, actor: APPROVAL_ACTORS.mcp }),
+    );
 
     if (issueIds.length > 0) {
       const linked = await tx
@@ -1553,6 +1559,7 @@ async function handleDecideApproval(tokenCompanyId: string, params: any) {
 
     return row;
   });
+  if (!updated) throw new Error('Approval already decided');
 
   // Trigger approval wake
   if (approval.requestedByAgentId) {

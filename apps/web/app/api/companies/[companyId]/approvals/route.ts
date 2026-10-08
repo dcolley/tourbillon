@@ -5,6 +5,7 @@ import { authenticateAgentToken } from '@/lib/auth/agent-token-auth';
 import { parseCompanySettings, resolveHitlyGate, publicOriginFromRequest } from '@tourbillon/shared';
 import { ingestHitlyApproval, type HitlyIngestPayload } from '@/lib/hitly/client';
 import { randomBytes } from 'crypto';
+import { approvalCreatedActivity } from '@/lib/approval-activity';
 
 type ApprovalPayload = Record<string, unknown> & {
   title?: string;
@@ -110,6 +111,19 @@ export async function POST(
           payload,
         })
         .returning();
+
+      // approval.created (PM #130): actor is the calling agent (token), note is the summary.
+      const [actorAgent] = await tx
+        .select({ name: agents.name })
+        .from(agents)
+        .where(and(eq(agents.id, runCtx.agentId), eq(agents.companyId, companyId)))
+        .limit(1);
+      await tx.insert(activityLog).values(
+        approvalCreatedActivity({
+          approval: created,
+          actor: { type: 'agent', id: runCtx.agentId, name: actorAgent?.name ?? null },
+        }),
+      );
 
       if (issueIds.length > 0) {
         const now = new Date();
