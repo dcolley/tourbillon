@@ -3,7 +3,7 @@ import { redirect } from 'next/navigation';
 import { db, agents } from '@tourbillon/db';
 import { desc, eq } from 'drizzle-orm';
 import { getActiveCompany, getActiveCompanyOrNull, requireBoardSession } from '@/lib/company';
-import { AgentValidationError, AGENT_ROLE_OPTIONS, createAgent } from '@/lib/agents';
+import { AgentValidationError, AGENT_ROLE_OPTIONS, AGENT_TITLE_MAX_CHARS, createAgent } from '@/lib/agents';
 import { AgentInstructionFields } from './agent-instruction-fields';
 
 async function hireAgent(formData: FormData) {
@@ -15,7 +15,7 @@ async function hireAgent(formData: FormData) {
   try {
     created = await createAgent({
       name: formData.get('name') as string,
-      title: formData.get('title') as string,
+      title: formData.get('title'),
       role: formData.get('role') as string,
       urlKey: (formData.get('urlKey') as string) || undefined,
       reportsToId: reportsToId || null,
@@ -88,6 +88,7 @@ export default async function NewAgentPage({
             name="title"
             type="text"
             required
+            maxLength={AGENT_TITLE_MAX_CHARS}
             placeholder="Chief Technology Officer"
             className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
           />

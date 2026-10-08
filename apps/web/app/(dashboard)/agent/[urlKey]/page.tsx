@@ -5,7 +5,7 @@ import { db, agents, heartbeatRuns } from '@tourbillon/db';
 import { eq, desc } from 'drizzle-orm';
 import type { AgentRuntimeConfig, ObservationalMemorySettings } from '@tourbillon/shared';
 import { modelProviderOverridesFromAgent, resolveModelProviderConfig, isAgentBudgetEnforced, isAgentBudgetExceeded, agentRuntimeLabel, agentRuntimeFromAdapter, resolveAssignedTools, modelSettingsFromFormData, isCodeExecutionAvailable, formatExecutionWorkspacePathPreview, parseCompanySettings } from '@tourbillon/shared';
-import { AgentValidationError, AGENT_ROLE_OPTIONS, getAgentByUrlKey, listAgentsByUrlKey, updateAgentRuntimeConfig, updateAgentCapabilities, updateAgentBudget, updateAgentInstructions, updateAgentModel, updateAgentModelSettings, updateAgentProfile, updateAgentCodeExecution, cloneAgent, suggestCloneUrlKey } from '@/lib/agents';
+import { AgentValidationError, AGENT_ROLE_OPTIONS, AGENT_TITLE_MAX_CHARS, getAgentByUrlKey, listAgentsByUrlKey, updateAgentRuntimeConfig, updateAgentCapabilities, updateAgentBudget, updateAgentInstructions, updateAgentModel, updateAgentModelSettings, updateAgentCodeExecution, cloneAgent, suggestCloneUrlKey } from '@/lib/agents';
 import { parseCodeExecutionFormData } from '@/lib/code-execution-config';
 import { actionError, actionSuccess, type ActionResult } from '@/lib/action-result';
 import { AgentDisambiguation } from '@/components/agent-disambiguation';
@@ -13,7 +13,7 @@ import { DeepLinkCompanySync } from '@/components/deep-link-company-sync';
 import { ActionForm, ActionSubmitButton } from '@/components/action-form';
 import { getCompanyById, requireBoardSession } from '@/lib/company';
 import { parseCompanyIdFromSearchParams } from '@/lib/company-link';
-import { deleteAgentAction, updateAgentRoleAction } from '../actions';
+import { deleteAgentAction, updateAgentProfileAction, updateAgentRoleAction } from '../actions';
 import { getLlmProviderRecordById, listLlmProvidersPublic } from '@/lib/llm-providers';
 import { redactBaseURL } from '@/lib/provider-safety';
 import { AgentModelForm } from './agent-model-form';
@@ -326,37 +326,6 @@ async function updateAgentOmConfig(
   );
 }
 
-async function updateProfile(
-  _prev: ActionResult | null,
-  formData: FormData,
-): Promise<ActionResult> {
-  'use server';
-  await requireBoardSession();
-
-  const agentId = formData.get('agentId') as string;
-  const currentUrlKey = formData.get('currentUrlKey') as string;
-  const reportsToRaw = formData.get('reportsToId') as string;
-
-  let updated;
-  try {
-    updated = await updateAgentProfile(agentId, {
-      name: formData.get('name') as string,
-      title: formData.get('title') as string,
-      urlKey: formData.get('urlKey') as string,
-      reportsToId: reportsToRaw || null,
-    });
-  } catch (err) {
-    return actionError(
-      err instanceof AgentValidationError ? err.message : 'Failed to update agent profile.',
-    );
-  }
-
-  if (updated.urlKey !== currentUrlKey) {
-    return actionSuccess('Agent profile saved.', `/agent/${updated.urlKey}`);
-  }
-  return actionSuccess('Agent profile saved.');
-}
-
 async function updateModel(
   _prev: ActionResult | null,
   formData: FormData,
@@ -638,7 +607,7 @@ export default async function AgentDetailPage({
                     <h2 className="text-sm font-semibold">Profile</h2>
                     <p className="text-xs text-muted-foreground mt-1">Name, title, URL slug, and reporting line.</p>
                   </div>
-                  <ActionForm action={updateProfile} className="space-y-4">
+                  <ActionForm action={updateAgentProfileAction} className="space-y-4">
                     <input type="hidden" name="agentId" value={agent.id} />
                     <input type="hidden" name="currentUrlKey" value={agent.urlKey} />
                     <div className="grid gap-4 sm:grid-cols-2">
@@ -664,6 +633,7 @@ export default async function AgentDetailPage({
                           name="title"
                           type="text"
                           required
+                          maxLength={AGENT_TITLE_MAX_CHARS}
                           defaultValue={agent.title}
                           className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                         />

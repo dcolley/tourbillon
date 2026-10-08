@@ -6,6 +6,7 @@ import {
   AgentValidationError,
   deleteAgent,
   setAgentActive,
+  updateAgentProfile,
   updateAgentRole,
 } from '@/lib/agents';
 import { triggerAgentHeartbeat, retryFailedHeartbeat } from '@/lib/heartbeat';
@@ -96,6 +97,37 @@ export async function setAgentActiveAction(
     }
     return { ok: false, status: 500, error: 'Failed to update agent status.' };
   }
+}
+
+export async function updateAgentProfileAction(
+  _prev: ActionResult | null,
+  formData: FormData,
+): Promise<ActionResult> {
+  'use server';
+  await requireBoardSession();
+
+  const agentId = formData.get('agentId') as string;
+  const currentUrlKey = formData.get('currentUrlKey') as string;
+  const reportsToRaw = formData.get('reportsToId') as string;
+
+  let updated;
+  try {
+    updated = await updateAgentProfile(agentId, {
+      name: formData.get('name') as string,
+      title: formData.get('title'),
+      urlKey: formData.get('urlKey') as string,
+      reportsToId: reportsToRaw || null,
+    });
+  } catch (err) {
+    return actionError(
+      err instanceof AgentValidationError ? err.message : 'Failed to update agent profile.',
+    );
+  }
+
+  if (updated.urlKey !== currentUrlKey) {
+    return actionSuccess('Agent profile saved.', `/agent/${updated.urlKey}`);
+  }
+  return actionSuccess('Agent profile saved.');
 }
 
 export async function updateAgentRoleAction(

@@ -27,6 +27,7 @@ import {
   updateAgentRole,
   updateAgentRuntimeConfig,
 } from '@/lib/agents';
+import { trimEdgeBlank } from '@/lib/edge-blank';
 import { listLlmProvidersPublic } from '@/lib/llm-providers';
 import { requireMobileCompany, toJson } from '@/lib/mobile-session';
 
@@ -147,6 +148,17 @@ export async function PATCH(
       case 'profile':
         updated = await updateAgentProfile(agent.id, {
           name: String(body.name ?? ''),
+          // Omitted/null/blank (whitespace or invisible only, per lib/edge-blank) keeps the current value
+          // so a profile save can never wipe it. Non-strings are passed through and
+          // refused by normalizeAgentTitle (400), not coerced.
+          title:
+            body.title === undefined || body.title === null
+              ? agent.title
+              : typeof body.title === 'string'
+                ? trimEdgeBlank(body.title)
+                  ? body.title
+                  : agent.title
+                : body.title,
           urlKey: String(body.urlKey ?? ''),
           reportsToId: (body.reportsToId as string | null | undefined) ?? null,
         });
