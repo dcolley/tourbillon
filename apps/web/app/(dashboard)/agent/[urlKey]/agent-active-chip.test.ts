@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
+  agentChipActionLabel,
   agentChipLabel,
   canToggleAgentChip,
   isAgentChipActive,
@@ -82,6 +83,8 @@ describe('UX-2 chip logic', () => {
     assert.equal(isAgentChipActive('paused'), false);
     assert.equal(agentChipLabel(true), 'Active');
     assert.equal(agentChipLabel(false), 'Inactive');
+    assert.equal(agentChipActionLabel(true), 'Deactivate agent');
+    assert.equal(agentChipActionLabel(false), 'Activate agent');
     assert.equal(canToggleAgentChip('active'), true);
     assert.equal(canToggleAgentChip('paused'), true);
     assert.equal(canToggleAgentChip('archived'), false);
@@ -112,14 +115,16 @@ describe('UX-2 chip markup', () => {
       React.createElement(AgentActiveChip, { agentId: 'a1', urlKey: 'a', initialStatus, inFlightHeartbeat }),
     );
 
-  it('active agent renders a pressed "Active" button (type=button)', () => {
+  it('active agent: "Active" button (type=button) whose accessible name is the action, "Deactivate agent"', () => {
     const html = render('active');
-    assert.match(html, /<button[^>]*type="button"[^>]*aria-pressed="true"[^>]*>Active<\/button>/);
+    assert.match(html, /<button[^>]*type="button"[^>]*aria-label="Deactivate agent"[^>]*>Active<\/button>/);
+    assert.doesNotMatch(html, /aria-pressed/);
   });
 
-  it('paused agent renders an unpressed "Inactive" button; the confirm dialog is closed by default', () => {
+  it('paused agent: "Inactive" button named "Activate agent"; the confirm dialog is closed by default', () => {
     const html = render('paused', { id: 'r1', status: 'running' });
-    assert.match(html, /<button[^>]*aria-pressed="false"[^>]*>Inactive<\/button>/);
+    assert.match(html, /<button[^>]*aria-label="Activate agent"[^>]*>Inactive<\/button>/);
+    assert.doesNotMatch(html, /aria-pressed/);
     assert.doesNotMatch(html, /Make this agent inactive\?/);
   });
 });

@@ -199,6 +199,14 @@ describe('UX-2 setAgentActiveAction', () => {
     assert.deepEqual(res, { ok: false, status: 400, error: 'Agent is pending approval and cannot be activated yet.' });
   });
 
+  it('non-string agent id → 400, no write', async () => {
+    for (const bad of [123, null, undefined, { id: 'agent-on' }, ['agent-on'], '   ']) {
+      const res = await action(bad as unknown as string, false);
+      assert.deepEqual(res, { ok: false, status: 400, error: 'Agent ID and active flag are required.' });
+    }
+    assert.deepEqual(setCalls, []);
+  });
+
   it('missing agent id → 400, no write', async () => {
     const res = await action('', true);
     assert.equal(res.ok, false);

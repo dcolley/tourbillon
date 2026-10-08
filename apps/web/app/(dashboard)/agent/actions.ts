@@ -70,6 +70,7 @@ export async function toggleAgentActiveAction(formData: FormData) {
  * (requireBoardSession, #105 B1: first statement) and the same write (setAgentActive: status
  * active ↔ paused) as toggleAgentActiveAction, but returns a result instead of redirecting to
  * /agent so the chip can roll back and toast. Never touches runtimeConfig.heartbeat (the timer).
+ * Archived agents cannot be activated (#119 B1, enforced in setAgentActive → 400 + toast).
  * No board session, or an agent run/chat bearer: requireBoardSession throws before any write
  * (and proxy.ts already answers such a server-action request with 401).
  */
@@ -80,7 +81,7 @@ export async function setAgentActiveAction(
 ): Promise<AgentActiveToggleResult> {
   await requireBoardSession();
 
-  if (!agentId || typeof active !== 'boolean') {
+  if (typeof agentId !== 'string' || !agentId.trim() || typeof active !== 'boolean') {
     return { ok: false, status: 400, error: 'Agent ID and active flag are required.' };
   }
 

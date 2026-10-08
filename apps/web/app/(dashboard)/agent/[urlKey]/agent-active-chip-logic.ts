@@ -28,6 +28,11 @@ export function agentChipLabel(active: boolean): 'Active' | 'Inactive' {
   return active ? 'Active' : 'Inactive';
 }
 
+/** Accessible name: the action a click performs (the visible text shows the current state). */
+export function agentChipActionLabel(active: boolean): 'Deactivate agent' | 'Activate agent' {
+  return active ? 'Deactivate agent' : 'Activate agent';
+}
+
 /** Confirm only when deactivating an agent whose heartbeat is running (not queued, not activating). */
 export function shouldConfirmAgentToggle(currentlyActive: boolean, inFlight: ChipInFlightHeartbeat): boolean {
   return currentlyActive && inFlight?.status === 'running';
