@@ -175,6 +175,7 @@ describe('#106 board-guarded routes', () => {
         return { ...realShared, ensureCompanyWorkspace: async () => {} };
       }
       if (is(id, 'sse')) return { getSseSubscribers: () => new Set() };
+      if (is(id, 'vault-oauth-nonce-store')) return { recordOAuthNonce: async () => {}, consumeOAuthNonce: async () => true };
       if (is(id, 'wake-client')) return { enqueueApprovalWake: async () => {} };
       if (is(id, 'issue-comments')) return { addIssueComment: async () => {} };
       if (is(id, 'queue')) return { isJobQueueName: (q: string) => q === 'heartbeat' };
