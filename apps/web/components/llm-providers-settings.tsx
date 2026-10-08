@@ -23,6 +23,8 @@ interface LlmProviderPublic {
   baseURL: string;
   hasApiKey: boolean;
   headers: Record<string, string>;
+  /** Present when the server treats header values as write-only (names only, blank values). */
+  headerNames?: string[];
   apiMode: 'chat' | 'responses';
   isDefault: boolean;
   defaultModelSettings: AgentModelSettings;
@@ -77,6 +79,10 @@ export function LlmProvidersSettings() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
+  // Header names already stored on the provider being edited, and whether the server returns
+  // header values write-only (blank = keep the stored value).
+  const [storedHeaderNames, setStoredHeaderNames] = useState<string[]>([]);
+  const [headersWriteOnly, setHeadersWriteOnly] = useState(false);
   const [form, setForm] = useState<ProviderFormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
   const [testingId, setTestingId] = useState<string | null>(null);
@@ -103,8 +109,15 @@ export function LlmProvidersSettings() {
     void loadProviders();
   }, [loadProviders]);
 
+  /** True only for a header name that is already stored on the provider being edited. */
+  function isStoredHeader(key: string): boolean {
+    return editingId !== null && editingId !== 'new' && storedHeaderNames.includes(key.trim());
+  }
+
   function startCreate() {
     setEditingId('new');
+    setStoredHeaderNames([]);
+    setHeadersWriteOnly(false);
     setForm(EMPTY_FORM);
     setTestResult(null);
     setModelSuggestions([]);
@@ -112,6 +125,8 @@ export function LlmProvidersSettings() {
 
   function startEdit(provider: LlmProviderPublic) {
     setEditingId(provider.id);
+    setStoredHeaderNames(provider.headerNames ?? Object.keys(provider.headers));
+    setHeadersWriteOnly(Array.isArray(provider.headerNames));
     setModelSuggestions([]);
     void fetch(`/api/models?providerId=${encodeURIComponent(provider.id)}`)
       .then((res) => (res.ok ? res.json() : { models: [] }))
@@ -137,11 +152,23 @@ export function LlmProvidersSettings() {
 
   function cancelEdit() {
     setEditingId(null);
+    setStoredHeaderNames([]);
+    setHeadersWriteOnly(false);
     setForm(EMPTY_FORM);
     setTestResult(null);
   }
 
   async function saveProvider() {
+    // New or renamed headers have no stored value to keep, so they need a value.
+    const missing = form.headerRows
+      .filter((row) => row.key.trim() && row.value.trim() === '' && !isStoredHeader(row.key))
+      .map((row) => row.key.trim());
+    if (missing.length > 0) {
+      setError(
+        `Enter a value for header ${missing.map((n) => `"${n}"`).join(', ')} (new or renamed headers need a value).`,
+      );
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
@@ -481,7 +508,14 @@ export function LlmProvidersSettings() {
                           return { ...f, headerRows };
                         })
                       }
-                      placeholder="Value"
+                      placeholder={
+                        !isStoredHeader(row.key)
+                          ? 'Value (required)'
+                          : headersWriteOnly && row.value === ''
+                            ? 'Unchanged (write-only)'
+                            : 'Value'
+                      }
+                      required={!isStoredHeader(row.key)}
                       className="flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
                     />
                     <button

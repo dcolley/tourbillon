@@ -196,6 +196,26 @@ export async function getLlmProviderRecordById(id: string): Promise<LlmProviderR
   return row ? toLlmProviderRecord(row) : null;
 }
 
+/**
+ * A header name that isn't already stored on the provider (new, or renamed in the UI) has no
+ * stored value to fall back on, so it must be submitted with a non-blank value. Otherwise it
+ * would be saved as ''. Blank values for already-stored names are left to the caller's merge
+ * rules. Used on create (nothing stored) and update.
+ */
+export function assertNewHeaderValues(
+  existing: Record<string, string>,
+  submitted: Record<string, string>,
+): void {
+  const missing = Object.entries(submitted)
+    .filter(([name, value]) => !(name in existing) && (typeof value !== 'string' || value.trim() === ''))
+    .map(([name]) => name);
+  if (missing.length > 0) {
+    throw new LlmProviderValidationError(
+      `Header ${missing.map((n) => `"${n}"`).join(', ')} needs a value (new or renamed headers can't be blank).`,
+    );
+  }
+}
+
 export async function createLlmProvider(input: CreateLlmProviderInput): Promise<LlmProviderPublic> {
   await ensureDefaultLlmProviders();
 
@@ -204,6 +224,7 @@ export async function createLlmProvider(input: CreateLlmProviderInput): Promise<
   const baseURL = validateBaseURL(input.baseURL || defaultBaseURLForProviderType(type));
   const apiMode = parseModelApiMode(input.apiMode) ?? 'chat';
   const headers = input.headers ?? {};
+  assertNewHeaderValues({}, headers);
   const isDefault = input.isDefault ?? false;
   const defaultModelSettings = validateDefaultModelSettings(input.defaultModelSettings);
   const defaultModel = normalizeDefaultModel(input.defaultModel);
@@ -248,7 +269,10 @@ export async function updateLlmProvider(
   if (input.name !== undefined) updates.name = validateName(input.name);
   if (input.type !== undefined) updates.type = parseProviderType(input.type);
   if (input.baseURL !== undefined) updates.baseURL = validateBaseURL(input.baseURL);
-  if (input.headers !== undefined) updates.headers = input.headers;
+  if (input.headers !== undefined) {
+    assertNewHeaderValues(parseHeaders(existing.headers), input.headers);
+    updates.headers = input.headers;
+  }
   if (input.apiMode !== undefined) {
     const apiMode = parseModelApiMode(input.apiMode);
     if (!apiMode) throw new LlmProviderValidationError('API mode must be chat or responses.');

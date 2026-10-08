@@ -15,6 +15,14 @@ function verifyOAuthState(payload: string, signature: string): boolean {
   return signature === expected;
 }
 
+/**
+ * NextResponse.redirect needs an absolute URL (relative paths throw → 500). Always lands on
+ * /settings of the request's own origin, so this is not an open redirect.
+ */
+function settingsRedirect(req: NextRequest, pathAndQuery: string): NextResponse {
+  return NextResponse.redirect(new URL(pathAndQuery, req.nextUrl.origin));
+}
+
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
@@ -23,24 +31,22 @@ export async function GET(req: NextRequest) {
     const error = searchParams.get('error');
     
     if (error) {
-      return NextResponse.redirect(
-        `/settings?oauth_error=${encodeURIComponent(error)}`
-      );
+      return settingsRedirect(req, `/settings?oauth_error=${encodeURIComponent(error)}`);
     }
     
     if (!code || !state) {
-      return NextResponse.redirect('/settings?oauth_error=missing_parameters');
+      return settingsRedirect(req, '/settings?oauth_error=missing_parameters');
     }
     
     let stateData: { payload: string; signature: string };
     try {
       stateData = JSON.parse(Buffer.from(state, 'base64').toString('utf8'));
     } catch {
-      return NextResponse.redirect('/settings?oauth_error=invalid_state');
+      return settingsRedirect(req, '/settings?oauth_error=invalid_state');
     }
     
     if (!verifyOAuthState(stateData.payload, stateData.signature)) {
-      return NextResponse.redirect('/settings?oauth_error=invalid_state_signature');
+      return settingsRedirect(req, '/settings?oauth_error=invalid_state_signature');
     }
     
     const { serverId, scope, userId, agentId } = JSON.parse(stateData.payload);
@@ -52,7 +58,7 @@ export async function GET(req: NextRequest) {
       const clientSecret = process.env.GITHUB_OAUTH_CLIENT_SECRET;
       
       if (!clientId || !clientSecret) {
-        return NextResponse.redirect('/settings?oauth_error=not_configured');
+        return settingsRedirect(req, '/settings?oauth_error=not_configured');
       }
       
       const baseUrl = process.env.BETTER_AUTH_URL || 'http://localhost:3002';
@@ -73,15 +79,13 @@ export async function GET(req: NextRequest) {
       });
       
       if (!tokenResponse.ok) {
-        return NextResponse.redirect('/settings?oauth_error=token_exchange_failed');
+        return settingsRedirect(req, '/settings?oauth_error=token_exchange_failed');
       }
       
       const tokenData = await tokenResponse.json();
       
       if (tokenData.error) {
-        return NextResponse.redirect(
-          `/settings?oauth_error=${encodeURIComponent(tokenData.error)}`
-        );
+        return settingsRedirect(req, `/settings?oauth_error=${encodeURIComponent(tokenData.error)}`);
       }
       
       const tokens: OAuthTokens = {
@@ -136,12 +140,12 @@ export async function GET(req: NextRequest) {
         });
       }
       
-      return NextResponse.redirect(`/settings?connected=${serverId}`);
+      return settingsRedirect(req, `/settings?connected=${serverId}`);
     }
     
-    return NextResponse.redirect('/settings?oauth_error=unsupported_provider');
+    return settingsRedirect(req, '/settings?oauth_error=unsupported_provider');
   } catch (error) {
     console.error('Error in OAuth callback:', error);
-    return NextResponse.redirect('/settings?oauth_error=callback_failed');
+    return settingsRedirect(req, '/settings?oauth_error=callback_failed');
   }
 }
