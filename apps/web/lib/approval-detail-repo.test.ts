@@ -2,7 +2,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { drizzle } from 'drizzle-orm/postgres-js';
-import { createApprovalDetailRepo } from './approval-detail-repo';
+import { createApprovalDetailRepo, vaultValueStrings } from './approval-detail-repo';
+import { encryptCredential } from '@tourbillon/shared/vault-encryption';
 
 function recordingDb() {
   const calls: Array<{ sql: string; params: unknown[] }> = [];
@@ -49,5 +50,38 @@ describe('approval details repo: company scoping in SQL', () => {
     assert.equal(calls.length, 1);
     assert.doesNotMatch(calls[0].sql, /approvalId/);
     assert.match(calls[0].sql, /"activity_log"\."entity_type" = \$\d+ and "activity_log"\."entity_id" = \$\d+/);
+  });
+
+  it('secret values: vault and agent rows filtered on the company; provider registry read for keys', async () => {
+    calls.length = 0;
+    assert.deepEqual(await repo.getSecretValues('company-a'), []);
+    assert.equal(calls.length, 3);
+    const [vault, agentsQ, providers] = calls;
+    assert.match(vault.sql, /select "encrypted_value" from "vault_secrets" where "vault_secrets"\."company_id" = \$1/);
+    assert.deepEqual(vault.params, ['company-a']);
+    assert.match(agentsQ.sql, /select "runtime_config" from "agents" where "agents"\."company_id" = \$1/);
+    assert.deepEqual(agentsQ.params, ['company-a']);
+    assert.match(providers.sql, /select "api_key", "headers", "base_url" from "llm_providers"/);
+  });
+});
+
+describe('approval details repo: vault values for redaction', () => {
+  it('decrypts API-key strings and OAuth access/refresh tokens; bad rows or no key give nothing', () => {
+    const env = process.env as Record<string, string | undefined>;
+    const prev = env.VAULT_ENCRYPTION_KEY;
+    env.VAULT_ENCRYPTION_KEY = '0'.repeat(64); // dummy test key
+    try {
+      assert.deepEqual(vaultValueStrings(encryptCredential('dummy-vault-api-key-1')), ['dummy-vault-api-key-1']);
+      assert.deepEqual(
+        vaultValueStrings(encryptCredential({ accessToken: 'dummy-access-1', refreshToken: 'dummy-refresh-1' })),
+        ['dummy-access-1', 'dummy-refresh-1'],
+      );
+      assert.deepEqual(vaultValueStrings('not-a-ciphertext'), []);
+      delete env.VAULT_ENCRYPTION_KEY;
+      assert.deepEqual(vaultValueStrings('anything'), []);
+    } finally {
+      if (prev === undefined) delete env.VAULT_ENCRYPTION_KEY;
+      else env.VAULT_ENCRYPTION_KEY = prev;
+    }
   });
 });

@@ -10,6 +10,8 @@ import { SignJWT } from 'jose';
 import { NextRequest } from 'next/server';
 import { mintChatToken, mintRunToken } from '@tourbillon/shared/agent-token';
 import { validateRunToken } from '../../lib/auth/run-token';
+import type { ApprovalDetailRepo } from '../../lib/approval-detail';
+import { PLANTED_VALUES, plantedRepo } from '../../lib/approval-detail-secrets.fixture';
 
 const BOARD_SECRET = 'test-operator-secret-106';
 // #108 refuses the public default BETTER_AUTH_SECRET whatever NODE_ENV is, so board JWTs are
@@ -23,6 +25,8 @@ const env = process.env as Record<string, string | undefined>;
 type Row = Record<string, unknown>;
 type Cond = { op: 'eq'; c: string; val: unknown } | { op: 'and'; xs: Cond[] } | { op: 'in'; c: string; vals: unknown[] };
 const store: Record<string, Row[]> = {};
+/** #130: when set, the approval details route reads this repo instead of the store. */
+let approvalRepoOverride: ApprovalDetailRepo | null = null;
 function table(name: string) {
   return new Proxy({ __table: name } as Record<string, unknown>, {
     get: (t, prop: string) => (prop === '__table' ? name : { c: prop }),
@@ -209,7 +213,7 @@ describe('#106 board-guarded routes', () => {
         // Unscoped on purpose (finds by id only): the route + loader must refuse other companies.
         const byId = (name: string, rid: string) => (store[name] ?? []).find((r) => r.id === rid) ?? null;
         return {
-          createApprovalDetailRepo: () => ({
+          createApprovalDetailRepo: () => approvalRepoOverride ?? ({
             getApproval: async (_c: string, rid: string) => byId('approvals', rid),
             getAgent: async (_c: string, rid: string) => byId('agents', rid),
             getIssues: async (_c: string, ids: string[]) => (store.issues ?? []).filter((r) => ids.includes(r.id as string)),
@@ -219,6 +223,7 @@ describe('#106 board-guarded routes', () => {
                 return r.entityId === aid || d.boardApprovalId === aid || d.approvalId === aid;
               }),
             getCompanySettings: async () => ({}),
+            getSecretValues: async () => [],
           }),
         };
       }
@@ -345,6 +350,41 @@ describe('#106 board-guarded routes', () => {
         assert.deepEqual(body.history.map((e) => e.kind), ['created', 'issue_halted', 'decided', 'issue_released']);
         assert.deepEqual(body.history.map((e) => e.at), [...body.history.map((e) => e.at)].sort());
       }
+    });
+  });
+
+  describe('#130 B1/B2: approval details JSON never carries a secret; malformed ids are 400', () => {
+    const get = async (approvalId: string) =>
+      routes.approval.GET(await request('boardA', `/api/approvals/${encodeURIComponent(approvalId)}`), ctx({ approvalId }));
+
+    it('secrets planted in every field (payload keys, Bearer, URL token, vault, provider, runtime, settings, resume token, title, summary, note, HITLy error, issue title, history note) are absent', async () => {
+      approvalRepoOverride = plantedRepo();
+      try {
+        for (const who of ['boardA', 'jwtA'] as const) {
+          const res = await routes.approval.GET(await request(who, '/api/approvals/appr-a'), ctx({ approvalId: 'appr-a' }));
+          assert.equal(res.status, 200);
+          const text = await res.text();
+          assert.deepEqual(PLANTED_VALUES.filter((v) => text.includes(v) || text.includes(encodeURIComponent(v))), []);
+          assert.match(text, /Deploy with \[redacted\]/);
+        }
+      } finally {
+        approvalRepoOverride = null;
+      }
+    });
+
+    it('NUL byte, control characters and >128-char ids → 400 (was 500), auth still first', async () => {
+      for (const bad of ['appr\u0000a', '\u0000', 'a\rb', 'x'.repeat(129)]) {
+        const res = await get(bad);
+        assert.equal(res.status, 400, JSON.stringify(bad));
+        assert.deepEqual(await res.json(), { error: 'Invalid approval id' });
+        const decide = await routes.decide.POST(
+          await request('boardA', '/api/approvals/x/decide', { method: 'POST', body: { decision: 'approved' } }),
+          ctx({ approvalId: bad }),
+        );
+        assert.equal(decide.status, 400, `decide ${JSON.stringify(bad)}`);
+      }
+      const anon = await routes.approval.GET(await request('anon', '/api/approvals/x'), ctx({ approvalId: 'appr\u0000a' }));
+      assert.equal(anon.status, 401);
     });
   });
 
