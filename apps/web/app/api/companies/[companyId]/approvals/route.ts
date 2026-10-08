@@ -161,9 +161,10 @@ export async function POST(
 
     // Forward to HITLy if gate is enabled
     if (shouldForwardToHitly && hitlyGate) {
+      let resumeToken: string | undefined;
       try {
         // Only the digest is stored, before HITLy can call back.
-        const resumeToken = generateResumeToken();
+        resumeToken = generateResumeToken();
         await db.insert(approvalResumeTokens).values({
           approvalId: approval.id,
           tokenHash: hashResumeToken(approval.id, resumeToken),
@@ -225,8 +226,10 @@ export async function POST(
         approval.hitlyApprovalId = hitlyApprovalId;
       } catch (hitlyErr: unknown) {
         // Fail-closed: store error but keep approval pending
-        const errorMsg =
+        const rawErrorMsg =
           hitlyErr instanceof Error ? hitlyErr.message : 'Unknown HITLy ingest error';
+        // The error text may quote the request back; never log or store the resume credential.
+        const errorMsg = resumeToken ? rawErrorMsg.split(resumeToken).join('[redacted]') : rawErrorMsg;
         console.error('[createApproval] HITLy ingest failed:', errorMsg);
         await db
           .delete(approvalResumeTokens)

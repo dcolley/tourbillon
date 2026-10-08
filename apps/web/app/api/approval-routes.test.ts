@@ -384,6 +384,36 @@ describe('approval routes', () => {
     });
   });
 
+  describe('ingest error text', () => {
+    it('never stores or logs the resume credential, even if the digest cannot be removed', async () => {
+      const originalPush = ingested.push;
+      const originalDelete = fakeDb.delete;
+      const originalError = console.error;
+      const logged: string[] = [];
+      let sent = '';
+      ingested.push = (p: Record<string, any>) => {
+        sent = new URL(p.resumeUrl).searchParams.get('token')!;
+        throw new Error(`HITLy ingest HTTP 400: {"resumeUrl":"${p.resumeUrl}","token":"${sent}"}`);
+      };
+      (fakeDb as any).delete = () => ({ where: () => Promise.reject(new Error('db unavailable')) });
+      console.error = (...args: unknown[]) => void logged.push(args.map((a) => (a instanceof Error ? a.message : String(a))).join(' '));
+      try {
+        const res = await createGated();
+        assert.equal(res.status, 201);
+        const created = await res.json();
+        assert.ok(sent.length > 0);
+        assert.match(created.hitlyError, /HITLy ingest HTTP 400/);
+        assert.ok(!JSON.stringify(created).includes(sent), 'create response');
+        assert.ok(!JSON.stringify(approval(created.id)).includes(sent), 'stored approval row');
+        assert.ok(!logged.join('\n').includes(sent), 'logs');
+      } finally {
+        ingested.push = originalPush;
+        (fakeDb as any).delete = originalDelete;
+        console.error = originalError;
+      }
+    });
+  });
+
   // ------------------------------------------------------------------------------ requester
   describe('requester identity on create', () => {
     it('defaults to the calling agent', async () => {

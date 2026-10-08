@@ -22,6 +22,7 @@ export async function POST(
   const { approvalId } = await params;
 
   // Called by HITLy via the resumeUrl given at ingest (see lib/hitly/resume-token.ts).
+  // TODO: drop the ?token= query form once the HITLy http plugin signs resume callbacks (header/HMAC).
   const credential = readResumeCredential(req);
   if (!credential.ok) {
     return NextResponse.json({ error: credential.error }, { status: credential.status });
