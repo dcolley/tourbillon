@@ -3,10 +3,11 @@
  *
  * 1. Signature (constant time) + version + expiry via validateRunToken (no DB).
  * 2. DB checks:
+ *    - both: the agent row exists in the token's company and is not archived (#120: an agent
+ *      archived mid-run loses its run token at once, not when the run ends or the token expires).
  *    - run token: heartbeat_runs row exists, status is 'running', and its agentId/companyId match
- *      the token; the agent row exists in that company.
- *    - chat token: chatSessionId is the agent's chat session (`chat-<agentId>`), and the agent
- *      exists in the token's company and is not archived.
+ *      the token.
+ *    - chat token: chatSessionId is the agent's chat session (`chat-<agentId>`).
  * Returns the payload or null (callers answer 401). Never logs the token.
  * No/short TOURBILLON_AGENT_TOKEN_SECRET: logs the config error (see agent-token-config.ts), returns null.
  */
@@ -32,10 +33,11 @@ export async function authenticateAgentToken(
       where: and(eq(agents.id, payload.agentId), eq(agents.companyId, payload.companyId)),
     });
     if (!agent) return null;
+    // #120: archived agents are refused for run and chat tokens alike (401 at every caller).
+    if (agent.status === 'archived') return null;
 
     if (payload.kind === 'chat') {
       if (payload.runId !== chatSessionIdForAgent(agent.id)) return null;
-      if (agent.status === 'archived') return null;
       return payload;
     }
 
