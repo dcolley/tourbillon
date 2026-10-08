@@ -1,20 +1,26 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db, approvals, issues, activityLog, companies, agents, type IssueStatus } from '@tourbillon/db';
+import { db, approvals, approvalResumeTokens, issues, activityLog, companies, agents, type IssueStatus } from '@tourbillon/db';
 import { and, eq, inArray, desc, gte, or, ilike, sql } from 'drizzle-orm';
 import { authenticateAgentToken } from '@/lib/auth/agent-token-auth';
 import { parseCompanySettings, resolveHitlyGate, publicOriginFromRequest } from '@tourbillon/shared';
 import { ingestHitlyApproval, type HitlyIngestPayload } from '@/lib/hitly/client';
-import { randomBytes } from 'crypto';
+import {
+  generateResumeToken,
+  hashResumeToken,
+  resumeTokenExpiry,
+  RESUME_TOKEN_QUERY_PARAM,
+} from '@/lib/hitly/resume-token';
+import {
+  companySettingsSecretValues,
+  serializeApproval,
+  stripReservedPayloadKeys,
+} from '@/lib/approval-serializer';
 
 type ApprovalPayload = Record<string, unknown> & {
   title?: string;
   summary?: string;
   priorStatuses?: Record<string, IssueStatus>;
 };
-
-function generateResumeToken(): string {
-  return randomBytes(32).toString('base64url');
-}
 
 export async function POST(
   req: NextRequest,
@@ -34,11 +40,17 @@ export async function POST(
     requestedByAgentId?: string;
   };
 
+  // The requester is always the authenticated agent (already bound to this company).
+  if (body.requestedByAgentId !== undefined && body.requestedByAgentId !== runCtx.agentId) {
+    return NextResponse.json(
+      { error: 'requestedByAgentId must be the calling agent' },
+      { status: 403 },
+    );
+  }
+  const requestedByAgentId = runCtx.agentId;
+
   const issueIds = [...new Set((body.issueIds ?? []).filter(Boolean))];
-  const basePayload: ApprovalPayload =
-    body.payload && typeof body.payload === 'object' && !Array.isArray(body.payload)
-      ? { ...body.payload }
-      : {};
+  const basePayload: ApprovalPayload = stripReservedPayloadKeys(body.payload);
 
   try {
     // Load company settings to check HITLy gate
@@ -105,7 +117,7 @@ export async function POST(
           companyId,
           type: body.type,
           status: 'pending',
-          requestedByAgentId: body.requestedByAgentId ?? runCtx.agentId,
+          requestedByAgentId,
           issueIds,
           payload,
         })
@@ -150,12 +162,19 @@ export async function POST(
     // Forward to HITLy if gate is enabled
     if (shouldForwardToHitly && hitlyGate) {
       try {
+        // Only the digest is stored, before HITLy can call back.
         const resumeToken = generateResumeToken();
+        await db.insert(approvalResumeTokens).values({
+          approvalId: approval.id,
+          tokenHash: hashResumeToken(approval.id, resumeToken),
+          expiresAt: resumeTokenExpiry(),
+        });
         const resumeUrl = new URL(
           `/api/approvals/${approval.id}/hitly-resume`,
           hitlyGate.resumeHost,
         );
-        resumeUrl.searchParams.set('token', resumeToken);
+        // HITLy's http plugin POSTs to this URL as given (no custom headers or signature).
+        resumeUrl.searchParams.set(RESUME_TOKEN_QUERY_PARAM, resumeToken);
         const resumeUrlString = resumeUrl.toString();
 
         const approvalUrl = new URL(`/approval`, publicOriginFromRequest(req)).toString();
@@ -194,13 +213,11 @@ export async function POST(
 
         const hitlyApprovalId = await ingestHitlyApproval(hitlyGate, hitlyPayload, approval.id);
 
-        // Store HITLy approval id and resume token
-        const currentPayload = approval.payload as Record<string, unknown>;
+        // Store HITLy approval id
         await db
           .update(approvals)
           .set({
             hitlyApprovalId,
-            payload: { ...currentPayload, hitlyResumeToken: resumeToken },
             updatedAt: new Date(),
           })
           .where(eq(approvals.id, approval.id));
@@ -211,6 +228,10 @@ export async function POST(
         const errorMsg =
           hitlyErr instanceof Error ? hitlyErr.message : 'Unknown HITLy ingest error';
         console.error('[createApproval] HITLy ingest failed:', errorMsg);
+        await db
+          .delete(approvalResumeTokens)
+          .where(eq(approvalResumeTokens.approvalId, approval.id))
+          .catch(() => {});
 
         await db
           .update(approvals)
@@ -224,7 +245,10 @@ export async function POST(
       }
     }
 
-    return NextResponse.json(approval, { status: 201 });
+    return NextResponse.json(
+      serializeApproval(approval, { knownSecrets: companySettingsSecretValues(company.settings) }),
+      { status: 201 },
+    );
   } catch (err: unknown) {
     const e = err as { status?: number; message?: string };
     if (e.status) {
@@ -301,6 +325,9 @@ export async function GET(
       }
     }
 
+    const company = await db.query.companies.findFirst({ where: eq(companies.id, companyId) });
+    const knownSecrets = companySettingsSecretValues(company?.settings);
+
     // Execute query with joins
     const rows = await db
       .select({ approval: approvals, agent: agents })
@@ -329,20 +356,7 @@ export async function GET(
 
     // Build response
     const result = rows.map(({ approval, agent }) => ({
-      id: approval.id,
-      companyId: approval.companyId,
-      type: approval.type,
-      status: approval.status,
-      requestedByAgentId: approval.requestedByAgentId,
-      decidedByUserId: approval.decidedByUserId,
-      issueIds: approval.issueIds,
-      payload: approval.payload,
-      note: approval.note,
-      decidedAt: approval.decidedAt,
-      hitlyApprovalId: approval.hitlyApprovalId,
-      hitlyError: approval.hitlyError,
-      createdAt: approval.createdAt,
-      updatedAt: approval.updatedAt,
+      ...serializeApproval(approval, { knownSecrets }),
       requester: agent ? { id: agent.id, name: agent.name, urlKey: agent.urlKey } : null,
       linkedIssues: (approval.issueIds ?? [])
         .map((id) => issuesById.get(id))

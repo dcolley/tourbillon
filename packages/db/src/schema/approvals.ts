@@ -22,3 +22,18 @@ export const approvals = pgTable('approvals', {
 
 export type Approval = typeof approvals.$inferSelect;
 export type NewApproval = typeof approvals.$inferInsert;
+
+/**
+ * Resume credentials for approvals forwarded to HITLy. Kept out of `approvals` so no approval
+ * read can return them. Only a SHA-256 digest (bound to the approval id) is stored; a row is
+ * single-use (`used_at`) and expires (`expires_at`).
+ */
+export const approvalResumeTokens = pgTable('approval_resume_tokens', {
+  approvalId: text('approval_id').primaryKey().references(() => approvals.id, { onDelete: 'cascade' }),
+  tokenHash: text('token_hash').notNull(),
+  expiresAt: timestamp('expires_at').notNull(),
+  usedAt: timestamp('used_at'),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+});
+
+export type ApprovalResumeToken = typeof approvalResumeTokens.$inferSelect;
