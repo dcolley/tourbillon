@@ -37,6 +37,7 @@ describe('#110 /api/chat/* with no agent token secret', () => {
         return {
           ChatAgentError,
           resolveChatAgent: async () => agent,
+          assertChatAgentCanRun: () => {},
           chatResourceId: () => 'res-1',
           chatContextFromTags: () => ({}),
           getOrCreateChatController: async () => ({ id: 'ctrl-1' }),

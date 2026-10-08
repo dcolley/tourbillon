@@ -21,9 +21,17 @@ import {
   getCompanyMemoryFilePath,
   getCompanyWorkspaceDir,
 } from '@tourbillon/shared/company-workspace';
+import { createHash } from 'node:crypto';
+import { mcpServerToolNamespace } from '@tourbillon/shared/tool-permissions';
 import { filterMcpTools } from './mcp-tool-filter';
 
 const mcpClientCache = new Map<string, MCPClient>();
+
+/** Test hook: serve a stand-in client for a cache key (see {@link mcpClientCacheKey}). */
+export function primeMcpClientCacheForTests(key: string, client: { listTools(): Promise<Record<string, unknown>> } | null): void {
+  if (client) mcpClientCache.set(key, client as unknown as MCPClient);
+  else mcpClientCache.delete(key);
+}
 
 function buildHttpFetch(
   apiKey: string | undefined,
@@ -44,7 +52,23 @@ function buildHttpFetch(
 }
 
 function serverKeyForClient(serverId: string): string {
-  return serverId.replace(/-mcp$/, '').replace(/-/g, '_') || serverId;
+  return mcpServerToolNamespace(serverId);
+}
+
+/**
+ * Client cache key: one client per company + server + credential. The credential is hashed
+ * (never a raw key prefix), so two credentials that share a prefix never share a client.
+ */
+export function mcpClientCacheKey(options: {
+  serverId: string;
+  companyId: string;
+  urlKey?: string;
+  apiKey?: string;
+}): string {
+  const { serverId, companyId, urlKey, apiKey } = options;
+  const credential = apiKey ? createHash('sha256').update(apiKey).digest('hex') : 'none';
+  const scope = serverId === 'memory-mcp-private' && urlKey ? `${companyId}:${urlKey}` : companyId;
+  return `${serverId}:${scope}:${credential}`;
 }
 
 export interface GetMcpClientOptions {
@@ -65,7 +89,7 @@ async function getSpecialStdioClient(
     return new MCPClient({
       id: `filesystem-local-${companyId}`,
       servers: {
-        filesystem: {
+        [mcpServerToolNamespace('filesystem-local')]: {
           command: 'npx',
           args: ['-y', '@modelcontextprotocol/server-filesystem', workspacePath],
         },
@@ -80,7 +104,7 @@ async function getSpecialStdioClient(
     return new MCPClient({
       id: `memory-mcp-private-${companyId}-${urlKey}`,
       servers: {
-        memory_private: {
+        [mcpServerToolNamespace('memory-mcp-private')]: {
           command: 'npx',
           args: ['-y', '@modelcontextprotocol/server-memory'],
           env: { MEMORY_FILE_PATH: memoryFilePath },
@@ -95,7 +119,7 @@ async function getSpecialStdioClient(
     return new MCPClient({
       id: `memory-mcp-company-${companyId}`,
       servers: {
-        memory_company: {
+        [mcpServerToolNamespace('memory-mcp-company')]: {
           command: 'npx',
           args: ['-y', '@modelcontextprotocol/server-memory'],
           env: { MEMORY_FILE_PATH: memoryFilePath },
@@ -156,18 +180,7 @@ async function getMCPClient(
 ): Promise<MCPClient | null> {
   const { companyId, urlKey, apiKey } = options;
 
-  const cacheKey =
-    serverId === 'filesystem-local'
-      ? `${serverId}:${companyId}`
-      : serverId === 'memory-mcp-private' && urlKey
-        ? `${serverId}:${companyId}:${urlKey}`
-        : serverId === 'memory-mcp-company'
-          ? `${serverId}:${companyId}`
-          : serverId === 'buffer-mcp' && apiKey
-            ? `${serverId}:${apiKey.slice(0, 8)}`
-            : apiKey
-              ? `${serverId}:${apiKey.slice(0, 8)}`
-              : serverId;
+  const cacheKey = mcpClientCacheKey({ serverId, companyId, urlKey, apiKey });
 
   if (mcpClientCache.has(cacheKey)) return mcpClientCache.get(cacheKey)!;
 

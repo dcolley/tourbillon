@@ -40,6 +40,7 @@ import { buildHeartbeatInputProcessors } from './heartbeat-processors';
 import { getMastraInstance } from './mastra-instance';
 import { buildChatWorkspace } from './execution-workspace';
 import { getInternalApiUrl } from './tools/api-client';
+import { gatedAgentOptions } from './tool-gate';
 
 const CHAT_IDENTITY_CHAR_LIMIT = 2000;
 
@@ -61,7 +62,6 @@ Rules:
 
 export type ChatControllerState = {
   yolo?: boolean;
-  permissionRules?: ReturnType<typeof buildChatPermissionRules>;
   chatContext?: {
     contextType?: string;
     contextId?: string;
@@ -96,18 +96,6 @@ export function buildChatControllerId(agentId: string, modelId?: string): string
   return modelKey
     ? `tourbillon-chat-${agentId}::${modelKey}`
     : `tourbillon-chat-${agentId}`;
-}
-
-export function buildChatPermissionRules() {
-  return {
-    categories: {
-      read: 'allow' as const,
-      edit: 'deny' as const,
-      execute: 'deny' as const,
-      mcp: 'allow' as const,
-    },
-    tools: {} as Record<string, 'allow' | 'ask' | 'deny'>,
-  };
 }
 
 function toolIdOf(key: string, tool: unknown): string {
@@ -179,7 +167,7 @@ export async function createChatAgentWithSkills(
     options?.modelIdOverride && options.modelIdOverride !== agentRecord.modelId
       ? { ...agentRecord, modelId: options.modelIdOverride }
       : agentRecord;
-  const tools = await assembleAgentTools(effectiveRecord, options);
+  const tools = await assembleAgentTools(effectiveRecord, { ...options, surface: 'chat' });
   const prepared = await prepareAgentSkills(effectiveRecord, { mode: 'chat' });
   const toolIds = Object.values(tools)
     .map((t) =>
@@ -235,7 +223,10 @@ export async function createChatAgentWithSkills(
     model: getLanguageModelForAgent(effectiveRecord, providerRecord, {
       apiModeOverride: chatApiMode,
     }),
-    tools: tools as never,
+    ...(gatedAgentOptions(
+      { agentId: effectiveRecord.id, companyId: effectiveRecord.companyId, surface: 'chat' },
+      tools,
+    ) as object),
     memory: await getAgentMemory(options?.companySettings ?? null, effectiveRecord.runtimeConfig as AgentRuntimeConfig),
     inputProcessors,
     ...toMastraDefaultOptions(generationOptions),
@@ -308,9 +299,10 @@ export async function createChatController(
     agent,
     modes,
     workspace: buildChatWorkspace(),
+    // Tool permissions are enforced per call by the live tool permission gate (hooks on the
+    // chat agent), so the controller's own category rules are not used.
     initialState: {
       yolo: true,
-      permissionRules: buildChatPermissionRules(),
     },
     ...(isMastraTracingEnabled()
       ? { observability: getMastraInstance().observability }

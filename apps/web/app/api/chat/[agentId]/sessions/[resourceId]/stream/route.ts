@@ -3,6 +3,7 @@ import {
   getOrCreateChatController,
   getChatSession,
   resolveChatAgent,
+  assertChatAgentCanRun,
 } from '@/lib/chat';
 import { chatErrorResponse, decodeResourceId } from '@/lib/chat/route-helpers';
 import { chatModelIdFromSearch } from '@/lib/chat/model-query';
@@ -31,6 +32,7 @@ export async function GET(
     const sessionScope = req.nextUrl.searchParams.get('sessionScope') ?? undefined;
 
     const agent = await resolveChatAgent(agentKey);
+    assertChatAgentCanRun(agent);
     const controller = await getOrCreateChatController(agent, { modelIdOverride: chatModelIdFromSearch(req) });
     const session = await getChatSession(controller, agent, {
       resourceId,

@@ -5,6 +5,7 @@ import {
   getChatSession,
   createChatRequestContext,
   resolveChatAgent,
+  assertChatAgentCanRun,
 } from '@/lib/chat';
 import {
   chatDashboardContextSchema,
@@ -41,6 +42,7 @@ export async function POST(
     const body = bodySchema.parse(await req.json());
 
     const agent = await resolveChatAgent(agentKey);
+    assertChatAgentCanRun(agent);
     const controller = await getOrCreateChatController(agent, { modelIdOverride: chatModelIdFromSearch(req) });
     const session = await getChatSession(controller, agent, {
       resourceId,

@@ -29,6 +29,7 @@ import {
   redactBaseURL,
   sameCredentialBoundary,
 } from './provider-safety';
+import { invalidateChatControllersForProviderChange } from './chat/controller-cache';
 
 export type LlmProviderErrorCode =
   | 'llm_provider_base_url_credentials'
@@ -267,6 +268,7 @@ export async function ensureDefaultLlmProviders(): Promise<void> {
     apiMode: envConfig.apiMode,
     isDefault: true,
   });
+  invalidateChatControllersForProviderChange();
 }
 
 /**
@@ -378,6 +380,7 @@ export async function createLlmProvider(input: CreateLlmProviderInput): Promise<
     })
     .returning();
 
+  invalidateChatControllersForProviderChange();
   return toPublic(created);
 }
 
@@ -474,6 +477,8 @@ export async function updateLlmProvider(
     .returning();
 
   if (!updated) throw new LlmProviderValidationError('Provider not found.');
+  // The default may have moved or this provider's settings changed: rebuild chat controllers.
+  invalidateChatControllersForProviderChange();
 
   const stillHasDefault = await getDefaultLlmProviderRow();
   if (!stillHasDefault) {
@@ -481,6 +486,7 @@ export async function updateLlmProvider(
       .update(llmProviders)
       .set({ isDefault: true, updatedAt: new Date() })
       .where(eq(llmProviders.id, id));
+    invalidateChatControllersForProviderChange();
     const refreshed = await getLlmProviderRowById(id);
     if (!refreshed) throw new LlmProviderValidationError('Provider not found.');
     return toPublic(refreshed);
@@ -506,6 +512,7 @@ export async function deleteLlmProvider(id: string): Promise<void> {
   }
 
   await db.delete(llmProviders).where(eq(llmProviders.id, id));
+  invalidateChatControllersForProviderChange();
 
   if (existing.isDefault) {
     const remaining = await listLlmProviderRows();
@@ -514,6 +521,7 @@ export async function deleteLlmProvider(id: string): Promise<void> {
         .update(llmProviders)
         .set({ isDefault: true, updatedAt: new Date() })
         .where(eq(llmProviders.id, remaining[0].id));
+      invalidateChatControllersForProviderChange();
     }
   }
 }

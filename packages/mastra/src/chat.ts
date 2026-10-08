@@ -7,7 +7,6 @@ export {
   createChatAgentWithSkills,
   buildChatResourceId,
   buildChatControllerId,
-  buildChatPermissionRules,
   type ChatControllerState,
   type ChatResourceContext,
 } from './chat-controller';

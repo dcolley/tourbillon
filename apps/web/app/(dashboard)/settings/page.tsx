@@ -8,6 +8,7 @@ import {
   requireBoardSession,
 } from '@/lib/company';
 import { getVaultCredentialStatus } from '@/lib/vault';
+import { invalidateChatControllersForCompany } from '@/lib/chat';
 import {
   getExecutionWorkspaceRoot,
   getWorkspaceRoot,
@@ -68,6 +69,8 @@ async function saveIntegrations(
       clearSearxngApiKey: formData.get('clearSearxngApiKey') === 'on',
       clearTavilyApiKey: formData.get('clearTavilyApiKey') === 'on',
     });
+    // Search / MCP credentials change which tools agents get; rebuild cached chat controllers.
+    invalidateChatControllersForCompany(company.id);
     return actionSuccess('Integration settings saved.');
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Failed to save integrations.';

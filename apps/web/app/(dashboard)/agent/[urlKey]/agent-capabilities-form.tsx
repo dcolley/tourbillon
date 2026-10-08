@@ -10,6 +10,7 @@ import {
   type AgentIntegrationCredentialId,
 } from '@tourbillon/shared/constants';
 import { getMcpBridgedToolsetIds } from '@tourbillon/shared/mcp-builtin-catalog';
+import { mcpServerToolNamespace, mcpToolNameMatchesPattern } from '@tourbillon/shared/tool-permissions';
 import type { AgentRuntimeConfig } from '@tourbillon/shared/types';
 import type { ActionResult } from '@/lib/action-result';
 import { useActionToast } from '@/hooks/use-action-toast';
@@ -78,30 +79,29 @@ function initialRows(overrides: AgentIntegrationOverrides): IntegrationRow[] {
   return rows;
 }
 
-function matchesToolName(toolName: string, pattern: string): boolean {
-  return toolName === pattern || toolName.endsWith(`_${pattern}`) || toolName.includes(pattern);
-}
-
-function isToolDeniedByBlacklist(toolName: string, blacklist: string[] | undefined): boolean {
+function isToolDeniedByBlacklist(toolName: string, blacklist: string[] | undefined, namespace: string): boolean {
   if (!blacklist?.length) return false;
-  return blacklist.some((pattern) => matchesToolName(toolName, pattern));
+  return blacklist.some((pattern) => mcpToolNameMatchesPattern(toolName, pattern, namespace));
 }
 
+/** Same exact name matching the server applies (full tool name or bare name under the server namespace). */
 function defaultToolChecked(
   toolName: string,
   server: McpServerToolCatalog,
   policy: AgentRuntimeConfig['mcpToolPolicy'] | undefined,
 ): boolean {
+  const namespace = mcpServerToolNamespace(server.serverId);
+  const matches = (pattern: string) => mcpToolNameMatchesPattern(toolName, pattern, namespace);
   const storedAllow =
     policy?.[server.serverId]?.allow ??
     (server.serverId === 'memory-mcp-private' ? policy?.['memory-mcp']?.allow : undefined);
   if (storedAllow !== undefined) {
-    return storedAllow.some((pattern) => matchesToolName(toolName, pattern));
+    return storedAllow.some(matches);
   }
   if (server.toolWhitelist?.length) {
-    return server.toolWhitelist.some((pattern) => matchesToolName(toolName, pattern));
+    return server.toolWhitelist.some(matches);
   }
-  return !isToolDeniedByBlacklist(toolName, server.toolBlacklist);
+  return !isToolDeniedByBlacklist(toolName, server.toolBlacklist, namespace);
 }
 
 function readCheckedToolsets(form: HTMLFormElement): string[] {
