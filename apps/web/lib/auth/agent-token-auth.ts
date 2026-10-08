@@ -8,16 +8,22 @@
  *    - chat token: chatSessionId is the agent's chat session (`chat-<agentId>`), and the agent
  *      exists in the token's company and is not archived.
  * Returns the payload or null (callers answer 401). Never logs the token.
+ * No/short TOURBILLON_AGENT_TOKEN_SECRET: logs the config error (see agent-token-config.ts), returns null.
  */
 import { db, agents, heartbeatRuns } from '@tourbillon/db';
 import { and, eq } from 'drizzle-orm';
 import { chatSessionIdForAgent } from '@tourbillon/shared/agent-token';
 import { validateRunToken, type RunTokenPayload } from './run-token';
+import { isAgentTokenSecretConfigured, logAgentTokenConfigError } from './agent-token-config';
 
 export async function authenticateAgentToken(
   token: string | null | undefined,
 ): Promise<RunTokenPayload | null> {
   if (!token) return null;
+  if (!isAgentTokenSecretConfigured()) {
+    logAgentTokenConfigError('agent API');
+    return null;
+  }
   const payload = validateRunToken(token);
   if (!payload) return null;
 

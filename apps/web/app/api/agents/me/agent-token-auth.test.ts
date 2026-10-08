@@ -157,6 +157,35 @@ describe('#110 agent token auth (GET /api/agents/me)', () => {
     assert.equal((await call(legacy({ chatSessionId: 'chat-agent-a', agentId: 'agent-a', companyId: 'company-a' }, 'pm_chat_'))).status, 401);
   });
 
+  it('no secret: agent bearer → 401, the config error is logged and the log never contains the token', async () => {
+    const token = signed('pm_run_', RUN_A);
+    const chat = signed('pm_chat_', { chatSessionId: 'chat-agent-a', agentId: 'agent-a', companyId: 'company-a' });
+    delete env.TOURBILLON_AGENT_TOKEN_SECRET;
+    const logged: string[] = [];
+    const original = { error: console.error, warn: console.warn, log: console.log, info: console.info };
+    const capture = (...args: unknown[]) => {
+      logged.push(args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '));
+    };
+    console.error = capture;
+    console.warn = capture;
+    console.log = capture;
+    console.info = capture;
+    try {
+      assert.equal((await call(token)).status, 401);
+      assert.equal((await call(chat)).status, 401);
+    } finally {
+      Object.assign(console, original);
+    }
+    assert.ok(
+      logged.some((l) => l.includes('TOURBILLON_AGENT_TOKEN_SECRET is not set')),
+      `config error logged (got ${JSON.stringify(logged)})`,
+    );
+    for (const t of [token, chat]) {
+      const [body, sig] = [t.slice(0, t.lastIndexOf('.')), t.slice(t.lastIndexOf('.') + 1)];
+      assert.ok(logged.every((l) => !l.includes(body) && !l.includes(sig)), 'log never contains the token');
+    }
+  });
+
   it('no secret configured (production) → fails closed, even for a correctly signed token', async () => {
     const token = signed('pm_run_', RUN_A);
     delete env.TOURBILLON_AGENT_TOKEN_SECRET;
