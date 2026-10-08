@@ -1,4 +1,5 @@
 import { parseAgentModelSettings, type AgentModelSettings } from './model-settings';
+import { envCredentialHostRefusal, type EnvCredentialResolveOptions } from './env-credential-host';
 
 export type ModelProviderKind =
   | 'lmstudio'
@@ -230,60 +231,82 @@ function envApiMode(provider: ModelProviderKind): ModelApiMode {
   );
 }
 
-function envBaseURL(provider: ModelProviderKind): string {
-  switch (provider) {
-    case 'ollama':
-      return (
-        process.env.OLLAMA_BASE_URL ??
-        process.env.LLM_BASE_URL ??
-        PROVIDER_DEFAULTS.ollama.baseURL
-      );
-    case 'vllm':
-      return process.env.LLM_BASE_URL ?? PROVIDER_DEFAULTS.vllm.baseURL;
-    case 'openai':
-      return (
-        process.env.OPENAI_BASE_URL ??
-        process.env.LLM_BASE_URL ??
-        PROVIDER_DEFAULTS.openai.baseURL
-      );
-    case 'openai-compatible':
-      return (
-        process.env.LLM_BASE_URL ??
-        process.env.OPENAI_BASE_URL ??
-        PROVIDER_DEFAULTS['openai-compatible'].baseURL
-      );
-    case 'lmstudio':
-    default:
-      return (
-        process.env.LM_STUDIO_BASE_URL ??
-        process.env.LLM_BASE_URL ??
-        PROVIDER_DEFAULTS.lmstudio.baseURL
-      );
+/** Env vars that set the base URL for each provider kind, first set one wins. */
+const BASE_URL_ENV: Record<ModelProviderKind, readonly string[]> = {
+  ollama: ['OLLAMA_BASE_URL', 'LLM_BASE_URL'],
+  vllm: ['LLM_BASE_URL'],
+  openai: ['OPENAI_BASE_URL', 'LLM_BASE_URL'],
+  'openai-compatible': ['LLM_BASE_URL', 'OPENAI_BASE_URL'],
+  lmstudio: ['LM_STUDIO_BASE_URL', 'LLM_BASE_URL'],
+};
+
+/** True when the env var is set and not blank/whitespace-only (matches apps/web envSet). */
+function envVarSet(name: string): boolean {
+  const value = process.env[name];
+  return typeof value === 'string' && value.trim() !== '';
+}
+
+/** Distinct LLM base-URL env var names (union of BASE_URL_ENV lists). */
+const LLM_BASE_URL_ENV_VARS = [
+  'LLM_BASE_URL',
+  'OPENAI_BASE_URL',
+  'LM_STUDIO_BASE_URL',
+  'OLLAMA_BASE_URL',
+] as const;
+
+let blankBaseUrlEnvWarned = false;
+
+/**
+ * Once per process: name any LLM base-URL env var that is set but blank/whitespace-only.
+ * Never logs the values. Called from resolveModelProviderConfigFromEnv.
+ */
+export function warnBlankBaseUrlEnvVars(): void {
+  if (blankBaseUrlEnvWarned) return;
+  blankBaseUrlEnvWarned = true;
+  for (const name of LLM_BASE_URL_ENV_VARS) {
+    const value = process.env[name];
+    if (typeof value === 'string' && value.trim() === '') {
+      console.warn(`${name} is set but blank; treated as unset`);
+    }
   }
 }
 
+/** Test helper: allow warnBlankBaseUrlEnvVars to run again in the same process. */
+export function resetBlankBaseUrlEnvWarningForTests(): void {
+  blankBaseUrlEnvWarned = false;
+}
+
+/** Name of the env var the base URL comes from, or null when the built-in default is used. */
+function envBaseURLName(provider: ModelProviderKind): string | null {
+  const names = BASE_URL_ENV[provider] ?? BASE_URL_ENV.lmstudio;
+  return names.find((name) => envVarSet(name)) ?? null;
+}
+
+function envBaseURL(provider: ModelProviderKind): string {
+  const name = envBaseURLName(provider);
+  if (name) return (process.env[name] ?? '').trim();
+  return (PROVIDER_DEFAULTS[provider] ?? PROVIDER_DEFAULTS.lmstudio).baseURL;
+}
+
+/** Env vars that hold the API key for each provider kind, first set one wins. */
+const API_KEY_ENV: Record<ModelProviderKind, readonly string[]> = {
+  ollama: ['OLLAMA_API_KEY', 'LLM_API_KEY'],
+  vllm: ['LLM_API_KEY'],
+  openai: ['LLM_API_KEY', 'OPENAI_API_KEY'],
+  'openai-compatible': ['LLM_API_KEY', 'OPENAI_API_KEY'],
+  lmstudio: ['LM_STUDIO_API_KEY', 'LLM_API_KEY'],
+};
+
+/** Name of the env var the API key comes from, or null when the built-in placeholder is used. */
+function envApiKeyName(provider: ModelProviderKind): string | null {
+  const names = API_KEY_ENV[provider] ?? API_KEY_ENV.lmstudio;
+  return names.find((name) => process.env[name] !== undefined) ?? null;
+}
+
 function envApiKey(provider: ModelProviderKind): string {
-  switch (provider) {
-    case 'ollama':
-      return (
-        process.env.OLLAMA_API_KEY ??
-        process.env.LLM_API_KEY ??
-        PROVIDER_DEFAULTS.ollama.apiKey
-      );
-    case 'vllm':
-      return process.env.LLM_API_KEY ?? PROVIDER_DEFAULTS.vllm.apiKey;
-    case 'openai':
-      return process.env.LLM_API_KEY ?? process.env.OPENAI_API_KEY ?? '';
-    case 'openai-compatible':
-      return process.env.LLM_API_KEY ?? process.env.OPENAI_API_KEY ?? '';
-    case 'lmstudio':
-    default:
-      return (
-        process.env.LM_STUDIO_API_KEY ??
-        process.env.LLM_API_KEY ??
-        PROVIDER_DEFAULTS.lmstudio.apiKey
-      );
-  }
+  const name = envApiKeyName(provider);
+  if (name) return process.env[name] ?? '';
+  return (PROVIDER_DEFAULTS[provider] ?? PROVIDER_DEFAULTS.lmstudio).apiKey;
 }
 
 function envDefaultModel(): string {
@@ -327,10 +350,11 @@ export function resolveModelProviderConfig(
   overrides?: ModelProviderOverrides | null,
   modelId?: string | null,
   providerRecord?: LlmProviderRecord | null,
+  options?: EnvCredentialResolveOptions,
 ): ModelProviderConfig {
   const base = providerRecord
     ? resolveModelProviderConfigFromRecord(providerRecord, modelId)
-    : resolveModelProviderConfigFromEnv(overrides, modelId);
+    : resolveModelProviderConfigFromEnv(overrides, modelId, options);
 
   return applyOverrides(base, overrides, modelId);
 }
@@ -339,11 +363,38 @@ export function resolveModelProviderConfig(
 export function resolveModelProviderConfigFromEnv(
   overrides?: ModelProviderOverrides | null,
   modelId?: string | null,
+  options?: EnvCredentialResolveOptions,
 ): ModelProviderConfig {
+  warnBlankBaseUrlEnvVars();
   const provider = overrides?.provider ?? envProviderKind();
   const apiMode = overrides?.apiMode ?? envApiMode(provider);
-  const baseURL = overrides?.baseURL?.trim() || envBaseURL(provider);
-  const apiKey = overrides?.apiKey ?? envApiKey(provider);
+  // A server env API key only goes to the env-configured base URL host for this provider kind,
+  // or to the kind's built-in default host when this kind is the env kind (LLM_PROVIDER). Any
+  // other host (an agent base URL override, or a provider-kind change with no env base URL for
+  // that kind) throws EnvCredentialHostError (409), or with `onEnvCredentialHostMismatch:
+  // 'omit-key'` resolves without the key.
+  const configuredBaseURL = envBaseURL(provider);
+  const overrideBaseURL = overrides?.baseURL?.trim();
+  const baseURL = overrideBaseURL || configuredBaseURL;
+  let apiKey = overrides?.apiKey ?? envApiKey(provider);
+  const keyEnvName = overrides?.apiKey === undefined ? envApiKeyName(provider) : null;
+  if (keyEnvName && apiKey !== '') {
+    const envKind = envProviderKind();
+    const keyBaseURL =
+      envBaseURLName(provider) !== null || provider === envKind ? configuredBaseURL : null;
+    if (overrideBaseURL || keyBaseURL === null) {
+      const refusal = envCredentialHostRefusal({
+        providerLabel: LLM_PROVIDER_TYPE_LABELS[provider] ?? provider,
+        keyEnvName,
+        configuredBaseURL: keyBaseURL,
+        requestBaseURL: baseURL,
+      });
+      if (refusal) {
+        if (options?.onEnvCredentialHostMismatch !== 'omit-key') throw refusal;
+        apiKey = '';
+      }
+    }
+  }
   const defaultModel = modelId ?? overrides?.modelId ?? envDefaultModel();
 
   return {

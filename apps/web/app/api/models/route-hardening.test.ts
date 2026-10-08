@@ -365,12 +365,17 @@ describe('GET /api/models provider hardening', () => {
       assert.deepEqual(inserted, []);
     });
 
-    it('LLM_PROVIDER set but its base URL var is whitespace → nothing seeded (no empty base_url row)', async () => {
+    it('LLM_PROVIDER set but its base URL var is whitespace → counts as unset, seeds at the kind default', async () => {
+      // #143 S4: blank/whitespace base URL env matches unset (same as envSet), not an empty
+      // baseURL that the SDK would reject. Same outcome as "LLM_PROVIDER alone".
       env.LLM_PROVIDER = 'lmstudio';
       env.LM_STUDIO_BASE_URL = '   ';
+      handler = () => modelsBody('m');
       const { status } = await call();
-      assert.deepEqual(inserted, []);
-      assert.equal(status, 409);
+      assert.equal(status, 200);
+      assert.equal(inserted.length, 1);
+      assert.equal(inserted[0].type, 'lmstudio');
+      assert.equal(inserted[0].baseURL, 'http://localhost:1234/v1');
     });
 
     it('registry not empty → no auto-create even with env set', async () => {

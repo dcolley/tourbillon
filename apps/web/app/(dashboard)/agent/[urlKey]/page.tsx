@@ -543,10 +543,12 @@ export default async function AgentDetailPage({
     agent.status === 'active' &&
     !isAgentBudgetExceeded(agent.spentMonthlyTokens, agent.budgetMonthlyTokens, runtime);
   const error = errorParam ? decodeURIComponent(errorParam) : null;
+  // Display only (provider, endpoint, model): never throws on an env key / host mismatch.
   const providerConfig = resolveModelProviderConfig(
     modelProviderOverridesFromAgent(agent.adapterType, agent.adapterConfig),
     agent.modelId,
     providerRecord,
+    { onEnvCredentialHostMismatch: 'omit-key' },
   );
   const enabledTools = resolveAssignedTools({
     role: agent.role,

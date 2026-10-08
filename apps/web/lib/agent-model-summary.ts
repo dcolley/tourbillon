@@ -26,9 +26,11 @@ export function getAgentModelSummary(
     };
   }
 
+  // Display only: never throws on an env key / host mismatch (the key is not used here).
   const config = resolveModelProviderConfigFromEnv(
     modelProviderOverridesFromAgent(agent.adapterType, agent.adapterConfig),
     agent.modelId,
+    { onEnvCredentialHostMismatch: 'omit-key' },
   );
 
   return {
