@@ -790,6 +790,18 @@ export async function setAgentActive(agentId: string, active: boolean): Promise<
     throw new AgentValidationError('Agent is pending approval and cannot be activated yet.');
   }
 
+  // #119 B1: every active toggle (detail chip, list toggle, MCP set_agent_active, mobile
+  // 'active' section) goes through here. Activating an archived agent would revive its run and
+  // chat tokens (agent-token-auth refuses only archived agents), so it is refused. Deactivating
+  // an archived agent is a no-op: it is already not active, and writing 'paused' would
+  // un-archive it one step short of active.
+  if (agent.status === 'archived') {
+    if (active) {
+      throw new AgentValidationError('Agent is archived and cannot be activated.');
+    }
+    return agent;
+  }
+
   const status = active ? 'active' : 'paused';
 
   const [updated] = await db

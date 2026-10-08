@@ -12,6 +12,7 @@ import { triggerAgentHeartbeat, retryFailedHeartbeat } from '@/lib/heartbeat';
 import { getHeartbeatRun, getInFlightHeartbeatRun } from '@/lib/heartbeats';
 import { actionError, actionSuccess, type ActionResult } from '@/lib/action-result';
 import { requireBoardSession } from '@/lib/company';
+import type { AgentActiveToggleResult } from './[urlKey]/agent-active-chip-logic';
 
 export async function triggerAgentHeartbeatAction(formData: FormData) {
   await requireBoardSession();
@@ -62,6 +63,39 @@ export async function toggleAgentActiveAction(formData: FormData) {
   }
 
   revalidatePath('/agent');
+}
+
+/**
+ * UX-2: Active/Inactive status chip on the agent detail page. Same board gate
+ * (requireBoardSession, #105 B1: first statement) and the same write (setAgentActive: status
+ * active ↔ paused) as toggleAgentActiveAction, but returns a result instead of redirecting to
+ * /agent so the chip can roll back and toast. Never touches runtimeConfig.heartbeat (the timer).
+ * Archived agents cannot be activated (#119 B1, enforced in setAgentActive → 400 + toast).
+ * No board session, or an agent run/chat bearer: requireBoardSession throws before any write
+ * (and proxy.ts already answers such a server-action request with 401).
+ */
+export async function setAgentActiveAction(
+  agentId: string,
+  active: boolean,
+  urlKey?: string,
+): Promise<AgentActiveToggleResult> {
+  await requireBoardSession();
+
+  if (typeof agentId !== 'string' || !agentId.trim() || typeof active !== 'boolean') {
+    return { ok: false, status: 400, error: 'Agent ID and active flag are required.' };
+  }
+
+  try {
+    const updated = await setAgentActive(agentId, active);
+    revalidatePath('/agent');
+    if (urlKey) revalidatePath(`/agent/${urlKey}`);
+    return { ok: true, active: updated.status === 'active', status: updated.status };
+  } catch (err) {
+    if (err instanceof AgentValidationError) {
+      return { ok: false, status: 400, error: err.message };
+    }
+    return { ok: false, status: 500, error: 'Failed to update agent status.' };
+  }
 }
 
 export async function updateAgentRoleAction(
