@@ -5,6 +5,7 @@ import {
   updateCompanyIntegrations,
   updateCompanyObservationalMemory,
   updateCompanyHitlyGate,
+  updateCompanyMaxConcurrentRuns,
   requireBoardSession,
 } from '@/lib/company';
 import { getVaultCredentialStatus } from '@/lib/vault';
@@ -17,6 +18,7 @@ import {
   isTavilyConfigured,
   isHitlyGateConfigured,
   resolveObservationalMemoryModel,
+  resolveMaxConcurrentRuns,
 } from '@tourbillon/shared';
 import { LlmProvidersSettings } from '@/components/llm-providers-settings';
 import { PasswordInput } from '@/components/ui/password-input';
@@ -45,6 +47,25 @@ async function saveSettings(
     return actionSuccess('Company settings saved.');
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Failed to save settings.';
+    return actionError(message);
+  }
+}
+
+async function saveRunLimits(
+  _prev: ActionResult | null,
+  formData: FormData,
+): Promise<ActionResult> {
+  'use server';
+  await requireBoardSession();
+
+  const company = await getActiveCompany();
+
+  try {
+    const updated = await updateCompanyMaxConcurrentRuns(company.id, formData.get('maxConcurrentRuns') ?? '');
+    const cap = resolveMaxConcurrentRuns(parseCompanySettings(updated.settings));
+    return actionSuccess(cap === null ? 'Concurrent-run cap removed.' : `Concurrent-run cap set to ${cap}.`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to save the concurrent-run cap.';
     return actionError(message);
   }
 }
@@ -224,7 +245,14 @@ export default async function SettingsPage() {
       </div>
 
       <CompanySettingsTabs
-        company={<CompanyTab company={company} saveSettings={saveSettings} />}
+        company={
+          <CompanyTab
+            company={company}
+            saveSettings={saveSettings}
+            maxConcurrentRuns={resolveMaxConcurrentRuns(integrationSettings)}
+            saveRunLimits={saveRunLimits}
+          />
+        }
         integrations={
           <IntegrationsTab
             companyId={company.id}
@@ -261,9 +289,13 @@ export default async function SettingsPage() {
 function CompanyTab({
   company,
   saveSettings,
+  maxConcurrentRuns,
+  saveRunLimits,
 }: {
   company: { id: string; name: string; issuePrefix: string; budgetMonthlyTokens: number; spentMonthlyTokens: number; requiresBoardApprovalForHires: boolean };
   saveSettings: (prev: ActionResult | null, formData: FormData) => Promise<ActionResult>;
+  maxConcurrentRuns: number | null;
+  saveRunLimits: (prev: ActionResult | null, formData: FormData) => Promise<ActionResult>;
 }) {
   const ActionForm = require('@/components/action-form').ActionForm;
   const ActionSubmitButton = require('@/components/action-form').ActionSubmitButton;
@@ -331,6 +363,33 @@ function CompanyTab({
         </label>
 
         <ActionSubmitButton label="Save company settings" />
+      </ActionForm>
+
+      <ActionForm action={saveRunLimits} className="space-y-4 border-t pt-4 mt-4">
+        <div className="space-y-1.5">
+          <label htmlFor="maxConcurrentRuns" className="text-sm font-medium">
+            Max concurrent runs
+          </label>
+          <input
+            id="maxConcurrentRuns"
+            name="maxConcurrentRuns"
+            type="number"
+            inputMode="numeric"
+            min={1}
+            step={1}
+            defaultValue={maxConcurrentRuns ?? ''}
+            placeholder="No cap"
+            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+          />
+          <p className="text-xs text-muted-foreground">
+            {maxConcurrentRuns === null
+              ? 'No cap: every agent wake starts straight away.'
+              : `At most ${maxConcurrentRuns} heartbeat run${maxConcurrentRuns === 1 ? '' : 's'} at once across this company.`}{' '}
+            Wakes over the cap wait and start when a run finishes; they are never failed or dropped.
+            Leave blank for no cap.
+          </p>
+        </div>
+        <ActionSubmitButton label="Save run limit" />
       </ActionForm>
     </section>
   );

@@ -33,8 +33,25 @@ import {
   createTraceLogger,
   canForceKillHeartbeat,
   effectiveHeartbeatTimeoutSec,
+  resolveMaxConcurrentRuns,
 } from '@tourbillon/shared';
 import { durableWakeOutcomeFromTripwire } from './durable-wake-outcome';
+import {
+  RUN_CAP_LOCK_NAMESPACE,
+  coalesceIntoDeferredWake,
+  deferredWakeForAgent,
+  deferredWakesAhead,
+  enqueueDeferredWake,
+  notifyRunSlotFreed,
+  removeDeferredWake,
+  runCapBackoffMs,
+  sameWakeTarget,
+  startRunUnderCap,
+  takeDeferredWakeAfterAttempt,
+  waitForRunSlot,
+  wakeTargetForLog,
+  type DeferredWake,
+} from './run-cap';
 import { buildRunWakeMessage, createDrizzleWakeContextRepo } from './wake-context';
 import type { Agent as AgentRecord } from '@tourbillon/db';
 import { randomUUID } from 'crypto';
@@ -91,15 +108,67 @@ export type WakeRequest = HeartbeatJobData;
 
 export interface WakeResult {
   runId: string;
-  status: 'succeeded' | 'failed' | 'skipped';
+  /** `deferred`: the company is at its maxConcurrentRuns cap; the wake is retried, not dropped. */
+  status: 'succeeded' | 'failed' | 'skipped' | 'deferred';
   errorText?: string;
 }
 
 type WakeTracer = ReturnType<typeof createTraceLogger>;
+type RunCapTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 /** In-process single-flight + follow-up queue per agent (replaces BullMQ dedupe). */
 const agentLocks = new Map<string, Promise<void>>();
 const agentFollowUps = new Map<string, WakeRequest[]>();
+
+/**
+ * One follow-up per agent, latest wins (unchanged behaviour). When the wake that loses is not
+ * the same as the one kept and either is a non-timer wake, log a warning (ids only) so a replaced
+ * assignment / mention / approval wake is visible rather than silent.
+ */
+function warnFollowUpReplaced(kept: WakeRequest, dropped: WakeRequest): void {
+  if (sameWakeTarget(kept, dropped)) return;
+  if (kept.wakeReason === 'timer' && dropped.wakeReason === 'timer') return;
+  createTraceLogger('wake', { agentId: kept.agentId, companyId: kept.companyId }).warn(
+    'follow-up wake replaced (one follow-up per agent, latest wins)',
+    {
+      agentId: kept.agentId,
+      wakeType: kept.wakeReason,
+      target: wakeTargetForLog(kept),
+      replacedWakeType: dropped.wakeReason,
+      replacedTarget: wakeTargetForLog(dropped),
+    },
+  );
+}
+
+/** Queue `wake` as the agent's follow-up; it replaces any earlier one (latest wins). */
+function setAgentFollowUp(wake: WakeRequest): void {
+  const prev = agentFollowUps.get(wake.agentId)?.[0];
+  agentFollowUps.set(wake.agentId, [wake]);
+  if (prev) warnFollowUpReplaced(wake, prev);
+}
+
+/**
+ * Queue a wake that was folded into a deferred entry after its attempt had already read the
+ * entry. A follow-up already set arrived later than it, so that one wins (latest wins).
+ */
+function setAgentFollowUpUnlessNewer(wake: WakeRequest): void {
+  const newer = agentFollowUps.get(wake.agentId)?.[0];
+  if (newer) {
+    warnFollowUpReplaced(newer, wake);
+    return;
+  }
+  agentFollowUps.set(wake.agentId, [wake]);
+}
+
+/** Agent or company row is gone (deleted). The message is unchanged from before. */
+class WakeTargetMissingError extends Error {
+  constructor(
+    readonly missing: 'agent' | 'company',
+    message: string,
+  ) {
+    super(message);
+  }
+}
 
 /** In-flight AbortControllers keyed by runId for operator force-kill. */
 const runAbortControllers = new Map<string, AbortController>();
@@ -258,6 +327,10 @@ async function recordHeartbeatFailure(
  */
 export async function triggerWake(wake: WakeRequest): Promise<WakeResult> {
   const started = await startWake(wake);
+  if (started.deferred) {
+    // Over the company cap: the wake keeps retrying in the background (started.done).
+    return { runId: '', status: 'deferred', errorText: started.errorText };
+  }
   if (started.status !== 'started') {
     return {
       runId: started.runId,
@@ -272,6 +345,8 @@ export interface StartWakeResult {
   runId: string;
   status: 'started' | 'queued' | 'skipped';
   errorText?: string;
+  /** True when the wake is waiting for a slot under the company's maxConcurrentRuns cap. */
+  deferred?: boolean;
   /** Resolves when the wake fully finishes. */
   done: Promise<WakeResult>;
 }
@@ -283,7 +358,19 @@ export interface StartWakeResult {
 export async function startWake(wake: WakeRequest): Promise<StartWakeResult> {
   const lock = agentLocks.get(wake.agentId);
   if (lock) {
-    agentFollowUps.set(wake.agentId, [wake]);
+    // Agent's wake is waiting under the company cap: fold this one into it (keeps its place).
+    const deferredEntry = deferredWakeForAgent(wake.agentId) as DeferredWake<WakeRequest> | undefined;
+    if (deferredEntry && coalesceIntoDeferredWake(deferredEntry, wake)) {
+      const errorText = 'coalesced into deferred wake (company concurrent-run cap)';
+      return {
+        runId: '',
+        status: 'queued',
+        deferred: true,
+        errorText,
+        done: Promise.resolve({ runId: '', status: 'skipped', errorText }),
+      };
+    }
+    setAgentFollowUp(wake);
     createTraceLogger('wake', {
       agentId: wake.agentId,
       companyId: wake.companyId,
@@ -311,8 +398,12 @@ export async function startWake(wake: WakeRequest): Promise<StartWakeResult> {
   const runIdReady = new Promise<string>((resolve) => {
     resolveRunId = resolve;
   });
+  let resolveDeferred!: (reason: string) => void;
+  const deferredReady = new Promise<string>((resolve) => {
+    resolveDeferred = resolve;
+  });
 
-  const done = runWake(wake, { onRunCreated: resolveRunId })
+  const done = runWakeDeferringAtCap(wake, { onRunCreated: resolveRunId, onDeferred: resolveDeferred })
     .catch((err) => {
       const errorText = err instanceof Error ? err.message : String(err);
       resolveRunId('');
@@ -321,6 +412,8 @@ export async function startWake(wake: WakeRequest): Promise<StartWakeResult> {
     .finally(() => {
       agentLocks.delete(wake.agentId);
       release();
+      // A run slot may have freed: let this company's deferred wakes retry now, not at backoff.
+      notifyRunSlotFreed(wake.companyId);
       const next = agentFollowUps.get(wake.agentId);
       agentFollowUps.delete(wake.agentId);
       if (next?.[0]) {
@@ -332,10 +425,16 @@ export async function startWake(wake: WakeRequest): Promise<StartWakeResult> {
       }
     });
 
-  const runId = await Promise.race([
-    runIdReady,
-    done.then((r) => r.runId),
+  const first = await Promise.race([
+    runIdReady.then((id) => ({ runId: id, deferred: undefined as string | undefined })),
+    deferredReady.then((reason) => ({ runId: '', deferred: reason })),
+    done.then((r) => ({ runId: r.runId, deferred: undefined as string | undefined })),
   ]);
+  const runId = first.runId;
+
+  if (first.deferred !== undefined) {
+    return { runId: '', status: 'queued', deferred: true, errorText: first.deferred, done };
+  }
 
   if (!runId) {
     const result = await done;
@@ -350,9 +449,87 @@ export async function startWake(wake: WakeRequest): Promise<StartWakeResult> {
   return { runId, status: 'started', done };
 }
 
+/**
+ * Run a wake; while the company is at its maxConcurrentRuns cap, queue it (company-wide FIFO, see
+ * run-cap.ts) and retry when it is the oldest and a slot frees (or at jittered backoff). The
+ * per-agent lock stays held, so further wakes for this agent coalesce into the queued entry.
+ */
+async function runWakeDeferringAtCap(
+  wake: WakeRequest,
+  opts: { onRunCreated?: (runId: string) => void; onDeferred?: (reason: string) => void },
+): Promise<WakeResult> {
+  let entry: DeferredWake<WakeRequest> | undefined;
+  let attempt = 0;
+  /** The wake the current attempt read at its start (compared with entry.wake when it ends). */
+  let usedWake: WakeRequest = wake;
+  /** Last wake logged in full: retries of the same wake log a short line only. */
+  let loggedWake: WakeRequest | undefined;
+  const tracer = () => createTraceLogger('wake', { agentId: wake.agentId, companyId: wake.companyId });
+
+  const leaveQueue = (runId?: string) => {
+    if (!entry) return;
+    const queued = entry;
+    entry = undefined;
+    // Atomic with coalescing: a wake folded in after this attempt read the entry is returned here
+    // and becomes the agent's follow-up (it runs after this run), instead of being lost.
+    const replacement = takeDeferredWakeAfterAttempt(queued, usedWake);
+    if (replacement) setAgentFollowUpUnlessNewer(replacement);
+    if (runId !== undefined) {
+      tracer().info('deferred wake resumed', {
+        attempts: attempt,
+        waitedMs: Date.now() - queued.enqueuedAt,
+        wakeReason: usedWake.wakeReason,
+        status: runId ? 'started' : 'skipped',
+        runId,
+        ...(replacement ? { followUpWakeReason: replacement.wakeReason } : {}),
+      });
+    }
+  };
+  const onRunCreated = (runId: string) => {
+    leaveQueue(runId); // run row written (or skipped): free the front for the next oldest wake
+    opts.onRunCreated?.(runId);
+  };
+  try {
+    for (; ; attempt++) {
+      if (entry && deferredWakesAhead(wake.companyId, entry) > 0) {
+        await waitForRunSlot(wake.companyId, runCapBackoffMs(attempt));
+        continue;
+      }
+      usedWake = entry?.wake ?? wake;
+      const quiet = usedWake === loggedWake;
+      loggedWake = usedWake;
+      const result = await runWake(usedWake, { onRunCreated, deferredEntry: entry, quiet, attempt });
+      if (result.status !== 'deferred') return result;
+      if (!entry) {
+        entry = enqueueDeferredWake(wake);
+        opts.onDeferred?.(result.errorText ?? 'deferred: company concurrent-run cap reached');
+      }
+      await waitForRunSlot(wake.companyId, runCapBackoffMs(attempt));
+    }
+  } catch (err) {
+    if (entry && err instanceof WakeTargetMissingError) {
+      tracer().warn('deferred wake dropped: agent or company no longer exists', {
+        missing: err.missing,
+        wakeType: entry.wake.wakeReason,
+        attempts: attempt,
+        waitedMs: Date.now() - entry.enqueuedAt,
+      });
+    }
+    throw err;
+  } finally {
+    leaveQueue();
+  }
+}
+
 async function runWake(
   wake: WakeRequest,
-  opts: { onRunCreated?: (runId: string) => void } = {},
+  opts: {
+    onRunCreated?: (runId: string) => void;
+    deferredEntry?: DeferredWake;
+    /** Retry of a deferred wake already logged in full: log a short line only. */
+    quiet?: boolean;
+    attempt?: number;
+  } = {},
 ): Promise<WakeResult> {
   const { agentId, companyId, invocationSource, wakeReason, taskId } = wake;
   const tracer = createTraceLogger('wake', {
@@ -362,21 +539,25 @@ async function runWake(
     wakeReason,
   });
 
-  tracer.info('processing wake', {
-    invocationSource,
-    apiBase: getInternalApiUrl(),
-    wake,
-  });
+  if (opts.quiet) {
+    tracer.info('retrying deferred wake', { invocationSource, attempt: opts.attempt });
+  } else {
+    tracer.info('processing wake', {
+      invocationSource,
+      apiBase: getInternalApiUrl(),
+      wake,
+    });
+  }
 
   const agentRecord = await db.query.agents.findFirst({
     where: and(eq(agents.id, agentId), eq(agents.companyId, companyId)),
   });
-  if (!agentRecord) throw new Error(`Agent ${agentId} not found`);
+  if (!agentRecord) throw new WakeTargetMissingError('agent', `Agent ${agentId} not found`);
 
   const agentTracer = tracer.child({ agentName: agentRecord.name });
 
   const company = await db.query.companies.findFirst({ where: eq(companies.id, companyId) });
-  if (!company) throw new Error(`Company ${companyId} not found`);
+  if (!company) throw new WakeTargetMissingError('company', `Company ${companyId} not found`);
 
   // #100: register every company secret value (all agents' runtimeConfig + company settings)
   // so observability scrubs a peer's secret even if it reaches this run's spans.
@@ -423,7 +604,7 @@ async function runWake(
   let assignedIssue: Awaited<ReturnType<typeof db.query.issues.findFirst>> | undefined;
   if (taskId) {
     assignedIssue = await db.query.issues.findFirst({ where: eq(issues.id, taskId) });
-    agentTracer.info('assignment wake target issue', {
+    if (!opts.quiet) agentTracer.info('assignment wake target issue', {
       taskId,
       found: Boolean(assignedIssue),
       identifier: assignedIssue?.identifier,
@@ -462,7 +643,7 @@ async function runWake(
     repo: () => createDrizzleWakeContextRepo({ db, issues, approvals, activityLog, agents }),
   });
 
-  await db.insert(heartbeatRuns).values({
+  const runRow: typeof heartbeatRuns.$inferInsert = {
     id: runId,
     agentId,
     companyId,
@@ -486,7 +667,47 @@ async function runWake(
     },
     startedAt: runStartedAt,
     lastSeenAt: runStartedAt,
+  };
+
+  // Company concurrent-run cap: count + insert under a per-company advisory lock (see run-cap.ts).
+  const maxConcurrentRuns = resolveMaxConcurrentRuns(parseCompanySettings(company.settings));
+  // FIFO: older deferred wakes of this company go first; a fresh wake never jumps them.
+  const olderDeferred = maxConcurrentRuns === null ? 0 : deferredWakesAhead(companyId, opts.deferredEntry);
+  if (olderDeferred > 0) {
+    agentTracer.info('wake deferred: older deferred wakes go first', { olderDeferred, maxConcurrentRuns });
+    return { runId: '', status: 'deferred', errorText: `deferred: ${olderDeferred} older deferred wake(s) go first` };
+  }
+  const slot = await startRunUnderCap<RunCapTx>({
+    cap: maxConcurrentRuns,
+    startUncapped: async () => {
+      await db.insert(heartbeatRuns).values(runRow);
+    },
+    withCompanyLock: (fn) =>
+      db.transaction(async (tx) => {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(${RUN_CAP_LOCK_NAMESPACE}::int4, hashtext(${companyId}::text))`,
+        );
+        return fn(tx);
+      }),
+    countInFlight: async (tx) => {
+      const [row] = await tx
+        .select({ n: sql<number>`count(*)::int` })
+        .from(heartbeatRuns)
+        .where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.status, 'running')));
+      return Number(row?.n ?? 0);
+    },
+    startRun: async (tx) => {
+      await tx.insert(heartbeatRuns).values(runRow);
+    },
   });
+  if (!slot.started) {
+    const errorText = `deferred: company concurrent-run cap reached (${slot.inFlight}/${slot.cap} running)`;
+    agentTracer.info('wake deferred: company concurrent-run cap reached', {
+      inFlight: slot.inFlight,
+      maxConcurrentRuns: slot.cap,
+    });
+    return { runId: '', status: 'deferred', errorText };
+  }
   runTracer.info('heartbeat run created');
   opts.onRunCreated?.(runId);
 
@@ -1248,7 +1469,9 @@ export async function sweepStaleHeartbeatRuns(): Promise<number> {
       errorText: heartbeatStaleErrorText(staleSec),
     })
     .where(and(eq(heartbeatRuns.status, 'running'), lt(heartbeatRuns.lastSeenAt, cutoff)))
-    .returning({ id: heartbeatRuns.id });
+    .returning({ id: heartbeatRuns.id, companyId: heartbeatRuns.companyId });
+  // Swept rows no longer count against a company's concurrent-run cap: retry its deferred wakes.
+  for (const companyId of new Set(stale.map((row) => row.companyId))) notifyRunSlotFreed(companyId);
   return stale.length;
 }
 
@@ -1300,6 +1523,9 @@ export async function forceKillHeartbeat(runId: string, companyId: string): Prom
 
   // Publish update
   await publishHeartbeatRunUpdate(companyId, runId, 'failed', run.agentId);
+
+  // The killed run no longer counts against the company's concurrent-run cap.
+  notifyRunSlotFreed(companyId);
 
   return { success: true, hadController };
 }

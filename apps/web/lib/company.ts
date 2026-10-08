@@ -1,6 +1,12 @@
 import { cookies, headers } from 'next/headers';
 import { db, companies, type Company } from '@tourbillon/db';
-import { ensureCompanyWorkspace, mergeCompanySettings, parseCompanySettings, type CompanySettings } from '@tourbillon/shared';
+import {
+  ensureCompanyWorkspace,
+  mergeCompanySettings,
+  parseCompanySettings,
+  parseMaxConcurrentRunsInput,
+  type CompanySettings,
+} from '@tourbillon/shared';
 import { asc, eq } from 'drizzle-orm';
 import { deriveIssuePrefix, slugifyCompanySlug } from './company-utils';
 import { BOARD_SESSION_COOKIE, hasAgentToken, verifyBoardSessionToken } from './board-auth';
@@ -382,6 +388,32 @@ export async function updateCompanyHitlyGate(
       types: input.types && input.types.length > 0 ? input.types : undefined,
     },
   });
+
+  const [updated] = await db
+    .update(companies)
+    .set({ settings, updatedAt: new Date() })
+    .where(eq(companies.id, companyId))
+    .returning();
+
+  if (!updated) throw new Error('Company not found.');
+  return updated;
+}
+
+/**
+ * Company-wide concurrent-run cap (settings.maxConcurrentRuns, jsonb). Blank/null clears it (no
+ * cap); 0, negatives and non-integers are rejected. Scoped to the given company row only.
+ */
+export async function updateCompanyMaxConcurrentRuns(
+  companyId: string,
+  raw: unknown,
+): Promise<Company> {
+  const parsed = parseMaxConcurrentRunsInput(raw);
+  if (!parsed.ok) throw new Error(parsed.error);
+
+  const company = await db.query.companies.findFirst({ where: eq(companies.id, companyId) });
+  if (!company) throw new Error('Company not found.');
+
+  const settings = mergeCompanySettings(company.settings, { maxConcurrentRuns: parsed.value });
 
   const [updated] = await db
     .update(companies)
