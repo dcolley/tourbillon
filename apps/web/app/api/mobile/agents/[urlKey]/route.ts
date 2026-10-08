@@ -147,6 +147,17 @@ export async function PATCH(
       case 'profile':
         updated = await updateAgentProfile(agent.id, {
           name: String(body.name ?? ''),
+          // Omitted/null/blank title keeps the current value (same as #126 / #127) so a
+          // profile save can never wipe it. Non-strings are passed through and refused
+          // by normalizeAgentTitle (400), not coerced.
+          title:
+            body.title === undefined || body.title === null
+              ? agent.title
+              : typeof body.title === 'string'
+                ? body.title.trim()
+                  ? body.title
+                  : agent.title
+                : body.title,
           urlKey: String(body.urlKey ?? ''),
           reportsToId: (body.reportsToId as string | null | undefined) ?? null,
         });

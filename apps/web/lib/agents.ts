@@ -108,6 +108,31 @@ export class AgentValidationError extends Error {
   }
 }
 
+/** Max length for agent title after trim. Longer values are refused (never truncated). */
+export const AGENT_TITLE_MAX_CHARS = 200;
+
+/**
+ * Validate and normalise an agent title for create/update:
+ * - missing (undefined/null) or empty after trim is refused (title is required, as before);
+ * - any other non-string (number, boolean, object, array) is refused, never coerced;
+ * - trimmed;
+ * - at most AGENT_TITLE_MAX_CHARS characters after trim: longer is refused, never cut.
+ */
+export function normalizeAgentTitle(raw: unknown): string {
+  if (raw === undefined || raw === null) throw new AgentValidationError('Title is required.');
+  if (typeof raw !== 'string') {
+    throw new AgentValidationError('Title must be a string.');
+  }
+  const title = raw.trim();
+  if (!title) throw new AgentValidationError('Title is required.');
+  if (title.length > AGENT_TITLE_MAX_CHARS) {
+    throw new AgentValidationError(
+      `Title must be at most ${AGENT_TITLE_MAX_CHARS} characters.`,
+    );
+  }
+  return title;
+}
+
 export function slugifyUrlKey(value: string): string {
   return value
     .toLowerCase()
@@ -122,7 +147,7 @@ function isValidUrlKey(urlKey: string): boolean {
 
 export interface CreateAgentInput {
   name: string;
-  title: string;
+  title: unknown;
   role: string;
   urlKey?: string;
   companyId?: string;
@@ -141,11 +166,10 @@ function normalizeInstructionField(value: string | undefined | null): string | n
 
 export async function createAgent(input: CreateAgentInput): Promise<Agent> {
   const name = input.name?.trim();
-  const title = input.title?.trim();
   const role = input.role?.trim();
 
   if (!name) throw new AgentValidationError('Name is required.');
-  if (!title) throw new AgentValidationError('Title is required.');
+  const title = normalizeAgentTitle(input.title);
   if (!role || !AGENT_ROLES.includes(role as AgentRole)) {
     throw new AgentValidationError('A valid role is required.');
   }
@@ -714,7 +738,7 @@ export async function updateAgentInstructions(
 
 export interface UpdateAgentProfileInput {
   name: string;
-  title: string;
+  title: unknown;
   urlKey: string;
   reportsToId?: string | null;
 }
@@ -729,8 +753,7 @@ export async function updateAgentProfile(
   const name = input.name?.trim();
   if (!name) throw new AgentValidationError('Name is required.');
 
-  const title = input.title?.trim();
-  if (!title) throw new AgentValidationError('Title is required.');
+  const title = normalizeAgentTitle(input.title);
 
   const urlKey = slugifyUrlKey(input.urlKey?.trim() || '');
   if (!urlKey) throw new AgentValidationError('Agent ID is required.');
