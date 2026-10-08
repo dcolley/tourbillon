@@ -5,15 +5,12 @@ import { eq, and } from 'drizzle-orm';
 import { encryptCredential } from '@tourbillon/shared/vault-encryption';
 import { getActiveCompany } from '@/lib/company';
 import type { OAuthTokens } from '@tourbillon/db/schema';
-import { createHmac } from 'crypto';
-
-function verifyOAuthState(payload: string, signature: string): boolean {
-  const secret = process.env.BETTER_AUTH_SECRET || 'change-me-in-production';
-  const hmac = createHmac('sha256', secret);
-  hmac.update(payload);
-  const expected = hmac.digest('hex');
-  return signature === expected;
-}
+import {
+  OAUTH_NOT_CONFIGURED_ERROR,
+  isOAuthStateSecretConfigured,
+  logOAuthStateSecretMissing,
+  verifyOAuthState,
+} from '@/lib/vault-oauth-state';
 
 /**
  * NextResponse.redirect needs an absolute URL (relative paths throw → 500). Always lands on
@@ -24,6 +21,12 @@ function settingsRedirect(req: NextRequest, pathAndQuery: string): NextResponse 
 }
 
 export async function GET(req: NextRequest) {
+  // #112: fail closed. Without a real BETTER_AUTH_SECRET no state can be trusted.
+  if (!isOAuthStateSecretConfigured()) {
+    logOAuthStateSecretMissing('finish');
+    return settingsRedirect(req, `/settings?oauth_error=${OAUTH_NOT_CONFIGURED_ERROR}`);
+  }
+
   try {
     const { searchParams } = new URL(req.url);
     const code = searchParams.get('code');

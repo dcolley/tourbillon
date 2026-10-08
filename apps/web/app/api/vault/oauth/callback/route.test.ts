@@ -19,6 +19,8 @@ describe('#106 vault OAuth callback redirects', () => {
       return originalRequire.apply(this, arguments as unknown as [string]);
     };
     ({ GET } = await import('./route'));
+    // #112: the callback fails closed without a real secret; these cases test redirects after that.
+    process.env.BETTER_AUTH_SECRET = 'real-better-auth-secret-for-callback-tests-0123';
     Module.prototype.require = originalRequire;
   });
 
