@@ -402,15 +402,18 @@ export async function updateCompanyHitlyGate(
 /**
  * Outbound host allow-list for agent tools. mode 'off' clears it (every host allowed, the
  * default); mode 'list' stores the validated entries (an empty list allows no outbound host).
+ * The only writer of companies.settings.toolEgressAllowList: input is validated before any read
+ * or write, and bad input throws ToolEgressAllowListValidationError with a clear message.
  */
 export async function updateCompanyToolEgressAllowList(
   companyId: string,
   input: { mode: unknown; entries: unknown },
 ): Promise<Company> {
+  const list = resolveToolEgressAllowListInput(input?.mode, input?.entries);
+
   const company = await db.query.companies.findFirst({ where: eq(companies.id, companyId) });
   if (!company) throw new Error('Company not found.');
 
-  const list = resolveToolEgressAllowListInput(input.mode, input.entries);
   const settings = mergeCompanySettings(company.settings, list === null ? {} : { toolEgressAllowList: list });
   // Off: remove the field so every host is allowed again (the default).
   if (list === null) delete settings.toolEgressAllowList;

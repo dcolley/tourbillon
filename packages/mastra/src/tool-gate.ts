@@ -26,6 +26,7 @@ import {
   resolveToolEgressTargets,
   checkToolEgressTarget,
   isToolEgressRestricted,
+  malformedToolEgressAllowListWarning,
   type AgentRuntimeConfig,
   type AllowedToolNames,
   type CompanySettings,
@@ -106,6 +107,8 @@ export interface ToolGateDeps {
   listMcpServers(): McpServerDefinition[];
   /** Outbound URLs a tool call will contact (from configuration); injectable for tests. */
   resolveEgressTargets(names: string[], ctx: ToolEgressTargetContext): string[];
+  /** Server warning line (malformed stored allow-list); injectable for tests. */
+  warn(line: string): void;
   now(): number;
 }
 
@@ -160,6 +163,7 @@ const defaultDeps: ToolGateDeps = {
   getMcpServer: getMcpServerDefinition,
   listMcpServers: listMcpServerDefinitions,
   resolveEgressTargets: resolveToolEgressTargets,
+  warn: (line) => console.warn(line),
   now: () => Date.now(),
 };
 
@@ -170,6 +174,8 @@ interface GateEgress {
   companySettings: CompanySettings;
   agentRuntime: AgentRuntimeConfig;
   mcpServers: McpServerDefinition[];
+  /** Diagnostic line (ids only) when a stored list is malformed; logged once per cache refresh. */
+  malformedWarning: string | null;
 }
 
 interface GateState {
@@ -239,14 +245,21 @@ function computeAllowed(
     .filter((def): def is McpServerDefinition => Boolean(def));
   const companySettings = parseCompanySettings(company.settings);
   const agentRuntime = (agent.runtimeConfig ?? {}) as AgentRuntimeConfig;
+  const egress: GateEgress = {
+    policy: resolveToolEgressPolicy(companySettings, agentRuntime),
+    companySettings,
+    agentRuntime,
+    mcpServers,
+    malformedWarning: malformedToolEgressAllowListWarning({
+      companyId: company.id,
+      companyList: (company.settings as Record<string, unknown> | null | undefined)?.toolEgressAllowList,
+      agentId: agent.id,
+      agentList: agentRuntime.toolEgressAllowList,
+    }),
+  };
   return {
     allowed: resolveAllowedToolNames(agent, { settings: companySettings }, { mcpServers }),
-    egress: {
-      policy: resolveToolEgressPolicy(companySettings, agentRuntime),
-      companySettings,
-      agentRuntime,
-      mcpServers,
-    },
+    egress,
   };
 }
 
@@ -278,6 +291,7 @@ async function loadState(ctx: ToolGateContext): Promise<GateState | ToolGateReas
     };
     if (stateCache.size >= MAX_CACHED_AGENTS) stateCache.delete(stateCache.keys().next().value as string);
     stateCache.set(key, state);
+    if (state.egress.malformedWarning) deps.warn(state.egress.malformedWarning);
     return state;
   })();
   inflight.set(key, load);

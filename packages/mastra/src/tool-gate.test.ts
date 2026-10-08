@@ -51,6 +51,7 @@ type CompanyRow = { id: string; status: 'active' | 'paused' | 'archived'; settin
 const agentRows = new Map<string, AgentRow>();
 const companyRows = new Map<string, CompanyRow>();
 const deniedRows: Array<Record<string, unknown>> = [];
+const gateWarnings: string[] = [];
 const fetchCalls: string[] = [];
 const mcpCalls: string[] = [];
 const unlistedCalls: string[] = [];
@@ -294,8 +295,12 @@ beforeEach(() => {
     recordDenied: async (row) => {
       deniedRows.push({ ...row });
     },
+    warn: (line) => {
+      gateWarnings.push(line);
+    },
     now: () => clock,
   });
+  gateWarnings.length = 0;
   seedMastra();
 });
 
@@ -942,6 +947,98 @@ describe('tool permission gate: outbound host allow-list', () => {
     const mcpFetch = mcp.createMcpHttpFetch('k', undefined, shared.resolveToolEgressPolicy({ toolEgressAllowList: ['mcp.buffer.com'] }));
     await assert.rejects(() => mcpFetch('https://mcp.buffer.com/mcp', { method: 'POST', body: '{}' }), shared.ToolEgressBlockedError);
     assert.deepEqual(hops, ['https://mcp.buffer.com/mcp']);
+  });
+
+  it('the MCP HTTP fetch logs one warning with the server name and blocked host only', async () => {
+    globalThis.fetch = (async () =>
+      new Response(null, { status: 302, headers: { location: 'https://elsewhere.example:8443/private/path?token=abc#frag' } })) as typeof fetch;
+    const warned: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warned.push(args.map(String).join(' '));
+    };
+    try {
+      const mcpFetch = mcp.createMcpHttpFetch(
+        'k',
+        undefined,
+        shared.resolveToolEgressPolicy({ toolEgressAllowList: ['mcp.buffer.com'] }),
+        'buffer-mcp',
+      );
+      await assert.rejects(() => mcpFetch('https://mcp.buffer.com/mcp?session=s1', { method: 'POST', body: '{}' }), shared.ToolEgressBlockedError);
+    } finally {
+      console.warn = realWarn;
+    }
+    assert.equal(warned.length, 1);
+    assert.equal(warned[0], '[mcp-tools] MCP server buffer-mcp: blocked outbound host elsewhere.example (not on the tool allow-list)');
+    for (const leak of ['/private', 'path', 'token', 'abc', 'frag', 'session', '8443', 'agent']) {
+      assert.ok(!warned[0]!.includes(leak), leak);
+    }
+  });
+
+  it('the MCP HTTP fetch logs nothing when the request stays on the list', async () => {
+    globalThis.fetch = (async () => new Response('{}', { status: 200 })) as typeof fetch;
+    const warned: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warned.push(args.map(String).join(' '));
+    };
+    try {
+      const mcpFetch = mcp.createMcpHttpFetch('k', undefined, shared.resolveToolEgressPolicy({ toolEgressAllowList: ['mcp.buffer.com'] }), 'buffer-mcp');
+      assert.equal((await mcpFetch('https://mcp.buffer.com/mcp', { method: 'POST', body: '{}' })).status, 200);
+    } finally {
+      console.warn = realWarn;
+    }
+    assert.deepEqual(warned, []);
+  });
+
+  it('a malformed stored company list fails closed and logs one id-only warning per cache refresh', async () => {
+    const a = makeAgent('agent-egress-malformed', COMPANY_A, { assignedToolsets: ['web-search'] });
+    editCompany(COMPANY_A, {
+      settings: { searxngUrl: 'http://searxng.test', toolEgressAllowList: { hosts: ['searxng.test'] } },
+    });
+    const input = { agentId: a.id, companyId: COMPANY_A, surface: 'heartbeat' as const, toolName: 'searxngSearchTool', requestContext: contextFor(a) };
+    assert.deepEqual(await gate.checkToolPermission(input), { allowed: false, reason: 'egress_not_allowed', host: 'searxng.test' });
+    assert.equal((await gate.checkToolPermission(input)).allowed, false);
+    assert.deepEqual(gateWarnings, [
+      `[tool-egress] malformed outbound host allow-list for company ${COMPANY_A}; unreadable entries match no host until the list is saved again`,
+    ]);
+    clock += gate.TOOL_GATE_CACHE_TTL_MS;
+    assert.equal((await gate.checkToolPermission(input)).allowed, false);
+    assert.equal(gateWarnings.length, 2, 'one more line after the cache refresh');
+    assert.ok(gateWarnings.every((line) => !line.includes('searxng.test') && !line.includes('hosts')));
+  });
+
+  it('a malformed stored agent list names the agent id only; a valid list logs nothing', async () => {
+    const a = makeAgent('agent-egress-malformed-agent', COMPANY_A, {
+      assignedToolsets: ['web-search'],
+      runtimeConfig: { toolEgressAllowList: ['searxng.test', 42] as never },
+    } as never);
+    editCompany(COMPANY_A, { settings: { searxngUrl: 'http://searxng.test' } });
+    const input = { agentId: a.id, companyId: COMPANY_A, surface: 'chat' as const, toolName: 'searxngSearchTool', requestContext: contextFor(a) };
+    // The readable entry still applies; the unreadable one matches nothing.
+    assert.deepEqual(await gate.checkToolPermission(input), { allowed: true });
+    assert.deepEqual(gateWarnings, [
+      `[tool-egress] malformed outbound host allow-list for agent ${a.id}; unreadable entries match no host until the list is saved again`,
+    ]);
+    gateWarnings.length = 0;
+    const b = makeAgent('agent-egress-valid-list', COMPANY_A, {
+      assignedToolsets: ['web-search'],
+      runtimeConfig: { toolEgressAllowList: ['searxng.test'] },
+    } as never);
+    assert.deepEqual(await gate.checkToolPermission({ ...input, agentId: b.id, requestContext: contextFor(b) }), { allowed: true });
+    assert.deepEqual(gateWarnings, []);
+  });
+
+  it('an IPv6 tool host is allowed under allow-all and refused under a list', async () => {
+    const a = makeAgent('agent-egress-ipv6', COMPANY_A, { assignedToolsets: ['web-search'] });
+    const input = { agentId: a.id, companyId: COMPANY_A, surface: 'heartbeat' as const, toolName: 'searxngSearchTool', requestContext: contextFor(a) };
+    editCompany(COMPANY_A, { settings: { searxngUrl: 'http://[2001:db8::5]:8080' } });
+    assert.deepEqual(await gate.checkToolPermission(input), { allowed: true });
+    editCompany(COMPANY_A, { settings: { searxngUrl: 'http://[2001:db8::5]:8080', toolEgressAllowList: ['searxng.test'] } });
+    clock += gate.TOOL_GATE_CACHE_TTL_MS;
+    const denied = await gate.checkToolPermission(input);
+    assert.equal(denied.allowed, false);
+    assert.equal(denied.reason, 'egress_not_allowed');
   });
 
   it('a mid-run list change is seen after the cache window', async () => {

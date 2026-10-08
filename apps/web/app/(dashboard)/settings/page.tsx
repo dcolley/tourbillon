@@ -9,7 +9,7 @@ import {
   requireBoardSession,
 } from '@/lib/company';
 import { ToolEgressAllowListFields } from '@/components/tool-egress-allow-list-fields';
-import { parseToolEgressFormData } from '@/lib/tool-egress-form';
+import { parseToolEgressFormData, toolEgressSavedMessage } from '@/lib/tool-egress-form';
 import { getVaultCredentialStatus } from '@/lib/vault';
 import { invalidateChatControllersForCompany } from '@/lib/chat';
 import {
@@ -91,10 +91,10 @@ async function saveToolEgressAllowList(
   const company = await getActiveCompany();
 
   try {
-    await updateCompanyToolEgressAllowList(company.id, parseToolEgressFormData(formData));
+    const updated = await updateCompanyToolEgressAllowList(company.id, parseToolEgressFormData(formData));
     // MCP clients are keyed by the list; rebuild cached chat controllers.
     invalidateChatControllersForCompany(company.id);
-    return actionSuccess('Outbound host allow-list saved.');
+    return actionSuccess(toolEgressSavedMessage(parseCompanySettings(updated.settings).toolEgressAllowList));
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Failed to save the outbound host allow-list.';
     return actionError(message);

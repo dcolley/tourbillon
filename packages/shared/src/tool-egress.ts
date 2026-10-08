@@ -24,6 +24,8 @@ import { readStoredToolEgressAllowList, resolveSearxngBaseUrl } from './company-
 import { SEARXNG_TOOLSET_TOOL_IDS, TAVILY_TOOLSET_TOOL_IDS, NITTER_TOOLSET_TOOL_IDS, toolKeyForId } from './tool-permissions';
 
 export const TOOL_EGRESS_MAX_ENTRIES = 200;
+/** Raw entries accepted per save before de-duplication (bounds work on oversized input). */
+export const TOOL_EGRESS_MAX_RAW_ENTRIES = 1000;
 export const TOOL_EGRESS_MAX_REDIRECTS = 5;
 export const TAVILY_API_ORIGIN = 'https://api.tavily.com';
 
@@ -31,7 +33,23 @@ export const TOOL_EGRESS_ALLOW_LIST_HELP = [
   'One host per line: search.example.com, *.example.com (subdomains only) or an IPv4 address',
   'Add :port to allow only that port; without a port every port is allowed',
   'Leave the list off to allow every host (default)',
+  'Not enforced for local (stdio) MCP servers',
 ] as const;
+
+/** Refused allow-list input on save (bad mode, list shape or entry). The message names the problem. */
+export class ToolEgressAllowListValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ToolEgressAllowListValidationError';
+  }
+}
+
+export function isToolEgressAllowListValidationError(err: unknown): err is ToolEgressAllowListValidationError {
+  return (
+    err instanceof ToolEgressAllowListValidationError ||
+    (err instanceof Error && err.name === 'ToolEgressAllowListValidationError')
+  );
+}
 
 export type ToolEgressEntryKind = 'host' | 'wildcard' | 'ipv4';
 
@@ -135,31 +153,52 @@ export function parseToolEgressEntry(raw: string): ToolEgressEntryParseResult {
   return { ok: true, entry: `${ascii}${portSuffix}`, parsed: { kind: 'host', host: ascii, port } };
 }
 
-/** Validate a list for saving: canonical entries, de-duplicated. Throws with the bad entry. */
+/**
+ * Validate a list for saving: canonical entries, de-duplicated. Throws
+ * {@link ToolEgressAllowListValidationError} naming the bad entry or shape.
+ */
 export function sanitizeToolEgressAllowList(entries: unknown): string[] {
-  if (!Array.isArray(entries)) throw new Error('The allow-list must be a list of hosts.');
+  if (!Array.isArray(entries)) {
+    throw new ToolEgressAllowListValidationError('The allow-list must be a list of hosts.');
+  }
+  if (entries.length > TOOL_EGRESS_MAX_RAW_ENTRIES) {
+    throw new ToolEgressAllowListValidationError(`At most ${TOOL_EGRESS_MAX_ENTRIES} entries are allowed.`);
+  }
   const seen = new Set<string>();
   const out: string[] = [];
   for (const raw of entries) {
-    if (typeof raw !== 'string') throw new Error('Each allow-list entry must be a string.');
+    if (typeof raw !== 'string') {
+      throw new ToolEgressAllowListValidationError('Each allow-list entry must be a string.');
+    }
     const parsed = parseToolEgressEntry(raw);
-    if (!parsed.ok) throw new Error(`${raw.trim().slice(0, 100) || '(empty)'}: ${parsed.error}`);
+    if (!parsed.ok) {
+      throw new ToolEgressAllowListValidationError(`${raw.trim().slice(0, 100) || '(empty)'}: ${parsed.error}`);
+    }
     if (seen.has(parsed.entry)) continue;
     seen.add(parsed.entry);
     out.push(parsed.entry);
   }
   if (out.length > TOOL_EGRESS_MAX_ENTRIES) {
-    throw new Error(`At most ${TOOL_EGRESS_MAX_ENTRIES} entries are allowed.`);
+    throw new ToolEgressAllowListValidationError(`At most ${TOOL_EGRESS_MAX_ENTRIES} entries are allowed.`);
   }
   return out;
 }
 
 export type ToolEgressMode = 'off' | 'list';
 
-/** Form/API input → stored value. `null` = off (allow every host); an array (even empty) = list. */
+/**
+ * Form/API input → stored value, validated on every write. `null` = off (allow every host);
+ * an array (even empty) = list. The mode must be given explicitly ('off' or 'list'), so a
+ * missing field never clears a list. Throws {@link ToolEgressAllowListValidationError}.
+ */
 export function resolveToolEgressAllowListInput(mode: unknown, entries: unknown): string[] | null {
-  if (mode === 'off' || mode === undefined || mode === null) return null;
-  if (mode !== 'list') throw new Error('Mode must be off or list.');
+  if (mode === 'off') {
+    if (entries !== undefined && entries !== null && !Array.isArray(entries)) {
+      throw new ToolEgressAllowListValidationError('The allow-list must be a list of hosts.');
+    }
+    return null;
+  }
+  if (mode !== 'list') throw new ToolEgressAllowListValidationError("Mode must be 'off' or 'list'.");
   return sanitizeToolEgressAllowList(entries);
 }
 
@@ -199,6 +238,34 @@ export function resolveToolEgressPolicy(
   if (company) policy.company = company;
   if (agent) policy.agent = agent;
   return policy;
+}
+
+/**
+ * True when a stored list value (raw JSON, before parsing) is set but not a list of valid
+ * entries: not an array, a non-string item, or an entry that does not parse. Such a value
+ * stays restrictive (unreadable entries match no host); this only drives a diagnostic.
+ */
+export function isStoredToolEgressAllowListMalformed(raw: unknown): boolean {
+  if (raw === undefined || raw === null) return false;
+  if (!Array.isArray(raw)) return true;
+  return raw.some((item) => typeof item !== 'string' || !parseToolEgressEntry(item).ok);
+}
+
+/**
+ * One diagnostic line when a stored company or agent list is malformed, naming only the ids;
+ * null when both are fine. Never includes the stored entries.
+ */
+export function malformedToolEgressAllowListWarning(input: {
+  companyId?: string | null;
+  companyList?: unknown;
+  agentId?: string | null;
+  agentList?: unknown;
+}): string | null {
+  const parts: string[] = [];
+  if (input.companyId && isStoredToolEgressAllowListMalformed(input.companyList)) parts.push(`company ${input.companyId}`);
+  if (input.agentId && isStoredToolEgressAllowListMalformed(input.agentList)) parts.push(`agent ${input.agentId}`);
+  if (parts.length === 0) return null;
+  return `[tool-egress] malformed outbound host allow-list for ${parts.join(', ')}; unreadable entries match no host until the list is saved again`;
 }
 
 export function isToolEgressRestricted(policy: ToolEgressPolicy | null | undefined): boolean {

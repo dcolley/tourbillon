@@ -8,10 +8,13 @@ import {
   resolveToolEgressAllowListInput,
   resolveToolEgressPolicy,
   isToolEgressRestricted,
+  isStoredToolEgressAllowListMalformed,
+  malformedToolEgressAllowListWarning,
   checkToolEgressTarget,
   parseToolEgressTarget,
   fetchWithToolEgress,
   ToolEgressBlockedError,
+  ToolEgressAllowListValidationError,
   resolveToolEgressTargets,
   TAVILY_API_ORIGIN,
   TOOL_EGRESS_COVERED_TOOL_IDS,
@@ -62,6 +65,51 @@ describe('sanitizeToolEgressAllowList / resolveToolEgressAllowListInput', () => 
     ]);
     assert.equal(resolveToolEgressAllowListInput('off', ['example.com']), null);
     assert.deepEqual(resolveToolEgressAllowListInput('list', []), []);
+  });
+
+  it('refuses bad write shapes with a clear ToolEgressAllowListValidationError', () => {
+    const refused = (fn: () => unknown, pattern: RegExp) =>
+      assert.throws(fn, (err: unknown) => err instanceof ToolEgressAllowListValidationError && pattern.test(err.message));
+    refused(() => resolveToolEgressAllowListInput('list', 'ok.example'), /must be a list of hosts/);
+    refused(() => resolveToolEgressAllowListInput('list', { hosts: ['ok.example'] }), /must be a list of hosts/);
+    refused(() => resolveToolEgressAllowListInput('list', undefined), /must be a list of hosts/);
+    refused(() => resolveToolEgressAllowListInput('list', ['ok.example', 7]), /must be a string/);
+    refused(() => resolveToolEgressAllowListInput('list', ['ok.example', null]), /must be a string/);
+    refused(() => resolveToolEgressAllowListInput('list', ['https://bad.example/x']), /bad\.example.*not a URL/);
+    refused(() => resolveToolEgressAllowListInput('list', Array.from({ length: 1001 }, (_, i) => `h${i}.example`)), /At most/);
+    refused(() => resolveToolEgressAllowListInput('list', Array.from({ length: 201 }, (_, i) => `h${i}.example`)), /At most 200/);
+    refused(() => resolveToolEgressAllowListInput('maybe', []), /Mode must be 'off' or 'list'/);
+    // A missing mode never clears a list silently.
+    refused(() => resolveToolEgressAllowListInput(undefined, []), /Mode must be/);
+    refused(() => resolveToolEgressAllowListInput(null, ['ok.example']), /Mode must be/);
+    refused(() => resolveToolEgressAllowListInput('off', 'ok.example'), /must be a list of hosts/);
+  });
+
+  it('detects a malformed stored list; the warning names ids only', () => {
+    assert.equal(isStoredToolEgressAllowListMalformed(undefined), false);
+    assert.equal(isStoredToolEgressAllowListMalformed(null), false);
+    assert.equal(isStoredToolEgressAllowListMalformed([]), false);
+    assert.equal(isStoredToolEgressAllowListMalformed(['ok.example', '*.ok.example:443']), false);
+    assert.equal(isStoredToolEgressAllowListMalformed('ok.example'), true);
+    assert.equal(isStoredToolEgressAllowListMalformed({ hosts: [] }), true);
+    assert.equal(isStoredToolEgressAllowListMalformed(['ok.example', 7]), true);
+    assert.equal(isStoredToolEgressAllowListMalformed(['https://secret-host.example/x?k=v']), true);
+    const line = malformedToolEgressAllowListWarning({
+      companyId: 'co-1',
+      companyList: ['https://secret-host.example/x?k=v'],
+      agentId: 'ag-1',
+      agentList: ['ok.example'],
+    });
+    assert.equal(
+      line,
+      '[tool-egress] malformed outbound host allow-list for company co-1; unreadable entries match no host until the list is saved again',
+    );
+    assert.match(
+      malformedToolEgressAllowListWarning({ companyId: 'co-1', companyList: 5, agentId: 'ag-1', agentList: 'x' })!,
+      /for company co-1, agent ag-1;/,
+    );
+    assert.equal(malformedToolEgressAllowListWarning({ companyId: 'co-1', companyList: ['ok.example'] }), null);
+    assert.equal(malformedToolEgressAllowListWarning({ companyId: 'co-1' }), null);
   });
 });
 
@@ -124,6 +172,36 @@ describe('checkToolEgressTarget', () => {
     const empty = resolveToolEgressPolicy({ toolEgressAllowList: [] });
     assert.equal(isToolEgressRestricted(empty), true);
     assert.equal(checkToolEgressTarget(empty, 'https://api.example.com/').allowed, false);
+  });
+
+  it('IPv6 hosts are refused under "Only these hosts" and allowed under allow-all', () => {
+    const open = resolveToolEgressPolicy({});
+    for (const url of ['https://[2001:db8::1]/', 'http://[::1]:8080/p', 'http://[::ffff:203.0.113.7]/']) {
+      assert.equal(checkToolEgressTarget(open, url).allowed, true, url);
+      assert.equal(checkToolEgressTarget(null, url).allowed, true, url);
+    }
+    // IPv6 cannot be listed: the entry is refused on save, and an IPv6 destination is refused
+    // while any list is set, even one that allows other hosts.
+    assert.equal(parseToolEgressEntry('[2001:db8::1]').ok, false);
+    assert.equal(parseToolEgressEntry('2001:db8::1').ok, false);
+    const listed = resolveToolEgressPolicy({ toolEgressAllowList: ['api.example.com', '203.0.113.7'] });
+    for (const url of ['https://[2001:db8::1]/', 'http://[::1]:8080/p', 'http://[::ffff:203.0.113.7]/']) {
+      assert.equal(checkToolEgressTarget(listed, url).allowed, false, url);
+    }
+  });
+
+  it('IPv4 entries match that exact address only', () => {
+    const ip = resolveToolEgressPolicy({ toolEgressAllowList: ['203.0.113.7'] });
+    assert.equal(checkToolEgressTarget(ip, 'http://203.0.113.7/').allowed, true);
+    assert.equal(checkToolEgressTarget(ip, 'https://203.0.113.7:8443/').allowed, true);
+    for (const url of ['http://203.0.113.70/', 'http://203.0.113.8/', 'http://1.203.0.113.7/', 'http://203.0.113.7.nip.io/']) {
+      assert.equal(checkToolEgressTarget(ip, url).allowed, false, url);
+    }
+    // A host entry never matches an IP, and wildcards cannot be written for IPs.
+    const host = resolveToolEgressPolicy({ toolEgressAllowList: ['*.example.com'] });
+    assert.equal(checkToolEgressTarget(host, 'http://203.0.113.7/').allowed, false);
+    assert.equal(parseToolEgressEntry('*.203.0.113.7').ok, false);
+    assert.equal(parseToolEgressEntry('203.0.113.*').ok, false);
   });
 });
 

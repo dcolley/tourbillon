@@ -167,6 +167,14 @@ describe('tool egress: settings form', () => {
 
   it('save-time validation names the bad entry', () => {
     assert.throws(() => shared.resolveToolEgressAllowListInput('list', ['ok.example', 'https://bad.example/x']), /bad\.example.*not a URL/);
+    assert.throws(() => shared.resolveToolEgressAllowListInput('list', { hosts: [] }), /must be a list of hosts/);
+    assert.throws(() => shared.resolveToolEgressAllowListInput(undefined, []), /Mode must be/);
     assert.equal(shared.resolveToolEgressAllowListInput('off', ['ignored']), null);
+  });
+
+  it('save confirmation warns when Only these hosts is saved empty', () => {
+    assert.match(form.toolEgressSavedMessage([]), /empty list/);
+    assert.equal(form.toolEgressSavedMessage(undefined), 'Outbound host allow-list saved.');
+    assert.equal(form.toolEgressSavedMessage(['ok.example']), 'Outbound host allow-list saved.');
   });
 });

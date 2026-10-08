@@ -184,6 +184,18 @@ Two orthogonal agent settings:
 
 Workspace tools are separate from execution sandbox (shared docs vs ephemeral scratch).
 
+## Outbound hosts for agent tools
+
+Companies (and optionally agents) can limit which hosts agent tools may contact. Unset = every host allowed (default). Stored as `companies.settings.toolEgressAllowList` and `agents.runtimeConfig.toolEgressAllowList` (JSON; no schema change). An agent list can only narrow the company list: a host must match both when both are set.
+
+**Covered:** SearXNG, Tavily, Nitter, and HTTP MCP servers (e.g. Buffer). The gate checks the configured host before the tool runs; each request and redirect hop is checked where it is made. Code-execution sandbox egress is separate (its own allow-list).
+
+**Not covered:** Platform integrations such as HITLy (board-configured, not a tool host). Local (stdio) MCP servers are not enforced; the settings UI notes this next to the list.
+
+**Entries:** exact host, leading `*.domain` (subdomains only — does not match the apex), or dotted-decimal IPv4, each with an optional `:port`. Case-insensitive; IDN → punycode. While a list is set: refuse userinfo, non-http(s), IPv6 literals (allowed under allow-all), other IPv4 notations, trailing-dot and percent-encoded hosts. IPv4 entries match that exact address only.
+
+**Fail-closed:** "Only these hosts" with an empty list allows no outbound host (UI warns). A malformed stored value still restricts (unreadable entries match no host) and writes one server warning line naming the company or agent id on gate cache refresh. Bad input is refused on every write with a clear error. Blocked MCP redirects write one server warning with the MCP server name and blocked host only.
+
 ## Governance and Approvals
 
 Three distinct approval paths:

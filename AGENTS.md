@@ -151,6 +151,7 @@ Two **orthogonal** agent settings (configured on the agent detail page under **C
 - **Agent + code-execution** — quick scripts/tests in a per-issue sandbox directory.
 - **AgentController (`harness_local`) + code-execution** — multi-heartbeat coding; controller threads persist on the same issue via Session.
 - Company workspace tools (`listWorkspaceFiles`, etc.) are separate from the execution sandbox (shared docs vs ephemeral scratch).
+- Outbound hosts for agent tools (SearXNG / Tavily / Nitter / HTTP MCP): optional company + agent allow-lists; see `docs/architecture.md` § Outbound hosts for agent tools. Platform integrations (e.g. HITLy) and local (stdio) MCP servers are not covered.
 
 Env: `EXECUTION_WORKSPACE_ROOT`, `SANDBOX_ISOLATION` (`none` \| `seatbelt` \| `bwrap`), `SANDBOX_COMMAND_TIMEOUT_MS`. Per-agent overrides: `runtimeConfig.codeExecution`.
 

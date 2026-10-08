@@ -7,7 +7,7 @@ import type { AgentRuntimeConfig, ObservationalMemorySettings } from '@tourbillo
 import { modelProviderOverridesFromAgent, resolveModelProviderConfig, isAgentBudgetEnforced, isAgentBudgetExceeded, agentRuntimeLabel, agentRuntimeFromAdapter, resolveAssignedTools, modelSettingsFromFormData, isCodeExecutionAvailable, formatExecutionWorkspacePathPreview, parseCompanySettings } from '@tourbillon/shared';
 import { AgentValidationError, AGENT_ROLE_OPTIONS, getAgentByUrlKey, listAgentsByUrlKey, updateAgentRuntimeConfig, updateAgentCapabilities, updateAgentBudget, updateAgentInstructions, updateAgentModel, updateAgentModelSettings, updateAgentProfile, updateAgentCodeExecution, updateAgentToolEgressAllowList, cloneAgent, suggestCloneUrlKey } from '@/lib/agents';
 import { ToolEgressAllowListFields } from '@/components/tool-egress-allow-list-fields';
-import { parseToolEgressFormData } from '@/lib/tool-egress-form';
+import { parseToolEgressFormData, toolEgressSavedMessage } from '@/lib/tool-egress-form';
 import { parseCodeExecutionFormData } from '@/lib/code-execution-config';
 import { actionError, actionSuccess, type ActionResult } from '@/lib/action-result';
 import { AgentDisambiguation } from '@/components/agent-disambiguation';
@@ -238,15 +238,17 @@ async function updateToolEgressConfig(
   await requireBoardSession();
 
   const agentId = formData.get('agentId') as string;
+  let saved: string[] | undefined;
   try {
-    await updateAgentToolEgressAllowList(agentId, parseToolEgressFormData(formData));
+    const updated = await updateAgentToolEgressAllowList(agentId, parseToolEgressFormData(formData));
+    saved = (updated.runtimeConfig as AgentRuntimeConfig | null)?.toolEgressAllowList;
   } catch (err) {
     return actionError(
       err instanceof AgentValidationError ? err.message : 'Failed to save the outbound host allow-list.',
     );
   }
 
-  return actionSuccess('Outbound host allow-list saved.');
+  return actionSuccess(toolEgressSavedMessage(saved));
 }
 
 async function updateBudgetConfig(

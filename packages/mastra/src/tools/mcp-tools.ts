@@ -8,6 +8,7 @@ import type { AgentRuntimeConfig, CompanySettings, McpServerDefinition } from '@
 import {
   checkToolEgressTarget,
   fetchWithToolEgress,
+  isToolEgressBlockedError,
   isToolEgressRestricted,
   resolveToolEgressPolicy,
   toolEgressPolicyKey,
@@ -43,12 +44,15 @@ export function primeMcpClientCacheForTests(key: string, client: { listTools(): 
 
 /**
  * fetch for an HTTP MCP server. With a tool egress allow-list set, every request and redirect hop
- * must stay on the list (fetchWithToolEgress); without one, plain fetch as before.
+ * must stay on the list (fetchWithToolEgress); without one, plain fetch as before. A blocked hop
+ * writes one server warning line with the MCP server name and the blocked host only (no path,
+ * query or agent), then the error is rethrown.
  */
 export function createMcpHttpFetch(
   apiKey: string | undefined,
   extraHeaders?: Record<string, string>,
   egressPolicy?: ToolEgressPolicy,
+  serverName?: string,
 ) {
   return async (url: string | URL, init?: RequestInit) => {
     const headers = new Headers(init?.headers);
@@ -61,7 +65,16 @@ export function createMcpHttpFetch(
       headers.set('Authorization', `Bearer ${apiKey}`);
     }
     if (isToolEgressRestricted(egressPolicy)) {
-      return fetchWithToolEgress(url, { ...init, headers }, egressPolicy);
+      try {
+        return await fetchWithToolEgress(url, { ...init, headers }, egressPolicy);
+      } catch (err) {
+        if (isToolEgressBlockedError(err)) {
+          console.warn(
+            `[mcp-tools] MCP server ${serverName ?? 'unknown'}: blocked outbound host ${err.host ?? 'unknown'} (not on the tool allow-list)`,
+          );
+        }
+        throw err;
+      }
     }
     return fetch(url, { ...init, headers });
   };
@@ -166,7 +179,7 @@ function getGenericHttpClient(
     servers: {
       [serverKeyForClient(serverId)]: {
         url,
-        fetch: createMcpHttpFetch(apiKey, def.headers, egressPolicy),
+        fetch: createMcpHttpFetch(apiKey, def.headers, egressPolicy, serverId),
       },
     },
   });
