@@ -7,7 +7,14 @@ import {
   reduceChatStreamMessages,
   type ChatMessage,
 } from './use-agent-chat-session';
-import { chatStreamRunningFor, type ChatStreamEvent } from './chat-stream-events';
+import {
+  applyMessageUpdate,
+  chatStreamEffectsFor,
+  chatStreamRunningFor,
+  isForeignThreadMessage,
+  MAX_PART_INDEX,
+  type ChatStreamEvent,
+} from './chat-stream-events';
 
 /**
  * Event sequence a real Mastra 1.75 session emits for one user turn answered "Hello world"
@@ -124,5 +131,89 @@ describe('agent chat stream renders the reply in the open session', () => {
     assert.equal(a, start);
     const b = reduceChatStreamMessages(start, ds(false, { ...assistant('stale'), id: 'old' }));
     assert.equal(b, start);
+  });
+});
+
+describe('stream thread guard, hook effects and input bounds', () => {
+  const OPEN = 'thread-open';
+  const OTHER = 'thread-other';
+  const m = (id: string, text: string, extra: Partial<ChatMessage> = {}): ChatMessage => ({
+    id,
+    role: 'assistant',
+    content: { format: 2, parts: [{ type: 'text', text }] },
+    createdAt: '2026-10-16T18:00:00.000Z',
+    ...extra,
+  });
+  const snap = (isRunning: boolean, currentMessage: unknown): ChatStreamEvent => ({
+    type: 'display_state_changed',
+    displayState: { isRunning, currentMessage },
+  });
+
+  it('B1: live snapshot from another thread does not render in the open thread', () => {
+    const prev = [m('a', 'mine', { threadId: OPEN })];
+    const next = reduceChatStreamMessages(prev, snap(true, m('x', 'foreign', { threadId: OTHER })), OPEN);
+    assert.equal(next, prev);
+  });
+
+  it('B1: full-message events from another thread are skipped', () => {
+    const prev: ChatMessage[] = [];
+    for (const type of ['message_start', 'message_update', 'message_end']) {
+      const next = reduceChatStreamMessages(prev, { type, message: m('x', 'foreign', { threadId: OTHER }) }, OPEN);
+      assert.equal(next, prev, type);
+    }
+  });
+
+  it('B1: same-thread and untagged messages still render', () => {
+    const a = reduceChatStreamMessages([], snap(true, m('x', 'same', { threadId: OPEN })), OPEN);
+    assert.equal(chatMessagePlainText(a[0]!), 'same');
+    const b = reduceChatStreamMessages([], { type: 'message_start', message: m('y', 'untagged') }, OPEN);
+    assert.equal(b.length, 1);
+    assert.equal(isForeignThreadMessage(m('z', '', { threadId: OTHER }), null), false);
+  });
+
+  it('hook: agent_end reloads the open thread; nothing else does', () => {
+    assert.deepEqual(chatStreamEffectsFor({ type: 'agent_end' }, OPEN), { running: false, reloadThreadId: OPEN });
+    assert.equal(chatStreamEffectsFor({ type: 'agent_end' }, null).reloadThreadId, null);
+    assert.equal(chatStreamEffectsFor({ type: 'agent_start' }, OPEN).reloadThreadId, null);
+    assert.equal(chatStreamEffectsFor(snap(false, null), OPEN).reloadThreadId, null);
+  });
+
+  it('hook: running state from agent_start, agent_end and display snapshots', () => {
+    assert.equal(chatStreamEffectsFor({ type: 'agent_start' }, OPEN).running, true);
+    assert.equal(chatStreamEffectsFor({ type: 'agent_end' }, OPEN).running, false);
+    assert.equal(chatStreamEffectsFor(snap(true, null), OPEN).running, true);
+    assert.equal(chatStreamEffectsFor(snap(false, null), OPEN).running, false);
+    assert.equal(chatStreamEffectsFor({ type: 'message_update', id: 'a' }, OPEN).running, undefined);
+  });
+
+  it('delta after a non-text part opens a new text part; consecutive deltas extend it', () => {
+    let msg: ChatMessage = { id: 'a', role: 'assistant', content: { parts: [{ type: 'tool-call' }] } };
+    msg = applyMessageUpdate(msg, { type: 'text-delta', delta: 'He' });
+    msg = applyMessageUpdate(msg, { type: 'text-delta', delta: 'llo' });
+    assert.deepEqual(msg.content.parts, [{ type: 'tool-call' }, { type: 'text', text: 'Hello' }]);
+  });
+
+  it('rejects negative, huge, gapped indexes and non-string deltas', () => {
+    const msg = m('a', 'x');
+    const part = { type: 'text', text: 'BAD' };
+    assert.equal(applyMessageUpdate(msg, { type: 'part', index: -1, part }), msg);
+    assert.equal(applyMessageUpdate(msg, { type: 'part', index: MAX_PART_INDEX + 1, part }), msg);
+    assert.equal(applyMessageUpdate(msg, { type: 'part', index: 5, part }), msg);
+    assert.equal(applyMessageUpdate(msg, { type: 'text-delta', delta: 42 }), msg);
+    const appended = applyMessageUpdate(msg, { type: 'part', index: 1, part });
+    assert.equal(appended.content.parts?.length, 2);
+  });
+
+  it('ignores user-role snapshots', () => {
+    const prev: ChatMessage[] = [];
+    assert.equal(reduceChatStreamMessages(prev, snap(true, { ...m('u', 'hi'), role: 'user' })), prev);
+  });
+});
+
+describe('stream thread guard without an explicit open thread', () => {
+  it('uses the thread of the messages already shown', () => {
+    const prev: ChatMessage[] = [{ id: 'b', role: 'assistant', content: { parts: [{ type: 'text', text: 'B' }] }, threadId: 'tB' }];
+    const ev: ChatStreamEvent = { type: 'message_start', message: { id: 'a', role: 'assistant', content: { parts: [] }, threadId: 'tA' } };
+    assert.equal(reduceChatStreamMessages(prev, ev), prev);
   });
 });

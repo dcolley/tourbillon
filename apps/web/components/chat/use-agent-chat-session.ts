@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { stripDashboardContext } from '@/lib/chat/dashboard-context';
 import { selectThreadToBind } from './thread-selection';
-import { chatStreamMessageFor, chatStreamRunningFor, type ChatStreamEvent } from './chat-stream-events';
+import { chatStreamEffectsFor, chatStreamMessageFor, type ChatStreamEvent } from './chat-stream-events';
 
 export type ChatContextType = 'free' | 'issue' | 'project' | 'goal' | 'heartbeat' | 'agent' | 'board';
 
@@ -28,6 +28,7 @@ export interface ChatMessage {
   role: string;
   content: { format?: number; parts?: ChatMessagePart[]; [key: string]: unknown };
   createdAt?: string;
+  threadId?: string;
 }
 
 export interface ChatPendingApproval {
@@ -140,8 +141,17 @@ export function mergeChatMessage(prev: ChatMessage[], incoming: ChatMessage): Ch
 }
 
 /** Apply one session stream event to the open chat's message list. */
-export function reduceChatStreamMessages(prev: ChatMessage[], event: ChatStreamEvent): ChatMessage[] {
-  const incoming = chatStreamMessageFor(event, (id) => prev.find((m) => m.id === id));
+export function reduceChatStreamMessages(
+  prev: ChatMessage[],
+  event: ChatStreamEvent,
+  openThreadId?: string | null,
+): ChatMessage[] {
+  // Without an explicit open thread, fall back to the thread the shown messages belong to.
+  const tid =
+    typeof openThreadId === 'string' && openThreadId
+      ? openThreadId
+      : prev.find((m) => typeof m.threadId === 'string' && m.threadId)?.threadId ?? null;
+  const incoming = chatStreamMessageFor(event, (id) => prev.find((m) => m.id === id), tid);
   return incoming ? mergeChatMessage(prev, incoming) : prev;
 }
 
@@ -393,15 +403,18 @@ export function useAgentChatSession(options: {
                 }
 
                 // Message deltas and display snapshots update the open list in place.
-                setMessages((prev) => reduceChatStreamMessages(prev, event));
-                const nextRunning = chatStreamRunningFor(event);
-                if (nextRunning !== undefined) setRunning(nextRunning);
+                // Messages tagged with another thread never render in the open one.
+                const openTid = threadIdRef.current;
+                setMessages((prev) => reduceChatStreamMessages(prev, event, openTid));
+                const effects = chatStreamEffectsFor(event, openTid);
+                if (effects.running !== undefined) setRunning(effects.running);
 
                 if (event.type === 'agent_end') {
                   setPendingApproval(null);
                   // Reconcile with the stored thread so the final reply matches a reload.
-                  const tid = threadIdRef.current;
-                  if (tid) void loadMessages(agentKey, rid, tid).catch(() => undefined);
+                  if (effects.reloadThreadId) {
+                    void loadMessages(agentKey, rid, effects.reloadThreadId).catch(() => undefined);
+                  }
                 } else if (event.type === 'tool_approval_required') {
                   setPendingApproval({
                     toolCallId: String(event.toolCallId ?? ''),

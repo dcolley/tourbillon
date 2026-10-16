@@ -26,6 +26,15 @@ function withParts(message: ChatMessage, parts: ChatMessagePart[]): ChatMessage 
   return { ...message, content: { ...message.content, parts } };
 }
 
+/** Upper bound for a part index from the stream; larger indexes are ignored. */
+export const MAX_PART_INDEX = 10_000;
+
+/** True when a message names a thread other than the open one (it must not render here). */
+export function isForeignThreadMessage(message: ChatMessage, openThreadId: string | null | undefined): boolean {
+  const tid = (message as { threadId?: unknown }).threadId;
+  return typeof tid === 'string' && tid !== '' && typeof openThreadId === 'string' && openThreadId !== '' && tid !== openThreadId;
+}
+
 /** Apply one `message_update` sub-event to an existing message. Unknown sub-events are no-ops. */
 export function applyMessageUpdate(message: ChatMessage, update: MessageEvent): ChatMessage {
   if (update.type === 'text-delta' && typeof update.delta === 'string') {
@@ -43,10 +52,13 @@ export function applyMessageUpdate(message: ChatMessage, update: MessageEvent): 
     typeof update.index === 'number' &&
     Number.isInteger(update.index) &&
     update.index >= 0 &&
+    update.index <= MAX_PART_INDEX &&
     update.part &&
     typeof update.part === 'object'
   ) {
     const parts = cloneParts(message);
+    // Replace an existing part or append one; never open a sparse gap.
+    if (update.index > parts.length) return message;
     parts[update.index] = update.part as ChatMessagePart;
     return withParts(message, parts.filter(Boolean));
   }
@@ -60,13 +72,14 @@ export function applyMessageUpdate(message: ChatMessage, update: MessageEvent): 
 export function chatStreamMessageFor(
   event: ChatStreamEvent,
   current: (id: string) => ChatMessage | undefined,
+  openThreadId?: string | null,
 ): ChatMessage | null {
   const full = event.message as ChatMessage | undefined;
   if (
     (event.type === 'message_start' || event.type === 'message_update' || event.type === 'message_end') &&
     full?.id
   ) {
-    return full;
+    return isForeignThreadMessage(full, openThreadId) ? null : full;
   }
   if (event.type === 'message_update' && typeof event.id === 'string') {
     const existing = current(event.id);
@@ -80,7 +93,9 @@ export function chatStreamMessageFor(
       | { isRunning?: boolean; currentMessage?: ChatMessage | null }
       | undefined;
     const snapshot = ds?.currentMessage;
-    if (ds?.isRunning === true && snapshot?.id && snapshot.role === 'assistant') return snapshot;
+    if (ds?.isRunning === true && snapshot?.id && snapshot.role === 'assistant') {
+      return isForeignThreadMessage(snapshot, openThreadId) ? null : snapshot;
+    }
   }
   return null;
 }
@@ -94,4 +109,15 @@ export function chatStreamRunningFor(event: ChatStreamEvent): boolean | undefine
   if (event.type === 'agent_start') return true;
   if (event.type === 'agent_end') return false;
   return undefined;
+}
+
+/** Side effects of one stream event for the hook: running flag and which thread to reload. */
+export function chatStreamEffectsFor(
+  event: ChatStreamEvent,
+  openThreadId: string | null | undefined,
+): { running: boolean | undefined; reloadThreadId: string | null } {
+  return {
+    running: chatStreamRunningFor(event),
+    reloadThreadId: event.type === 'agent_end' && openThreadId ? openThreadId : null,
+  };
 }
