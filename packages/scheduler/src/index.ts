@@ -2,8 +2,22 @@ import { getMastraInstance, sweepStaleEgressSockets } from '@tourbillon/mastra';
 import { createTraceLogger, isObservabilityEnabled, isPhoenixCollectorEnabled } from '@tourbillon/shared';
 import { startWakeServer, startStaleSweepInterval } from './wake-server';
 import { bootMastraSchedules } from './schedule-boot';
+import { db } from '@tourbillon/db';
+import { sql } from 'drizzle-orm';
+import { runSchedulerMain, waitForDb } from './startup';
+import { sweepOrphanedRunsOnStartup } from './startup-sweep';
+
+const logger = createTraceLogger('scheduler', {});
 
 async function main(): Promise<void> {
+  const bootTime = new Date();
+  // Postgres may still be starting (e.g. "the database system is not yet accepting connections").
+  // Retry with backoff for ~2 min; on give-up main throws and we exit non-zero for systemd.
+  const dbAttempts = await waitForDb(() => db.execute(sql`select 1`), {
+    onRetry: ({ attempt, delayMs, error }) =>
+      logger.info('database not ready; retrying', { attempt, delayMs, error }),
+  });
+  const orphanedRunsFailed = await sweepOrphanedRunsOnStartup(bootTime);
   // Defence-in-depth: unlink dead egress proxy socks left by prior crashes.
   // Live listeners are connect-probed and never removed.
   await sweepStaleEgressSockets().catch(() => undefined);
@@ -27,18 +41,14 @@ async function main(): Promise<void> {
     void shutdown();
   });
 
-  createTraceLogger('scheduler', {}).info('scheduler started (no BullMQ heartbeats)', {
-    apiBase: process.env.INTERNAL_API_URL,
+  // One ready line. Never log URLs/connection strings (they can carry credentials).
+  logger.info('scheduler ready', {
     wakePort: process.env.SCHEDULER_WAKE_PORT ?? '3003',
-    redisUrl: process.env.REDIS_URL,
+    dbAttempts,
+    orphanedRunsFailed,
     observabilityEnabled: isObservabilityEnabled(),
     phoenixCollectorEnabled: isPhoenixCollectorEnabled(),
   });
 }
 
-void main().catch((err) => {
-  createTraceLogger('scheduler', {}).error('failed to start', {
-    error: err instanceof Error ? err.message : String(err),
-  });
-  process.exit(1);
-});
+void runSchedulerMain(main, logger);

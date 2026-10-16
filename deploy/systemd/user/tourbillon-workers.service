@@ -6,7 +6,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%h/tourbillon
-ExecStart=/bin/bash -lc 'source "$HOME/.nvm/nvm.sh" && exec pnpm workers:dev'
+ExecStart=/bin/bash -lc 'source "$HOME/.nvm/nvm.sh" && exec pnpm workers:start'
+# always ⊇ on-failure: the scheduler exits 1 when Postgres stays unreachable (~2 min) and is restarted.
+# Must not run under `tsx watch` (workers:dev): watch keeps the unit 'active' after the child dies.
 Restart=always
 RestartSec=5
 KillMode=mixed
