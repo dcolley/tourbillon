@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { stripDashboardContext } from '@/lib/chat/dashboard-context';
 import { selectThreadToBind } from './thread-selection';
+import { chatStreamMessageFor, chatStreamRunningFor, type ChatStreamEvent } from './chat-stream-events';
 
 export type ChatContextType = 'free' | 'issue' | 'project' | 'goal' | 'heartbeat' | 'agent' | 'board';
 
@@ -106,6 +107,42 @@ export function formatChatMessageDateTime(iso?: string): string | null {
     minute: '2-digit',
     second: '2-digit',
   });
+}
+
+/** Merge one message into the list (replace by id, drop matching optimistic bubbles, keep order). */
+export function mergeChatMessage(prev: ChatMessage[], incoming: ChatMessage): ChatMessage[] {
+  const withTimestamp: ChatMessage = {
+    ...incoming,
+    createdAt:
+      incoming.createdAt ??
+      prev.find((m) => m.id === incoming.id)?.createdAt ??
+      new Date().toISOString(),
+  };
+
+  // Drop optimistic local bubbles once the real stream message arrives.
+  const incomingText = chatMessagePlainText(withTimestamp);
+  let base = prev;
+  if (incomingText && isChatUserMessage(withTimestamp)) {
+    base = prev.filter(
+      (m) =>
+        !(
+          m.id.startsWith('local-') &&
+          chatMessagePlainText(m) === incomingText
+        ),
+    );
+  }
+
+  const idx = base.findIndex((m) => m.id === incoming.id);
+  if (idx === -1) return sortMessagesAscending([...base, withTimestamp]);
+  const next = [...base];
+  next[idx] = withTimestamp;
+  return sortMessagesAscending(next);
+}
+
+/** Apply one session stream event to the open chat's message list. */
+export function reduceChatStreamMessages(prev: ChatMessage[], event: ChatStreamEvent): ChatMessage[] {
+  const incoming = chatStreamMessageFor(event, (id) => prev.find((m) => m.id === id));
+  return incoming ? mergeChatMessage(prev, incoming) : prev;
 }
 
 function encodeResourceId(resourceId: string): string {
@@ -279,34 +316,7 @@ export function useAgentChatSession(options: {
   );
 
   const mergeMessage = useCallback((incoming: ChatMessage) => {
-    setMessages((prev) => {
-      const withTimestamp: ChatMessage = {
-        ...incoming,
-        createdAt:
-          incoming.createdAt ??
-          prev.find((m) => m.id === incoming.id)?.createdAt ??
-          new Date().toISOString(),
-      };
-
-      // Drop optimistic local bubbles once the real stream message arrives.
-      const incomingText = chatMessagePlainText(withTimestamp);
-      let base = prev;
-      if (incomingText && isChatUserMessage(withTimestamp)) {
-        base = prev.filter(
-          (m) =>
-            !(
-              m.id.startsWith('local-') &&
-              chatMessagePlainText(m) === incomingText
-            ),
-        );
-      }
-
-      const idx = base.findIndex((m) => m.id === incoming.id);
-      if (idx === -1) return sortMessagesAscending([...base, withTimestamp]);
-      const next = [...base];
-      next[idx] = withTimestamp;
-      return sortMessagesAscending(next);
-    });
+    setMessages((prev) => mergeChatMessage(prev, incoming));
   }, []);
 
   const subscribeStream = useCallback(
@@ -382,21 +392,16 @@ export function useAgentChatSession(options: {
                   continue;
                 }
 
-                if (
-                  event.type === 'message_start' ||
-                  event.type === 'message_update' ||
-                  event.type === 'message_end'
-                ) {
-                  const message = event.message as ChatMessage | undefined;
-                  if (message?.id) mergeMessage(message);
-                } else if (event.type === 'display_state_changed') {
-                  const ds = event.displayState as { isRunning?: boolean } | undefined;
-                  setRunning(ds?.isRunning === true);
-                } else if (event.type === 'agent_start') {
-                  setRunning(true);
-                } else if (event.type === 'agent_end') {
-                  setRunning(false);
+                // Message deltas and display snapshots update the open list in place.
+                setMessages((prev) => reduceChatStreamMessages(prev, event));
+                const nextRunning = chatStreamRunningFor(event);
+                if (nextRunning !== undefined) setRunning(nextRunning);
+
+                if (event.type === 'agent_end') {
                   setPendingApproval(null);
+                  // Reconcile with the stored thread so the final reply matches a reload.
+                  const tid = threadIdRef.current;
+                  if (tid) void loadMessages(agentKey, rid, tid).catch(() => undefined);
                 } else if (event.type === 'tool_approval_required') {
                   setPendingApproval({
                     toolCallId: String(event.toolCallId ?? ''),
@@ -452,7 +457,7 @@ export function useAgentChatSession(options: {
         setError(err instanceof Error ? err.message : String(err));
       });
     },
-    [contextId, contextType, loadMessages, mergeMessage],
+    [contextId, contextType, loadMessages],
   );
 
   const bindThread = useCallback(
