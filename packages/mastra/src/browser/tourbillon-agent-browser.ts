@@ -16,7 +16,7 @@
  * fakes; Chromium is never needed to run the tests.
  */
 import { AgentBrowser, AgentBrowserThreadManager } from '@mastra/agent-browser';
-import { createTraceLogger } from '@tourbillon/shared';
+import { BROWSER_ALWAYS_EXCLUDED_TOOLS, createTraceLogger } from '@tourbillon/shared';
 import {
   checkBrowserUrl,
   describeBrowserEgressDenial,
@@ -209,6 +209,8 @@ export interface TourbillonAgentBrowserOptions {
   companyId?: string;
   /** Bound on close(); default BROWSER_CLOSE_TIMEOUT_MS. */
   closeTimeoutMs?: number;
+  /** Expose browser_screenshot (runtimeConfig.browser.screenshots). Default false. */
+  screenshots?: boolean;
 }
 
 export class TourbillonAgentBrowser extends AgentBrowser {
@@ -217,12 +219,18 @@ export class TourbillonAgentBrowser extends AgentBrowser {
   private lastDenial: BrowserDenial | null = null;
   private readonly trace;
   private readonly closeTimeoutMs: number;
+  readonly screenshotsEnabled: boolean;
 
   constructor(options: TourbillonAgentBrowserOptions) {
     const { settings, policy } = options;
     let self: TourbillonAgentBrowser | null = null;
+    const excludeTools = [
+      ...BROWSER_ALWAYS_EXCLUDED_TOOLS,
+      ...(options.screenshots === true ? [] : ['browser_screenshot' as const]),
+    ];
     super({
       headless: true,
+      excludeTools,
       scope: 'thread',
       timeout: settings.navTimeoutMs,
       ...(settings.executablePath ? { executablePath: settings.executablePath } : {}),
@@ -241,6 +249,7 @@ export class TourbillonAgentBrowser extends AgentBrowser {
     this.guardSettings = settings;
     this.egressPolicy = policy;
     this.closeTimeoutMs = options.closeTimeoutMs ?? BROWSER_CLOSE_TIMEOUT_MS;
+    this.screenshotsEnabled = options.screenshots === true;
     this.trace = createTraceLogger('browser', {
       ...(options.agentId ? { agentId: options.agentId } : {}),
       ...(options.companyId ? { companyId: options.companyId } : {}),
@@ -291,6 +300,9 @@ export class TourbillonAgentBrowser extends AgentBrowser {
 
   override getTools(): ReturnType<AgentBrowser['getTools']> {
     const tools = super.getTools();
+    // Defensive: never expose these even if the provider ignores excludeTools.
+    for (const name of BROWSER_ALWAYS_EXCLUDED_TOOLS) delete tools[name];
+    if (!this.screenshotsEnabled) delete tools.browser_screenshot;
     for (const [name, tool] of Object.entries(tools)) {
       wrapBrowserTool(name, tool as ToolLike, this);
     }

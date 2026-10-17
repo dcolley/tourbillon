@@ -22,6 +22,7 @@ import {
   type AgentModelSettingsPatch,
   type AgentRuntimeConfig,
   type AgentRuntimeType,
+  nextBrowserRuntimeConfig,
 } from '@tourbillon/shared';
 import {
   resolveAgentMcpServerIds,
@@ -448,6 +449,8 @@ export async function updateAgentCapabilities(
     mcpToolPolicy?: Record<string, { allow: string[] }>;
     /** Knowledge-graph mounts when toolset is enabled. */
     knowledgeGraph?: { private: boolean; company: boolean };
+    /** `browser` toolset sub-options when the toolset is enabled. */
+    browser?: { screenshots: boolean };
   },
 ): Promise<Agent> {
   const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
@@ -551,6 +554,8 @@ export async function updateAgentCapabilities(
   } else if (!toolsets.includes('knowledge-graph')) {
     runtimeConfig.knowledgeGraph = undefined;
   }
+
+  runtimeConfig.browser = nextBrowserRuntimeConfig(current.browser, toolsets, input.browser);
 
   if (input.mcpToolPolicy !== undefined) {
     const assignedServerIds = new Set(

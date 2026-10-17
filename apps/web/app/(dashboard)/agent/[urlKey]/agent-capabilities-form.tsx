@@ -55,6 +55,7 @@ interface AgentCapabilitiesFormProps {
   enabledTools: string[];
   mcpToolPolicy?: AgentRuntimeConfig['mcpToolPolicy'];
   knowledgeGraph?: AgentRuntimeConfig['knowledgeGraph'];
+  browserConfig?: AgentRuntimeConfig['browser'];
   integrationOverrides?: AgentIntegrationOverrides;
   updateCapabilities: (
     prev: ActionResult | null,
@@ -134,6 +135,7 @@ export function AgentCapabilitiesForm({
   enabledTools,
   mcpToolPolicy,
   knowledgeGraph,
+  browserConfig,
   integrationOverrides = {},
   updateCapabilities,
 }: AgentCapabilitiesFormProps) {
@@ -162,6 +164,7 @@ export function AgentCapabilitiesForm({
   const availableKeys = AGENT_INTEGRATION_CREDENTIALS.filter((entry) => !usedKeys.has(entry.id));
 
   const showKnowledgeGraphMounts = previewToolsets.includes('knowledge-graph');
+  const showBrowserOptions = previewToolsets.includes('browser');
 
   const bundledSkillIds = new Set<string>(SKILL_CATALOG.map((entry) => entry.id));
   const extraCompanySkills = companySkillSlugs.filter((slug) => !bundledSkillIds.has(slug));
@@ -438,7 +441,9 @@ export function AgentCapabilitiesForm({
                     name={`toolset_${entry.id}`}
                     defaultChecked={checked}
                     className="mt-0.5 rounded border-input"
-                    onChange={isMcpBridged ? syncPreviewToolsetsFromForm : undefined}
+                    onChange={
+                      isMcpBridged || entry.id === 'browser' ? syncPreviewToolsetsFromForm : undefined
+                    }
                   />
                   <span>
                     <span className="font-medium">{entry.label}</span>
@@ -450,6 +455,31 @@ export function AgentCapabilitiesForm({
           })}
         </ul>
       </div>
+
+      {showBrowserOptions && (
+        <div className="space-y-3 rounded-md border p-4">
+          <div>
+            <p className="text-sm font-medium">Browser options</p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              14 browser tools are on with the toolset. Script evaluation in the page is never available.
+            </p>
+          </div>
+          <label className="flex items-start gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              name="browserScreenshots"
+              defaultChecked={browserConfig?.screenshots === true}
+              className="mt-0.5 rounded border-input"
+            />
+            <span>
+              <span className="font-medium text-sm">Screenshots</span>
+              <span className="block text-xs text-muted-foreground">
+                Expose browser_screenshot (PNG images; needs a vision-capable model). Off by default.
+              </span>
+            </span>
+          </label>
+        </div>
+      )}
 
       {showKnowledgeGraphMounts && (
         <div className="space-y-3 rounded-md border p-4">

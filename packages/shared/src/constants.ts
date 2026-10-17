@@ -133,7 +133,7 @@ export const TOOLSET_CATALOG = [
     id: 'browser',
     label: 'Browser (headless Chromium)',
     description:
-      'Open and interact with public web pages in a local headless Chromium (browser_goto, browser_snapshot, browser_click, …). Off by default. Local/internal addresses and non-http(s) URLs are always blocked; the outbound host allow-list applies. Heartbeat runs only. Needs Chromium on the host (Ops: npx playwright install --with-deps chromium).',
+      'Open and interact with public web pages in a local headless Chromium (browser_goto, browser_snapshot, browser_click, …). Off by default. Screenshots are a separate opt-in; in-page script evaluation is never available. Local/internal addresses and non-http(s) URLs are always blocked; the outbound host allow-list applies. Heartbeat runs only. Needs Chromium on the host (Ops: npx playwright install --with-deps chromium).',
   },
   {
     id: 'buffer',

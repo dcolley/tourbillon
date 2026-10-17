@@ -171,6 +171,8 @@ async function updateCapabilities(
     company: formData.get('kgMountCompany') === 'on',
   };
 
+  const browser = { screenshots: formData.get('browserScreenshots') === 'on' };
+
   try {
     await updateAgentCapabilities(agentId, {
       toolsets,
@@ -181,6 +183,7 @@ async function updateCapabilities(
       mcpServerIds,
       mcpToolPolicy,
       knowledgeGraph,
+      browser,
     });
   } catch (err) {
     return actionError(
@@ -908,6 +911,7 @@ export default async function AgentDetailPage({
                     enabledTools={enabledTools}
                     mcpToolPolicy={runtime.mcpToolPolicy}
                     knowledgeGraph={runtime.knowledgeGraph}
+                    browserConfig={runtime.browser}
                     integrationOverrides={{
                       ...(runtime.tavilyApiKey ? { tavilyApiKey: runtime.tavilyApiKey } : {}),
                       ...(runtime.mcpCredentials?.['buffer-mcp']

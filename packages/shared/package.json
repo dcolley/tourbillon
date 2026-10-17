@@ -38,6 +38,7 @@
     "./vault-credentials": "./src/vault-credentials.ts",
     "./knowledge-graph": "./src/knowledge-graph.ts",
     "./knowledge-graph-config": "./src/knowledge-graph-config.ts",
+    "./browser-config": "./src/browser-config.ts",
     "./agent-token": "./src/agent-token.ts"
   },
   "dependencies": {

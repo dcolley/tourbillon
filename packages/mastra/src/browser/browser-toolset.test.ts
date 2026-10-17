@@ -93,6 +93,42 @@ describe('buildAgentBrowser', () => {
   });
 });
 
+describe('browser tool exposure', () => {
+  const FOURTEEN = [
+    'browser_goto', 'browser_snapshot', 'browser_click', 'browser_type', 'browser_press',
+    'browser_select', 'browser_scroll', 'browser_close', 'browser_hover', 'browser_back',
+    'browser_dialog', 'browser_wait', 'browser_tabs', 'browser_drag',
+  ].sort();
+
+  it('default: 14 tools, no browser_evaluate, no browser_screenshot', async () => {
+    const browser = (await buildAgentBrowser(record(['browser']), { env: {} })) as any;
+    assert.deepEqual(Object.keys(browser.getTools()).sort(), FOURTEEN);
+  });
+
+  it('screenshots opt-in adds browser_screenshot only; browser_evaluate stays out', async () => {
+    const browser = (await buildAgentBrowser(record(['browser'], { browser: { screenshots: true } }), { env: {} })) as any;
+    assert.deepEqual(Object.keys(browser.getTools()).sort(), [...FOURTEEN, 'browser_screenshot'].sort());
+  });
+
+  it('a non-boolean screenshots value does not opt in', async () => {
+    const browser = (await buildAgentBrowser(record(['browser'], { browser: { screenshots: 'true' } }), { env: {} })) as any;
+    assert.ok(!('browser_screenshot' in browser.getTools()));
+  });
+
+  it('browser_evaluate is dropped even if the provider ignores excludeTools', async () => {
+    const browser = (await buildAgentBrowser(record(['browser'], { browser: { screenshots: true } }), { env: {} })) as any;
+    browser.browserConfig.excludeTools = []; // provider-side exclusion lost
+    const names = Object.keys(browser.getTools());
+    assert.ok(!names.includes('browser_evaluate'));
+    assert.ok(names.includes('browser_screenshot'));
+    const noShots = (await buildAgentBrowser(record(['browser']), { env: {} })) as any;
+    noShots.browserConfig.excludeTools = [];
+    const names2 = Object.keys(noShots.getTools());
+    assert.ok(!names2.includes('browser_evaluate'));
+    assert.ok(!names2.includes('browser_screenshot'));
+  });
+});
+
 describe('resolveBrowserSettings', () => {
   it('uses defaults and clamps', () => {
     assert.deepEqual(resolveBrowserSettings({}), { stepTimeoutMs: 45000, navTimeoutMs: 30000 });

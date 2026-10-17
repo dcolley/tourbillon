@@ -3,7 +3,7 @@
  * provider (@mastra/agent-browser → playwright-core) is only loaded when an agent has
  * the toolset, so agents without it never construct or import a browser.
  */
-import { createTraceLogger } from '@tourbillon/shared';
+import { createTraceLogger, isBrowserScreenshotsEnabled } from '@tourbillon/shared';
 import { readBrowserHostAllowList, type BrowserEgressPolicy } from './browser-egress';
 import { resolveBrowserSettings, BROWSER_CLOSE_TIMEOUT_MS } from './browser-settings';
 import type { MastraBrowser } from '@mastra/core/browser';
@@ -61,6 +61,9 @@ export async function buildAgentBrowser(
     policy,
     agentId: agentRecord.id,
     ...(agentRecord.companyId ? { companyId: agentRecord.companyId } : {}),
+    screenshots: isBrowserScreenshotsEnabled(
+      agentRecord.runtimeConfig as Parameters<typeof isBrowserScreenshotsEnabled>[0],
+    ),
   }) as unknown as MastraBrowser;
 }
 

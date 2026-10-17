@@ -212,6 +212,16 @@ describe('TourbillonAgentBrowser session hook', () => {
     assert.equal(ctx.navTimeout, 100);
   });
 
+  it('tells the provider to exclude browser_evaluate always and browser_screenshot unless opted in', () => {
+    const off = new TourbillonAgentBrowser({ settings, policy });
+    assert.deepEqual((off as any).browserConfig.excludeTools, ['browser_evaluate', 'browser_screenshot']);
+    const on = new TourbillonAgentBrowser({ settings, policy, screenshots: true });
+    assert.deepEqual((on as any).browserConfig.excludeTools, ['browser_evaluate']);
+    const truthy = new TourbillonAgentBrowser({ settings, policy, screenshots: 'true' as never });
+    assert.equal(truthy.screenshotsEnabled, false);
+    assert.ok(!('browser_screenshot' in truthy.getTools()));
+  });
+
   it('passes the configured executable path and headless mode to the provider', () => {
     const browser = new TourbillonAgentBrowser({
       settings: { ...settings, executablePath: '/opt/chromium/chrome' },
