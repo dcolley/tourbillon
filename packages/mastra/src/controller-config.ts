@@ -37,6 +37,7 @@ import { getMastraInstance } from './mastra-instance';
 export type { AgentController, AgentControllerEvent, AgentControllerMode, Session };
 
 import { buildHarnessIdleThreadId } from './heartbeat-memory';
+import { requireDatabaseUrl } from '@tourbillon/db/database-url';
 
 export function buildControllerThreadId(agentRecord: AgentRecord, taskId?: string): string {
   return taskId
@@ -63,10 +64,7 @@ export function buildControllerStorageConfig(): {
   backend: 'pg';
   connectionString: string;
 } {
-  const connectionString = process.env.DATABASE_URL;
-  if (!connectionString) {
-    throw new Error('DATABASE_URL is required for controller storage');
-  }
+  const connectionString = requireDatabaseUrl('controller storage');
   return { backend: 'pg', connectionString };
 }
 
@@ -232,10 +230,7 @@ let controllerThreadStorage: PostgresStore | null = null;
 
 function getControllerThreadStorage(): PostgresStore {
   if (!controllerThreadStorage) {
-    const connectionString = process.env.DATABASE_URL;
-    if (!connectionString) {
-      throw new Error('DATABASE_URL is required for controller thread storage');
-    }
+    const connectionString = requireDatabaseUrl('controller thread storage');
     controllerThreadStorage = new PostgresStore({
       id: 'tourbillon-harness-threads',
       connectionString,

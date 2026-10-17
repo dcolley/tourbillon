@@ -15,6 +15,7 @@ import {
 } from '@tourbillon/shared';
 import { TourbillonPostgresExporter } from './observability/tourbillon-postgres-exporter';
 import { SecretValueRedactionProcessor } from './observability/secret-value-redaction';
+import { requireDatabaseUrl } from '@tourbillon/db/database-url';
 
 const globalForMastra = globalThis as unknown as {
   tourbillonMastra?: Mastra;
@@ -81,10 +82,7 @@ function buildObservability(): Observability | undefined {
 
 function getMastraStorage(): PostgresStore {
   if (!globalForMastra.tourbillonMastraStore) {
-    const connectionString = process.env.DATABASE_URL;
-    if (!connectionString) {
-      throw new Error('DATABASE_URL is required for Mastra schedule storage');
-    }
+    const connectionString = requireDatabaseUrl('Mastra schedule storage');
     globalForMastra.tourbillonMastraStore = new PostgresStore({
       id: 'tourbillon-mastra',
       connectionString,
