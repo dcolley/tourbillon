@@ -163,4 +163,8 @@ export const ROLE_TOOLS: Record<string, Record<string, unknown>> = {
   'web-search': SEARXNG_TOOLS,
   'web-search-tavily': TAVILY_TOOLS,
   nitter: NITTER_TOOLS,
+  // Opt-in toolset. Its tools (browser_goto, browser_snapshot, …) come from the Mastra
+  // browser provider attached to the Agent (agent-factory → buildAgentBrowser), not from
+  // this map; the empty entry registers the toolset id for tool assembly.
+  browser: {},
 };

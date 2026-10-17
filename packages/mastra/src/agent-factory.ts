@@ -37,6 +37,7 @@ import { SEARXNG_TOOLS } from './tools/searxng-tools';
 import { TAVILY_TOOLS } from './tools/tavily-tools';
 import { getInternalApiUrl } from './tools/api-client';
 import { buildCodeExecutionWorkspace } from './execution-workspace';
+import { buildAgentBrowser } from './browser';
 import {
   resolveAgentContextBudget,
   resolveAgentGenerationOptions,
@@ -245,6 +246,11 @@ export async function createAgentWithSkills(
   );
 
   const codeExecutionEnabled = await shouldAttachCodeExecutionWorkspace(agentRecord);
+  // Opt-in `browser` toolset: local headless Chromium, egress-guarded, closed at run end
+  // by the wake runner (closeAgentBrowser). Undefined when the toolset is off.
+  const browser = await buildAgentBrowser(agentRecord, {
+    companySettings: options?.companySettings ?? null,
+  });
   const generationOptions = resolveAgentGenerationOptions(agentRecord, providerRecord);
   const contextBudget = resolveAgentContextBudget(agentRecord, providerRecord, 'durable');
   const inputProcessors = buildHeartbeatInputProcessors({ limit: contextBudget.limiterLimit });
@@ -268,6 +274,7 @@ export async function createAgentWithSkills(
       maxContextTokens: contextBudget.contextTokens,
       outputReserve: contextBudget.outputReserve,
       codeExecutionEnabled,
+      browserEnabled: Boolean(browser),
       modelSettings: generationOptions.modelSettings,
       reasoning: generationOptions.reasoning,
     })
@@ -282,6 +289,7 @@ export async function createAgentWithSkills(
     memory: await getAgentMemory(options?.companySettings ?? null, agentRecord.runtimeConfig as AgentRuntimeConfig),
     inputProcessors,
     ...(codeExecutionEnabled ? { workspace: buildCodeExecutionWorkspace() } : {}),
+    ...(browser ? { browser } : {}),
     ...toMastraDefaultOptions(generationOptions),
   });
 

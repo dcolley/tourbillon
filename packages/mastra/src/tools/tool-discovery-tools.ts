@@ -64,6 +64,7 @@ function getToolsetForId(toolId: string): string | undefined {
   if (toolId.startsWith('mcp_')) return 'mcp';
   if (toolId.startsWith('nitter_')) return 'nitter';
   if (toolId.startsWith('buffer_')) return 'buffer';
+  if (toolId.startsWith('browser_')) return 'browser';
   
   return toolsetMap[toolId];
 }

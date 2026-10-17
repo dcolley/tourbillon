@@ -138,6 +138,13 @@ export interface AgentRuntimeConfig {
     company?: boolean;
   };
   /**
+   * `browser` toolset options (only meaningful when the toolset is enabled).
+   * screenshots: expose browser_screenshot. Default off.
+   */
+  browser?: {
+    screenshots?: boolean;
+  };
+  /**
    * Direct messages to other agents (sendToAgent tool).
    * When false, sendToAgent is unavailable. Default: true.
    */

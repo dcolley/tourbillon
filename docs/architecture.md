@@ -129,6 +129,7 @@ Goal (outcome — CEO-owned, weeks/months)
 - `web-search-tavily` — Tavily cloud API
 - `nitter` — X/Twitter search via self-hosted Nitter
 - `buffer` — Buffer social publishing via official MCP
+- `browser` — local headless Chromium via `@mastra/agent-browser` (opt-in, heartbeat runs only; chat/harness parity is a planned follow-up). 14 tools; `browser_screenshot` is opt-in via `runtimeConfig.browser.screenshots`; `browser_evaluate` is never exposed. See [Browser toolset](browser-toolset.md).
 
 ### Tier 2 Granular Tools
 
