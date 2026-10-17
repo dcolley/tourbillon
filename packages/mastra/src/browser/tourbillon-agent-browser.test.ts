@@ -1,6 +1,6 @@
 /**
- * Playwright is mocked throughout: Chromium is not installed on CI / the dev box.
- * Fakes implement only the structural surface the guard uses.
+ * Playwright is mocked here: fakes implement only the structural surface the guard uses.
+ * Live-Chromium checks are in tourbillon-agent-browser.live.test.ts.
  */
 import { strict as assert } from 'node:assert';
 import { describe, it, afterEach } from 'node:test';
@@ -8,7 +8,9 @@ import { AgentBrowserThreadManager } from '@mastra/agent-browser';
 import {
   installBrowserGuard,
   TourbillonAgentBrowser,
+  BROWSER_MAX_REDIRECT_HOPS,
   type GuardContext,
+  type GuardFetchOptions,
   type GuardFrame,
   type GuardPage,
   type GuardResponse,
@@ -83,29 +85,56 @@ class FakeContext implements GuardContext {
   }
 }
 
-function fakeRoute(url: string, opts: { navigation?: boolean; status?: number; location?: string } = {}) {
+type FakeHop = { status: number; location?: string };
+
+function fakeRoute(
+  url: string,
+  opts: {
+    navigation?: boolean;
+    status?: number;
+    location?: string;
+    method?: string;
+    headers?: Record<string, string>;
+    /** Responses by URL for later hops (default 200). */
+    hops?: Record<string, FakeHop>;
+  } = {},
+) {
   const calls: string[] = [];
-  const response: GuardResponse = {
-    status: () => opts.status ?? 200,
-    headers: (): Record<string, string> => (opts.location ? { location: opts.location } : {}),
+  const fetches: Array<{ url: string; method?: string; headers?: Record<string, string>; postData?: string }> = [];
+  const responseFor = (target: string): GuardResponse => {
+    const hop: FakeHop =
+      target === url ? { status: opts.status ?? 200, location: opts.location } : (opts.hops?.[target] ?? { status: 200 });
+    return {
+      status: () => hop.status,
+      headers: (): Record<string, string> => (hop.location ? { location: hop.location } : {}),
+    };
   };
+  let fulfilled: GuardResponse | undefined;
   const route: GuardRoute = {
-    request: () => ({ url: () => url, isNavigationRequest: () => opts.navigation ?? false }),
+    request: () => ({
+      url: () => url,
+      isNavigationRequest: () => opts.navigation ?? false,
+      method: () => opts.method ?? 'GET',
+      headers: () => opts.headers ?? { accept: '*/*' },
+    }),
     abort: async (code?: string) => {
       calls.push(`abort:${code}`);
     },
     continue: async () => {
       calls.push('continue');
     },
-    fetch: async (o?: { maxRedirects?: number }) => {
+    fetch: async (o?: GuardFetchOptions) => {
       calls.push(`fetch:maxRedirects=${o?.maxRedirects}`);
-      return response;
+      const target = o?.url ?? url;
+      fetches.push({ url: target, method: o?.method, headers: o?.headers, postData: o?.postData });
+      return responseFor(target);
     },
-    fulfill: async () => {
+    fulfill: async (o: { response: GuardResponse }) => {
+      fulfilled = o.response;
       calls.push('fulfill');
     },
   };
-  return { route, calls };
+  return { route, calls, fetches, fulfilledStatus: () => fulfilled?.status() };
 }
 
 // ── Guard ────────────────────────────────────────────────────────────────────
@@ -132,7 +161,7 @@ describe('installBrowserGuard', () => {
     assert.deepEqual(local.calls, ['abort:blockedbyclient']);
     const ok = fakeRoute('https://cdn.example.com/app.js');
     await ctx.routeHandler!(ok.route);
-    assert.deepEqual(ok.calls, ['continue']);
+    assert.deepEqual(ok.calls, ['fetch:maxRedirects=0', 'fulfill']);
     assert.deepEqual(denied, ['cloud_metadata:169.254.169.254', 'private_range:localhost']);
   });
 
@@ -157,7 +186,85 @@ describe('installBrowserGuard', () => {
 
     const toPublic = fakeRoute('https://example.com/go', { navigation: true, status: 302, location: '/landing' });
     await ctx.routeHandler!(toPublic.route);
-    assert.deepEqual(toPublic.calls, ['fetch:maxRedirects=0', 'fulfill']);
+    assert.deepEqual(toPublic.calls, ['fetch:maxRedirects=0', 'fetch:maxRedirects=0', 'fulfill']);
+    assert.equal(toPublic.fetches[1]!.url, 'https://example.com/landing');
+    assert.equal(toPublic.fulfilledStatus(), 200, 'the browser never gets a redirect response');
+  });
+
+  it('checks every hop of a redirect chain, not just the first', async () => {
+    const ctx = new FakeContext();
+    const denied: string[] = [];
+    await installBrowserGuard(ctx, policy, settings, { onDenied: (d) => denied.push(`${d.reason}:${d.host}`) });
+    const chain = fakeRoute('https://example.com/a', {
+      navigation: true,
+      status: 302,
+      location: '/b',
+      hops: { 'https://example.com/b': { status: 307, location: 'http://127.0.0.1:9/x' } },
+    });
+    await ctx.routeHandler!(chain.route);
+    assert.deepEqual(chain.calls, ['fetch:maxRedirects=0', 'fetch:maxRedirects=0', 'abort:blockedbyclient']);
+    assert.deepEqual(chain.fetches.map((f) => f.url), ['https://example.com/a', 'https://example.com/b']);
+    assert.deepEqual(denied, ['private_range:127.0.0.1']);
+  });
+
+  it('applies the same per-hop checks to subresource redirects', async () => {
+    const ctx = new FakeContext();
+    await installBrowserGuard(ctx, policy, settings);
+    const img = fakeRoute('https://cdn.example.com/i.png', { status: 302, location: 'http://10.0.0.5/i.png' });
+    await ctx.routeHandler!(img.route);
+    assert.deepEqual(img.calls, ['fetch:maxRedirects=0', 'abort:blockedbyclient']);
+  });
+
+  it('stops at the hop cap', async () => {
+    const ctx = new FakeContext();
+    const denied: string[] = [];
+    await installBrowserGuard(ctx, policy, settings, { onDenied: (d) => denied.push(d.reason) });
+    const hops: Record<string, { status: number; location: string }> = {};
+    for (let i = 1; i <= BROWSER_MAX_REDIRECT_HOPS + 2; i += 1) {
+      hops[`https://example.com/r${i}`] = { status: 302, location: `/r${i + 1}` };
+    }
+    const loop = fakeRoute('https://example.com/r0', { navigation: true, status: 302, location: '/r1', hops });
+    await ctx.routeHandler!(loop.route);
+    assert.equal(loop.fetches.length, BROWSER_MAX_REDIRECT_HOPS + 1);
+    assert.equal(loop.calls.at(-1), 'abort:blockedbyclient');
+    assert.deepEqual(denied, ['too_many_redirects']);
+
+    // exactly at the cap is fine
+    const atCap: Record<string, { status: number; location?: string }> = {};
+    for (let i = 1; i < BROWSER_MAX_REDIRECT_HOPS; i += 1) atCap[`https://example.com/r${i}`] = { status: 302, location: `/r${i + 1}` };
+    const ok = fakeRoute('https://example.com/r0', { navigation: true, status: 302, location: '/r1', hops: atCap });
+    await ctx.routeHandler!(ok.route);
+    assert.equal(ok.fetches.length, BROWSER_MAX_REDIRECT_HOPS + 1);
+    assert.equal(ok.calls.at(-1), 'fulfill');
+  });
+
+  it('never forwards cookies or credentials to a later hop and drops the body when a redirect turns POST into GET', async () => {
+    const ctx = new FakeContext();
+    await installBrowserGuard(ctx, policy, settings);
+    const post = fakeRoute('https://example.com/form', {
+      navigation: true,
+      method: 'POST',
+      status: 303,
+      location: 'https://cdn.example.com/done',
+      headers: { cookie: 'sid=1', authorization: 'Bearer x', 'content-type': 'application/x-www-form-urlencoded', accept: 'text/html' },
+    });
+    await ctx.routeHandler!(post.route);
+    const second = post.fetches[1]!;
+    assert.equal(second.method, 'GET');
+    assert.equal(second.postData, '');
+    assert.deepEqual(second.headers, { accept: 'text/html' });
+
+    const keep = fakeRoute('https://example.com/form', {
+      navigation: true,
+      method: 'POST',
+      status: 307,
+      location: '/again',
+      headers: { cookie: 'sid=1', 'content-type': 'application/json' },
+    });
+    await ctx.routeHandler!(keep.route);
+    assert.equal(keep.fetches[1]!.method, 'POST');
+    assert.equal(keep.fetches[1]!.postData, undefined, 'original body kept on 307');
+    assert.deepEqual(keep.fetches[1]!.headers, { 'content-type': 'application/json' });
   });
 
   it('closes WebSockets to refused destinations', async () => {
@@ -189,6 +296,20 @@ describe('installBrowserGuard', () => {
     popup.navigate('data:text/html,hi');
     assert.deepEqual(popup.gotos, ['about:blank']);
   });
+
+  it('sends a main frame that lands on a refused http(s) address back to about:blank', async () => {
+    const ctx = new FakeContext();
+    const denied: string[] = [];
+    await installBrowserGuard(ctx, policy, settings, { onDenied: (d) => denied.push(d.reason) });
+    const page = ctx.existing[0]!;
+    page.navigate('http://127.0.0.1:8080/');
+    await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(page.gotos, ['about:blank']);
+    assert.deepEqual(denied, ['private_range']);
+    page.navigate('https://example.com/');
+    await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(page.gotos, ['about:blank']);
+  });
 });
 
 // ── Thread-manager hook (guard before first use) ────────────────────────────
@@ -210,6 +331,73 @@ describe('TourbillonAgentBrowser session hook', () => {
     await (browser as any).threadManager.createSession('hb-run-1');
     assert.equal(ctx.routeCalls, 1);
     assert.equal(ctx.navTimeout, 100);
+  });
+
+  it('guards the context before any saved tab is reopened and drops refused tabs', async () => {
+    const order: string[] = [];
+    const ctx = new FakeContext();
+    const origRoute = ctx.route.bind(ctx);
+    ctx.route = async (u, h) => {
+      order.push('guard');
+      await origRoute(u, h);
+    };
+    const restored: unknown[] = [];
+    const originalRestore = (AgentBrowserThreadManager.prototype as any).restoreBrowserState;
+    (AgentBrowserThreadManager.prototype as any).restoreBrowserState = async (_m: unknown, state: unknown) => {
+      order.push('restore');
+      restored.push(state);
+    };
+    try {
+      const browser = new TourbillonAgentBrowser({ settings, policy });
+      const tm = (browser as any).threadManager;
+      await tm.restoreBrowserState(
+        { getContext: () => ctx },
+        {
+          tabs: [{ url: 'http://127.0.0.1:9/canary' }, { url: 'https://example.com/ok' }, { url: 'file:///etc/passwd' }],
+          activeTabIndex: 1,
+        },
+      );
+      assert.deepEqual(order, ['guard', 'restore']);
+      assert.deepEqual(restored, [{ tabs: [{ url: 'https://example.com/ok' }], activeTabIndex: 0 }]);
+
+      // the active tab keeps pointing at the same tab after refused ones are dropped
+      restored.length = 0;
+      await tm.restoreBrowserState(
+        { getContext: () => new FakeContext() },
+        {
+          tabs: [{ url: 'http://10.0.0.1/' }, { url: 'https://example.com/a' }, { url: 'https://example.com/b' }],
+          activeTabIndex: 2,
+        },
+      );
+      assert.deepEqual(restored, [{ tabs: [{ url: 'https://example.com/a' }, { url: 'https://example.com/b' }], activeTabIndex: 1 }]);
+
+      // nothing left → parent restore is not called at all
+      order.length = 0;
+      const ctx2 = new FakeContext();
+      await tm.restoreBrowserState({ getContext: () => ctx2 }, { tabs: [{ url: 'http://10.0.0.1/' }], activeTabIndex: 0 });
+      assert.equal(ctx2.routeCalls, 1);
+      assert.deepEqual(order, []);
+
+      // no context to guard → nothing is reopened
+      await tm.restoreBrowserState({ getContext: () => undefined }, { tabs: [{ url: 'https://example.com/' }], activeTabIndex: 0 });
+      assert.deepEqual(order, []);
+    } finally {
+      (AgentBrowserThreadManager.prototype as any).restoreBrowserState = originalRestore;
+    }
+  });
+
+  it('checks the provider relaunch navigation like an agent navigation', async () => {
+    const browser = new TourbillonAgentBrowser({ settings, policy });
+    const went: string[] = [];
+    const parentNavigate = Object.getPrototypeOf(TourbillonAgentBrowser.prototype).navigateTo;
+    Object.getPrototypeOf(TourbillonAgentBrowser.prototype).navigateTo = async (u: string) => void went.push(u);
+    try {
+      await browser.navigateTo('http://127.0.0.1:9/canary');
+      await browser.navigateTo('https://example.com/');
+      assert.deepEqual(went, ['https://example.com/']);
+    } finally {
+      Object.getPrototypeOf(TourbillonAgentBrowser.prototype).navigateTo = parentNavigate;
+    }
   });
 
   it('tells the provider to exclude browser_evaluate always and browser_screenshot unless opted in', () => {

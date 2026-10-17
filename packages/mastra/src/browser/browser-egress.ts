@@ -29,7 +29,8 @@ export type BrowserEgressDenyReason =
   | 'not_on_allow_list'
   | 'private_range'
   | 'cloud_metadata'
-  | 'dns_failed';
+  | 'dns_failed'
+  | 'too_many_redirects';
 
 export type BrowserEgressDecision =
   | { allowed: true; host: string | null }
@@ -210,6 +211,8 @@ export function describeBrowserEgressDenial(decision: Extract<BrowserEgressDecis
       return `Host ${target} is a local or internal address and cannot be opened in the browser.`;
     case 'dns_failed':
       return `Host ${target} could not be resolved.`;
+    case 'too_many_redirects':
+      return 'The page redirected too many times.';
     default:
       return `Host ${target} is not allowed.`;
   }

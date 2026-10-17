@@ -2,20 +2,25 @@
  * TourbillonAgentBrowser — @mastra/agent-browser with Tourbillon guard rails:
  *
  * - Egress: a Playwright context route checks every http(s) request (navigations,
- *   subresources, popups, new tabs) with {@link checkBrowserUrl}; navigation redirects
- *   are fetched hop by hop and the Location of each hop is checked before the browser
- *   follows it. WebSockets are checked too. `browser_goto` / `browser_tabs` URLs are
- *   checked before the browser is even launched, so file:// and other schemes never
- *   reach Chromium.
+ *   subresources, popups, new tabs) with {@link checkBrowserUrl}. The route fetches each
+ *   request itself without following redirects, checks every Location, follows allowed
+ *   hops itself (up to {@link BROWSER_MAX_REDIRECT_HOPS}) and hands the browser only the
+ *   final response, so the browser never follows a redirect on its own. WebSockets are
+ *   checked too. `browser_goto` / `browser_tabs` URLs are checked before the browser is
+ *   even launched, so file:// and other schemes never reach Chromium.
+ * - Session restore: when a thread's browser is relaunched, the guard is installed on
+ *   the new context before any saved tab is reopened, and each saved tab URL is checked
+ *   again; refused tabs are dropped.
  * - Timeouts: navigation / action timeouts are capped in the page, and every browser
  *   tool call is raced against a hard step cap. A step that hits the cap (or is aborted)
  *   closes the browser so a wedged page cannot hang the heartbeat.
  * - Cleanup: {@link closeAgentBrowser} is called from the wake runner's finally block.
  *
- * Playwright objects are typed structurally (no playwright import) so tests can use
- * fakes; Chromium is never needed to run the tests.
+ * Playwright objects are typed structurally (no playwright import) so unit tests can use
+ * fakes; the live tests launch Chromium and skip when it is not installed.
  */
 import { AgentBrowser, AgentBrowserThreadManager } from '@mastra/agent-browser';
+import type { BrowserState } from '@mastra/core/browser';
 import { BROWSER_ALWAYS_EXCLUDED_TOOLS, createTraceLogger } from '@tourbillon/shared';
 import {
   checkBrowserUrl,
@@ -30,6 +35,8 @@ import { BROWSER_CLOSE_TIMEOUT_MS, type BrowserSettings } from './browser-settin
 export interface GuardRequest {
   url(): string;
   isNavigationRequest(): boolean;
+  method(): string;
+  headers(): Record<string, string>;
 }
 export interface GuardResponse {
   status(): number;
@@ -39,8 +46,16 @@ export interface GuardRoute {
   request(): GuardRequest;
   abort(errorCode?: string): Promise<void>;
   continue(): Promise<void>;
-  fetch(options?: { maxRedirects?: number; timeout?: number }): Promise<GuardResponse>;
+  fetch(options?: GuardFetchOptions): Promise<GuardResponse>;
   fulfill(options: { response: GuardResponse }): Promise<void>;
+}
+export interface GuardFetchOptions {
+  url?: string;
+  method?: string;
+  headers?: Record<string, string>;
+  postData?: string;
+  maxRedirects?: number;
+  timeout?: number;
 }
 export interface GuardWebSocketRoute {
   url(): string;
@@ -71,6 +86,79 @@ export interface BrowserGuardHooks {
 }
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+/** Most redirects one request may follow inside the guard (Chromium's own limit is 20). */
+export const BROWSER_MAX_REDIRECT_HOPS = 10;
+/** Never forwarded to a later hop; the context cookie jar adds the right cookies per URL. */
+const HEADERS_DROPPED_ON_FOLLOW = new Set(['cookie', 'authorization', 'proxy-authorization', 'host', 'content-length']);
+/** Dropped as well when a redirect turns the request into a body-less GET. */
+const BODY_HEADERS = new Set(['content-type', 'content-encoding', 'content-language', 'content-location']);
+
+type Denial = Extract<BrowserEgressDecision, { allowed: false }>;
+
+function followHeaders(request: GuardRequest, dropBody: boolean): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(request.headers())) {
+    const key = name.toLowerCase();
+    if (HEADERS_DROPPED_ON_FOLLOW.has(key)) continue;
+    if (dropBody && BODY_HEADERS.has(key)) continue;
+    out[name] = value;
+  }
+  return out;
+}
+
+/**
+ * Fetch a routed request without letting anything follow redirects on its own: every
+ * hop's Location is checked, allowed hops are fetched here, up to the hop cap. Returns
+ * the final response, or the denial that stopped the chain.
+ */
+async function fetchWithCheckedRedirects(
+  route: GuardRoute,
+  policy: BrowserEgressPolicy,
+  timeoutMs: number,
+): Promise<{ response: GuardResponse } | { denial: Denial } | { timedOut: true }> {
+  const request = route.request();
+  let current = request.url();
+  let method = (request.method() || 'GET').toUpperCase();
+  let dropBody = false;
+  const deadline = Date.now() + timeoutMs;
+  for (let hops = 0; ; hops += 1) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return { timedOut: true };
+    const response =
+      hops === 0
+        ? await route.fetch({ maxRedirects: 0, timeout: remaining })
+        : await route.fetch({
+            url: current,
+            method,
+            headers: followHeaders(request, dropBody),
+            ...(dropBody ? { postData: '' } : {}),
+            maxRedirects: 0,
+            timeout: remaining,
+          });
+    if (!REDIRECT_STATUSES.has(response.status())) return { response };
+    const headers = response.headers();
+    const location = headers.location ?? headers.Location;
+    if (!location) return { response };
+    let next: string;
+    try {
+      next = new URL(location, current).href;
+    } catch {
+      return { denial: { allowed: false, reason: 'invalid_url', host: null } };
+    }
+    const hop = await checkBrowserUrl(next, policy);
+    if (!hop.allowed) return { denial: hop };
+    if (hops >= BROWSER_MAX_REDIRECT_HOPS) {
+      return { denial: { allowed: false, reason: 'too_many_redirects', host: hop.host } };
+    }
+    const status = response.status();
+    if ((status === 303 && method !== 'HEAD') || ((status === 301 || status === 302) && method === 'POST')) {
+      method = 'GET';
+      dropBody = true;
+    }
+    current = next;
+  }
+}
+
 const PAGE_SCHEMES_OK = new Set(['http:', 'https:', 'about:', 'chrome-error:']);
 
 function schemeOf(url: string): string | null {
@@ -113,34 +201,19 @@ export async function installBrowserGuard(
         await route.abort('blockedbyclient');
         return;
       }
-      if (!request.isNavigationRequest()) {
-        await route.continue();
+      // Fetch here and hand the browser only the final response, so every redirect
+      // hop goes through the same checks.
+      const result = await fetchWithCheckedRedirects(route, policy, settings.navTimeoutMs);
+      if ('denial' in result) {
+        deny(result.denial);
+        await route.abort('blockedbyclient');
         return;
       }
-      // Navigations: fetch without following redirects so each hop's target is
-      // checked before the browser goes there.
-      const response = await route.fetch({ maxRedirects: 0, timeout: settings.navTimeoutMs });
-      if (REDIRECT_STATUSES.has(response.status())) {
-        const headers = response.headers();
-        const location = headers.location ?? headers.Location;
-        if (location) {
-          let next: string;
-          try {
-            next = new URL(location, url).href;
-          } catch {
-            deny({ allowed: false, reason: 'invalid_url', host: null });
-            await route.abort('blockedbyclient');
-            return;
-          }
-          const hop = await checkBrowserUrl(next, policy);
-          if (!hop.allowed) {
-            deny(hop);
-            await route.abort('blockedbyclient');
-            return;
-          }
-        }
+      if ('timedOut' in result) {
+        await route.abort('timedout');
+        return;
       }
-      await route.fulfill({ response });
+      await route.fulfill({ response: result.response });
     } catch {
       try {
         await route.abort('failed');
@@ -171,7 +244,19 @@ export async function installBrowserGuard(
   const watchPage = (page: GuardPage) => {
     page.on('framenavigated', (frame) => {
       if (frame !== page.mainFrame()) return;
-      const scheme = schemeOf(frame.url());
+      const url = frame.url();
+      const scheme = schemeOf(url);
+      if (scheme === 'http:' || scheme === 'https:') {
+        // Defence in depth: a main frame on a refused http(s) address is sent back too.
+        void checkBrowserUrl(url, policy)
+          .then((decision) => {
+            if (decision.allowed || frame.url() !== url) return;
+            deny(decision);
+            return page.goto('about:blank');
+          })
+          .catch(() => undefined);
+        return;
+      }
       if (scheme && PAGE_SCHEMES_OK.has(scheme)) return;
       deny({ allowed: false, reason: 'scheme_not_allowed', host: null });
       void page.goto('about:blank').catch(() => undefined);
@@ -243,6 +328,18 @@ export class TourbillonAgentBrowser extends AgentBrowser {
             if (ctx && self) await self.guardContext(ctx as unknown as GuardContext);
             return session;
           }
+
+          // Guard the context first, then reopen only saved tabs that pass the checks again.
+          protected override async restoreBrowserState(
+            manager: unknown,
+            state: BrowserState,
+          ) {
+            const ctx = (manager as unknown as { getContext?: () => unknown }).getContext?.();
+            if (!ctx || !self) return; // cannot guard: do not reopen anything
+            await self.guardContext(ctx as GuardContext);
+            const safe = await self.filterRestorableState(state);
+            if (safe) await super.restoreBrowserState(manager as never, safe);
+          }
         })(config),
     });
     self = this;
@@ -259,12 +356,46 @@ export class TourbillonAgentBrowser extends AgentBrowser {
   /** Install the egress route on a context (idempotent). */
   async guardContext(context: GuardContext): Promise<void> {
     await installBrowserGuard(context, this.egressPolicy, this.guardSettings, {
-      onDenied: (denial) => {
-        this.lastDenial = denial;
-        // Host and reason only — never the full URL.
-        this.trace.warn('browser egress denied', { host: denial.host, reason: denial.reason });
-      },
+      onDenied: (denial) => this.recordDenial(denial),
     });
+  }
+
+  /**
+   * Saved tabs that may be reopened: each URL is checked again with the current policy.
+   * Returns null when nothing is left to restore. @internal
+   */
+  async filterRestorableState(state: BrowserState): Promise<BrowserState | null> {
+    const tabs: BrowserState['tabs'] = [];
+    let activeTabIndex = 0;
+    for (const [index, tab] of (state.tabs ?? []).entries()) {
+      if (!tab?.url) continue;
+      const decision = await checkBrowserUrl(tab.url, this.egressPolicy, { navigation: true });
+      if (!decision.allowed) {
+        this.recordDenial(decision);
+        continue;
+      }
+      if (index === state.activeTabIndex) activeTabIndex = tabs.length;
+      tabs.push(tab);
+    }
+    if (tabs.length === 0) return null;
+    return { ...state, tabs, activeTabIndex };
+  }
+
+  /** The provider's own relaunch navigation: checked like an agent navigation. */
+  override async navigateTo(url: string): Promise<void> {
+    const decision = await checkBrowserUrl(url, this.egressPolicy, { navigation: true });
+    if (!decision.allowed) {
+      this.recordDenial(decision);
+      return;
+    }
+    await super.navigateTo(url);
+  }
+
+  private recordDenial(decision: Denial): void {
+    const denial = { ...decision, at: Date.now() };
+    this.lastDenial = denial;
+    // Host and reason only — never the full URL.
+    this.trace.warn('browser egress denied', { host: denial.host, reason: denial.reason });
   }
 
   /** Defensive: also guard on every ensureReady (no-op once installed). */

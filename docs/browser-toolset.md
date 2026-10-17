@@ -34,7 +34,15 @@ is unaffected).
 Run the scheduler as a non-root user: Chromium's sandbox refuses to start as root and the
 provider does not pass `--no-sandbox`.
 
-Node: `@mastra/agent-browser` declares `engines.node >=22.13.0`; see the PR for the runtime check on Node 20.
+Node: Node 20 is supported (Chromium launch and the browser tests verified on Node
+20.19.2). `@mastra/agent-browser` declares `engines.node >=22.13.0`; that field is
+advisory here — pnpm does not enforce it (no `engine-strict`), and nothing in the
+toolset needs Node 22.
+
+Install scripts: the `agent-browser` package's `postinstall` (and the browser-driver
+download scripts of its dependencies) stay excluded from `allowBuilds` in
+`pnpm-workspace.yaml` (`agent-browser: false`, …), so they never run at `pnpm install`.
+This is intentional: Chromium comes only from the Ops step above.
 
 ## Environment
 
@@ -48,7 +56,8 @@ Node: `@mastra/agent-browser` declares `engines.node >=22.13.0`; see the PR for 
 ## Egress
 
 Every URL the browser loads is checked (agent navigation, subresources, popups / new
-tabs, WebSockets, and the `Location` of each redirect hop on navigations):
+tabs, WebSockets, every redirect hop, and saved tabs reopened when a thread's browser
+is relaunched):
 
 1. Only `http`/`https` (navigation may also use exactly `about:blank`). `file:`, `data:`,
    `javascript:`, `chrome:`, `view-source:` … are refused before Chromium is launched.
@@ -60,7 +69,28 @@ tabs, WebSockets, and the `Location` of each redirect hop on navigations):
    RFC1918, CGNAT, link-local and cloud metadata, unique-local IPv6. Hostnames are
    resolved and every address is checked.
 
+How it is enforced:
+
+- A Playwright route on the browser context handles every http(s) request. The route
+  fetches the request itself without following redirects, checks each `Location`,
+  follows allowed hops itself (at most 10; more is refused as `too_many_redirects`) and
+  gives the browser only the final response. The browser never follows a redirect on
+  its own. After a redirect the page's address stays at the first URL of the chain.
+  Response bodies pass through the guard, so very large downloads are slower.
+- The route is installed on a new browser before anything is loaded. On relaunch, saved
+  tabs are checked again with the current policy; refused tabs are not reopened.
+- A main frame that still ends up on a refused address or a non-http(s) document is
+  sent back to `about:blank`.
+
 Denials are logged as `[browser] browser egress denied` with the host and reason only.
+
+Known limits, accepted for this P1 (covered by the process-level follow-up below):
+
+- DNS: the check resolves the hostname, and the connection resolves it again, so a
+  name whose answer changes between the two is not caught.
+- Service workers: requests made by a page's service worker are not seen by the
+  context route.
+- WebRTC: peer and STUN/TURN traffic does not go through the HTTP request layer.
 
 Stronger network enforcement at the browser process level (a filtering proxy plus a
 custom thread manager) is a planned P1 follow-up. Until then, enforcement is at the
