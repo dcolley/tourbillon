@@ -1,8 +1,12 @@
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import * as schema from './schema/index';
+import { assertValidDatabaseUrl } from './database-url';
 
 const connectionString = process.env.DATABASE_URL!;
+// A malformed URL would otherwise make the driver throw an error that carries the raw string
+// (credentials included) into logs and stack traces. Fail with a fixed message instead.
+assertValidDatabaseUrl(connectionString);
 const poolMax = parseInt(process.env.DATABASE_POOL_MAX ?? '5', 10);
 
 type PostgresClient = ReturnType<typeof postgres>;

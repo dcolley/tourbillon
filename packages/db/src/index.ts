@@ -1,5 +1,7 @@
 export * from './schema/index';
+export * from './database-url';
 export * from './client';
+export * from './probe';
 export * from './orm';
 export * from './llm-provider-queries';
 export * from './checkout-lock';

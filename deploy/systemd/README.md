@@ -50,3 +50,23 @@ still unreachable; `Restart=always` (a superset of `on-failure`) restarts it. It
 `tsx watch` (`workers:start`, not `workers:dev`), because watch mode keeps the process, and so the unit,
 alive after the scheduler itself has died. Once ready it logs a single `scheduler ready` line, and any
 run left `running` by the previous process is marked failed.
+
+Startup details:
+
+- Each probe uses its own single-connection client and is bounded to 10 s (handshake and query), so a
+  database that accepts TCP but never answers cannot stall startup past the 2 minute budget.
+- Errors that retrying cannot fix exit 1 at once instead of retrying: authentication rejected
+  (`28P01`, `28000`), database does not exist (`3D000`), unknown object such as a missing role
+  (`42704`), a startup parameter that cannot be set (`55P02`), or a malformed `DATABASE_URL`
+  (including unencoded reserved characters such as `@`, `/` or `#` in the password). systemd then
+  restarts the unit every `RestartSec`; fix `.env` and `systemctl --user restart tourbillon-workers`.
+- Retry and give-up lines carry the underlying driver message and code (for example
+  `ECONNREFUSED`, `28P01`), sanitised: never the connection URL or password. User, host, port and
+  database name may appear.
+
+### One scheduler per database
+
+Run exactly **one** scheduler process against a given database. On startup the scheduler marks every
+run still `running` from before its boot as failed, so a second scheduler started on the same database
+(for example a local `pnpm workers:dev` pointed at the TEST database) fails the first one's in-flight
+runs. Use a separate database for any extra scheduler.

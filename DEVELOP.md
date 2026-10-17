@@ -87,7 +87,7 @@ On an agent detail page (`/agent/{urlKey}`), enable **Automatic heartbeats** and
 | Command | What it runs | When you need it |
 |---|---|---|
 | `pnpm dev` | Next.js web app (`apps/web`) | Always, for UI and API routes |
-| `pnpm workers:dev` | WakeRunner + Mastra schedules (`packages/scheduler`) | Agent wakes, timers, routines |
+| `pnpm workers:dev` | WakeRunner + Mastra schedules (`packages/scheduler`) | Agent wakes, timers, routines. **One scheduler per database:** never point it at a database another scheduler (e.g. TEST) uses; startup fails runs left `running` |
 | `pnpm db:migrate` | Apply Drizzle migrations | After schema changes or fresh DB |
 | `pnpm db:strip` | Strip dev DB to one company + default LLM provider | Local Mac reset after migrating data elsewhere |
 | `pnpm db:generate` | Generate migration SQL from schema | After editing `packages/db/src/schema/` |

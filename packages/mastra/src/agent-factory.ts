@@ -45,6 +45,7 @@ import {
 import { getMastraInstance } from './mastra-instance';
 import { isMastraTracingEnabled } from '@tourbillon/shared';
 import { buildHeartbeatInputProcessors } from './heartbeat-processors';
+import { requireDatabaseUrl } from '@tourbillon/db/database-url';
 
 const globalForMastra = globalThis as unknown as {
   /** Memory instances keyed by resolved OM config (or `base` when OM is off). */
@@ -70,7 +71,7 @@ export async function getAgentMemory(
   const cached = globalForMastra.mastraMemoryByKey.get(key);
   if (cached) return cached;
 
-  const connectionString = process.env.DATABASE_URL!;
+  const connectionString = requireDatabaseUrl('agent memory storage');
   const semanticRecallEnabled = process.env.MEMORY_SEMANTIC_RECALL === 'true';
   const embeddingModel = process.env.MEMORY_EMBEDDING_MODEL;
   const resolved = resolveAgentObservationalMemory(companySettings, agentRuntime);

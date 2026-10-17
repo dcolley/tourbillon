@@ -1,54 +1,17 @@
-import { getMastraInstance, sweepStaleEgressSockets } from '@tourbillon/mastra';
-import { createTraceLogger, isObservabilityEnabled, isPhoenixCollectorEnabled } from '@tourbillon/shared';
-import { startWakeServer, startStaleSweepInterval } from './wake-server';
-import { bootMastraSchedules } from './schedule-boot';
-import { db } from '@tourbillon/db';
-import { sql } from 'drizzle-orm';
-import { runSchedulerMain, waitForDb } from './startup';
-import { sweepOrphanedRunsOnStartup } from './startup-sweep';
+/**
+ * Scheduler entry. Kept tiny on purpose: DATABASE_URL is validated before anything that opens a
+ * database client at import time is loaded, and that loading happens inside runSchedulerMain, so a
+ * bad URL or an import-time failure becomes one sanitised log line and exit 1, never an uncaught
+ * error that prints connection details.
+ */
+import { createTraceLogger } from '@tourbillon/shared';
+import { assertValidDatabaseUrl } from '@tourbillon/db/database-url';
+import { runSchedulerMain } from './startup';
 
 const logger = createTraceLogger('scheduler', {});
 
-async function main(): Promise<void> {
-  const bootTime = new Date();
-  // Postgres may still be starting (e.g. "the database system is not yet accepting connections").
-  // Retry with backoff for ~2 min; on give-up main throws and we exit non-zero for systemd.
-  const dbAttempts = await waitForDb(() => db.execute(sql`select 1`), {
-    onRetry: ({ attempt, delayMs, error }) =>
-      logger.info('database not ready; retrying', { attempt, delayMs, error }),
-  });
-  const orphanedRunsFailed = await sweepOrphanedRunsOnStartup(bootTime);
-  // Defence-in-depth: unlink dead egress proxy socks left by prior crashes.
-  // Live listeners are connect-probed and never removed.
-  await sweepStaleEgressSockets().catch(() => undefined);
-  const wakeServer = startWakeServer();
-  const staleSweep = startStaleSweepInterval();
-  await bootMastraSchedules();
-
-  async function shutdown(): Promise<void> {
-    clearInterval(staleSweep);
-    await getMastraInstance().stopWorkers();
-    await new Promise<void>((resolve) => {
-      wakeServer.close(() => resolve());
-    });
-    process.exit(0);
-  }
-
-  process.on('SIGTERM', () => {
-    void shutdown();
-  });
-  process.on('SIGINT', () => {
-    void shutdown();
-  });
-
-  // One ready line. Never log URLs/connection strings (they can carry credentials).
-  logger.info('scheduler ready', {
-    wakePort: process.env.SCHEDULER_WAKE_PORT ?? '3003',
-    dbAttempts,
-    orphanedRunsFailed,
-    observabilityEnabled: isObservabilityEnabled(),
-    phoenixCollectorEnabled: isPhoenixCollectorEnabled(),
-  });
-}
-
-void runSchedulerMain(main, logger);
+void runSchedulerMain(async () => {
+  assertValidDatabaseUrl(process.env.DATABASE_URL);
+  const { main } = await import('./scheduler-main');
+  await main(logger);
+}, logger);

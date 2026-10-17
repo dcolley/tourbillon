@@ -40,6 +40,7 @@ import { buildHeartbeatInputProcessors } from './heartbeat-processors';
 import { getMastraInstance } from './mastra-instance';
 import { buildChatWorkspace } from './execution-workspace';
 import { getInternalApiUrl } from './tools/api-client';
+import { requireDatabaseUrl } from '@tourbillon/db/database-url';
 
 const CHAT_IDENTITY_CHAR_LIMIT = 2000;
 
@@ -246,10 +247,7 @@ let chatThreadStorage: PostgresStore | null = null;
 
 function getChatThreadStorage(): PostgresStore {
   if (!chatThreadStorage) {
-    const connectionString = process.env.DATABASE_URL;
-    if (!connectionString) {
-      throw new Error('DATABASE_URL is required for chat controller storage');
-    }
+    const connectionString = requireDatabaseUrl('chat controller storage');
     chatThreadStorage = new PostgresStore({
       id: 'tourbillon-chat-threads',
       connectionString,
