@@ -8,6 +8,7 @@ import {
   describeDatabaseTarget,
   describeDbError,
   requireDatabaseUrl,
+  safeTargetFields,
   sanitizeDbErrorText,
 } from './database-url';
 
@@ -16,7 +17,7 @@ const GOOD = `postgres://tb_user:${PW}@db.internal:5432/tourbillon`;
 
 /** Malformed values of different kinds; each embeds the password. */
 const MALFORMED: Array<[string, string]> = [
-  [`postgres://tb_user:${PW}@db.internal:99999/tourbillon`, 'unparseable'],
+  [`postgres://tb_user:${PW}@db.internal:99999/tourbillon`, 'bad-port'],
   [`postgres://tb_user:${PW}%ZZ@db.internal/tourbillon`, 'bad-encoding'],
   [`tb_user:${PW}@db.internal/tourbillon`, 'bad-scheme'],
   [`postgres://tb_user:${PW}@db internal/tourbillon`, 'unparseable'],
@@ -132,7 +133,7 @@ describe('db client import with a malformed DATABASE_URL', () => {
     });
     const out = `${res.stdout}\n${res.stderr}`;
     assert.notEqual(res.status, 0, out);
-    assert.match(out, /DATABASE_URL is not a valid postgres connection URL \(unparseable\)/);
+    assert.match(out, /DATABASE_URL is not a valid postgres connection URL \(bad-port\)/);
     assert.ok(!out.includes(PW) && !out.includes('db.internal'), out);
   });
 });
@@ -151,7 +152,102 @@ describe('drizzle-kit config with a malformed DATABASE_URL', () => {
     });
     const out = `${res.stdout}\n${res.stderr}`;
     assert.notEqual(res.status, 0, out);
-    assert.match(out, /DATABASE_URL is not a valid postgres connection URL \(unparseable\)/);
+    assert.match(out, /DATABASE_URL is not a valid postgres connection URL \(bad-port\)/);
     assert.ok(!out.includes(PW) && !out.includes('db.internal'), out);
+  });
+});
+
+/**
+ * Passwords with unencoded reserved characters, which parsers split differently. Each entry is
+ * [url, the real password, expected problem]. Dummy credentials.
+ */
+const AMBIGUOUS: Array<[string, string, string]> = [
+  ['postgres://tb_user:5543/REST@db.internal:5432/tourbillon', '5543/REST', 'ambiguous-authority'],
+  ['postgres://tb_user:/WHOLEpw@db.internal:5432/tourbillon', '/WHOLEpw', 'ambiguous-authority'],
+  ['postgres://tb_user:AAAx@BBBx,CCCx@db.internal/tourbillon', 'AAAx@BBBx,CCCx', 'ambiguous-authority'],
+  ['postgres://tb_user:pw?QRSx@db.internal/tourbillon', 'pw?QRSx', 'ambiguous-authority'],
+  ['postgres://tb_user:pw#FRAGx@db.internal/tourbillon', 'pw#FRAGx', 'ambiguous-authority'],
+  ['postgres://tb_user:AAAx@db%40internal/tourbillon', 'AAAx', 'ambiguous-authority'],
+];
+
+describe('ambiguous credentials boundary', () => {
+  for (const [raw, , problem] of AMBIGUOUS) {
+    it(`rejects ${raw.replace(/:[^:]*@.*/, ':…')} as ${problem}`, () => {
+      assert.equal(checkDatabaseUrl(raw), problem);
+      assert.throws(() => assertValidDatabaseUrl(raw), (err: unknown) => {
+        assert.ok(err instanceof DatabaseUrlError);
+        assert.ok(!everythingAbout(err).includes('db.internal'));
+        return true;
+      });
+    });
+  }
+
+  it('describeDatabaseTarget never returns password text (any 3+ char piece of it)', () => {
+    for (const [raw, password] of AMBIGUOUS) {
+      const target = describeDatabaseTarget(raw);
+      const pieces = password.split(/[^A-Za-z0-9]+/).filter((p) => p.length >= 3);
+      for (const value of Object.values(target ?? {})) {
+        for (const piece of pieces) assert.ok(!value.includes(piece), `${raw}: ${value} has password text`);
+        assert.ok(!value.includes('@'));
+      }
+    }
+  });
+
+  it('still accepts a percent-encoded password with reserved characters', () => {
+    const pw = 'AAAx@BBBx,CCCx/5543?#';
+    const raw = `postgres://tb_user:${encodeURIComponent(pw)}@db.internal:5432/tourbillon`;
+    assert.equal(checkDatabaseUrl(raw), null);
+    assert.deepEqual(describeDatabaseTarget(raw), {
+      user: 'tb_user',
+      host: 'db.internal',
+      port: '5432',
+      database: 'tourbillon',
+    });
+  });
+});
+
+describe('safeTargetFields (defence in depth)', () => {
+  it("drops fields containing '@' or a password fragment, keeps the rest", () => {
+    assert.deepEqual(
+      safeTargetFields({ user: 'tb_user', host: 'BBBx', port: '5543', database: 'REST@db:1/x' }, ['AAAx@BBBx,CCCx']),
+      { user: 'tb_user', port: '5543' },
+    );
+    assert.deepEqual(
+      safeTargetFields({ user: 'tb_user', host: 'db', port: '5432', database: 'x-Sup3rpw-y' }, ['Sup3rpw']),
+      { user: 'tb_user', host: 'db', port: '5432' },
+    );
+  });
+});
+
+describe('multi-host ports', () => {
+  it('checks every host, not just the first', () => {
+    assert.equal(checkDatabaseUrl('postgres://u:pw@h1:5432,h2:abc/db'), 'bad-port');
+    assert.equal(checkDatabaseUrl('postgres://u:pw@h1:5432,h2:99999/db'), 'bad-port');
+    assert.equal(checkDatabaseUrl('postgres://u:pw@h1:5432,h2:0/db'), 'bad-port');
+    assert.equal(checkDatabaseUrl('postgres://u:pw@h1,,h2/db'), 'unparseable');
+    assert.equal(checkDatabaseUrl('postgres://u:pw@h1:5432,[::1]:5433,h3/db'), null);
+  });
+});
+
+describe('backfill script with a malformed DATABASE_URL', () => {
+  it('exits 1 with the fixed message and no URL text', async () => {
+    const { spawnSync } = await import('node:child_process');
+    const path = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const res = spawnSync(
+      path.resolve(here, '../node_modules/.bin/tsx'),
+      [path.resolve(here, '../../../scripts/backfill-chat-thread-agent-ids.ts')],
+      {
+        env: { PATH: process.env.PATH ?? '', DATABASE_URL: AMBIGUOUS[2]![0] },
+        encoding: 'utf-8',
+        timeout: 60_000,
+      },
+    );
+    const out = `${res.stdout}\n${res.stderr}`;
+    assert.equal(res.status, 1, out);
+    assert.match(out, /DATABASE_URL is not a valid postgres connection URL \(ambiguous-authority\)/);
+    assert.ok(!/AAAx|BBBx|CCCx|db\.internal/.test(out), out);
+    assert.doesNotMatch(out, /Starting chat thread/, 'stopped before connecting');
   });
 });

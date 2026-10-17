@@ -8,7 +8,12 @@
  * process can validate the URL before anything that connects at import time is loaded.
  */
 
-export type DatabaseUrlProblem = 'bad-scheme' | 'unparseable' | 'bad-encoding' | 'bad-port';
+export type DatabaseUrlProblem =
+  | 'bad-scheme'
+  | 'unparseable'
+  | 'bad-encoding'
+  | 'bad-port'
+  | 'ambiguous-authority';
 
 export const DATABASE_URL_INVALID_CODE = 'DATABASE_URL_INVALID';
 
@@ -35,11 +40,32 @@ interface ParsedDatabaseUrl {
  */
 function parseDatabaseUrl(raw: string): ParsedDatabaseUrl | DatabaseUrlProblem {
   if (!/^postgres(?:ql)?:\/\//i.test(raw)) return 'bad-scheme';
+  // Reserved characters in userinfo must be percent-encoded. When they are not, parsers disagree on
+  // where the credentials end, so refuse anything where that boundary is not unambiguous: an '@'
+  // after the authority (in path, query or fragment), or more than one '@' in it.
+  const afterScheme = raw.slice(raw.indexOf('://') + 3);
+  const authorityEnd = afterScheme.search(/[/?#]/);
+  const authority = authorityEnd === -1 ? afterScheme : afterScheme.slice(0, authorityEnd);
+  const rest = authorityEnd === -1 ? '' : afterScheme.slice(authorityEnd);
+  if (rest.includes('@') || authority.split('@').length > 2) return 'ambiguous-authority';
   let hostPart = raw.slice(raw.indexOf('://') + 3).split(/[?/]/)[0] ?? '';
   try {
     hostPart = decodeURIComponent(hostPart.slice(hostPart.indexOf('@') + 1));
   } catch {
     return 'bad-encoding';
+  }
+  if (hostPart.includes('@')) return 'ambiguous-authority';
+  // Every host of a multi-host list, not just the first (which is all WHATWG URL sees).
+  if (hostPart) {
+    for (const entry of hostPart.split(',')) {
+      const m = /^(\[[^\]]*\]|[^:[\]]+)(?::([^:]*))?$/.exec(entry);
+      if (!m) return 'unparseable';
+      if (m[2] !== undefined) {
+        if (!/^\d{1,5}$/.test(m[2])) return 'bad-port';
+        const port = Number(m[2]);
+        if (port < 1 || port > 65535) return 'bad-port';
+      }
+    }
   }
   let url: URL;
   try {
@@ -91,12 +117,27 @@ export function describeDatabaseTarget(
   if (!raw) return null;
   const parsed = parseDatabaseUrl(raw);
   if (typeof parsed === 'string') return null;
-  return {
-    ...(parsed.username ? { user: parsed.username } : {}),
-    ...(parsed.hostname ? { host: parsed.hostname } : {}),
-    ...(parsed.port ? { port: parsed.port } : {}),
-    ...(parsed.database ? { database: parsed.database } : {}),
-  };
+  return safeTargetFields(
+    { user: parsed.username, host: parsed.hostname, port: parsed.port, database: parsed.database },
+    secretFragments(raw).filter((fragment) => fragment !== raw),
+  );
+}
+
+/**
+ * Defence in depth for describeDatabaseTarget: drop any field that contains '@' (a sign the
+ * credentials boundary was misread) or any password fragment. Exported for tests.
+ */
+export function safeTargetFields(
+  fields: Record<'user' | 'host' | 'port' | 'database', string>,
+  secrets: string[],
+): { user?: string; host?: string; port?: string; database?: string } {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(fields)) {
+    if (!value || value.includes('@')) continue;
+    if (secrets.some((secret) => value.includes(secret) || (value.length >= 3 && secret.includes(value)))) continue;
+    out[key] = value;
+  }
+  return out;
 }
 
 const REDACTED = '[redacted]';
@@ -113,9 +154,12 @@ function secretFragments(raw: string | undefined): string[] {
     out.add(parsed.password);
     out.add(encodeURIComponent(parsed.password));
   } else {
-    // Malformed: still strip whatever sits between "user:" and "@".
-    const m = /:\/\/[^:/@]*:([^@]*)@/.exec(raw);
-    if (m?.[1]) out.add(m[1]);
+    // Malformed or ambiguous: strip whatever sits between "user:" and the first '@', and between
+    // "user:" and the last '@' (an unencoded '@' or '/' can sit inside the password).
+    const first = /:\/\/[^:/@]*:([^@]*)@/.exec(raw);
+    if (first?.[1]) out.add(first[1]);
+    const last = /:\/\/[^:/@]*:(.*)@/.exec(raw);
+    if (last?.[1]) out.add(last[1]);
   }
   // Very short passwords are not redacted as substrings (they would shred the message); the
   // URL-with-userinfo pattern below still catches them inside any echoed URL.

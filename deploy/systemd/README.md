@@ -56,7 +56,9 @@ Startup details:
 - Each probe uses its own single-connection client and is bounded to 10 s (handshake and query), so a
   database that accepts TCP but never answers cannot stall startup past the 2 minute budget.
 - Errors that retrying cannot fix exit 1 at once instead of retrying: authentication rejected
-  (`28P01`, `28000`), database does not exist (`3D000`), or a malformed `DATABASE_URL`. systemd then
+  (`28P01`, `28000`), database does not exist (`3D000`), unknown object such as a missing role
+  (`42704`), a startup parameter that cannot be set (`55P02`), or a malformed `DATABASE_URL`
+  (including unencoded reserved characters such as `@`, `/` or `#` in the password). systemd then
   restarts the unit every `RestartSec`; fix `.env` and `systemctl --user restart tourbillon-workers`.
 - Retry and give-up lines carry the underlying driver message and code (for example
   `ECONNREFUSED`, `28P01`), sanitised: never the connection URL or password. User, host, port and

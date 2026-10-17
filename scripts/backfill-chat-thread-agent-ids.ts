@@ -23,6 +23,7 @@
  */
 
 import { Pool } from 'pg';
+import { DatabaseUrlError, assertValidDatabaseUrl, describeDbError } from '../packages/db/src/database-url';
 
 interface ThreadRow {
   id: string;
@@ -37,6 +38,13 @@ async function backfillChatThreadAgentIds() {
 
   if (!databaseUrl) {
     console.error('ERROR: DATABASE_URL environment variable is required');
+    process.exit(1);
+  }
+  try {
+    assertValidDatabaseUrl(databaseUrl);
+  } catch (err) {
+    // Fixed message only; never the value.
+    console.error(`ERROR: ${err instanceof DatabaseUrlError ? err.message : 'DATABASE_URL is not valid'}`);
     process.exit(1);
   }
 
@@ -150,7 +158,8 @@ async function backfillChatThreadAgentIds() {
     console.log('\n✅ Backfill complete.');
 
   } catch (error) {
-    console.error('❌ Error during backfill:', error);
+    const { message, code } = describeDbError(error, databaseUrl);
+    console.error('❌ Error during backfill:', message, code ? `(${code})` : '');
     process.exit(1);
   } finally {
     await pool.end();

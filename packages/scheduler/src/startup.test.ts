@@ -168,6 +168,8 @@ describe('waitForDb: fail fast on errors retrying cannot fix', () => {
     ['28P01', 'password authentication failed for user "tb_user"'],
     ['28000', 'no pg_hba.conf entry for host "10.0.0.9", user "tb_user", database "tourbillon"'],
     ['3D000', 'database "tourbillon" does not exist'],
+    ['42704', 'role "tb_user" does not exist'],
+    ['55P02', 'parameter "max_connections" cannot be changed now'],
     ['DATABASE_URL_INVALID', 'DATABASE_URL is not a valid postgres connection URL (unparseable)'],
   ] as const) {
     it(`${code}: one attempt, no sleep, fatal DbUnavailableError`, async () => {

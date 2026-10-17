@@ -17,12 +17,15 @@ export const DB_PROBE_TIMEOUT_CODE = 'PROBE_TIMEOUT';
 
 /**
  * Errors that retrying cannot fix: bad password / auth rejected (28P01, 28000), database does not
- * exist (3D000), or a malformed DATABASE_URL. These fail fast instead of burning the 2 min budget.
+ * exist (3D000), an unknown object such as a missing role (42704), a startup parameter that cannot
+ * be set (55P02), or a malformed DATABASE_URL. These fail fast instead of burning the 2 min budget.
  */
 export const FATAL_DB_ERROR_CODES: ReadonlySet<string> = new Set([
   '28P01',
   '28000',
   '3D000',
+  '42704',
+  '55P02',
   DATABASE_URL_INVALID_CODE,
 ]);
 
