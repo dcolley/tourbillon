@@ -136,3 +136,22 @@ describe('db client import with a malformed DATABASE_URL', () => {
     assert.ok(!out.includes(PW) && !out.includes('db.internal'), out);
   });
 });
+
+describe('drizzle-kit config with a malformed DATABASE_URL', () => {
+  it('fails with the fixed message only', async () => {
+    const { spawnSync } = await import('node:child_process');
+    const path = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const res = spawnSync(path.resolve(here, '../node_modules/.bin/tsx'), ['drizzle.config.ts'], {
+      cwd: path.resolve(here, '..'),
+      env: { PATH: process.env.PATH ?? '', DATABASE_URL: MALFORMED[0]![0] },
+      encoding: 'utf-8',
+      timeout: 60_000,
+    });
+    const out = `${res.stdout}\n${res.stderr}`;
+    assert.notEqual(res.status, 0, out);
+    assert.match(out, /DATABASE_URL is not a valid postgres connection URL \(unparseable\)/);
+    assert.ok(!out.includes(PW) && !out.includes('db.internal'), out);
+  });
+});
