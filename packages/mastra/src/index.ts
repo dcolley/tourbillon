@@ -4,6 +4,15 @@ export * from './heartbeat-context';
 export * from './provider';
 export * from './model-settings';
 export * from './agent-factory';
+export {
+  agentHasBrowserToolset,
+  buildAgentBrowser,
+  closeAgentBrowser,
+  BROWSER_TOOLSET_ID,
+  BROWSER_EXECUTABLE_PATH_ENV,
+  BROWSER_NAV_TIMEOUT_ENV,
+  BROWSER_STEP_TIMEOUT_ENV,
+} from './browser';
 export * from './controller-config';
 export {
   destroyCodeExecutionWorkspace,

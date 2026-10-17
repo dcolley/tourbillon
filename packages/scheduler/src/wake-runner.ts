@@ -16,7 +16,6 @@ import {
   TripwireDetector,
   tripwireDetectorRegistry,
   runWithHeartbeatContext,
-  destroyCodeExecutionWorkspace,
   registerKnownSecretValues,
 } from '@tourbillon/mastra';
 import type { HeartbeatJobData, AgentRuntimeConfig } from '@tourbillon/shared';
@@ -54,27 +53,7 @@ import {
   hasMaterialWork,
   shouldParkIssue,
 } from './park-helpers';
-
-/**
- * Tear down the code-execution workspace attached to an agent-ish runtime
- * (Agent / DurableAgent expose getWorkspace()). The egress-proxy unix socket
- * bound for this wake stays on disk unless the sandbox is destroyed, so every
- * wake must release it in a finally — success, failure, and abort alike.
- */
-async function destroyWakeWorkspaces(
-  ...agents: Array<{ getWorkspace?: (options?: unknown) => Promise<unknown> } | undefined>
-): Promise<void> {
-  for (const agent of agents) {
-    try {
-      const workspace = await agent?.getWorkspace?.();
-      if (workspace) {
-        await destroyCodeExecutionWorkspace(workspace as never);
-      }
-    } catch {
-      /* teardown is best-effort; never mask the original wake error */
-    }
-  }
-}
+import { releaseWakeResources } from './wake-teardown';
 
 /**
  * Error thrown when generation is truncated (finishReason: length).
@@ -1104,7 +1083,8 @@ export async function runDurableAgentWake(params: {
     // DurableAgent.getWorkspace delegates to the wrapped Agent, so this
     // reaches the same code-execution workspace (and its EgressProxy sockets)
     // without a second factory resolve.
-    await destroyWakeWorkspaces(durableAgent);
+    // Also closes the `browser` toolset's Chromium (bounded, best-effort).
+    await releaseWakeResources(durableAgent);
     tripwireDetectorRegistry.unregister(detector);
     detector.clear();
   }
