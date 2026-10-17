@@ -13,6 +13,7 @@
     "db:migrate-mcp": "pnpm --filter @tourbillon/db migrate-mcp",
     "backfill:chat-threads": "pnpm --filter web exec tsx ../../scripts/backfill-chat-thread-agent-ids.ts",
     "workers:dev": "pnpm --filter @tourbillon/scheduler dev",
+    "workers:start": "pnpm --filter @tourbillon/scheduler start:service",
     "type-check": "pnpm -r type-check",
     "lint": "pnpm -r lint",
     "deps:check": "pnpm outdated -r",
