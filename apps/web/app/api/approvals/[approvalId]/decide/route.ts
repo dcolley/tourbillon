@@ -5,6 +5,7 @@ import { enqueueApprovalWake } from '@/lib/wake-client';
 import { addIssueComment } from '@/lib/issue-comments';
 import { publicOriginFromRequest } from '@tourbillon/shared';
 import { requireBoardCompany } from '@/lib/board-route-auth';
+import { isValidApprovalId } from '@/lib/approval-detail';
 
 type ApprovalPayload = Record<string, unknown> & {
   title?: string;
@@ -40,6 +41,8 @@ export async function POST(
   const auth = await requireBoardCompany(req);
   if (!auth.ok) return auth.response;
   const company = auth.value;
+  // NUL/control characters made Postgres throw (500); malformed ids are a 400.
+  if (!isValidApprovalId(approvalId)) return NextResponse.json({ error: 'Invalid approval id' }, { status: 400 });
   const body = await parseDecisionBody(req);
 
   const decision = body.decision as 'approved' | 'rejected';
