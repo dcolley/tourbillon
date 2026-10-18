@@ -127,6 +127,13 @@
       "when": 1791369768386,
       "tag": "0017_bouncy_spyke",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1791461601003,
+      "tag": "0018_bizarre_zodiak",
+      "breakpoints": true
     }
   ]
 }

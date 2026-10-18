@@ -20,6 +20,7 @@ import { createProject, updateProject, listProjectsForAgent, type CreateProjectI
 import { addIssueComment } from '@/lib/issue-comments';
 import { triggerAgentHeartbeat } from '@/lib/heartbeat';
 import { enqueueApprovalWake } from '@/lib/wake-client';
+import { serializeApproval } from '@/lib/approval-serializer';
 
 interface McpRequest {
   jsonrpc: '2.0';
@@ -1462,18 +1463,21 @@ async function handleListApprovals(tokenCompanyId: string, params: any) {
     .limit(limit);
 
   return {
-    approvals: rows.map(a => ({
-      id: a.id,
-      type: a.type,
-      status: a.status,
-      requestedByAgentId: a.requestedByAgentId,
-      decidedByUserId: a.decidedByUserId,
-      issueIds: a.issueIds,
-      payload: a.payload,
-      note: a.note,
-      decidedAt: a.decidedAt?.toISOString() ?? null,
-      createdAt: a.createdAt.toISOString(),
-    })),
+    approvals: rows.map((row) => {
+      const a = serializeApproval(row);
+      return {
+        id: a.id,
+        type: a.type,
+        status: a.status,
+        requestedByAgentId: a.requestedByAgentId,
+        decidedByUserId: a.decidedByUserId,
+        issueIds: a.issueIds,
+        payload: a.payload,
+        note: a.note,
+        decidedAt: a.decidedAt?.toISOString() ?? null,
+        createdAt: a.createdAt.toISOString(),
+      };
+    }),
   };
 }
 

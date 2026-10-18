@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db, approvals, agents, issues } from '@tourbillon/db';
+import { db, approvals, agents, issues, companies } from '@tourbillon/db';
 import { and, eq, inArray } from 'drizzle-orm';
 import { authenticateAgentToken } from '@/lib/auth/agent-token-auth';
+import { companySettingsSecretValues, serializeApproval } from '@/lib/approval-serializer';
 
 export async function GET(
   req: NextRequest,
@@ -46,21 +47,9 @@ export async function GET(
     const issuesById = new Map(linkedIssues.map((row) => [row.id, row]));
 
     // Build response with full detail
+    const company = await db.query.companies.findFirst({ where: eq(companies.id, companyId) });
     const result = {
-      id: approval.id,
-      companyId: approval.companyId,
-      type: approval.type,
-      status: approval.status,
-      requestedByAgentId: approval.requestedByAgentId,
-      decidedByUserId: approval.decidedByUserId,
-      issueIds: approval.issueIds,
-      payload: approval.payload,
-      note: approval.note,
-      decidedAt: approval.decidedAt,
-      hitlyApprovalId: approval.hitlyApprovalId,
-      hitlyError: approval.hitlyError,
-      createdAt: approval.createdAt,
-      updatedAt: approval.updatedAt,
+      ...serializeApproval(approval, { knownSecrets: companySettingsSecretValues(company?.settings) }),
       requester: agent ? { id: agent.id, name: agent.name, urlKey: agent.urlKey } : null,
       linkedIssues: approval.issueIds
         .map((id) => issuesById.get(id))

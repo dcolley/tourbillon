@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db, approvals, agents, issues } from '@tourbillon/db';
 import { desc, eq, inArray } from 'drizzle-orm';
 import { requireMobileCompany, toJson } from '@/lib/mobile-session';
+import { serializeApproval } from '@/lib/approval-serializer';
 
 export async function listCompanyApprovals(companyId: string) {
   const rows = await db
@@ -29,7 +30,7 @@ export async function listCompanyApprovals(companyId: string) {
   const issuesById = new Map(linkedIssues.map((row) => [row.id, row]));
 
   return rows.map(({ approval, agent }) => ({
-    ...approval,
+    ...serializeApproval(approval),
     requester: agent ? { id: agent.id, name: agent.name, urlKey: agent.urlKey } : null,
     linkedIssues: (approval.issueIds ?? [])
       .map((id) => issuesById.get(id))

@@ -8,17 +8,24 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { StatusBadge } from '@/lib/status-badges';
 import { getActiveCompanyOrNull } from '@/lib/company';
+import { companySettingsSecretValues, serializeApproval } from '@/lib/approval-serializer';
 
 export default async function ApprovalsPage() {
   const company = await getActiveCompanyOrNull();
   if (!company) return null;
-  const pendingApprovals = await db
+  const rows = await db
     .select({ approval: approvals, agent: agents })
     .from(approvals)
     .leftJoin(agents, eq(approvals.requestedByAgentId, agents.id))
     .where(eq(approvals.companyId, company.id))
     .orderBy(desc(approvals.createdAt))
     .limit(50);
+  // Title, summary, note and HITLy error are rendered from the scrubbed read model only.
+  const knownSecrets = companySettingsSecretValues(company.settings);
+  const pendingApprovals = rows.map(({ approval, agent }) => ({
+    approval: serializeApproval(approval, { knownSecrets }),
+    agent,
+  }));
 
   const allIssueIds = [
     ...new Set(pendingApprovals.flatMap(({ approval }) => approval.issueIds ?? [])),
