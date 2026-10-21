@@ -282,7 +282,7 @@ All variables live in `.env` at the repo root. Key ones:
 | `SCHEDULER_API_KEY` | Wake/schedule sync + internal issue create | `change-me-in-production` |
 | `SCHEDULER_WAKE_PORT` | WakeRunner HTTP port | `3003` |
 | `SCHEDULER_WAKE_URL` | Web → scheduler base URL | `http://127.0.0.1:3003` |
-| `BETTER_AUTH_SECRET` | Auth signing secret | generate with `openssl rand -base64 32` |
+| `BETTER_AUTH_SECRET` | Auth signing secret (required, 32+ chars, no placeholder) | `<generate with: openssl rand -base64 32>` |
 | `BETTER_AUTH_URL` | Auth callback base URL | `http://localhost:3002` |
 | `MEMORY_SEMANTIC_RECALL` | Enable pgvector semantic memory | `false` |
 | `MEMORY_EMBEDDING_MODEL` | Embedding model for semantic memory | `text-embedding-nomic-embed-text-v1.5` |

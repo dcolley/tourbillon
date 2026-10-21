@@ -25,7 +25,7 @@ mock.module('@tourbillon/db', {
 });
 
 mock.module('@/lib/auth', {
-  namedExports: { auth: mockAuth },
+  namedExports: { auth: mockAuth, getAuth: () => mockAuth },
 });
 
 describe('GET /api/auth/session', () => {

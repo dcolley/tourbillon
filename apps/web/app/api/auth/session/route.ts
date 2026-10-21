@@ -9,7 +9,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { auth } from '@/lib/auth';
+import { getAuth } from '@/lib/auth';
 import { db, eq, or, session, user } from '@tourbillon/db';
 
 export async function GET(req: NextRequest) {
@@ -92,7 +92,7 @@ export async function GET(req: NextRequest) {
       headers: req.headers,
     });
 
-    const authResponse = await auth.handler(authRequest);
+    const authResponse = await getAuth(req.headers).handler(authRequest);
     
     let result;
     try {
