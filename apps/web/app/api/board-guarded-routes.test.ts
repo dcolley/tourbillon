@@ -196,6 +196,7 @@ describe('#106 board-guarded routes', () => {
         return {
           LlmProviderValidationError: class extends Error {},
           listLlmProvidersPublic: async () => [pub],
+          listLlmProvidersForCompany: async () => [{ ...pub, enabledForCompany: true }],
           getLlmProviderPublic: async () => pub,
           createLlmProvider: async () => pub,
           updateLlmProvider: async () => pub,

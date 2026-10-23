@@ -5,8 +5,16 @@ import {
   getDefaultLlmProviderRow,
   getLlmProviderRowById,
   listLlmProviderRows,
+  listDisabledLlmProviderIds,
+  isLlmProviderEnabledForCompany,
+  setCompanyLlmProviderEnabled,
   type LlmProvider,
 } from '@tourbillon/db';
+import {
+  markEnabledForCompany,
+  providersForCompanyPicker,
+  type WithCompanyEnablement,
+} from './company-llm-providers';
 import { eq, ne } from 'drizzle-orm';
 import {
   defaultBaseURLForProviderType,
@@ -302,6 +310,51 @@ export async function listLlmProvidersPublic(): Promise<LlmProviderPublic[]> {
   await ensureDefaultLlmProviders();
   const rows = await listLlmProviderRows();
   return rows.map(toPublic);
+}
+
+export type LlmProviderForCompany = WithCompanyEnablement<LlmProviderPublic>;
+
+/**
+ * PRV-1: every provider with `enabledForCompany` for one company. No company (e.g. a board
+ * token with no active company) → every provider reported on, as before PRV-1.
+ */
+export async function listLlmProvidersForCompany(
+  companyId: string | null | undefined,
+): Promise<LlmProviderForCompany[]> {
+  const providers = await listLlmProvidersPublic();
+  if (!companyId) return markEnabledForCompany(providers, new Set());
+  return markEnabledForCompany(providers, await listDisabledLlmProviderIds(companyId));
+}
+
+/**
+ * PRV-1: providers a company's pickers offer (switched on), keeping `keepProviderIds` listed and
+ * labelled when off so an existing selection is not silently changed.
+ */
+export async function listLlmProvidersForCompanyPicker(
+  companyId: string,
+  keepProviderIds?: string | null | ReadonlyArray<string | null | undefined>,
+): Promise<LlmProviderForCompany[]> {
+  return providersForCompanyPicker(await listLlmProvidersForCompany(companyId), keepProviderIds);
+}
+
+export async function isLlmProviderOnForCompany(companyId: string, providerId: string): Promise<boolean> {
+  return isLlmProviderEnabledForCompany(companyId, providerId);
+}
+
+/** PRV-1: switch a provider on/off for one company (writes one activity row). Null → no such provider. */
+export async function setLlmProviderEnabledForCompany(
+  companyId: string,
+  providerId: string,
+  enabled: boolean,
+): Promise<{ providerId: string; companyId: string; enabledForCompany: boolean; changed: boolean } | null> {
+  const res = await setCompanyLlmProviderEnabled({
+    companyId,
+    providerId,
+    enabled,
+    actor: { actorType: 'user', actorId: 'dashboard', actorName: 'Dashboard' },
+  });
+  if (!res) return null;
+  return { providerId, companyId, enabledForCompany: res.setting.enabled, changed: res.changed };
 }
 
 export async function getLlmProviderPublic(id: string): Promise<LlmProviderPublic | null> {

@@ -2,6 +2,7 @@ export * from './memory-keys';
 export * from './heartbeat-memory';
 export * from './heartbeat-context';
 export * from './provider';
+export * from './company-provider';
 export * from './model-settings';
 export * from './agent-factory';
 export {

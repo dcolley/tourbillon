@@ -16,6 +16,7 @@ import {
   type ModelSettingsFormValues,
   emptyModelSettingsFormValues,
 } from '@/components/model-settings-fields';
+import { setProviderEnabledForCompanyRequest } from '@/lib/company-llm-providers';
 
 interface LlmProviderPublic {
   id: string;
@@ -32,6 +33,42 @@ interface LlmProviderPublic {
   defaultModel: string | null;
   stickiness: 'off' | 'agent' | 'chat';
   stickinessHeaderName: string;
+  /** PRV-1: on for the active company (absent from older servers → treated as on). */
+  enabledForCompany?: boolean;
+}
+
+/**
+ * PRV-1: per-company on/off switch for one provider. Off hides the provider from this
+ * company's pickers; agents still set to it run on the company default with a warning.
+ */
+export function CompanyProviderToggle({
+  providerName,
+  companyName,
+  enabled,
+  pending,
+  onChange,
+}: {
+  providerName: string;
+  companyName: string;
+  enabled: boolean;
+  pending?: boolean;
+  onChange: (enabled: boolean) => void;
+}) {
+  return (
+    <label className="inline-flex items-center gap-2 rounded-md border px-2 py-1 text-xs">
+      <input
+        type="checkbox"
+        role="switch"
+        className="h-3.5 w-3.5"
+        checked={enabled}
+        aria-checked={enabled}
+        disabled={pending}
+        aria-label={`Use ${providerName} in ${companyName}`}
+        onChange={(e) => onChange(e.target.checked)}
+      />
+      <span>{pending ? 'Saving…' : enabled ? `On for ${companyName}` : `Off for ${companyName}`}</span>
+    </label>
+  );
 }
 
 interface ProviderFormState {
@@ -75,8 +112,16 @@ function rowsToHeaders(rows: Array<{ key: string; value: string }>): Record<stri
   return headers;
 }
 
-export function LlmProvidersSettings() {
+export function LlmProvidersSettings({
+  companyId,
+  companyName,
+}: {
+  /** PRV-1: active company; when set, each provider gets an on/off switch for it. */
+  companyId?: string;
+  companyName?: string;
+} = {}) {
   const [providers, setProviders] = useState<LlmProviderPublic[]>([]);
+  const [togglingId, setTogglingId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -208,6 +253,22 @@ export function LlmProvidersSettings() {
     }
   }
 
+  async function toggleForCompany(providerId: string, enabled: boolean) {
+    if (!companyId) return;
+    setTogglingId(providerId);
+    setError(null);
+    try {
+      const res = await setProviderEnabledForCompanyRequest(companyId, providerId, enabled);
+      setProviders((list) =>
+        list.map((p) => (p.id === providerId ? { ...p, enabledForCompany: res.enabledForCompany } : p)),
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update provider for this company');
+    } finally {
+      setTogglingId(null);
+    }
+  }
+
   async function deleteProvider(id: string) {
     if (!confirm('Delete this provider? Agents using it must be reassigned first.')) return;
     setError(null);
@@ -254,6 +315,7 @@ export function LlmProvidersSettings() {
           <h2 className="text-lg font-semibold">LLM Providers</h2>
           <p className="text-sm text-muted-foreground">
             System-wide model endpoints. Agents select a provider, then pick a model from that endpoint.
+            {companyId ? ' Switch a provider off to hide it from this company only.' : ''}
           </p>
         </div>
         <button
@@ -288,12 +350,26 @@ export function LlmProvidersSettings() {
                         Default
                       </span>
                     )}
+                    {companyId && provider.enabledForCompany === false && (
+                      <span className="ml-2 text-xs rounded-full bg-muted text-muted-foreground px-2 py-0.5">
+                        Off for this company
+                      </span>
+                    )}
                   </p>
                   <p className="text-xs text-muted-foreground">
                     {LLM_PROVIDER_TYPE_LABELS[provider.type]} · {provider.baseURL}
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2">
+                  {companyId && (
+                    <CompanyProviderToggle
+                      providerName={provider.name}
+                      companyName={companyName ?? 'this company'}
+                      enabled={provider.enabledForCompany !== false}
+                      pending={togglingId === provider.id}
+                      onChange={(next) => void toggleForCompany(provider.id, next)}
+                    />
+                  )}
                   <button
                     type="button"
                     onClick={() => testProvider(provider.id)}
