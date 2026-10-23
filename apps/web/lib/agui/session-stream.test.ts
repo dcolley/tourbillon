@@ -12,6 +12,7 @@ import {
   aguiRunStream,
   expectRunContinuation,
   type AguiSession,
+  type AguiThreadQueue,
 } from './session-stream';
 import {
   createStubAgentController,
@@ -46,6 +47,7 @@ async function runTurn(
           threadId,
           runId: 'run-1',
           mastraThreadId: threadId,
+          resourceId: RESOURCE,
           signal: init.signal ?? undefined,
           start: opts.send,
           heartbeatMs: opts.heartbeatMs,
@@ -272,4 +274,157 @@ describe('AGUI-1 run stream on a real session (stub model)', () => {
     await agent.runAgent({ runId: 'r' }, { onEvent: ({ event }) => void seen.push(event.type) });
     assert.deepEqual(seen, ['RUN_STARTED', 'CUSTOM', 'RUN_FINISHED']);
   });
+
+  it("client disconnect clears Mastra's queued follow-ups for the thread", async () => {
+    for (const how of ['abort-signal', 'stream-cancel'] as const) {
+      for (const mastraQueued of [0, 1]) {
+        const calls: string[] = [];
+        let listener: ((e: any) => void) | undefined;
+        let queueListener: ((e: { type: string; count?: number }) => void) | undefined;
+        let runId: string | null = 'mastra-run';
+        const agent: AguiThreadQueue = {
+          subscribeThreadEvents(scope, l) {
+            calls.push(`subscribe:${scope.resourceId}/${scope.threadId}`);
+            queueListener = l;
+            return () => {
+              calls.push('unsubscribe');
+              queueListener = undefined;
+            };
+          },
+          abortThreadStream(o) {
+            calls.push(`abortThreadStream:${o.resourceId}/${o.threadId}:${o.clearPendingSignals}:${o.localOnly}`);
+            return true;
+          },
+        };
+        const session: AguiSession = {
+          subscribe(l) {
+            listener = l;
+            return () => {
+              listener = undefined;
+            };
+          },
+          abort() {
+            calls.push('abort');
+            runId = null;
+          },
+          getCurrentRunId: () => runId,
+          cleanupFollowUpBinding: () => void calls.push('cleanupFollowUpBinding'),
+          machinery: { getAgent: () => agent },
+        };
+        let closed = 0;
+        const ac = new AbortController();
+        const stream = aguiRunStream({
+          session,
+          threadId: 't',
+          runId: 'r',
+          mastraThreadId: 'mt',
+          resourceId: 'res',
+          signal: ac.signal,
+          heartbeatMs: 0,
+          onClose: () => void closed++,
+          start: () => new Promise(() => {}),
+        });
+        const reader = stream.getReader();
+        await reader.read();
+        listener?.({ type: 'agent_start' });
+        if (mastraQueued) queueListener?.({ type: 'queue-count-changed', count: mastraQueued });
+        if (how === 'abort-signal') ac.abort();
+        else await reader.cancel();
+        const label = `${how}, mastra queue ${mastraQueued}`;
+        assert.deepEqual(
+          calls,
+          [
+            'subscribe:res/mt',
+            'cleanupFollowUpBinding',
+            'abort',
+            ...(mastraQueued ? ['abortThreadStream:res/mt:true:true'] : []),
+            'unsubscribe',
+          ],
+          label,
+        );
+        assert.equal(closed, 1, label);
+      }
+    }
+  });
+
+  it("client disconnect: a follow-up queued in Mastra's session never runs", async () => {
+    const stub = await createStubAgentController({
+      script: (call) =>
+        call === 1 ? stubText('t1', Array.from({ length: 30 }, (_, i) => `w${i} `)) : stubText('t2', ['late']),
+      chunkDelayMs: 20,
+    });
+    const session = await stub.createSession(RESOURCE, 'agui');
+    let queued = false;
+    await runTurn(session, {
+      send: () => session.sendMessage({ content: 'long answer' }),
+      onEvent: (event, agent) => {
+        if (event.type === 'TEXT_MESSAGE_CONTENT' && !queued) {
+          queued = true;
+          void session.followUp({ content: 'queued in mastra' });
+          setTimeout(() => agent.abortRun(), 40);
+        }
+      },
+    });
+    await new Promise((r) => setTimeout(r, 500));
+    assert.equal(stub.modelCalls, 1, 'the Mastra follow-up must not run after the client has gone');
+  });
+
+  it('queued turns that will not run are reported before RUN_FINISHED', async () => {
+    const stub = await createStubAgentController({
+      script: () => stubText('t1', Array.from({ length: 30 }, (_, i) => `w${i} `)),
+      chunkDelayMs: 20,
+    });
+    const session = await stub.createSession(RESOURCE, 'agui');
+    const threadId = session.thread.getId() ?? 'thread';
+    let dropped = 0;
+    let aborted = false;
+    const agent = new HttpAgent({
+      url: 'http://agui.test/run',
+      threadId,
+      initialMessages: [{ id: 'u1', role: 'user', content: 'hi' }],
+      fetch: async () =>
+        new Response(
+          aguiRunStream({
+            session: session as unknown as AguiSession,
+            threadId,
+            runId: 'run-1',
+            mastraThreadId: threadId,
+            start: () => session.sendMessage({ content: 'long answer' }),
+            droppedQueuedTurns: () => dropped,
+          }),
+          { headers: AGUI_SSE_HEADERS },
+        ),
+    });
+    const events: Ev[] = [];
+    let failure: unknown;
+    await agent
+      .runAgent(
+        { runId: 'run-1' },
+        {
+          onEvent: ({ event }) => {
+            events.push(event as Ev);
+            if (event.type === 'TEXT_MESSAGE_CONTENT' && !aborted) {
+              aborted = true;
+              dropped = 2;
+              session.abort();
+            }
+          },
+          onRunFailed: ({ error }) => {
+            failure = error;
+          },
+        },
+      )
+      .catch((err: unknown) => {
+        failure = failure ?? err;
+      });
+    assert.equal(failure, undefined);
+    const last = events.at(-1)!;
+    assert.equal(last.type, 'RUN_FINISHED');
+    assert.deepEqual(last.outcome, { type: 'cancelled' });
+    const prev = events.at(-2)!;
+    assert.equal(prev.type, 'CUSTOM');
+    assert.equal(prev.name, 'tourbillon.follow_up_dropped');
+    assert.deepEqual(prev.value, { count: 2 });
+  });
 });
+

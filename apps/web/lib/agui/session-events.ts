@@ -32,6 +32,8 @@ export const AGUI_CUSTOM = {
   toolApprovalRequired: 'tourbillon.tool_approval_required',
   toolSuspended: 'tourbillon.tool_suspended',
   followUpQueued: 'tourbillon.follow_up_queued',
+  /** Queued follow-ups that will not run (run aborted, failed or ended first); value `{ count }`. */
+  followUpDropped: 'tourbillon.follow_up_dropped',
   control: 'tourbillon.control',
 } as const;
 

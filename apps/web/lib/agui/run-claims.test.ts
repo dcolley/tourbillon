@@ -1,7 +1,7 @@
 /** AGUI-1: run claims (one AG-UI run per thread and per session). */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { activeAguiRun, claimAguiRun, isAguiRunClaimed } from './run-claims';
+import { activeAguiRun, claimAguiRun, isAguiRunClaimed, isAguiThreadClaimedByOtherSession } from './run-claims';
 
 describe('AG-UI run claims', () => {
   it('one claim per thread and per session; released claims can be taken again', () => {
@@ -35,5 +35,30 @@ describe('AG-UI run claims', () => {
     assert.equal(c.takeQueuedTurn(), undefined);
     assert.equal(c.queueTurn(async () => void order.push(3)), 0);
     assert.deepEqual(order, [1]);
+  });
+
+  it('a thread claimed by another session is reported as such; the owner and free threads are not', () => {
+    const owner = {};
+    const other = {};
+    const c = claimAguiRun(owner, 'r', 'o1')!;
+    assert.equal(isAguiThreadClaimedByOtherSession(other, 'r', 'o1'), true);
+    assert.equal(isAguiThreadClaimedByOtherSession(owner, 'r', 'o1'), false);
+    assert.equal(isAguiThreadClaimedByOtherSession(other, 'r', 'o2'), false);
+    assert.equal(isAguiThreadClaimedByOtherSession(other, 'r2', 'o1'), false, 'other resource');
+    c.release();
+    assert.equal(isAguiThreadClaimedByOtherSession(other, 'r', 'o1'), false);
+  });
+
+  it('dropping queued turns reports how many were dropped', () => {
+    const c = claimAguiRun({}, 'r', 'd')!;
+    c.queueTurn(async () => {});
+    c.queueTurn(async () => {});
+    assert.equal(c.dropQueuedTurns(), 2);
+    assert.equal(c.dropQueuedTurns(), 0);
+    c.queueTurn(async () => {});
+    assert.equal(c.dropQueuedTurns(), 1);
+    assert.equal(c.droppedTurns(), 3);
+    assert.equal(c.queuedTurns(), 0);
+    c.release();
   });
 });

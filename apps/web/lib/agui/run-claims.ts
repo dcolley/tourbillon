@@ -22,7 +22,10 @@ export interface AguiRunClaim {
   /** Next queued turn, if any. */
   takeQueuedTurn(): AguiQueuedTurn | undefined;
   queuedTurns(): number;
-  dropQueuedTurns(): void;
+  /** Drops the queued turns that have not started; returns how many were dropped. */
+  dropQueuedTurns(): number;
+  /** Queued turns dropped so far (by `dropQueuedTurns`), for telling the client. */
+  droppedTurns(): number;
   release(): void;
   readonly released: boolean;
 }
@@ -50,6 +53,16 @@ export function isAguiRunClaimed(session: object, resourceId: string, threadId: 
   return sessionClaims().has(session) || threadClaims().has(threadKey(resourceId, threadId));
 }
 
+/**
+ * True when the thread's run is claimed by a different session (e.g. another `sessionScope` of the
+ * same agent). Control actions that act on a run (abort, steer, follow-up, tool approval / resume)
+ * must be refused then: only the session that owns the open run may act on it.
+ */
+export function isAguiThreadClaimedByOtherSession(session: object, resourceId: string, threadId: string): boolean {
+  const holder = threadClaims().get(threadKey(resourceId, threadId));
+  return holder !== undefined && sessionClaims().get(session) !== holder;
+}
+
 /** The open AG-UI run of this session on this thread, if there is one. */
 export function activeAguiRun(session: object, resourceId: string, threadId: string): AguiRunClaim | undefined {
   const claim = sessionClaims().get(session);
@@ -62,6 +75,7 @@ export function claimAguiRun(session: object, resourceId: string, threadId: stri
   const key = threadKey(resourceId, threadId);
   const queue: AguiQueuedTurn[] = [];
   let released = false;
+  let dropped = 0;
   const claim: AguiRunClaim = {
     queueTurn(turn) {
       if (!released) queue.push(turn);
@@ -74,7 +88,13 @@ export function claimAguiRun(session: object, resourceId: string, threadId: stri
       return queue.length;
     },
     dropQueuedTurns() {
+      const n = queue.length;
+      dropped += n;
       queue.length = 0;
+      return n;
+    },
+    droppedTurns() {
+      return dropped;
     },
     release() {
       if (released) return;

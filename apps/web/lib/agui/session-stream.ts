@@ -8,7 +8,25 @@
  */
 import { EventType, type BaseEvent } from '@ag-ui/core';
 import { EventEncoder } from '@ag-ui/encoder';
-import { createAguiEventMapper, type AguiSourceEvent } from './session-events';
+import { AGUI_CUSTOM, createAguiEventMapper, type AguiSourceEvent } from './session-events';
+
+/**
+ * Mastra Agent thread-queue API (`@mastra/core` Agent): messages queued on a thread while a run is
+ * active (e.g. `session.followUp()`) wait in the agent runtime's pending-signal queue for that thread,
+ * not in the session, and survive `session.abort()`.
+ */
+export interface AguiThreadQueue {
+  subscribeThreadEvents?(
+    scope: { resourceId: string; threadId: string },
+    listener: (event: { type: string; count?: number }) => void,
+  ): () => void;
+  abortThreadStream?(options: {
+    resourceId: string;
+    threadId: string;
+    clearPendingSignals?: boolean;
+    localOnly?: boolean;
+  }): boolean;
+}
 
 /** The parts of an AgentController session this module uses (Mastra `Session` satisfies it). */
 export interface AguiSession {
@@ -17,19 +35,47 @@ export interface AguiSession {
   getCurrentRunId(): string | null | undefined;
   /** Mastra: drops follow-ups still being prepared and the follow-up binding. */
   cleanupFollowUpBinding?(): void;
-  /** Mastra: the session's follow-up queue. */
-  followUps?: { clear(): void };
+  /** Mastra: the session's run machinery; its agent owns the thread's queued follow-ups. */
+  readonly machinery?: { getAgent(): AguiThreadQueue };
 }
 
-/** Client gone: stop the run and drop any queued turns so nothing runs for a closed stream. */
-function abortAndDropQueued(session: AguiSession): void {
+function threadQueue(session: AguiSession): AguiThreadQueue | undefined {
   try {
-    session.followUps?.clear();
+    return session.machinery?.getAgent();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Client gone: stop the run and drop every queued turn so nothing runs for a closed stream:
+ * - Mastra follow-ups still being prepared (`cleanupFollowUpBinding`);
+ * - Mastra follow-ups already queued on the thread (`mastraQueued` > 0): the agent runtime's pending
+ *   signals for the thread are cleared (`abortThreadStream({ clearPendingSignals: true })`);
+ * - AG-UI follow-ups queued on the run claim: dropped when `onClose` releases the claim.
+ */
+function abortAndDropQueued(
+  session: AguiSession,
+  target: { resourceId?: string; threadId?: string; mastraQueued: number },
+): void {
+  try {
     session.cleanupFollowUpBinding?.();
   } catch {
     /* best effort */
   }
   if (session.getCurrentRunId()) session.abort();
+  if (target.mastraQueued > 0 && target.resourceId && target.threadId) {
+    try {
+      threadQueue(session)?.abortThreadStream?.({
+        resourceId: target.resourceId,
+        threadId: target.threadId,
+        clearPendingSignals: true,
+        localOnly: true,
+      });
+    } catch {
+      /* best effort */
+    }
+  }
 }
 
 const continuationExpected = new WeakMap<object, number>();
@@ -57,6 +103,8 @@ export interface AguiRunStreamOptions {
   runId: string;
   /** Mastra thread the run is bound to (filters tool events from other threads). */
   mastraThreadId?: string;
+  /** Mastra resource of that thread; with `mastraThreadId`, lets a disconnect clear the thread's queue. */
+  resourceId?: string;
   /** Starts the turn (e.g. `session.sendMessage`); resolves when Mastra reports the turn done. */
   start: () => Promise<void>;
   /** Request abort signal; abort ends the stream and aborts the session run. */
@@ -74,6 +122,12 @@ export interface AguiRunStreamOptions {
    * turns that have not started when the stream closes are never started.
    */
   takeQueuedTurn?: () => (() => Promise<void>) | undefined;
+  /**
+   * Queued turns that will not run: those already dropped plus those still queued when the run ends.
+   * When non-zero, a `tourbillon.follow_up_dropped` CUSTOM event (`{ count }`) is sent before
+   * RUN_FINISHED / RUN_ERROR so the client knows its follow-up was not processed.
+   */
+  droppedQueuedTurns?: () => number;
 }
 
 export const AGUI_SSE_HEADERS = {
@@ -135,6 +189,13 @@ export function aguiRunStream(opts: AguiRunStreamOptions): ReadableStream<Uint8A
   let running = false;
   let queuedFollowUps = 0;
   let onAbort: (() => void) | undefined;
+  let unsubscribeQueue: (() => void) | undefined;
+  /** Messages queued on the Mastra thread (any session), from the agent's thread events. */
+  let mastraQueued = 0;
+  const dropAll = () => {
+    const queued = Math.max(mastraQueued, queuedFollowUps);
+    abortAndDropQueued(session, { resourceId: opts.resourceId, threadId: opts.mastraThreadId, mastraQueued: queued });
+  };
 
   let closeNotified = false;
   const notifyClose = () => {
@@ -169,6 +230,7 @@ export function aguiRunStream(opts: AguiRunStreamOptions): ReadableStream<Uint8A
         clearFinishTimer();
         if (heartbeat) clearInterval(heartbeat);
         unsubscribe?.();
+        unsubscribeQueue?.();
         if (onAbort) opts.signal?.removeEventListener('abort', onAbort);
         try {
           ctrl.close();
@@ -180,7 +242,22 @@ export function aguiRunStream(opts: AguiRunStreamOptions): ReadableStream<Uint8A
 
       const finish = (override?: Parameters<typeof mapper.finish>[0]) => {
         if (closed) return;
-        write(mapper.finish(override));
+        const events = mapper.finish(override);
+        let dropped = 0;
+        try {
+          dropped = opts.droppedQueuedTurns?.() ?? 0;
+        } catch {
+          /* ignore */
+        }
+        if (dropped > 0) {
+          // After any closing message/tool events, before RUN_FINISHED / RUN_ERROR.
+          events.splice(Math.max(events.length - 1, 0), 0, {
+            type: EventType.CUSTOM,
+            name: AGUI_CUSTOM.followUpDropped,
+            value: { count: dropped },
+          } as BaseEvent);
+        }
+        write(events);
         teardown();
       };
 
@@ -227,10 +304,23 @@ export function aguiRunStream(opts: AguiRunStreamOptions): ReadableStream<Uint8A
         }
       });
 
+      if (opts.resourceId && opts.mastraThreadId) {
+        try {
+          unsubscribeQueue = threadQueue(session)?.subscribeThreadEvents?.(
+            { resourceId: opts.resourceId, threadId: opts.mastraThreadId },
+            (event) => {
+              if (event.type === 'queue-count-changed' && typeof event.count === 'number') mastraQueued = event.count;
+            },
+          );
+        } catch {
+          unsubscribeQueue = undefined;
+        }
+      }
+
       if (opts.signal) {
         onAbort = () => {
           if (closed) return;
-          abortAndDropQueued(session);
+          dropAll();
           // The client has gone; nothing more can be delivered.
           teardown();
         };
@@ -268,9 +358,10 @@ export function aguiRunStream(opts: AguiRunStreamOptions): ReadableStream<Uint8A
       closed = true;
       clearFinishTimer();
       if (heartbeat) clearInterval(heartbeat);
+      dropAll();
       unsubscribe?.();
+      unsubscribeQueue?.();
       if (onAbort) opts.signal?.removeEventListener('abort', onAbort);
-      abortAndDropQueued(session);
       notifyClose();
     },
   });

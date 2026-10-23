@@ -475,7 +475,93 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
         { toolCallId: 'c2', decision: 'decline', requestContext },
       ]);
     });
+
+    it('tool approval or resume for a thread the session is not on → 404, nothing decided', async () => {
+      await clientRun('agui-thread-on');
+      await seedThread('agui-thread-off');
+      const session = sessions.get(SESSION_KEY);
+      assert.equal(session.thread.getId(), 'agui-thread-on');
+      const decisions: unknown[] = [];
+      session.respondToToolApproval = (args: unknown) => {
+        decisions.push(args);
+        return { accepted: true };
+      };
+      const viaProps = await request(
+        'alice',
+        input('agui-thread-off', { forwardedProps: { tourbillon: { action: 'toolApproval', toolCallId: 'c1', approved: true } } }, ''),
+      );
+      assert.equal(viaProps.status, 404);
+      const viaResume = await request('alice', input('agui-thread-off', { resume: [{ interruptId: 'c1', status: 'resolved' }] }, ''));
+      assert.equal(viaResume.status, 404);
+      assert.deepEqual(decisions, []);
+    });
+
+    it('another session of the same agent cannot approve, resume or control the open run → 409', async () => {
+      chunkDelayMs = 20;
+      script = () => stubText('t1', Array.from({ length: 30 }, (_, i) => `w${i} `));
+      await seedThread('agui-thread-owned');
+      // A second AG-UI session (another client sessionScope) bound to the same thread, as when a new
+      // session adopts the resource's latest thread.
+      const other = await stub.createSession(DEFAULT_RESOURCE, `${SCOPE}:other`);
+      await other.thread.switch({ threadId: 'agui-thread-owned' });
+      sessions.set(`${DEFAULT_RESOURCE}::${SCOPE}:other`, other);
+      const decisions: unknown[] = [];
+      other.respondToToolApproval = (args: unknown) => {
+        decisions.push(args);
+        return { accepted: true };
+      };
+      let otherAborts = 0;
+      const realAbort = other.abort.bind(other);
+      other.abort = () => {
+        otherAborts++;
+        realAbort();
+      };
+      const realRunId = other.getCurrentRunId.bind(other);
+      const fwd = (tourbillon: Record<string, unknown>) => ({ forwardedProps: { tourbillon: { sessionScope: 'other', ...tourbillon } } });
+      const attempts: Array<[string, Record<string, unknown>]> = [
+        ['toolApproval', fwd({ action: 'toolApproval', toolCallId: 'c1', approved: true })],
+        ['resume', { ...fwd({}), resume: [{ interruptId: 'c1', status: 'resolved' }] }],
+        ['abort', fwd({ action: 'abort' })],
+        ['steer', fwd({ action: 'steer' })],
+        ['followUp', fwd({ action: 'followUp' })],
+      ];
+      let checks: Promise<string[]> | undefined;
+      const { events, failure } = await clientRun('agui-thread-owned', {
+        onEvent: (e) => {
+          if (e.type === 'TEXT_MESSAGE_CONTENT' && !checks) {
+            checks = (async () => {
+              const out: string[] = [];
+              // Also when Mastra reports a run on the other session (e.g. a suspended run it can see
+              // from the thread's persisted state): the claim, not the session's run state, decides.
+              for (const otherRunning of [false, true]) {
+                other.getCurrentRunId = otherRunning ? () => 'owner-run' : realRunId;
+                for (const [name, extra] of attempts) {
+                  const res = await request('alice', input('agui-thread-owned', extra, 'x'));
+                  out.push(`${otherRunning ? 'running' : 'idle'}:${name}:${res.status}`);
+                  if (res.status === 200) await readSse(res);
+                }
+              }
+              other.getCurrentRunId = realRunId;
+              return out;
+            })();
+          }
+        },
+      });
+      const results = await checks!;
+      assert.deepEqual(
+        results,
+        ['idle', 'running'].flatMap((state) => attempts.map(([name]) => `${state}:${name}:409`)),
+      );
+      assert.deepEqual(decisions, []);
+      assert.equal(otherAborts, 0);
+      assert.equal(failure, undefined);
+      assert.equal(events.at(-1)!.type, 'RUN_FINISHED');
+      assert.deepEqual(events.at(-1)!.outcome, { type: 'success' });
+      assert.equal(text(events), Array.from({ length: 30 }, (_, i) => `w${i} `).join(''));
+      assert.equal(stub.modelCalls, 1);
+    });
   });
+
   describe('thread ownership on every request', () => {
     it('a session already on another agent\'s thread cannot run or act on it', async () => {
       await seedThread('bobs-current', { agentId: 'agent-b' });
@@ -598,6 +684,79 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
       while (!disconnected && Date.now() < until) await sleep(10);
       await sleep(500);
       assert.equal(stub.modelCalls, 1, 'the queued follow-up must not run after the stream closed');
+    });
+
+    it("client disconnect also drops a follow-up queued in Mastra's own queue for the thread", async () => {
+      chunkDelayMs = 20;
+      script = (call) =>
+        call === 1 ? stubText('t1', Array.from({ length: 30 }, (_, i) => `w${i} `)) : stubText('t2', ['mastra-queued']);
+      let queued = false;
+      await clientRun('agui-thread-mastra-q', {
+        onEvent: (e, agent) => {
+          if (e.type === 'TEXT_MESSAGE_CONTENT' && !queued) {
+            queued = true;
+            // Queued straight into Mastra (not through the AG-UI claim), as another caller on the thread would.
+            void sessions.get(SESSION_KEY).followUp({ content: 'queued in mastra', requestContext });
+            setTimeout(() => agent.abortRun(), 60);
+          }
+        },
+      });
+      await sleep(500);
+      assert.equal(stub.modelCalls, 1, 'the Mastra follow-up must not run after the stream closed');
+    });
+
+    it('the claim is released when binding the thread fails, so the next run is accepted', async () => {
+      script = () => stubText('t', ['bound']);
+      await seedThread('bind-elsewhere');
+      await seedThread('bind-fail');
+      const session = await stub.createSession(DEFAULT_RESOURCE, SCOPE);
+      sessions.set(SESSION_KEY, session);
+      await session.thread.switch({ threadId: 'bind-elsewhere' });
+      const thread = session.thread;
+      const realSwitch = thread.switch;
+      thread.switch = async () => {
+        throw new Error('switch failed');
+      };
+      const failed = await request('alice', input('bind-fail'));
+      assert.notEqual(failed.status, 200);
+      thread.switch = realSwitch;
+      // Another session would be refused too if the failed run had kept its thread claim.
+      const fromOther = await request('alice', input('bind-fail', { forwardedProps: { tourbillon: { sessionScope: 'later' } } }));
+      assert.equal(fromOther.status, 200);
+      await readSse(fromOther);
+      const next = await request('alice', input('bind-fail'));
+      assert.equal(next.status, 200);
+      assert.match(text(await readSse(next)), /bound/);
+    });
+
+    it('a queued follow-up dropped by abort is reported in the abort response and on the open run', async () => {
+      chunkDelayMs = 20;
+      script = (call) =>
+        call === 1 ? stubText('t1', Array.from({ length: 30 }, (_, i) => `w${i} `)) : stubText('t2', ['queued-turn']);
+      let control: Promise<Ev[]> | undefined;
+      const { events } = await clientRun('agui-thread-dropped', {
+        onEvent: (e) => {
+          if (e.type === 'TEXT_MESSAGE_CONTENT' && !control) {
+            control = (async () => {
+              const q = await readSse(
+                await request('alice', input('agui-thread-dropped', { forwardedProps: { tourbillon: { action: 'followUp' } } }, 'later')),
+              );
+              assert.deepEqual(q[1].value, { action: 'followUp', accepted: true, queued: 1 });
+              return readSse(
+                await request('alice', input('agui-thread-dropped', { forwardedProps: { tourbillon: { action: 'abort' } } }, '')),
+              );
+            })();
+          }
+        },
+      });
+      const ctl = await control!;
+      assert.deepEqual(ctl[1].value, { action: 'abort', accepted: true, droppedFollowUps: 1 });
+      const dropped = events.filter((e) => e.type === 'CUSTOM' && e.name === 'tourbillon.follow_up_dropped');
+      assert.deepEqual(dropped.map((e) => e.value), [{ count: 1 }]);
+      assert.equal(events.at(-2)!.name, 'tourbillon.follow_up_dropped');
+      assert.deepEqual(events.at(-1)!.outcome, { type: 'cancelled' });
+      await sleep(200);
+      assert.equal(stub.modelCalls, 1);
     });
   });
 });

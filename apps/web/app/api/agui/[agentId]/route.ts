@@ -12,12 +12,20 @@
  * The AG-UI threadId is the Mastra memory thread id inside that resource.
  *
  * Thread ownership is checked on every request, for runs and for control actions alike: the thread
- * must exist, belong to the requested resource and be tagged to this agent. Threads are created
- * through the chat thread API; an unknown thread id is a 404 here and is never created.
+ * must exist, belong to the requested resource and be tagged to this agent (`metadata.agentId`).
+ * AG-UI clients must create threads through the REST chat thread API
+ * (POST /api/chat/[agentId]/sessions/[resourceId]/threads), which tags the thread to the agent, and
+ * then pass that id as the AG-UI threadId. This route never creates a thread: a client-chosen
+ * threadId that does not exist is a 404, and an existing thread that is not tagged to this agent
+ * (including untagged threads) is refused with 404.
  *
  * One run per thread and per session: the run is claimed synchronously (no await between the check
- * and the claim) and released when its stream closes. Follow-ups sent while the run is open are queued
- * on the claim and dropped when the stream closes. See lib/agui/run-claims.ts.
+ * and the claim) and released when its stream closes. Control actions that act on a run (abort, steer,
+ * followUp, toolApproval / AG-UI `resume`) are refused with 409 when the thread's run is claimed by
+ * another session (e.g. another sessionScope of the same agent). Follow-ups sent while the run is open
+ * are queued on the claim; any that will not run (abort, error, run ended first) are reported to the
+ * client as a `tourbillon.follow_up_dropped` CUSTOM event on the open run, and the abort control
+ * response carries `droppedFollowUps`. See lib/agui/run-claims.ts.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { EventType, type BaseEvent } from '@ag-ui/core';
@@ -35,7 +43,12 @@ import { chatErrorResponse } from '@/lib/chat/route-helpers';
 import { chatModelIdFromSearch } from '@/lib/chat/model-query';
 import { AguiInputError, aguiSessionScope, parseAguiRequest } from '@/lib/agui/run-input';
 import { AGUI_CUSTOM } from '@/lib/agui/session-events';
-import { activeAguiRun, claimAguiRun, isAguiRunClaimed } from '@/lib/agui/run-claims';
+import {
+  activeAguiRun,
+  claimAguiRun,
+  isAguiRunClaimed,
+  isAguiThreadClaimedByOtherSession,
+} from '@/lib/agui/run-claims';
 import {
   AGUI_SSE_HEADERS,
   aguiControlStream,
@@ -125,6 +138,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
     const running = Boolean(session.getCurrentRunId());
     const claimed = isAguiRunClaimed(session, resourceId, input.threadId);
     const active = activeAguiRun(session, resourceId, input.threadId);
+    const claimedByOther = isAguiThreadClaimedByOtherSession(session, resourceId, input.threadId);
     const onThread = session.thread.getId() === input.threadId;
     const heartbeat = {
       runId: `chat-${agent.id}`,
@@ -140,14 +154,21 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
       queueOnOpenRun ||
       ((action === 'steer' || action === 'followUp') && running);
     if (isControl) {
+      // Only the session that owns the open run may act on it (approve / resume, abort, steer, follow up).
+      if (claimedByOther) {
+        throw new ChatAgentError('The run on this thread belongs to another session', 409);
+      }
       if (!running && claimed && !queueOnOpenRun) {
         throw new ChatAgentError('A run is starting on this thread; retry shortly', 409);
       }
       if (!onThread) throw new ChatAgentError('Thread not found', 404);
       if (action === 'abort') {
-        active?.dropQueuedTurns();
+        const droppedFollowUps = active?.dropQueuedTurns() ?? 0;
         if (running) session.abort();
-        return controlResponse(input.threadId, input.runId, action, { accepted: running });
+        return controlResponse(input.threadId, input.runId, action, {
+          accepted: running,
+          ...(droppedFollowUps > 0 ? { droppedFollowUps } : {}),
+        });
       }
       if (action === 'toolApproval') {
         const results: Array<ToolApprovalResult & { toolCallId: string }> = [];
@@ -205,9 +226,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
       threadId: input.threadId,
       runId: input.runId,
       mastraThreadId: input.threadId,
+      resourceId,
       signal: req.signal,
       onClose: claim.release,
       takeQueuedTurn: claim.takeQueuedTurn,
+      droppedQueuedTurns: () => claim.droppedTurns() + claim.queuedTurns(),
       start: () =>
         runWithHeartbeatContext(
           heartbeat,
