@@ -13,3 +13,13 @@
 export function isControlChatEnabled(): boolean {
   return process.env.NEXT_PUBLIC_CONTROL_CHAT_ENABLED === 'true';
 }
+
+/**
+ * Server-side switch for the legacy Control Pane chat API (/api/chat/[agentId]/sessions/**).
+ * Both CONTROL_CHAT_ENABLED (read on the server at request time) and the build-time
+ * NEXT_PUBLIC_CONTROL_CHAT_ENABLED must be exactly 'true'; otherwise those routes answer 404.
+ * Hiding the pane alone does not turn the routes off, so they check this on the server.
+ */
+export function isControlChatServerEnabled(): boolean {
+  return process.env.CONTROL_CHAT_ENABLED === 'true' && isControlChatEnabled();
+}

@@ -177,6 +177,9 @@ const RESOURCE_ROUTES: Array<[string, unknown?]> = [
 
 describe('chat route scoping', () => {
   before(async () => {
+    // These routes are off unless the Control Pane chat is enabled on the server.
+    process.env.CONTROL_CHAT_ENABLED = 'true';
+    process.env.NEXT_PUBLIC_CONTROL_CHAT_ENABLED = 'true';
     const { InMemoryStore } = mastraRequire('@mastra/core/storage');
     storage = new InMemoryStore();
 

@@ -9,7 +9,7 @@ import {
   chatDashboardContextSchema,
   wrapMessageWithDashboardContext,
 } from '@/lib/chat/dashboard-context';
-import { chatErrorResponse, decodeResourceId, openChatRouteSession } from '@/lib/chat/route-helpers';
+import { chatErrorResponse, decodeResourceId, openChatRouteSession, assertChatSessionGuard, controlChatDisabledResponse } from '@/lib/chat/route-helpers';
 import { chatModelIdFromSearch } from '@/lib/chat/model-query';
 
 const bodySchema = z.object({
@@ -22,6 +22,8 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ agentId: string; resourceId: string }> },
 ) {
+  const disabled = controlChatDisabledResponse();
+  if (disabled) return disabled;
   try {
     const { agentId: agentKey, resourceId: rawResourceId } = await params;
     const resourceId = decodeResourceId(rawResourceId);
@@ -34,6 +36,7 @@ export async function POST(
       resourceId,
       scope: sessionScope,
     });
+    await assertChatSessionGuard(session, 'follow-up');
     const requestContext = createChatRequestContext(agent);
     
     // Tag untagged thread to current agent on follow-up message

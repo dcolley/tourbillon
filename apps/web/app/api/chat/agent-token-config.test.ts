@@ -21,6 +21,9 @@ describe('#110 /api/chat/* with no agent token secret', () => {
   const routes: Record<string, Handler> = {};
 
   before(async () => {
+    // These routes are off unless the Control Pane chat is enabled on the server.
+    process.env.CONTROL_CHAT_ENABLED = 'true';
+    process.env.NEXT_PUBLIC_CONTROL_CHAT_ENABLED = 'true';
     const Module = require('module');
     const originalRequire = Module.prototype.require;
     class ChatAgentError extends Error {

@@ -7,6 +7,7 @@ import {
   type TourbillonChatSession,
 } from '@/lib/chat';
 import { agentTokenConfigErrorResponse, isAgentTokenConfigError } from '@/lib/auth/agent-token-config';
+import { isControlChatServerEnabled } from '@/lib/feature-flags';
 
 export function chatErrorResponse(err: unknown): NextResponse {
   if (err instanceof ChatAgentError) {
@@ -123,4 +124,60 @@ export async function openChatRouteSession(
     }
   }
   return session;
+}
+
+/**
+ * The legacy Control Pane chat session routes are off unless isControlChatServerEnabled().
+ * Returns the 404 to send when they are off (checked before anything else in the handler), or
+ * null when the route may run.
+ */
+export function controlChatDisabledResponse(): NextResponse | null {
+  if (isControlChatServerEnabled()) return null;
+  return NextResponse.json({ error: 'Not found' }, { status: 404 });
+}
+
+/** What a session route is about to do to the thread. */
+export type ChatSessionAction =
+  | 'send'
+  | 'follow-up'
+  | 'steer'
+  | 'abort'
+  | 'tool-approval'
+  | 'switch-thread'
+  | 'rename-thread'
+  | 'delete-thread';
+
+/**
+ * A check run before a session route changes a run or a thread. Return a short message to refuse
+ * the request with 409, or nothing to let it through. `resourceId` is the session's resource and
+ * `threadId` the thread the route acts on (the session's bound thread unless the route names one).
+ */
+export type ChatSessionGuard = (
+  session: TourbillonChatSession,
+  ctx: { action: ChatSessionAction; resourceId?: string; threadId?: string },
+) => string | null | undefined | Promise<string | null | undefined>;
+
+type GuardGlobal = { tourbillonChatSessionGuard?: ChatSessionGuard | null };
+
+/**
+ * Register the guard (one per process; null removes it). Stored on globalThis so every route
+ * bundle sees the same guard. With no guard registered, assertChatSessionGuard lets everything
+ * through.
+ */
+export function setChatSessionGuard(guard: ChatSessionGuard | null): void {
+  (globalThis as GuardGlobal).tourbillonChatSessionGuard = guard;
+}
+
+/** Throws a 409 ChatAgentError when the registered guard refuses the action. */
+export async function assertChatSessionGuard(
+  session: TourbillonChatSession,
+  action: ChatSessionAction,
+  threadId?: string,
+): Promise<void> {
+  const guard = (globalThis as GuardGlobal).tourbillonChatSessionGuard;
+  if (!guard) return;
+  const target = threadId ?? session.thread.getId() ?? undefined;
+  const resourceId = (session as { getResourceId?: () => string }).getResourceId?.();
+  const refusal = await guard(session, { action, resourceId, threadId: target });
+  if (refusal) throw new ChatAgentError(refusal, 409);
 }

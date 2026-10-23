@@ -4,7 +4,7 @@ import {
   getOrCreateChatController,
   resolveChatAgent,
 } from '@/lib/chat';
-import { chatErrorResponse, decodeResourceId, openChatRouteSession, requireChatThread } from '@/lib/chat/route-helpers';
+import { chatErrorResponse, decodeResourceId, openChatRouteSession, requireChatThread, assertChatSessionGuard, controlChatDisabledResponse } from '@/lib/chat/route-helpers';
 import { chatModelIdFromSearch } from '@/lib/chat/model-query';
 
 const renameBodySchema = z.object({
@@ -18,6 +18,8 @@ export async function PATCH(
     params,
   }: { params: Promise<{ agentId: string; resourceId: string; threadId: string }> },
 ) {
+  const disabled = controlChatDisabledResponse();
+  if (disabled) return disabled;
   try {
     const {
       agentId: agentKey,
@@ -38,6 +40,7 @@ export async function PATCH(
     });
 
     await requireChatThread(session, agent, resourceId, threadId);
+    await assertChatSessionGuard(session, 'rename-thread', threadId);
 
     const previousThreadId = session.thread.getId();
     if (previousThreadId !== threadId) {
@@ -66,6 +69,8 @@ export async function DELETE(
     params,
   }: { params: Promise<{ agentId: string; resourceId: string; threadId: string }> },
 ) {
+  const disabled = controlChatDisabledResponse();
+  if (disabled) return disabled;
   try {
     const {
       agentId: agentKey,
@@ -85,6 +90,7 @@ export async function DELETE(
     });
 
     await requireChatThread(session, agent, resourceId, threadId);
+    await assertChatSessionGuard(session, 'delete-thread', threadId);
 
     const deletedCurrent = session.thread.getId() === threadId;
     await session.thread.delete({ threadId });
