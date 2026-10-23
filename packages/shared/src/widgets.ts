@@ -116,7 +116,9 @@ export function widgetAnswerToolResult(answer: WidgetAnswer): string {
  * Rule (checked at registration): `propsSchema` is a `z.strictObject`, and every object inside the
  * props and answer schemas is strict too, so unknown keys are refused instead of silently stripped.
  * Every value must also have a described type: schemas that accept any value (`z.unknown()`,
- * `z.any()`, `z.custom()`, and records or arrays of those) are refused at any depth. Records
+ * `z.any()`, `z.custom()`, `z.json()`, and records or arrays of those) are refused at any depth, and so
+ * are schemas whose JSON Schema does not describe what is validated: recursive or lazy schemas
+ * (`z.lazy`, `$ref`), `z.preprocess` (runs a function before validation) and `z.promise`. Records
  * (`z.record`) with typed values are allowed: their keys are explicit.
  */
 export interface WidgetSpec<P = any, A = any> {
@@ -202,6 +204,44 @@ function unconstrainedPaths(node: unknown, path: string, out: string[]): void {
   }
 }
 
+/** Zod schema kinds the strict rule refuses wherever they appear (see WidgetSpec). */
+const REFUSED_ZOD_KINDS: Record<string, string> = {
+  lazy: 'lazy or recursive schemas (z.lazy, z.json) are not allowed',
+  promise: 'z.promise is not allowed',
+};
+
+/** Walks a Zod schema tree (defs), reporting refused kinds and z.preprocess pipes. */
+function refusedZodKinds(schema: unknown, out: Set<string>, seen = new Set<unknown>()): void {
+  const def = (schema as { _zod?: { def?: Record<string, unknown> } } | undefined)?._zod?.def;
+  if (!def || seen.has(schema)) return;
+  seen.add(schema);
+  const kind = typeof def.type === 'string' ? def.type : '';
+  if (REFUSED_ZOD_KINDS[kind]) {
+    out.add(REFUSED_ZOD_KINDS[kind]);
+    return;
+  }
+  if (kind === 'pipe') {
+    const input = (def.in as { _zod?: { def?: { type?: unknown } } } | undefined)?._zod?.def?.type;
+    if (input === 'transform') out.add('z.preprocess is not allowed');
+  }
+  const visit = (value: unknown) => {
+    if (!value || typeof value !== 'object') return;
+    if ((value as { _zod?: unknown })._zod) refusedZodKinds(value, out, seen);
+    else if (Array.isArray(value)) value.forEach(visit);
+  };
+  for (const [key, value] of Object.entries(def)) {
+    if (key === 'shape' && value && typeof value === 'object') Object.values(value).forEach(visit);
+    else visit(value);
+  }
+}
+
+/** True when a JSON Schema uses `$ref` anywhere (recursive schemas). */
+function usesRef(node: unknown): boolean {
+  if (!node || typeof node !== 'object') return false;
+  if (Array.isArray(node)) return node.some(usesRef);
+  return Object.entries(node as Record<string, unknown>).some(([k, v]) => k === '$ref' || usesRef(v));
+}
+
 /** Problems with a widget schema under the strict rule (empty when it complies). */
 export function widgetSchemaProblems(schema: z.ZodType, opts: { mustBeObject?: boolean } = {}): string[] {
   const json = jsonSchemaOf(schema);
@@ -211,6 +251,10 @@ export function widgetSchemaProblems(schema: z.ZodType, opts: { mustBeObject?: b
   const loose: string[] = [];
   looseObjectPaths(json, '', loose);
   for (const p of loose) problems.push(`${p}: object must be strict (z.strictObject)`);
+  const refused = new Set<string>();
+  refusedZodKinds(schema, refused);
+  for (const r of refused) problems.push(`(schema): ${r}`);
+  if (refused.size === 0 && usesRef(json)) problems.push('(schema): recursive schemas ($ref) are not allowed');
   const untyped: string[] = [];
   unconstrainedPaths(json, '', untyped);
   for (const p of untyped) problems.push(`${p}: value must have a described type (not unknown / any / custom)`);

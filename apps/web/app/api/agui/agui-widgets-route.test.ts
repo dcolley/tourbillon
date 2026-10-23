@@ -552,4 +552,76 @@ describe('WID-1 widgets over AG-UI (round trip)', () => {
     await assert.rejects(listWidgetAnswers(specIndex, owner, 'no-such-thread', OWNER), /Thread not found/);
     assert.deepEqual(await listWidgetAnswers(specIndex, owner, 'wt-list', OWNER), []);
   });
+
+  function controlBody(threadId: string, action: 'abort' | 'steer' | 'followUp' | 'run', extraProps: Record<string, unknown> = {}) {
+    return {
+      threadId,
+      runId: `r-${action}-${Math.random().toString(36).slice(2)}`,
+      messages: [{ id: `u-${action}`, role: 'user', content: `FOREIGN ${action} text` }],
+      tools: [],
+      context: [],
+      forwardedProps: { tourbillon: { ...(action === 'run' ? {} : { action }), ...extraProps } },
+    };
+  }
+
+  /** The owner answers and the run completes normally, with no foreign text reaching the model. */
+  async function ownerCompletes(threadId: string) {
+    const events = await readSse(await post(resumeBody(threadId, answerEntry('Yes'))));
+    assert.ok(!events.some((e) => e.type === 'RUN_ERROR'), JSON.stringify(events.find((e) => e.type === 'RUN_ERROR')));
+    assert.equal(text(events), 'Thanks, noted.');
+    assert.deepEqual(events.at(-1)!.outcome, { type: 'success' });
+    assert.equal(stub.modelCalls, 2);
+    assert.doesNotMatch(JSON.stringify(stub.prompts), /FOREIGN/);
+  }
+
+  for (const mode of ['attached', 'new'] as const) {
+    for (const action of ['abort', 'steer', 'followUp', 'run'] as const) {
+      it(`while the owner's widget is pending, ${action} from a ${mode} session is refused (409) and the owner's run completes`, async () => {
+        const threadId = `wt-foreign-${mode}-${action}`;
+        if (mode === 'attached') {
+          await seedThread(threadId);
+          const other = await stub.createSession(RESOURCE, OTHER_SCOPE);
+          sessions.set(OTHER_KEY, other);
+          await other.thread.switch({ threadId });
+          await run(client(threadId), { tools: DECLARED });
+          await sleep(300);
+          assert.ok(other.suspensions.has({ toolCallId: WIDGET_CALL }));
+        } else {
+          await askWidget(threadId);
+        }
+        const res = await post(controlBody(threadId, action, { sessionScope: 'other' }));
+        assert.equal(res.status, 409, `${mode} ${action}`);
+        assert.match((await res.json()).error, /another session/);
+        await sleep(50);
+        assert.ok(sessions.get(SESSION_KEY).suspensions.has({ toolCallId: WIDGET_CALL }));
+        await ownerCompletes(threadId);
+        // Once the widget is answered, the other session may use the thread again.
+        const after = await post(controlBody(threadId, 'abort', { sessionScope: 'other' }));
+        assert.notEqual(after.status, 409);
+      });
+    }
+  }
+
+  it("the owner's own follow-up while its widget is pending is still queued and delivered after the answer", async () => {
+    await askWidget('wt-own-followup');
+    const res = await post({
+      threadId: 'wt-own-followup',
+      runId: 'r-own-fu',
+      messages: [{ id: 'u3', role: 'user', content: 'OWNER follow-up' }],
+      tools: [],
+      context: [],
+      forwardedProps: { tourbillon: { action: 'followUp' } },
+    });
+    assert.equal(res.status, 200);
+    await res.text();
+    assert.ok(sessions.get(SESSION_KEY).suspensions.has({ toolCallId: WIDGET_CALL }));
+  });
+
+  it('a dismissal for a widget call nobody asked is a 400', async () => {
+    await askWidget('wt-unknown-dismiss');
+    const res = await post(resumeBody('wt-unknown-dismiss', [{ interruptId: 'no-such-call', status: 'cancelled' }]));
+    assert.equal(res.status, 400);
+    assert.equal((await res.json()).error, 'Unknown widget call');
+    await ownerStillAnswers('wt-unknown-dismiss');
+  });
 });

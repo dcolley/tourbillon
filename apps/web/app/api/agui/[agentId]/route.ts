@@ -34,7 +34,8 @@
  * is resumed on a new streaming run (one widget per request). Refused with 400 when the answer is
  * invalid, mixed with other decisions or for a widget call no AG-UI run asked; 409 when another
  * session asked the widget (only the asking session may answer or dismiss it, see
- * lib/agui/widget-owners.ts) or a run is open; an owner's repeat after the answer gets
+ * lib/agui/widget-owners.ts) or a run is open; while another session's widget is pending on the thread,
+ * every action from other sessions is refused with 409; an owner's repeat after the answer gets
  * `accepted:false`. A steer is refused with 409 while this session has a widget waiting (answer or
  * dismiss it first); a follow-up is queued and runs after the answer. Run errors on a resumed widget
  * run carry a generic message; details are logged server-side.
@@ -71,7 +72,12 @@ import { runWithHeartbeatContext } from '@tourbillon/mastra';
 import { setRequestWidgetSpecs } from '@tourbillon/mastra/widget-tools';
 import { assistantWidgetSpecIndex } from '@/components/assistant/widgets/specs';
 import { isWidgetAnswerEntry, selectWidgetSpecs, suspendedWidgetSpec, widgetResumeFromEntry } from '@/lib/agui/widgets';
-import { pendingOwnedWidgetCalls, trackWidgetOwners, widgetOwnership } from '@/lib/agui/widget-owners';
+import {
+  hasOtherSessionPendingWidget,
+  pendingOwnedWidgetCalls,
+  trackWidgetOwners,
+  widgetOwnership,
+} from '@/lib/agui/widget-owners';
 
 export const dynamic = 'force-dynamic';
 
@@ -108,6 +114,19 @@ async function bindThread(session: TourbillonChatSession, threadId: string) {
 }
 
 const isWidgetTool = (toolName: string) => Boolean(assistantWidgetSpecIndex.latest(toolName)?.frontendTool);
+
+/**
+ * A dismissal-shaped resume entry (`cancelled`, no payload) for a call that is neither a parked widget
+ * nor a pending tool approval in this session: answered with 400 like an unknown widget answer.
+ */
+function isUnknownDismissal(
+  session: { approval?: { getToolCallIds?(): string[] } },
+  entry: { toolCallId: string; status: string; payload?: unknown },
+): boolean {
+  if (entry.status !== 'cancelled' || (entry.payload !== undefined && entry.payload !== null)) return false;
+  const pendingApprovals = session.approval?.getToolCallIds?.() ?? [];
+  return !pendingApprovals.includes(entry.toolCallId);
+}
 
 const WIDGET_RUN_ERROR = 'The widget answer could not be processed. Please try again.';
 
@@ -170,6 +189,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
       threadId: input.threadId,
     };
 
+    // While another session's widget is pending on this thread, only that session may act on the thread
+    // (its run is parked on the widget): refuse every action from other sessions.
+    if (hasOtherSessionPendingWidget(session, resourceId, input.threadId)) {
+      throw new ChatAgentError('A widget on this thread is waiting on another session', 409);
+    }
     // A steer would abort the run parked on this session's widget and drop the widget: refuse it.
     if (action === 'steer' && onThread && pendingOwnedWidgetCalls(session, resourceId, input.threadId).length > 0) {
       throw new ChatAgentError('A widget is waiting for an answer; answer or dismiss it first', 409);
@@ -203,7 +227,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
               (e) =>
                 Boolean(suspendedWidgetSpec(assistantWidgetSpecIndex, session, e.toolCallId)) ||
                 widgetOwnership(session, resourceId, input.threadId, e.toolCallId) !== 'unknown' ||
-                isWidgetAnswerEntry(e),
+                isWidgetAnswerEntry(e) ||
+                isUnknownDismissal(session, e),
             )
           : [];
       if (widgetEntries.length > 0) {

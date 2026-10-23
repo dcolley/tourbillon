@@ -4,40 +4,84 @@
  * Mastra parks a suspended tool call in every session that watches the thread when the call
  * suspends, so "parked in this session" does not say who may answer it. The AG-UI route records the
  * session whose open run emitted `tool_suspended` for a widget call; only that session may answer or
- * dismiss it. Every other session is refused and the owner's widget stays pending.
+ * dismiss it, and while it is pending no other session may act on the thread (abort, steer, follow
+ * up, run). The owner's own behaviour is unchanged.
  *
- * Records are kept after the answer (bounded, oldest dropped first) so a repeat from the owner is
- * still recognised as "already answered" and a repeat from another session is still refused.
+ * Records are kept per thread after the answer so a repeat from the owner is still recognised as
+ * "already answered". Bounds never drop a pending (parked) record:
+ * - per thread: at most MAX_RECORDS_PER_THREAD; the oldest settled record is dropped first;
+ * - overall: when more than MAX_THREADS threads have records, settled records are swept (threads
+ *   with a pending widget keep it), so one company's widgets cannot evict another's.
  */
 
-const MAX_RECORDS = 5000;
+const MAX_RECORDS_PER_THREAD = 100;
+const MAX_THREADS = 10_000;
+
+interface ParkedView {
+  suspensions?: { has(args: { toolCallId: string }): boolean };
+}
 
 interface WidgetOwnerRecord {
   owner: WeakRef<object>;
 }
 
-const g = globalThis as unknown as { tourbillonAguiWidgetOwners?: Map<string, WidgetOwnerRecord> };
+const g = globalThis as unknown as {
+  tourbillonAguiWidgetOwners?: Map<string, Map<string, WidgetOwnerRecord>>;
+  tourbillonAguiWidgetOwnersSweepAt?: number;
+};
 
-function records(): Map<string, WidgetOwnerRecord> {
+function threads(): Map<string, Map<string, WidgetOwnerRecord>> {
   if (!g.tourbillonAguiWidgetOwners) g.tourbillonAguiWidgetOwners = new Map();
   return g.tourbillonAguiWidgetOwners;
 }
 
-function key(resourceId: string, threadId: string, toolCallId: string): string {
-  return `${resourceId}\u0000${threadId}\u0000${toolCallId}`;
+function threadKey(resourceId: string, threadId: string): string {
+  return `${resourceId}\u0000${threadId}`;
+}
+
+/** True while the owner (if still alive) has the call parked. */
+function isParked(record: WidgetOwnerRecord, toolCallId: string): boolean {
+  const owner = record.owner.deref() as ParkedView | undefined;
+  return Boolean(owner?.suspensions?.has({ toolCallId }));
+}
+
+function trimThread(bucket: Map<string, WidgetOwnerRecord>): void {
+  while (bucket.size > MAX_RECORDS_PER_THREAD) {
+    let victim: string | undefined;
+    for (const [id, record] of bucket) {
+      if (!isParked(record, id)) {
+        victim = id;
+        break;
+      }
+    }
+    // Every record is pending (cannot happen with one widget per run, but stay bounded): drop the oldest.
+    bucket.delete(victim ?? bucket.keys().next().value!);
+  }
+}
+
+/** Drops settled records everywhere; threads left empty go too. Pending records are kept. */
+function sweepSettled(): void {
+  const map = threads();
+  for (const [key, bucket] of map) {
+    for (const [id, record] of bucket) if (!isParked(record, id)) bucket.delete(id);
+    if (bucket.size === 0) map.delete(key);
+  }
+  g.tourbillonAguiWidgetOwnersSweepAt = Math.max(MAX_THREADS, map.size * 2);
 }
 
 /** Records `session` as the owner of a widget call (first record wins; a replay keeps the owner). */
 export function recordWidgetOwner(session: object, resourceId: string, threadId: string, toolCallId: string): void {
-  const map = records();
-  const k = key(resourceId, threadId, toolCallId);
-  if (map.has(k)) return;
-  map.set(k, { owner: new WeakRef(session) });
-  while (map.size > MAX_RECORDS) {
-    const oldest = map.keys().next().value;
-    if (oldest === undefined) break;
-    map.delete(oldest);
+  const map = threads();
+  const key = threadKey(resourceId, threadId);
+  let bucket = map.get(key);
+  if (bucket?.has(toolCallId)) return;
+  if (!bucket) {
+    if (map.size >= (g.tourbillonAguiWidgetOwnersSweepAt ?? MAX_THREADS)) sweepSettled();
+    bucket = new Map();
+    map.set(key, bucket);
   }
+  bucket.set(toolCallId, { owner: new WeakRef(session) });
+  trimThread(bucket);
 }
 
 export type WidgetOwnership = 'owner' | 'other' | 'unknown';
@@ -47,25 +91,31 @@ export type WidgetOwnership = 'owner' | 'other' | 'unknown';
  * gone), `unknown` when no AG-UI run asked it.
  */
 export function widgetOwnership(session: object, resourceId: string, threadId: string, toolCallId: string): WidgetOwnership {
-  const record = records().get(key(resourceId, threadId, toolCallId));
+  const record = threads().get(threadKey(resourceId, threadId))?.get(toolCallId);
   if (!record) return 'unknown';
   return record.owner.deref() === session ? 'owner' : 'other';
 }
 
 /** Widget calls this session asked on this thread that are still parked in it. */
-export function pendingOwnedWidgetCalls(
-  session: { suspensions?: { has(args: { toolCallId: string }): boolean } },
-  resourceId: string,
-  threadId: string,
-): string[] {
-  const prefix = `${resourceId}\u0000${threadId}\u0000`;
+export function pendingOwnedWidgetCalls(session: ParkedView & object, resourceId: string, threadId: string): string[] {
   const out: string[] = [];
-  for (const [k, record] of records()) {
-    if (!k.startsWith(prefix) || record.owner.deref() !== session) continue;
-    const toolCallId = k.slice(prefix.length);
-    if (session.suspensions?.has({ toolCallId })) out.push(toolCallId);
+  for (const [toolCallId, record] of threads().get(threadKey(resourceId, threadId)) ?? []) {
+    if (record.owner.deref() === session && session.suspensions?.has({ toolCallId })) out.push(toolCallId);
   }
   return out;
+}
+
+/**
+ * True when a widget asked by another session is still pending on this thread: parked in its owner,
+ * or (owner gone) still parked in this session through Mastra's fan-out.
+ */
+export function hasOtherSessionPendingWidget(session: ParkedView & object, resourceId: string, threadId: string): boolean {
+  for (const [toolCallId, record] of threads().get(threadKey(resourceId, threadId)) ?? []) {
+    const owner = record.owner.deref();
+    if (owner === session) continue;
+    if (isParked(record, toolCallId) || (!owner && session.suspensions?.has({ toolCallId }))) return true;
+  }
+  return false;
 }
 
 /**
@@ -90,5 +140,11 @@ export function trackWidgetOwners(
 
 /** Test only: forget every record. */
 export function resetWidgetOwnersForTests(): void {
-  records().clear();
+  threads().clear();
+  g.tourbillonAguiWidgetOwnersSweepAt = undefined;
+}
+
+/** Test only: number of threads with records. */
+export function widgetOwnerThreadCountForTests(): number {
+  return threads().size;
 }

@@ -219,6 +219,20 @@ describe('WID-1 widget specs (S3 strict rule)', () => {
     assert.throws(() => createWidgetSpecIndex([{ ...spec, answerSchema: z.any() }]), /described type/);
   });
 
+  it('json, lazy / recursive, preprocess and promise schemas are refused at any depth', () => {
+    const has = (schema: z.ZodType, re: RegExp) => assert.match(widgetSchemaProblems(schema).join('\n'), re);
+    has(z.json(), /lazy or recursive/);
+    has(z.strictObject({ data: z.json() }), /lazy or recursive/);
+    has(z.lazy(() => z.string()), /lazy or recursive/);
+    has(z.preprocess((v) => v, z.string()), /z\.preprocess/);
+    has(z.strictObject({ a: z.array(z.preprocess((v) => v, z.string())) }), /z\.preprocess/);
+    has(z.promise(z.string()), /z\.promise/);
+    has(z.strictObject({ p: z.promise(z.string()).optional() }), /z\.promise/);
+    // Plain pipes and output transforms keep their described input type.
+    assert.deepEqual(widgetSchemaProblems(z.string().pipe(z.string().min(1))), []);
+    assert.throws(() => createWidgetSpecIndex([{ ...spec, answerSchema: z.strictObject({ data: z.json() }) }]), /lazy or recursive/);
+  });
+
   it('spec problems cover name, version range, props, answers and the reserved key', () => {
     assert.deepEqual(widgetSpecProblems(spec), []);
     assert.match(widgetSpecProblems({ ...spec, name: 'Bad-Name' })[0], /Invalid widget name/);

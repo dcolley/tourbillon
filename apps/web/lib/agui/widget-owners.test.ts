@@ -2,10 +2,12 @@
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  hasOtherSessionPendingWidget,
   pendingOwnedWidgetCalls,
   recordWidgetOwner,
   resetWidgetOwnersForTests,
   trackWidgetOwners,
+  widgetOwnerThreadCountForTests,
   widgetOwnership,
 } from './widget-owners';
 
@@ -69,11 +71,38 @@ describe('WID-1 widget owners', () => {
     assert.deepEqual(pendingOwnedWidgetCalls(other, 'r', 't'), []);
   });
 
-  it('keeps a bounded number of records, dropping the oldest first', () => {
-    const s = fakeSession();
-    for (let i = 0; i < 5001; i += 1) recordWidgetOwner(s, 'r', 't', `c${i}`);
-    assert.equal(widgetOwnership(s, 'r', 't', 'c0'), 'unknown');
-    assert.equal(widgetOwnership(s, 'r', 't', 'c1'), 'owner');
-    assert.equal(widgetOwnership(s, 'r', 't', 'c5000'), 'owner');
+  it('caps records per thread, dropping the oldest settled record first and never a pending one', () => {
+    const s = fakeSession(['c0']);
+    for (let i = 0; i < 101; i += 1) recordWidgetOwner(s, 'r', 't', `c${i}`);
+    assert.equal(widgetOwnership(s, 'r', 't', 'c0'), 'owner', 'pending record kept');
+    assert.equal(widgetOwnership(s, 'r', 't', 'c1'), 'unknown', 'oldest settled record dropped');
+    assert.equal(widgetOwnership(s, 'r', 't', 'c2'), 'owner');
+    assert.equal(widgetOwnership(s, 'r', 't', 'c100'), 'owner');
+    assert.deepEqual(pendingOwnedWidgetCalls(s, 'r', 't'), ['c0']);
+  });
+
+  it("one resource's records never evict another's pending widget or its steer guard", () => {
+    const owner = fakeSession(['mine']);
+    recordWidgetOwner(owner, 'company-a', 't', 'mine');
+    const flood = fakeSession();
+    for (let t = 0; t < 12_000; t += 1) recordWidgetOwner(flood, 'company-b', `t${t}`, 'c');
+    for (let i = 0; i < 500; i += 1) recordWidgetOwner(flood, 'company-b', 't0', `x${i}`);
+    assert.equal(widgetOwnership(owner, 'company-a', 't', 'mine'), 'owner');
+    assert.deepEqual(pendingOwnedWidgetCalls(owner, 'company-a', 't'), ['mine'], 'steer guard intact');
+    assert.equal(hasOtherSessionPendingWidget(fakeSession(), 'company-a', 't'), true);
+    assert.ok(widgetOwnerThreadCountForTests() <= 10_001, `swept: ${widgetOwnerThreadCountForTests()}`);
+  });
+
+  it('reports a widget pending for another session on the thread only', () => {
+    const owner = fakeSession(['w1']);
+    const other = fakeSession(['w1']);
+    recordWidgetOwner(owner, 'r', 't', 'w1');
+    assert.equal(hasOtherSessionPendingWidget(other, 'r', 't'), true);
+    assert.equal(hasOtherSessionPendingWidget(owner, 'r', 't'), false, 'the owner is not refused');
+    assert.equal(hasOtherSessionPendingWidget(other, 'r', 't2'), false);
+    assert.equal(hasOtherSessionPendingWidget(other, 'r2', 't'), false);
+    const settled = fakeSession();
+    recordWidgetOwner(settled, 'r', 't3', 'w9');
+    assert.equal(hasOtherSessionPendingWidget(other, 'r', 't3'), false, 'answered widgets do not block');
   });
 });
