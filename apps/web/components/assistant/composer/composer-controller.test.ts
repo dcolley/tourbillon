@@ -166,7 +166,7 @@ describe('CHAT-1 composer attachments', () => {
     assert.equal(messages.length, 4);
     assert.match(messages[0], /tool\.exe: \.exe files can't be attached/);
     assert.match(messages[1], /a\.zip: \.zip files aren't supported/);
-    assert.match(messages[2], /huge\.pdf: 10 MB is over the 10 MB limit/);
+    assert.equal(messages[2], 'huge.pdf: 10,485,761 bytes is over the 10 MB limit (10,485,760 bytes).');
     assert.match(messages[3], /empty\.txt: the file is empty/);
     assert.deepEqual(c.getState().attachments.map((a) => a.name), ['ok.txt']);
     c.dismissNotice(0);

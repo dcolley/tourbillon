@@ -10,7 +10,12 @@ import {
   WorkspacePathError,
   WorkspaceSizeError,
 } from '@tourbillon/shared/company-workspace';
-import { isTextEditablePath, isTextViewablePath } from '@tourbillon/shared/company-workspace-types';
+import {
+  WORKSPACE_MAX_UPLOAD_BYTES,
+  isTextEditablePath,
+  isTextViewablePath,
+} from '@tourbillon/shared/company-workspace-types';
+import { readLimitedFormData } from '@/lib/limited-form-data';
 import { stat } from 'fs/promises';
 
 export async function GET(req: NextRequest) {
@@ -57,9 +62,19 @@ export async function GET(req: NextRequest) {
   }
 }
 
+/** Multipart overhead allowed on top of the file itself. */
+const UPLOAD_FORM_OVERHEAD_BYTES = 64 * 1024;
+
 export async function POST(req: NextRequest) {
   const company = await getActiveCompany();
-  const formData = await req.formData();
+  // Counted while streaming and aborted past the limit (never buffers an oversized body).
+  const body = await readLimitedFormData(req, WORKSPACE_MAX_UPLOAD_BYTES + UPLOAD_FORM_OVERHEAD_BYTES);
+  if (!body.ok) {
+    return body.reason === 'too_large'
+      ? NextResponse.json({ error: `Upload exceeds ${WORKSPACE_MAX_UPLOAD_BYTES} byte limit.` }, { status: 413 })
+      : NextResponse.json({ error: 'Expected a multipart form with a file.' }, { status: 400 });
+  }
+  const formData = body.form;
   const file = formData.get('file');
   const targetDir = (formData.get('targetDir') as string | null)?.trim() ?? '';
 

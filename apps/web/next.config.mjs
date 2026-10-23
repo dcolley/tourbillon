@@ -40,6 +40,10 @@ const nextConfig = {
     NEXT_PUBLIC_CONTROL_CHAT_ENABLED: process.env.NEXT_PUBLIC_CONTROL_CHAT_ENABLED ?? '',
   },
   ...(allowedDevOrigins?.length ? { allowedDevOrigins } : {}),
+  // Browsers must not guess content types (e.g. render an uploaded text file as HTML).
+  async headers() {
+    return [{ source: '/:path*', headers: [{ key: 'X-Content-Type-Options', value: 'nosniff' }] }];
+  },
   transpilePackages: [
     '@tourbillon/db',
     '@tourbillon/shared',

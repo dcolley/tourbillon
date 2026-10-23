@@ -1,5 +1,5 @@
-import type { Stats } from 'node:fs';
-import { mkdir, readFile, writeFile, readdir, rename, stat, unlink, rmdir } from 'fs/promises';
+import { constants as fsConstants, type Stats } from 'node:fs';
+import { lstat, mkdir, open, readFile, realpath, writeFile, readdir, rename, stat, unlink, rmdir } from 'fs/promises';
 import path from 'path';
 import { ROLE_DEFAULT_SKILLS, TOOLSET_SKILL_FILENAME_SET, ensureControlPlaneInSkills, CONTROL_PLANE_SKILL_SLUG } from './constants';
 import { getMonorepoRoot, resolveDataPath } from './monorepo-root';
@@ -80,6 +80,110 @@ export async function resolveSafePath(companyId: string, relativePath: string): 
     throw new WorkspacePathError('Path escapes company workspace.');
   }
   return resolved;
+}
+
+function isInsideDir(root: string, candidate: string): boolean {
+  return candidate === root || candidate.startsWith(root + path.sep);
+}
+
+function errnoCode(err: unknown): string | undefined {
+  return (err as NodeJS.ErrnoException | undefined)?.code;
+}
+
+/**
+ * Creates (when missing) and verifies a directory inside the company workspace for a write.
+ *
+ * Each component of `normalizedDir` is created one level at a time and then resolved with
+ * realpath: a component that is (or resolves through) a symbolic link pointing outside the
+ * company workspace is refused, as is anything that is not a directory. Returns the real path.
+ */
+export async function ensureSafeWorkspaceDir(companyId: string, normalizedDir: string): Promise<string> {
+  const companyDir = getCompanyWorkspaceDir(companyId);
+  await mkdir(companyDir, { recursive: true });
+  const root = await realpath(companyDir);
+  let current = root;
+  for (const segment of normalizedDir ? normalizedDir.split('/') : []) {
+    const next = path.join(current, segment);
+    try {
+      await mkdir(next);
+    } catch (err) {
+      if (errnoCode(err) !== 'EEXIST') throw err;
+    }
+    let real: string;
+    try {
+      real = await realpath(next);
+    } catch (err) {
+      if (errnoCode(err) === 'ENOENT' || errnoCode(err) === 'ELOOP') {
+        throw new WorkspacePathError('Path escapes company workspace.');
+      }
+      throw err;
+    }
+    if (!isInsideDir(root, real)) throw new WorkspacePathError('Path escapes company workspace.');
+    if (!(await stat(real)).isDirectory()) throw new WorkspacePathError('Not a directory.');
+    current = real;
+  }
+  return current;
+}
+
+const O_NOFOLLOW: number = fsConstants.O_NOFOLLOW ?? 0;
+const O_NONBLOCK: number = fsConstants.O_NONBLOCK ?? 0;
+
+/**
+ * Writes a file inside the company workspace without following links:
+ * - the parent directory is checked with ensureSafeWorkspaceDir (real path inside the workspace);
+ * - the file is opened with O_NOFOLLOW (on platforms without it, a symbolic link at the target is
+ *   refused after lstat), and with O_EXCL when `exclusive` (never replaces an existing file);
+ * - an existing target must be a regular file with a single link (no hard link to a file elsewhere)
+ *   before it is truncated and rewritten;
+ * - the parent directory's real path is checked again after the open.
+ */
+export async function writeWorkspaceFileSafe(
+  companyId: string,
+  normalized: string,
+  data: Buffer | string,
+  options: { exclusive?: boolean } = {},
+): Promise<void> {
+  const slash = normalized.lastIndexOf('/');
+  const dirRel = slash === -1 ? '' : normalized.slice(0, slash);
+  const name = slash === -1 ? normalized : normalized.slice(slash + 1);
+  if (!name) throw new WorkspacePathError('File path is required.');
+  const dirReal = await ensureSafeWorkspaceDir(companyId, dirRel);
+  const target = path.join(dirReal, name);
+
+  if (!O_NOFOLLOW) {
+    try {
+      if ((await lstat(target)).isSymbolicLink()) {
+        throw new WorkspacePathError('Refusing to write through a symbolic link.');
+      }
+    } catch (err) {
+      if (err instanceof WorkspacePathError) throw err;
+      if (errnoCode(err) !== 'ENOENT') throw err;
+    }
+  }
+
+  const flags =
+    fsConstants.O_WRONLY | fsConstants.O_CREAT | (options.exclusive ? fsConstants.O_EXCL : 0) | O_NOFOLLOW | O_NONBLOCK;
+  let handle;
+  try {
+    handle = await open(target, flags, 0o644);
+  } catch (err) {
+    const code = errnoCode(err);
+    if (code === 'ELOOP' || code === 'EMLINK') throw new WorkspacePathError('Refusing to write through a symbolic link.');
+    if (code === 'EEXIST') throw new WorkspacePathError('A file already exists at that path.');
+    if (code === 'EISDIR') throw new WorkspacePathError('A folder already exists at that path.');
+    if (code === 'ENXIO') throw new WorkspacePathError('Not a regular file.');
+    throw err;
+  }
+  try {
+    const st = await handle.stat();
+    if (!st.isFile()) throw new WorkspacePathError('Not a regular file.');
+    if (st.nlink > 1) throw new WorkspacePathError('Refusing to write to a file with several links.');
+    if ((await realpath(dirReal)) !== dirReal) throw new WorkspacePathError('Path escapes company workspace.');
+    await handle.truncate(0);
+    await handle.writeFile(data);
+  } finally {
+    await handle.close();
+  }
 }
 
 export async function ensureCompanyWorkspace(companyId: string): Promise<string> {
@@ -172,16 +276,16 @@ export async function writeWorkspaceText(
   if (bytes > WORKSPACE_MAX_TEXT_BYTES) {
     throw new WorkspaceSizeError(`Content exceeds ${WORKSPACE_MAX_TEXT_BYTES} byte limit.`);
   }
-  const filePath = await resolveSafePath(companyId, normalized);
-  await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, content, 'utf-8');
+  await resolveSafePath(companyId, normalized);
+  await writeWorkspaceFileSafe(companyId, normalized, content);
   return { path: normalized, size: bytes };
 }
 
 export async function saveWorkspaceUpload(
   companyId: string,
   relativePath: string,
-  data: Buffer
+  data: Buffer,
+  options: { exclusive?: boolean } = {}
 ): Promise<{ path: string; size: number }> {
   await ensureCompanyWorkspace(companyId);
   const normalized = normalizeRelativePath(relativePath);
@@ -189,9 +293,9 @@ export async function saveWorkspaceUpload(
   if (data.length > WORKSPACE_MAX_UPLOAD_BYTES) {
     throw new WorkspaceSizeError(`Upload exceeds ${WORKSPACE_MAX_UPLOAD_BYTES} byte limit.`);
   }
-  const filePath = await resolveSafePath(companyId, normalized);
-  await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, data);
+  await resolveSafePath(companyId, normalized);
+  // Real-path checked, no-follow write (see writeWorkspaceFileSafe).
+  await writeWorkspaceFileSafe(companyId, normalized, data, options);
   return { path: normalized, size: data.length };
 }
 
@@ -213,7 +317,7 @@ export async function createWorkspaceDirectory(
     if (err instanceof WorkspacePathError) throw err;
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
-  await mkdir(dirPath, { recursive: true });
+  await ensureSafeWorkspaceDir(companyId, normalized);
   return { path: normalized };
 }
 
