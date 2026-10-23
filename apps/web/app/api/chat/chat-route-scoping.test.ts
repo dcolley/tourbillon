@@ -128,7 +128,12 @@ async function messageCount(resourceId: string, threadId: string): Promise<numbe
 }
 const settle = () => new Promise((r) => setTimeout(r, 300));
 
+async function threadsIn(resourceId: string): Promise<Json[]> {
+  return (await (await probe(resourceId)).thread.list()) as Json[];
+}
+
 const routes: Record<string, Handler> = {};
+let helpers: typeof import('../../../lib/chat/route-helpers');
 const enc = encodeURIComponent;
 
 async function call(
@@ -231,6 +236,7 @@ describe('chat route scoping', () => {
     routes['DELETE threads/:threadId'] = thread.DELETE as unknown as Handler;
     routes['GET threads/:threadId/messages'] = (await import(`${r}/threads/[threadId]/messages/route`)).GET as unknown as Handler;
     routes['POST tool-approval'] = (await import(`${r}/tool-approval/route`)).POST as unknown as Handler;
+    helpers = await import('../../../lib/chat/route-helpers');
     Module.prototype.require = originalRequire;
 
     // Other company: one thread. Active company: agent A's thread (newest), B's own thread, a shared one.
@@ -421,6 +427,95 @@ describe('chat route scoping', () => {
       assert.equal(res.status, 200);
       const msgs = await call('GET threads/:threadId/messages', { agentId: 'alice', resourceId: RES_A, threadId: 'x-own' }, { query: '?sessionScope=owner' });
       assert.equal(msgs.status, 200);
+    });
+  });
+
+  describe('ownership tags and explicit threads', () => {
+    for (const [i, clientTags] of [
+      [1, { agentId: 'agent-a', kind: 'other' }],
+      [2, { agentId: '' }],
+    ] as Array<[number, Record<string, string>]>) {
+      it(`POST sessions forces kind and agentId (client tags ${JSON.stringify(clientTags)})`, async () => {
+        const contextId = `p-s1-${i}`;
+        const resourceId = `company-company-a:chat:project:${contextId}`;
+        const tags = { ...clientTags, contextType: 'project', contextId };
+        const q = `?sessionScope=s1-${i}`;
+        const res = await call('POST sessions', { agentId: 'bob' }, { body: { tags, sessionScope: `s1-${i}` } });
+        assert.equal(res.status, 200, JSON.stringify(res.body));
+        assert.equal(res.body.resourceId, resourceId);
+
+        const sent = await call('POST messages', { agentId: 'bob', resourceId }, {
+          body: { message: 'hi', context: { contextType: 'project', contextId } },
+          query: q,
+        });
+        assert.equal(sent.status, 200);
+        await settle();
+
+        const threads = await threadsIn(resourceId);
+        assert.ok(threads.length >= 1, 'a thread was created');
+        for (const t of threads) {
+          assert.equal((t.metadata as Json)?.agentId, 'agent-b', `thread ${t.id} owner`);
+          assert.equal((t.metadata as Json)?.kind, 'chat', `thread ${t.id} kind`);
+        }
+        const asAlice = await call('GET threads', { agentId: 'alice', resourceId });
+        assert.equal(asAlice.status, 200);
+        assert.equal((asAlice.body.threads as Json[]).length, 0, 'not listed for another agent');
+      });
+    }
+
+    it('POST threads: client tags do not reach the session or its first thread', async () => {
+      const resourceId = 'company-company-a:chat:project:p-m13';
+      const res = await call('POST threads', { agentId: 'bob', resourceId }, {
+        body: { title: 'T', tags: { agentId: 'agent-a', kind: 'other' } },
+        query: '?sessionScope=m13',
+      });
+      assert.equal(res.status, 200);
+      const threads = await threadsIn(resourceId);
+      assert.ok(threads.length >= 1);
+      for (const t of threads) {
+        assert.equal((t.metadata as Json)?.agentId, 'agent-b', `thread ${t.id} owner`);
+        assert.equal((t.metadata as Json)?.kind, 'chat', `thread ${t.id} kind`);
+      }
+    });
+
+    it('POST sessions with a rejected threadId leaves the existing session untouched', async () => {
+      await seedThread({ id: 'b-issue', agentId: 'agent-b', resourceId: RES_A_ISSUE });
+      const q = '?sessionScope=s2';
+      assert.equal((await call('POST thread', { agentId: 'bob', resourceId: RES_A }, { body: { threadId: 'b-own' }, query: q })).status, 200);
+      const session = await (await controllerFor('agent-b')).getSessionByResource(RES_A, 's2');
+      assert.equal(session.thread.getId(), 'b-own');
+      const events: Json[] = [];
+      const unsubscribe = session.subscribe((e: Json) => events.push(e));
+      try {
+        for (const threadId of ['x-own', 'x-thread', 'b-issue']) {
+          const res = await call('POST sessions', { agentId: 'bob' }, { body: { threadId, sessionScope: 's2' } });
+          assert.equal(res.status, 404, `${threadId}: ${JSON.stringify(res.body)}`);
+          assert.equal(res.body.error, 'Thread not found');
+          assert.equal(session.thread.getId(), 'b-own', `${threadId}: binding kept`);
+        }
+        await settle();
+        assert.deepEqual(
+          events.filter((e) => e.type === 'thread_changed'),
+          [],
+          'no switch happened',
+        );
+      } finally {
+        unsubscribe();
+      }
+    });
+
+    it('chatThreadVisibleTo requires the same resource and an own or untagged owner', () => {
+      const bob = { id: 'agent-b', companyId: 'company-a' };
+      const v = helpers.chatThreadVisibleTo;
+      assert.equal(v({ resourceId: RES_A, metadata: { agentId: 'agent-b' } }, bob, RES_A), true);
+      assert.equal(v({ resourceId: RES_A, metadata: {} }, bob, RES_A), true);
+      assert.equal(v({ resourceId: RES_A }, bob, RES_A), true);
+      assert.equal(v({ resourceId: RES_A_ISSUE, metadata: { agentId: 'agent-b' } }, bob, RES_A), false);
+      assert.equal(v({ resourceId: RES_A_ISSUE, metadata: {} }, bob, RES_A), false);
+      assert.equal(v({ resourceId: RES_X }, bob, RES_A), false);
+      assert.equal(v({ metadata: { agentId: 'agent-b' } }, bob, RES_A), false);
+      assert.equal(v({ resourceId: RES_A, metadata: { agentId: 'agent-a' } }, bob, RES_A), false);
+      assert.equal(v(null, bob, RES_A), false);
     });
   });
 });

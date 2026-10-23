@@ -40,10 +40,16 @@ export async function POST(
     const controller = await getOrCreateChatController(agent, {
       modelIdOverride: body.modelId,
     });
+    // Ownership keys come last so request tags cannot set or override them (as in POST threads).
+    const tags: Record<string, string> = {
+      ...(body.tags ?? {}),
+      kind: 'chat',
+      agentId: agent.id,
+    };
     const session = await openChatRouteSession(controller, agent, {
       resourceId,
       threadId: body.threadId,
-      tags: body.tags,
+      tags,
       scope: sessionScope,
     });
 

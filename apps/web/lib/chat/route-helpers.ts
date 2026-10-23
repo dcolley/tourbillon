@@ -91,7 +91,9 @@ export async function requireChatThread(
  * - The resource must belong to the agent's company (404 otherwise).
  * - A session may bind a thread implicitly (for example the newest thread of the resource when a
  *   new session scope starts). When that thread belongs to another agent, the binding is dropped
- *   so the route never acts on it; with an explicit threadId the request answers 404 instead.
+ *   so the route never acts on it.
+ * - An explicit threadId that exists but is not visible to the agent answers 404 before the
+ *   session binds or switches to it.
  */
 export async function openChatRouteSession(
   controller: TourbillonChatController,
@@ -104,6 +106,13 @@ export async function openChatRouteSession(
   },
 ): Promise<TourbillonChatSession> {
   requireChatResource(agent, opts.resourceId);
+  if (opts.threadId) {
+    // Check an explicit thread before the session binds (or switches) to it.
+    const target = await controller.queryThreadById({ threadId: opts.threadId });
+    if (target && !chatThreadVisibleTo(target, agent, opts.resourceId)) {
+      throw new ChatAgentError('Thread not found', 404);
+    }
+  }
   const session = await getChatSession(controller, agent, opts);
   const boundId = session.thread.getId();
   if (boundId) {

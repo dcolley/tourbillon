@@ -39,7 +39,7 @@ describe('#110 /api/chat/* with no agent token secret', () => {
           resolveChatAgent: async () => agent,
           chatResourceId: () => 'company-company-a:chat:free',
           chatContextFromTags: () => ({}),
-          getOrCreateChatController: async () => ({ id: 'ctrl-1' }),
+          getOrCreateChatController: async () => ({ id: 'ctrl-1', queryThreadById: async () => null }),
           // Mirrors registry.getChatSession → createChatRequestContext → getOrCreateChatApiKey.
           getChatSession: async () => {
             if (failWith === 'other') throw new Error('boom');
