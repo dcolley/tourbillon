@@ -7,11 +7,17 @@ import { describe, it, before } from 'node:test';
 import assert from 'node:assert/strict';
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { initialAgentChatState, type AgentChatState } from '../../lib/agui/client/chat-state';
+import {
+  initialAgentChatState,
+  RUN_CANCELLED_MESSAGE,
+  TOOL_DETACHED_MESSAGE,
+  type AgentChatState,
+} from '../../lib/agui/client/chat-state';
 
 type View = typeof import('./agent-chat');
 let AgentChatView: View['AgentChatView'];
 let AgentChat: View['AgentChat'];
+let withThreadParam: View['withThreadParam'];
 let Button: unknown;
 let WidgetToolCall: unknown;
 let AssistantPage: (p: { searchParams: Promise<Record<string, string | string[] | undefined>> }) => Promise<React.ReactElement>;
@@ -67,7 +73,7 @@ function buttons(node: React.ReactNode): Array<{ label: string; disabled: boolea
 describe('AGUI-1b assistant chat view', () => {
   before(async () => {
     (globalThis as { React?: unknown }).React = React;
-    ({ AgentChatView, AgentChat } = await import('./agent-chat'));
+    ({ AgentChatView, AgentChat, withThreadParam } = await import('./agent-chat'));
     ({ Button } = await import('@/components/ui/button'));
     ({ WidgetToolCall } = await import('./widgets/widget-tool-call'));
     ({ AssistantEmptyState } = await import('./assistant-shell'));
@@ -146,10 +152,14 @@ describe('AGUI-1b assistant chat view', () => {
           items: [
             { kind: 'tool', id: 't1', name: 'echo', argsText: '{"text":"hi"}', status: 'done', result: '{}' },
             { kind: 'tool', id: 't2', name: 'other', argsText: '', status: 'denied' },
+            { kind: 'tool', id: 't3', name: 'late', argsText: '', status: 'detached' },
           ],
         }),
       ),
     );
+    // Approved after the run ended: shown as not completed here, never as running.
+    assert.match(html, /data-tool-status="detached"/);
+    assert.doesNotMatch(html, /Running/);
     assert.match(html, /data-tool-status="done"/);
     assert.match(html, /data-widget="fallback"/);
     assert.match(html, /echo/);
@@ -186,6 +196,17 @@ describe('AGUI-1b assistant chat view', () => {
     assert.equal(dismissed, true);
   });
 
+  it('a run cancelled without Stop, and a detached tool approval, show their messages', () => {
+    for (const error of [
+      { kind: 'cancelled' as const, message: RUN_CANCELLED_MESSAGE },
+      { kind: 'detached' as const, message: TOOL_DETACHED_MESSAGE },
+    ]) {
+      const html = renderToStaticMarkup(React.createElement(AgentChatView, props({ error })));
+      assert.match(html, new RegExp(`role="alert"[^>]*data-error="${error.kind}"`));
+      assert.ok(html.includes(error.kind === 'cancelled' ? 'Run cancelled' : 'no longer connected to the run'), html);
+    }
+  });
+
   it('connecting and setup error phases', () => {
     assert.match(renderToStaticMarkup(React.createElement(AgentChatView, props({}, { phase: 'connecting' }))), /Opening chat/);
     const html = renderToStaticMarkup(React.createElement(AgentChatView, props({}, { phase: 'error', setupError: 'Agent not found' })));
@@ -206,8 +227,28 @@ describe('AGUI-1b assistant chat view', () => {
         const el = await AssistantPage({ searchParams: Promise.resolve({ agent }) });
         assert.equal(el.type, AssistantEmptyState, String(agent));
       }
-      const badThread = await AssistantPage({ searchParams: Promise.resolve({ agent: 'alice', thread: 'no/slash' }) });
-      assert.deepEqual(badThread.props, { agentId: 'alice', threadId: undefined });
     });
+
+    it('dot-only agent values (which would change the API path) show the empty state', async () => {
+      for (const agent of ['.', '..', '...', ['..', 'alice']]) {
+        const el = await AssistantPage({ searchParams: Promise.resolve({ agent }) });
+        assert.equal(el.type, AssistantEmptyState, String(agent));
+      }
+      const dotted = await AssistantPage({ searchParams: Promise.resolve({ agent: 'a.b' }) });
+      assert.equal(dotted.type, AgentChat);
+    });
+
+    it('an invalid thread id is reported as not found, not swapped for another thread', async () => {
+      for (const thread of ['no/slash', '.', '..', '', 'x'.repeat(201)]) {
+        const el = await AssistantPage({ searchParams: Promise.resolve({ agent: 'alice', thread }) });
+        assert.notEqual(el.type, AgentChat, thread);
+        assert.match(renderToStaticMarkup(el), /role="alert"[^>]*>Thread not found/, thread);
+      }
+    });
+  });
+
+  it('withThreadParam: sets thread=<id> on the current URL, keeping the agent', () => {
+    assert.equal(withThreadParam('http://localhost:3001/assistant?agent=alice', 't-1'), '/assistant?agent=alice&thread=t-1');
+    assert.equal(withThreadParam('http://localhost:3001/assistant?agent=alice&thread=old#x', 't 2'), '/assistant?agent=alice&thread=t+2#x');
   });
 });

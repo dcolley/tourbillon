@@ -6,6 +6,7 @@ import {
   endRun,
   initialAgentChatState,
   markDroppedFollowUps,
+  RUN_CANCELLED_MESSAGE,
   type AgentChatItem,
   type AgentChatState,
   type UserMessageDelivery,
@@ -109,6 +110,28 @@ describe('AGUI-1b chat state', () => {
     assert.equal(apply(withItems([]), { type: 'RUN_FINISHED' }).lastOutcome, 'success');
     const e = apply(withItems([]), { type: 'RUN_ERROR', message: 'bad' });
     assert.deepEqual([e.lastOutcome, e.error], ['error', { kind: 'run', message: 'bad' }]);
+  });
+
+  it('endRun on interrupt delivers queued follow-ups (they ran inside the run)', () => {
+    const s = endRun(withItems([user('q', 'followUp', 'queued')]), 'interrupt');
+    assert.deepEqual(deliveries(s), ['delivered']);
+  });
+
+  it('a cancelled run the user stopped clears a stale error; one the user did not stop says so', () => {
+    const stale = { kind: 'conflict' as const, message: 'stale' };
+    const stopped = endRun(withItems([], { status: 'stopping', error: stale }), 'cancelled');
+    assert.equal(stopped.error, null);
+    for (const status of ['running', 'starting'] as const) {
+      const notAsked = endRun(withItems([], { status, error: stale }), 'cancelled');
+      assert.deepEqual(notAsked.error, { kind: 'cancelled', message: RUN_CANCELLED_MESSAGE }, status);
+    }
+    const viaEvent = apply(withItems([]), { type: 'RUN_FINISHED', outcome: { type: 'cancelled' } });
+    assert.equal(viaEvent.error?.kind, 'cancelled');
+    const stoppedViaEvent = apply(withItems([], { status: 'stopping' }), { type: 'RUN_FINISHED', outcome: { type: 'cancelled' } });
+    assert.equal(stoppedViaEvent.error, null);
+    // Success and interrupt still clear a stale error.
+    assert.equal(endRun(withItems([], { error: stale }), 'success').error, null);
+    assert.equal(endRun(withItems([], { error: stale }), 'interrupt').error, null);
   });
 
   it('unknown events leave the state unchanged', () => {

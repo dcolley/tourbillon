@@ -17,6 +17,7 @@ import type {
   ToolCallStatus,
   UserMessageDelivery,
 } from '@/lib/agui/client/chat-state';
+import type { AguiThreadRef } from '@/lib/agui/client/thread-bootstrap';
 import { useAgentChat, type AgentChatPhase } from './use-agent-chat';
 
 const DELIVERY_LABEL: Partial<Record<UserMessageDelivery, string>> = {
@@ -35,7 +36,7 @@ const STATUS_LABEL: Record<AgentChatState['status'], string> = {
 
 function toolCardStatus(status: ToolCallStatus): ToolCardStatus {
   if (status === 'done') return 'done';
-  if (status === 'error' || status === 'denied') return 'failed';
+  if (status === 'error' || status === 'denied' || status === 'detached') return 'failed';
   return 'running';
 }
 
@@ -181,8 +182,23 @@ export function AgentChatView(props: AgentChatViewProps) {
   );
 }
 
+/** The current page URL with `thread=<id>` set (path, query and hash only). */
+export function withThreadParam(href: string, threadId: string): string {
+  const url = new URL(href);
+  url.searchParams.set('thread', threadId);
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+
 export function AgentChat({ agentId, threadId }: { agentId: string; threadId?: string }) {
-  const chat = useAgentChat({ agentId, threadId });
+  // Without a thread in the URL, record the opened thread there so a reload reopens it.
+  const onThreadOpened = React.useCallback(
+    (ref: AguiThreadRef) => {
+      if (threadId || typeof window === 'undefined') return;
+      window.history.replaceState(null, '', withThreadParam(window.location.href, ref.threadId));
+    },
+    [threadId],
+  );
+  const chat = useAgentChat({ agentId, threadId, onThreadOpened });
   const [draft, setDraft] = React.useState('');
   const submit = (fn: ((text: string) => Promise<{ ok: boolean }> | undefined) | undefined) => {
     const text = draft;

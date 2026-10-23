@@ -29,6 +29,7 @@ import {
   endRun,
   initialAgentChatState,
   markDroppedFollowUps,
+  TOOL_DETACHED_MESSAGE,
   type AgentChatError,
   type AgentChatItem,
   type AgentChatState,
@@ -46,7 +47,7 @@ export interface AguiTool {
 export interface AgentChatClientOptions {
   /** Agent id or url key, as in /api/agui/[agentId]. */
   agentId: string;
-  /** Mastra memory thread id (created through the chat thread API; the endpoint never creates one). */
+  /** Mastra memory thread id (from the assistant thread API; the endpoint never creates one). */
   threadId: string;
   resourceId?: string;
   sessionScope?: string;
@@ -239,12 +240,18 @@ export class AgentChatClient {
     const r = (result.value?.results as Array<{ toolCallId: string; accepted: boolean; reason?: string }>) ?? [];
     const mine = r.find((x) => x.toolCallId === toolCallId);
     if (result.value?.accepted === true && mine?.accepted !== false) {
+      // With no run stream open here (the run ended with an interrupt), nothing will report the
+      // tool's progress or result to this client: say so instead of showing it as running.
+      const detached = approved && !this.active;
       this.update((s) => ({
         ...s,
         pendingTools: s.pendingTools.filter((p) => p.toolCallId !== toolCallId),
         items: s.items.map((it) =>
-          it.kind === 'tool' && it.id === toolCallId ? { ...it, status: approved ? 'running' : 'denied' } : it,
+          it.kind === 'tool' && it.id === toolCallId
+            ? { ...it, status: !approved ? 'denied' : detached ? 'detached' : 'running' }
+            : it,
         ),
+        ...(detached ? { error: { kind: 'detached', message: TOOL_DETACHED_MESSAGE } } : {}),
       }));
       return result;
     }

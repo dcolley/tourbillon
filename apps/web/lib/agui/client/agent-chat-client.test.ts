@@ -652,6 +652,128 @@ describe('AGUI-1b AgentChatClient', () => {
     });
   });
 
+  describe('request defaults', () => {
+    it('sends empty tools and context unless tools are given; given tools are sent as-is', () => {
+      const plain = new AgentChatClient({ agentId: 'alice', threadId: THREAD, newId });
+      const input = plain.buildInput('run', 'hi');
+      assert.deepEqual(input.tools, []);
+      assert.deepEqual(input.context, []);
+      assert.deepEqual(input.forwardedProps.tourbillon, { action: 'run' });
+      const tools = [{ name: 'pick', description: 'Pick one', parameters: { type: 'object' } }];
+      const withTools = new AgentChatClient({ agentId: 'alice', threadId: THREAD, newId, tools });
+      assert.deepEqual(withTools.buildInput('followUp', 'x').tools, tools);
+      assert.deepEqual(withTools.buildInput('followUp', 'x').context, []);
+    });
+
+    it('a run refused with 409 "retry shortly" is not retried (only control actions are)', async () => {
+      const { server, client } = setup(() => jsonError(409, 'A run is starting on this thread; retry shortly'));
+      const r = await client.send('hello');
+      assert.equal(r.ok, false);
+      assert.equal(server.requests.length, 1);
+      assert.equal(client.getState().error?.kind, 'conflict');
+      assert.deepEqual(users(client.getState()).map((u) => u.delivery), ['failed']);
+    });
+  });
+
+  describe('runs ending without the user asking', () => {
+    it('cancelled while the user did not press Stop → "run cancelled" is shown', async () => {
+      const { server, client } = setup(runAndControls());
+      void client.send('long task');
+      await until(() => server.streams.length === 1);
+      const req = server.requests[0];
+      server.streams[0].send(started(req), ...text('m', 'partial'), finished(req, 'cancelled'));
+      server.streams[0].close();
+      await client.whenIdle();
+      const st = client.getState();
+      assert.equal(st.lastOutcome, 'cancelled');
+      assert.equal(st.status, 'idle');
+      assert.equal(st.error?.kind, 'cancelled');
+      assert.match(st.error!.message, /Run cancelled/);
+    });
+
+    it('cancelled after the user pressed Stop → no message, and an earlier error is cleared', async () => {
+      const { server, client } = setup(runAndControls({ steer: () => jsonError(409, 'Refused for this test') }));
+      void client.send('long task');
+      await until(() => server.streams.length === 1);
+      const req = server.requests[0];
+      server.streams[0].send(started(req));
+      await until(() => client.getState().status === 'running');
+      // A stale error from an earlier action (a refused steer) is on screen.
+      assert.equal((await client.steer('shorter')).ok, false);
+      assert.equal(client.getState().error?.kind, 'conflict');
+      const stopping = client.abort();
+      await until(() => server.requests.some((q) => q.action === 'abort'));
+      server.streams[0].send(finished(req, 'cancelled'));
+      server.streams[0].close();
+      await stopping;
+      await client.whenIdle();
+      const st = client.getState();
+      assert.equal(st.lastOutcome, 'cancelled');
+      assert.equal(st.error, null);
+    });
+  });
+
+  describe('tool approval after an interrupt', () => {
+    async function interrupted(results: Array<{ toolCallId: string; accepted: boolean; reason?: string }>, accepted = true) {
+      const ctx = setup(
+        runAndControls({
+          toolApproval: (req) => controlResponse(req.body, { accepted, toolCallIds: results.map((r) => r.toolCallId), results }),
+        }),
+      );
+      void ctx.client.send('do it');
+      await until(() => ctx.server.streams.length === 1);
+      const req = ctx.server.requests[0];
+      ctx.server.streams[0].send(
+        started(req),
+        { type: 'TOOL_CALL_START', toolCallId: 'call-1', toolCallName: 'deleteThing' },
+        { type: 'TOOL_CALL_END', toolCallId: 'call-1' },
+        { type: 'CUSTOM', name: 'tourbillon.tool_approval_required', value: { toolCallId: 'call-1', toolName: 'deleteThing' } },
+        finished(req, 'interrupt'),
+      );
+      ctx.server.streams[0].close();
+      await ctx.client.whenIdle();
+      assert.equal(ctx.client.getState().lastOutcome, 'interrupt');
+      assert.equal(ctx.client.getState().pendingTools.length, 1);
+      return ctx;
+    }
+    const toolStatus = (st: AgentChatState) => (st.items.find((i) => i.kind === 'tool') as { status: string }).status;
+
+    it('approve accepted with no run open → the tool is not shown as running and a message explains why', async () => {
+      const { client } = await interrupted([{ toolCallId: 'call-1', accepted: true }]);
+      const r = await client.respondToTool('call-1', true);
+      assert.equal(r.ok, true);
+      const st = client.getState();
+      assert.equal(st.status, 'idle');
+      assert.equal(toolStatus(st), 'detached');
+      assert.deepEqual(st.pendingTools, []);
+      assert.equal(st.error?.kind, 'detached');
+      assert.match(st.error!.message, /no longer connected to the run/);
+    });
+
+    it('decline accepted with no run open → denied, no message', async () => {
+      const { client } = await interrupted([{ toolCallId: 'call-1', accepted: true }]);
+      assert.equal((await client.respondToTool('call-1', false)).ok, true);
+      assert.equal(toolStatus(client.getState()), 'denied');
+      assert.equal(client.getState().error, null);
+    });
+
+    it('a per-tool rejection inside an accepted approval is reported; the tool stays pending', async () => {
+      const { client } = await interrupted(
+        [
+          { toolCallId: 'other', accepted: true },
+          { toolCallId: 'call-1', accepted: false, reason: 'not_pending' },
+        ],
+        true,
+      );
+      const r = await client.respondToTool('call-1', true);
+      assert.equal(r.ok, false);
+      const st = client.getState();
+      assert.deepEqual(st.error, { kind: 'rejected', message: 'Tool decision not applied (not_pending)' });
+      assert.equal(st.pendingTools.length, 1);
+      assert.equal(toolStatus(st), 'awaiting_approval');
+    });
+  });
+
   it('an empty message is not sent', async () => {
     const { server, client } = setup(runAndControls());
     assert.equal((await client.send('   ')).ok, false);

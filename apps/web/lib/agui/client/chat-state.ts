@@ -40,7 +40,9 @@ export type ToolCallStatus =
   | 'suspended'
   | 'done'
   | 'error'
-  | 'denied';
+  | 'denied'
+  /** Approved after the run had ended: this client is not connected to the continued run, so no result will arrive here. */
+  | 'detached';
 
 export type AgentChatItem =
   | { kind: 'user'; id: string; text: string; mode: 'run' | 'followUp' | 'steer'; delivery: UserMessageDelivery }
@@ -75,7 +77,11 @@ export type AgentChatErrorKind =
   /** fetch failed or the body could not be read / parsed. */
   | 'network'
   /** A control request was answered but not applied (e.g. a tool decision with nothing pending). */
-  | 'rejected';
+  | 'rejected'
+  /** The run ended cancelled although this client did not ask to stop it. */
+  | 'cancelled'
+  /** A tool was approved after the run ended; its progress and result cannot be shown in this chat. */
+  | 'detached';
 
 export interface AgentChatError {
   kind: AgentChatErrorKind;
@@ -84,6 +90,12 @@ export interface AgentChatError {
 }
 
 export type AgentRunOutcome = 'success' | 'cancelled' | 'interrupt' | 'error' | 'disconnected';
+
+/** Shown when a run ends cancelled without the user pressing Stop. */
+export const RUN_CANCELLED_MESSAGE = 'Run cancelled: the reply was stopped before it finished.';
+/** Shown when a tool is approved after its run has ended. */
+export const TOOL_DETACHED_MESSAGE =
+  'Approved, but this chat is no longer connected to the run, so the tool’s progress and result cannot be shown here.';
 
 export interface AgentChatState {
   status: AgentChatStatus;
@@ -180,6 +192,9 @@ export function endRun(
   const queuedTo: UserMessageDelivery = outcome === 'success' || outcome === 'interrupt' ? 'delivered' : 'dropped';
   let items = closeStreaming(state.items);
   items = setDelivery(items, (it) => it.delivery === 'queued', queuedTo);
+  // A cancelled run the user did not stop (no Stop pressed, so not 'stopping') is reported.
+  const unrequestedCancel: AgentChatError | null =
+    outcome === 'cancelled' && state.status !== 'stopping' ? { kind: 'cancelled', message: RUN_CANCELLED_MESSAGE } : null;
   return {
     ...state,
     status: 'idle',
@@ -187,7 +202,10 @@ export function endRun(
     pendingTools: outcome === 'interrupt' ? state.pendingTools : [],
     runtimeQueuedFollowUps: 0,
     droppedThisRun: 0,
-    error: error ?? (outcome === 'cancelled' || outcome === 'success' || outcome === 'interrupt' ? null : state.error),
+    error:
+      error ??
+      unrequestedCancel ??
+      (outcome === 'cancelled' || outcome === 'success' || outcome === 'interrupt' ? null : state.error),
     lastOutcome: outcome,
   };
 }

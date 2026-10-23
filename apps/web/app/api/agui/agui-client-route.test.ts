@@ -1,7 +1,8 @@
 /**
  * AGUI-1b: the assistant-view client (lib/agui/client) end to end against the real
  * POST /api/agui/[agentId] route: a turn with text + a tool call, follow-up / steer / abort mid-run,
- * disconnect (dispose) stopping the run, and a run refused with 409.
+ * disconnect (dispose) stopping the run, a run refused with 409, and a second tab opening the same
+ * agent (thread bootstrap through lib/assistant/threads) while the first tab's run streams.
  *
  * Same mock boundary as agui-route.test.ts: '@/lib/chat' at the registry, and a real Mastra
  * AgentController on in-memory storage with a stub model.
@@ -27,6 +28,7 @@ const RESOURCE = 'company-company-a:chat:free';
 let stub: StubAgentController;
 let sessions: Map<string, unknown>;
 let POST: Handler;
+let assistant: typeof import('../../../lib/assistant/threads');
 let script: (call: number, prompt: Array<{ role: string; content: unknown }>) => Record<string, unknown>[];
 let chunkDelayMs = 0;
 const requestContext = createStubRequestContext({ chatRequestContext: true });
@@ -92,21 +94,53 @@ describe('AGUI-1b client ↔ POST /api/agui/[agentId]', () => {
           },
           chatResourceId: (companyId: string) => `company-${companyId}:chat:free`,
           getOrCreateChatController: async () => stub.controller,
-          getChatSession: async (_c: unknown, _a: unknown, o: { resourceId: string; scope?: string }) => {
+          getChatSession: async (
+            _c: unknown,
+            _a: unknown,
+            o: { resourceId: string; scope?: string; threadId?: string; tags?: Record<string, string>; createInitialThread?: boolean },
+          ) => {
+            // Same arguments as lib/chat/registry.ts getChatSession → controller.createSession.
+            if (o.threadId) {
+              return stub.controller.createSession({
+                resourceId: o.resourceId,
+                id: o.threadId,
+                ownerId: stub.controller.id,
+                tags: o.tags,
+                scope: o.scope,
+                threadId: o.threadId,
+              });
+            }
             const key = `${o.resourceId}::${o.scope ?? ''}`;
-            if (!sessions.has(key)) sessions.set(key, await stub.createSession(o.resourceId, o.scope));
+            if (!sessions.has(key)) {
+              sessions.set(
+                key,
+                o.createInitialThread === false
+                  ? await stub.controller.createSession({
+                      resourceId: o.resourceId,
+                      id: key,
+                      ownerId: stub.controller.id,
+                      scope: o.scope,
+                      createInitialThread: false,
+                    })
+                  : await stub.createSession(o.resourceId, o.scope),
+              );
+            }
             return sessions.get(key);
           },
           createChatRequestContext: () => requestContext,
         };
       }
       if (id === '@/lib/company' || id.endsWith('/lib/company')) return { ActiveCompanyError };
+      if (id.endsWith('/lib/assistant/thread-store')) {
+        return { ASSISTANT_MAX_PINS_PER_AGENT: 50, listPinnedAssistantThreadIds: async () => [] };
+      }
       if (id === '@tourbillon/mastra') {
         return { runWithHeartbeatContext: async (_ctx: unknown, fn: () => Promise<unknown>) => fn() };
       }
       return originalRequire.apply(this, arguments as unknown as [string]);
     };
     POST = (await import('./[agentId]/route')).POST as unknown as Handler;
+    assistant = await import('../../../lib/assistant/threads');
     Module.prototype.require = originalRequire;
   });
 
@@ -257,5 +291,66 @@ describe('AGUI-1b client ↔ POST /api/agui/[agentId]', () => {
     assert.ok(st.error?.message, 'shows the endpoint message');
     assert.equal(users(st)[0].delivery, 'failed');
     assert.equal(owner.getState().lastOutcome, 'success');
+  });
+  describe('a second tab on the same agent', () => {
+    const agent = { ...AGENT, status: 'active' };
+    /** What the assistant view does on load: list the agent's threads, create one when there are none. */
+    async function bootstrap(create: boolean) {
+      const session = await assistant.openAssistantSession(agent);
+      const threads = await assistant.listAssistantThreads(session, agent, { viewerKey: 'user-1' });
+      const created = create ? await assistant.createAssistantThread(session, agent) : null;
+      return { threads, created };
+    }
+    async function firstTabRunning() {
+      slowFirstTurn();
+      const first = await bootstrap(true);
+      const tab1 = chatClient(first.created!.id);
+      let streaming!: () => void;
+      const textSeen = new Promise<void>((r) => (streaming = r));
+      tab1.subscribe(() => {
+        if (assistantText(tab1.getState())) streaming();
+      });
+      assert.equal((await tab1.send('start')).ok, true);
+      await textSeen;
+      return { tab1, threadId: first.created!.id };
+    }
+    function assertFinished(tab1: AgentChatClient) {
+      const st = tab1.getState();
+      assert.equal(st.lastOutcome, 'success');
+      assert.equal(st.error, null, JSON.stringify(st.error));
+      assert.ok(assistantText(st).includes('w19'), 'streamed to the end');
+    }
+
+    it('loading the agent again (thread list + new thread) leaves the first tab running to the end', async () => {
+      const { tab1, threadId } = await firstTabRunning();
+      const second = await bootstrap(false);
+      assert.equal(second.threads[0]?.id, threadId, 'reuses the latest thread');
+      const created = await bootstrap(true);
+      assert.notEqual(created.created!.id, threadId);
+      await sleep(100);
+      assert.notEqual(tab1.getState().status, 'idle', 'still running after the second load');
+      await tab1.whenIdle();
+      assertFinished(tab1);
+    });
+
+    it('the second tab sending on its own new thread meanwhile is refused; the first tab finishes', async () => {
+      const { tab1 } = await firstTabRunning();
+      const second = await bootstrap(true);
+      const tab2 = chatClient(second.created!.id);
+      const r = await tab2.send('hello from tab 2');
+      assert.equal(r.ok, false);
+      assert.equal(tab2.getState().error?.status, 409);
+      await tab1.whenIdle();
+      assertFinished(tab1);
+    });
+
+    it('the second tab sending on the same thread meanwhile is refused; the first tab finishes', async () => {
+      const { tab1, threadId } = await firstTabRunning();
+      const tab2 = chatClient(threadId);
+      assert.equal((await tab2.send('me too')).ok, false);
+      assert.equal(tab2.getState().error?.status, 409);
+      await tab1.whenIdle();
+      assertFinished(tab1);
+    });
   });
 });

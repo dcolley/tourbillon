@@ -2,8 +2,8 @@
 
 /**
  * AGUI-1b: React binding for the AG-UI agent chat client (lib/agui/client). Opens a thread through
- * the chat REST API, then runs turns over POST /api/agui/[agentId]. Unmounting closes the client,
- * which stops an open run on the endpoint (AG-UI client disconnect).
+ * the assistant thread API, then runs turns over POST /api/agui/[agentId]. Unmounting closes the
+ * client, which stops an open run on the endpoint (AG-UI client disconnect).
  */
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { AgentChatClient, type AgentChatClientOptions } from '@/lib/agui/client/agent-chat-client';
@@ -15,15 +15,37 @@ export type AgentChatPhase = 'connecting' | 'ready' | 'error';
 const noopSubscribe = () => () => {};
 const initial = () => initialAgentChatState;
 
+/**
+ * Thread lookups in flight, by agent + thread. A remount for the same key (React strict mode runs
+ * effects twice in development) reuses the pending lookup instead of starting another one, so a
+ * new thread is not created twice.
+ */
+const inflight = new Map<string, Promise<AguiThreadRef>>();
+
+function openThreadOnce(key: string, agentId: string, threadId: string | undefined): Promise<AguiThreadRef> {
+  let pending = inflight.get(key);
+  if (!pending) {
+    pending = openAguiThread({ agentId, threadId });
+    inflight.set(key, pending);
+    const clear = () => {
+      if (inflight.get(key) === pending) inflight.delete(key);
+    };
+    pending.then(clear, clear);
+  }
+  return pending;
+}
+
 export interface UseAgentChatOptions {
   agentId: string;
   threadId?: string;
   /** WID-1 seam: passed through to the client. */
   tools?: AgentChatClientOptions['tools'];
   onRunEvent?: AgentChatClientOptions['onRunEvent'];
+  /** Called once the thread is open (e.g. to put its id in the page URL). */
+  onThreadOpened?: (thread: AguiThreadRef) => void;
 }
 
-export function useAgentChat({ agentId, threadId, tools, onRunEvent }: UseAgentChatOptions) {
+export function useAgentChat({ agentId, threadId, tools, onRunEvent, onThreadOpened }: UseAgentChatOptions) {
   const key = `${agentId}\u0000${threadId ?? ''}`;
   /** Result of opening the thread for `key`; anything else (older key, not yet set) reads as connecting. */
   const [setup, setSetup] = useState<{
@@ -32,33 +54,33 @@ export function useAgentChat({ agentId, threadId, tools, onRunEvent }: UseAgentC
     thread: AguiThreadRef | null;
     error: string | null;
   } | null>(null);
-  const seam = useRef({ tools, onRunEvent });
+  const seam = useRef({ tools, onRunEvent, onThreadOpened });
   useEffect(() => {
-    seam.current = { tools, onRunEvent };
-  }, [tools, onRunEvent]);
+    seam.current = { tools, onRunEvent, onThreadOpened };
+  }, [tools, onRunEvent, onThreadOpened]);
 
   useEffect(() => {
-    const ac = new AbortController();
+    let cancelled = false;
     let created: AgentChatClient | null = null;
-    openAguiThread({ agentId, threadId, signal: ac.signal }).then(
+    openThreadOnce(key, agentId, threadId).then(
       (ref) => {
-        if (ac.signal.aborted) return;
+        if (cancelled) return;
         created = new AgentChatClient({
           agentId,
           threadId: ref.threadId,
-          resourceId: ref.resourceId,
           tools: seam.current.tools,
           onRunEvent: (event) => seam.current.onRunEvent?.(event),
         });
         setSetup({ key, client: created, thread: ref, error: null });
+        seam.current.onThreadOpened?.(ref);
       },
       (err: unknown) => {
-        if (ac.signal.aborted) return;
+        if (cancelled) return;
         setSetup({ key, client: null, thread: null, error: err instanceof Error ? err.message : String(err) });
       },
     );
     return () => {
-      ac.abort();
+      cancelled = true;
       created?.dispose();
     };
     // tools are read once per thread (WID-1 seam; not reactive yet).

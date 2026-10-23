@@ -32,6 +32,13 @@ describe('AGUI-1b SSE reader', () => {
     assert.deepEqual(events, [{ type: 'TEXT_MESSAGE_CONTENT', delta: 'héllo ✓' }, { type: 'X' }]);
   });
 
+  it('a multi-byte UTF-8 character split between chunks is decoded whole', async () => {
+    const bytes = new TextEncoder().encode('data: {"type":"TEXT_MESSAGE_CONTENT","delta":"é✓😀"}\n\n');
+    // One byte per chunk: every multi-byte character is split.
+    const chunks = Array.from(bytes, (b) => new Uint8Array([b]));
+    assert.deepEqual(await readAll(body(...chunks)), [{ type: 'TEXT_MESSAGE_CONTENT', delta: 'é✓😀' }]);
+  });
+
   it('a trailing event without its blank line is still delivered at end of stream', async () => {
     assert.deepEqual(await readAll(body('data: {"type":"RUN_FINISHED"}')), [{ type: 'RUN_FINISHED' }]);
   });
