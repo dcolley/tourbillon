@@ -176,10 +176,10 @@ describe('UI-2b assistant sidebar view', () => {
     assert.match(out, /Paused/);
   });
 
-  it('thread links hand off to /assistant?agent=<key>&thread=<id>; unread marker; current thread', () => {
+  it('thread links go to /assistant/<agent-url-key>/<threadId>; unread marker; current thread', () => {
     const { props } = viewProps(baseState(), { currentAgentKey: 'ceo-key', currentThreadId: 't2', expanded: new Set(['ceo']) });
     const out = html(props);
-    assert.match(out, /href="\/assistant\?agent=ceo-key&amp;thread=t2"/);
+    assert.match(out, /href="\/assistant\/ceo-key\/t2"/);
     assert.match(out, /data-unread/);
     assert.match(out, /data-thread="t2" data-current="true"/);
     assert.match(out, /data-agent-threads="ceo"/);
@@ -243,16 +243,16 @@ describe('UI-2b assistant sidebar view', () => {
 
   it('agent selection, expand toggle, new thread and opening a thread call back (plain clicks only)', () => {
     const { props, calls } = viewProps(baseState(), { expanded: new Set(['eng']) });
-    const link = control(props, (p) => p.href === '/assistant?agent=eng-key');
+    const link = control(props, (p) => p.href === '/assistant/eng-key');
     const e = click();
     link.onClick(e);
     assert.ok(e.prevented);
     link.onClick({ ...click(), metaKey: true });
     control(props, byLabel('Show Chief Exec threads')).onClick();
     control(props, byText('New thread')).onClick();
-    const threadLink = control(props, (p) => p.href === '/assistant?agent=eng-key&thread=t3');
+    const threadLink = control(props, (p) => p.href === '/assistant/eng-key/t3');
     threadLink.onClick(click());
-    assert.deepEqual(calls, [['select', 'eng'], ['toggle', 'ceo'], ['new', 'eng'], ['open', 'eng', 't3', '/assistant?agent=eng-key&thread=t3']]);
+    assert.deepEqual(calls, [['select', 'eng'], ['toggle', 'ceo'], ['new', 'eng'], ['open', 'eng', 't3', '/assistant/eng-key/t3']]);
   });
 
   it('titles render as text, never as markup', () => {

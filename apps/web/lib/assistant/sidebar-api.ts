@@ -6,7 +6,7 @@
  *   PATCH /api/assistant/agents/[agentId]/threads/[threadId] { title?, pinned?, read? }
  * `agentId` accepts the agent id or url key; the sidebar uses the url key (same as page URLs).
  */
-import type { AssistantAgent, AssistantThread } from './sidebar';
+import { assistantAgentPath, type AssistantAgent, type AssistantThread } from './sidebar';
 
 export class AssistantApiError extends Error {
   constructor(
@@ -34,11 +34,9 @@ export interface AssistantThreadsResponse {
 
 export type AssistantThreadPatch = { title?: string; pinned?: boolean; read?: true };
 
-/** Hand-off to the chat view: `/assistant?agent=<urlKey>[&thread=<id>]` (the shape AGUI-1b's page reads). */
+/** Link to the chat view: `/assistant/<agent-url-key>[/<threadId>]` (see lib/assistant/route.ts). */
 export function assistantChatHref(agentUrlKey: string, threadId?: string | null): string {
-  const q = new URLSearchParams({ agent: agentUrlKey });
-  if (threadId) q.set('thread', threadId);
-  return `/assistant?${q.toString()}`;
+  return assistantAgentPath(agentUrlKey, threadId);
 }
 
 export function createAssistantSidebarApi(fetchImpl: typeof fetch = (...args) => fetch(...args)) {

@@ -19,10 +19,10 @@ const json = (body: unknown, status = 200, headers: Record<string, string> = {})
 const thread = { id: 't1', agentId: 'a1', title: 'T', pinned: false, unread: false, lastActivityAt: null, createdAt: null };
 
 describe('UI-2b assistant sidebar API client', () => {
-  it('chat hand-off URL is /assistant?agent=<urlKey>&thread=<id> (encoded)', () => {
-    assert.equal(assistantChatHref('alice', 't-1'), '/assistant?agent=alice&thread=t-1');
-    assert.equal(assistantChatHref('alice'), '/assistant?agent=alice');
-    assert.equal(assistantChatHref('a b', 'x&y'), '/assistant?agent=a+b&thread=x%26y');
+  it('chat links are /assistant/<agent-url-key>[/<threadId>] (segments encoded)', () => {
+    assert.equal(assistantChatHref('alice', 't-1'), '/assistant/alice/t-1');
+    assert.equal(assistantChatHref('alice'), '/assistant/alice');
+    assert.equal(assistantChatHref('a b', 'x/y?z'), '/assistant/a%20b/x%2Fy%3Fz');
   });
 
   it('list agents / threads, create, update: URLs, methods and bodies match the UI-2 routes', async () => {

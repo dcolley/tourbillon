@@ -257,13 +257,13 @@ describe('UI-2b assistant sidebar store', () => {
   describe('selecting an agent', () => {
     it('opens its latest thread (initialThreadId from the API)', async () => {
       const { store, calls } = await loaded({ agents: [agent('a')], threads: { a: [thread('a1', 'a'), thread('a2', 'a')] }, initial: { a: 'a2' } });
-      assert.equal(await store.selectAgent('a'), '/assistant?agent=a-key&thread=a2');
+      assert.equal(await store.selectAgent('a'), '/assistant/a-key/a2');
       assert.ok(!calls.some((c) => c.startsWith('create')));
     });
 
     it('with no threads, starts a new one and opens it', async () => {
       const { store, calls } = await loaded({ agents: [agent('a')], threads: { a: [] } });
-      assert.equal(await store.selectAgent('a'), '/assistant?agent=a-key&thread=new-1');
+      assert.equal(await store.selectAgent('a'), '/assistant/a-key/new-1');
       assert.ok(calls.includes('create:a-key'));
       assert.deepEqual(store.getState().threads.a.threads.map((t) => t.id), ['new-1']);
       assert.equal(store.getState().threads.a.initialThreadId, 'new-1');
@@ -288,13 +288,13 @@ describe('UI-2b assistant sidebar store', () => {
       assert.equal(await store.selectAgent('a'), null);
       assert.equal(store.getState().notice?.message, 'Agent not found');
       o.threads!.a = [thread('a1', 'a')];
-      assert.equal(await store.selectAgent('a'), '/assistant?agent=a-key&thread=a1');
+      assert.equal(await store.selectAgent('a'), '/assistant/a-key/a1');
     });
 
     it('repeated New thread clicks while one is being created send one request', async () => {
       const { store, calls } = await loaded({ agents: [agent('a')], threads: { a: [] } });
       const [first, second, viaSelect] = await Promise.all([store.newThread('a'), store.newThread('a'), store.selectAgent('a')]);
-      assert.equal(first, '/assistant?agent=a-key&thread=new-1');
+      assert.equal(first, '/assistant/a-key/new-1');
       assert.equal(second, null);
       assert.equal(viaSelect, null, 'select while creating does not create a second thread');
       assert.equal(calls.filter((c) => c.startsWith('create')).length, 1);
@@ -303,7 +303,7 @@ describe('UI-2b assistant sidebar store', () => {
 
     it('new thread button adds a thread and opens it', async () => {
       const { store } = await loaded({ agents: [agent('a')], threads: { a: [thread('a1', 'a')] } });
-      assert.equal(await store.newThread('a'), '/assistant?agent=a-key&thread=new-1');
+      assert.equal(await store.newThread('a'), '/assistant/a-key/new-1');
       assert.deepEqual(store.getState().threads.a.threads.map((t) => t.id).sort(), ['a1', 'new-1']);
     });
   });

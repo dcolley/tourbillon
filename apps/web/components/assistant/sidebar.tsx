@@ -3,10 +3,11 @@
 /**
  * UI-2b: assistant sidebar — the active company's agents by section (Pinned threads, My agents,
  * Teams by role, Recent threads) with each agent's threads: open, new, rename, pin, search, unread.
- * Hand-off to the chat view is a link to `/assistant?agent=<urlKey>&thread=<id>`.
+ * Links go to `/assistant/<agent-url-key>[/<threadId>]` (lib/assistant/route.ts).
  */
 import * as React from 'react';
-import { usePathname, useRouter, useSearchParams } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
+import { parseAssistantPath } from '@/lib/assistant/route';
 import { Button } from '@/components/ui/button';
 import { ASSISTANT_MAX_PINS_PER_AGENT, type AssistantAgent } from '@/lib/assistant/sidebar';
 import {
@@ -247,12 +248,9 @@ export function AssistantSidebarView(props: AssistantSidebarViewProps) {
   );
 }
 
-/** Reads `?agent=&thread=` from the URL (only on /assistant). */
+/** The agent / thread in the URL (`/assistant/<agent-url-key>[/<threadId>]`). */
 function useCurrentSelection(): { agent: string | null; thread: string | null } {
-  const pathname = usePathname();
-  const params = useSearchParams();
-  if (pathname !== '/assistant') return { agent: null, thread: null };
-  return { agent: params.get('agent'), thread: params.get('thread') };
+  return parseAssistantPath(usePathname());
 }
 
 export function AssistantSidebar() {
