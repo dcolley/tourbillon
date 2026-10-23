@@ -14,7 +14,7 @@ import { ActionForm, ActionSubmitButton } from '@/components/action-form';
 import { getCompanyById, requireBoardSession } from '@/lib/company';
 import { parseCompanyIdFromSearchParams } from '@/lib/company-link';
 import { deleteAgentAction, updateAgentRoleAction } from '../actions';
-import { getLlmProviderRecordById, listLlmProvidersPublic } from '@/lib/llm-providers';
+import { getLlmProviderRecordById, isLlmProviderOnForCompany, listLlmProvidersForCompanyPicker } from '@/lib/llm-providers';
 import { redactBaseURL } from '@/lib/provider-safety';
 import { AgentModelForm } from './agent-model-form';
 import { AgentModelSettingsForm } from './agent-model-settings-form';
@@ -513,6 +513,7 @@ export default async function AgentDetailPage({
     providerList,
     providerRecord,
     suggestedCloneUrlKey,
+    providerOnForCompany,
   ] = await Promise.all([
     db.select().from(agents).where(eq(agents.reportsToId, agent.id)),
     db
@@ -530,9 +531,16 @@ export default async function AgentDetailPage({
     listRoutinesForAgent(agent.id),
     listGoalOptions(false, agent.companyId),
     listProjectOptions(undefined, agent.companyId),
-    listLlmProvidersPublic(),
+    // PRV-1: pickers offer providers switched on for this company (current choices stay listed).
+    listLlmProvidersForCompanyPicker(agent.companyId, [
+      agent.providerId,
+      (agent.runtimeConfig as AgentRuntimeConfig | null)?.observationalMemory?.providerId,
+    ]),
     agent.providerId ? getLlmProviderRecordById(agent.providerId) : Promise.resolve(null),
     suggestCloneUrlKey(agent.companyId, agent.urlKey),
+    agent.providerId
+      ? isLlmProviderOnForCompany(agent.companyId, agent.providerId)
+      : Promise.resolve(true),
   ]);
 
   const runtime = agent.runtimeConfig as AgentRuntimeConfig;
@@ -824,6 +832,16 @@ export default async function AgentDetailPage({
                     <DetailCard label="API mode" value={providerConfig.apiMode} />
                     <DetailCard label="Endpoint" value={redactBaseURL(providerConfig.baseURL)} />
                   </div>
+                  {!providerOnForCompany ? (
+                    <p
+                      role="status"
+                      className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100"
+                    >
+                      {providerRecord?.name ?? 'This provider'} is switched off for this company. Runs use the
+                      company default provider until you pick another provider here or switch it back on in
+                      Settings → Providers.
+                    </p>
+                  ) : null}
                   <AgentModelForm
                     agentId={agent.id}
                     urlKey={agent.urlKey}

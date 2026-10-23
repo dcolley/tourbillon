@@ -43,3 +43,11 @@ export async function requireBoardIdentity(req: NextRequest): Promise<BoardGuard
   }
   return { ok: false, response: boardUnauthorized() };
 }
+
+/**
+ * The board's active company, if any (no guard). For instance-global routes that add
+ * per-company detail (PRV-1 `enabledForCompany`); call after `requireBoardIdentity`.
+ */
+export async function activeBoardCompanyOrNull(req: NextRequest): Promise<Company | null> {
+  return getActiveCompanyOrNull(await verifyMobileToken(req));
+}

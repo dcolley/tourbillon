@@ -3,7 +3,7 @@ import { createDurableAgent } from '@mastra/core/agent/durable';
 import { Memory } from '@mastra/memory';
 import { PostgresStore, PgVector } from '@mastra/pg';
 import type { Agent as AgentRecord } from '@tourbillon/db';
-import { getLlmProviderRowById } from '@tourbillon/db';
+import { resolveAgentProviderRow } from './company-provider';
 import {
   formatTrace,
   modelProviderOverridesFromAgent,
@@ -235,9 +235,8 @@ export async function createAgentWithSkills(
     agentRecord.adapterType,
     agentRecord.adapterConfig,
   );
-  const providerRow = agentRecord.providerId
-    ? await getLlmProviderRowById(agentRecord.providerId)
-    : null;
+  // PRV-1: honour the company's provider switches (the wake runner records the warning).
+  const { row: providerRow } = await resolveAgentProviderRow(agentRecord, { context: 'heartbeat' });
   const providerRecord = providerRow ? llmProviderRowToRecord(providerRow) : null;
   const providerConfig = resolveModelProviderConfig(
     providerOverrides,

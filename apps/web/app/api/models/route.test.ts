@@ -100,7 +100,7 @@ describe('GET /api/models default provider', () => {
           authOk
             ? { ok: true, value: true }
             : { ok: false, response: Response.json({ error: 'Unauthorized' }, { status: 401 }) };
-        return { requireBoardIdentity: guard, requireBoardCompany: guard };
+        return { requireBoardIdentity: guard, requireBoardCompany: guard, activeBoardCompanyOrNull: async () => null };
       }
       return originalRequire.apply(this, arguments as unknown as [string]);
     };

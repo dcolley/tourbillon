@@ -1,4 +1,11 @@
-import { db, agents, companies, activityLog, type Agent } from '@tourbillon/db';
+import {
+  db,
+  agents,
+  companies,
+  activityLog,
+  assertLlmProviderEnabledForCompany,
+  type Agent,
+} from '@tourbillon/db';
 import { and, eq } from 'drizzle-orm';
 import {
   ROLE_DEFAULT_TOOLSETS,
@@ -36,7 +43,7 @@ import {
   discoverCompanySkillSlugs,
 } from '@tourbillon/shared/company-workspace';
 import { getActiveCompany } from './company';
-import { getDefaultLlmProviderRecord } from './llm-providers';
+import { getCompanyDefaultLlmProviderRecord } from './llm-providers';
 import { invalidateChatControllerForAgent } from './chat';
 import { clearIdleThreadOnRuntimeSwitch } from '@tourbillon/mastra';
 import {
@@ -140,6 +147,36 @@ function normalizeInstructionField(value: string | undefined | null): string | n
   return trimmed.length > 0 ? trimmed : null;
 }
 
+/**
+ * PRV-1: refuse saving an agent onto a provider that is switched off for its company.
+ * Agents already on such a provider keep the run-time fallback to the company default.
+ */
+async function assertAgentProviderOnForCompany(
+  companyId: string,
+  providerId: string | null | undefined,
+): Promise<void> {
+  try {
+    await assertLlmProviderEnabledForCompany(companyId, providerId);
+  } catch (err) {
+    if (err instanceof Error && err.name === 'LlmProviderDisabledForCompanyError') {
+      throw new AgentValidationError(err.message);
+    }
+    throw err;
+  }
+}
+
+/** Provider a new agent starts on: the default when it is on for the company, else the company's fallback. */
+async function newAgentProviderForCompany(companyId: string) {
+  try {
+    return await getCompanyDefaultLlmProviderRecord(companyId);
+  } catch (err) {
+    if (err instanceof Error && err.name === 'NoEnabledLlmProviderError') {
+      throw new AgentValidationError(err.message);
+    }
+    throw err;
+  }
+}
+
 export async function createAgent(input: CreateAgentInput): Promise<Agent> {
   const name = input.name?.trim();
   const title = input.title?.trim();
@@ -182,7 +219,7 @@ export async function createAgent(input: CreateAgentInput): Promise<Agent> {
     if (!manager) throw new AgentValidationError('Reports-to agent not found in this company.');
   }
 
-  const defaultProvider = await getDefaultLlmProviderRecord();
+  const defaultProvider = await newAgentProviderForCompany(companyId);
   const envProvider = resolveModelProviderConfig(null, null, defaultProvider);
 
   const runtimeType = parseAgentRuntimeType(input.runtimeType) ?? 'agent';
@@ -279,6 +316,8 @@ export async function cloneAgent(input: CloneAgentInput): Promise<Agent> {
   if (duplicate) {
     throw new AgentValidationError(`Agent ID "${urlKey}" is already in use.`);
   }
+
+  await assertAgentProviderOnForCompany(source.companyId, source.providerId);
 
   const sourceRuntime = source.runtimeConfig as AgentRuntimeConfig;
   const copyCredentials = input.copyCredentials !== false;
@@ -919,6 +958,7 @@ export async function updateAgentModel(
 
   if (input.providerId !== undefined) {
     patch.providerId = input.providerId?.trim() ? input.providerId.trim() : null;
+    await assertAgentProviderOnForCompany(agent.companyId, patch.providerId);
   }
 
   const [updated] = await db
@@ -984,6 +1024,8 @@ export async function updateAgentObservationalMemory(
   if (!['inherit', 'off', 'on'].includes(input.mode)) {
     throw new AgentValidationError('Invalid mode. Must be inherit, off, or on.');
   }
+
+  await assertAgentProviderOnForCompany(agent.companyId, input.providerId?.trim() || null);
 
   // Validate integer thresholds
   if (input.maxOutputTokens !== undefined) {

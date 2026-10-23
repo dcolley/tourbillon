@@ -27,7 +27,7 @@ import {
   updateAgentRole,
   updateAgentRuntimeConfig,
 } from '@/lib/agents';
-import { listLlmProvidersPublic } from '@/lib/llm-providers';
+import { listLlmProvidersForCompanyPicker } from '@/lib/llm-providers';
 import { requireMobileCompany, toJson } from '@/lib/mobile-session';
 
 function serializeAgent(agent: Agent) {
@@ -64,9 +64,14 @@ function serializeAgent(agent: Agent) {
   };
 }
 
-async function buildCatalog(companyId: string, allowedMcpServerIds: string[] | null) {
+async function buildCatalog(
+  companyId: string,
+  allowedMcpServerIds: string[] | null,
+  currentProviderId?: string | null,
+) {
   const [providers, peers] = await Promise.all([
-    listLlmProvidersPublic(),
+    // PRV-1: providers switched on for this company (the agent's current one stays listed).
+    listLlmProvidersForCompanyPicker(companyId, currentProviderId),
     db
       .select({
         id: agents.id,
@@ -110,7 +115,11 @@ export async function GET(
     if (!agent) {
       return NextResponse.json({ error: 'Not found' }, { status: 404 });
     }
-    const catalog = await buildCatalog(auth.company.id, auth.company.allowedMcpServerIds ?? []);
+    const catalog = await buildCatalog(
+      auth.company.id,
+      auth.company.allowedMcpServerIds ?? [],
+      agent.providerId,
+    );
     return NextResponse.json({
       agent: serializeAgent(agent),
       catalog,

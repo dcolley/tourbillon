@@ -196,12 +196,15 @@ describe('#106 board-guarded routes', () => {
         return {
           LlmProviderValidationError: class extends Error {},
           listLlmProvidersPublic: async () => [pub],
+          listLlmProvidersForCompany: async () => [{ ...pub, enabledForCompany: true }],
           getLlmProviderPublic: async () => pub,
           createLlmProvider: async () => pub,
           updateLlmProvider: async () => pub,
           deleteLlmProvider: async () => {},
           getLlmProviderRecordById: async (id2: string) => (id2 === 'prov-1' ? { id: 'prov-1' } : null),
           getDefaultLlmProviderRecord: async () => null,
+          isLlmProviderOnForCompany: async () => true,
+          effectiveLlmProviderIdForCompany: async () => null,
           llmProviderErrorBody: (err: Error) => ({ body: { error: err.message }, status: 400 }),
         };
       }

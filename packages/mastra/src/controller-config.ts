@@ -1,5 +1,5 @@
 import type { Agent as AgentRecord } from '@tourbillon/db';
-import { getLlmProviderRowById } from '@tourbillon/db';
+import { resolveAgentProviderRow } from './company-provider';
 import type {
   AgentController,
   AgentControllerEvent,
@@ -98,9 +98,8 @@ async function buildBackingAgent(
   const tools = await assembleAgentTools(agentRecord, options);
   const systemPrompt = await assembleAgentSystemPrompt(agentRecord);
   const codeExecutionEnabled = await shouldAttachCodeExecutionWorkspace(agentRecord);
-  const providerRow = agentRecord.providerId
-    ? await getLlmProviderRowById(agentRecord.providerId)
-    : null;
+  // PRV-1: honour the company's provider switches (the wake runner records the warning).
+  const { row: providerRow } = await resolveAgentProviderRow(agentRecord, { context: 'heartbeat' });
   const providerRecord = providerRow ? llmProviderRowToRecord(providerRow) : null;
   const generationOptions = resolveAgentGenerationOptions(agentRecord, providerRecord);
   const contextBudget = resolveAgentContextBudget(agentRecord, providerRecord, 'harness');
@@ -177,9 +176,8 @@ export async function createTourbillonController(
     agentRecord.runtimeConfig as AgentRuntimeConfig,
   );
   const memory = await getAgentMemory(options?.companySettings ?? null, agentRecord.runtimeConfig as AgentRuntimeConfig);
-  const providerRow = agentRecord.providerId
-    ? await getLlmProviderRowById(agentRecord.providerId)
-    : null;
+  // PRV-1: honour the company's provider switches (the wake runner records the warning).
+  const { row: providerRow } = await resolveAgentProviderRow(agentRecord, { context: 'heartbeat' });
   const providerRecord = providerRow ? llmProviderRowToRecord(providerRow) : null;
   const contextBudget = resolveAgentContextBudget(agentRecord, providerRecord, 'harness');
 
