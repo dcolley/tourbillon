@@ -39,7 +39,8 @@
     "./knowledge-graph": "./src/knowledge-graph.ts",
     "./knowledge-graph-config": "./src/knowledge-graph-config.ts",
     "./browser-config": "./src/browser-config.ts",
-    "./agent-token": "./src/agent-token.ts"
+    "./agent-token": "./src/agent-token.ts",
+    "./widgets": "./src/widgets.ts"
   },
   "dependencies": {
     "croner": "^10.0.1",
