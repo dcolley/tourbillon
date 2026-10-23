@@ -2,7 +2,7 @@ import { afterEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { resolveReturnTo } from './company-return-to';
+import { resolveReturnTo, selectCompanyHref } from './company-return-to';
 import { VIEW_PREFERENCE_STORAGE_KEY } from './view-preference';
 
 const g = globalThis as { window?: unknown };
@@ -90,5 +90,47 @@ describe('company selector returnTo', () => {
     assert.doesNotMatch(src, /\bredirect\s*\(/);
     assert.doesNotMatch(src, /(window\.)?location\s*(\.\s*(assign|replace|href)|=)/);
     assert.doesNotMatch(src, /<Link\b|href=\{\s*returnTo/);
+  });
+
+  describe('UI-1 CompanyGate → /select-company returnTo', () => {
+    const returnToOf = (href: string) => new URL(href, 'http://x.invalid').searchParams.get('returnTo');
+
+    it('a deep link keeps the page as returnTo, with its query', () => {
+      assert.equal(selectCompanyHref('/dashboard'), '/select-company?returnTo=%2Fdashboard');
+      assert.equal(selectCompanyHref('/assistant'), '/select-company?returnTo=%2Fassistant');
+      assert.equal(returnToOf(selectCompanyHref('/issues', '?status=todo')), '/issues?status=todo');
+      assert.equal(returnToOf(selectCompanyHref('/issues', 'status=todo')), '/issues?status=todo');
+    });
+
+    it('round trip: a no-company user at /dashboard lands on /dashboard, not the stored view', () => {
+      for (const view of [null, 'assistant', 'control']) {
+        storeView(view);
+        assert.equal(resolveReturnTo(returnToOf(selectCompanyHref('/dashboard'))), '/dashboard');
+        assert.equal(resolveReturnTo(returnToOf(selectCompanyHref('/assistant'))), '/assistant');
+      }
+    });
+
+    it('no returnTo for /, the selector itself, or a missing pathname', () => {
+      for (const p of ['/', '/select-company', '/select-company/x', '', null, undefined]) {
+        assert.equal(selectCompanyHref(p), '/select-company', String(p));
+      }
+      assert.equal(selectCompanyHref('/', '?a=1'), '/select-company');
+      assert.equal(selectCompanyHref('/select-company', '?returnTo=%2Fdashboard'), '/select-company');
+      assert.equal(selectCompanyHref('/select-companyx'), '/select-company?returnTo=%2Fselect-companyx');
+    });
+
+    it('never forwards a path that is not same-site', () => {
+      for (const p of ['//example.com', '/\\example.com', '/%2f/example.com', '/%252F/example.com', 'https://example.com/x']) {
+        assert.equal(selectCompanyHref(p), '/select-company', p);
+      }
+    });
+
+    it('CompanyGate uses selectCompanyHref for its only redirect', () => {
+      const src = readFileSync(join(__dirname, '..', 'components', 'company-gate.tsx'), 'utf8');
+      const calls = [...src.matchAll(/router\s*\.\s*(push|replace)\s*\(([^;]*)\)\s*;/g)];
+      assert.equal(calls.length, 1, 'one redirect');
+      assert.match(calls[0][2], /^selectCompanyHref\(pathname, window\.location\.search\)$/);
+      assert.doesNotMatch(src, /['"]\/select-company['"]/);
+    });
   });
 });

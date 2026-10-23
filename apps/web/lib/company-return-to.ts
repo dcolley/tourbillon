@@ -19,3 +19,21 @@ export function resolveReturnTo(
   }
   return fallback();
 }
+
+export const SELECT_COMPANY_PATH = '/select-company';
+
+/**
+ * Where CompanyGate sends a user who has no company yet: the selector, with the current
+ * page as `returnTo` when it is a safe same-origin path, so a deep link such as `/dashboard`
+ * lands back on that page once a company is chosen. `/` and the selector itself are left
+ * out (the selector then falls back to the stored view).
+ */
+export function selectCompanyHref(pathname: string | null | undefined, search = ''): string {
+  if (typeof pathname !== 'string' || pathname.length === 0) return SELECT_COMPANY_PATH;
+  const query = search && !search.startsWith('?') ? `?${search}` : search;
+  const path = sameOriginPath(pathname + query, CHECK_ORIGIN);
+  if (path === null || /^\/(?:[?#]|$)/.test(path) || /^\/select-company(?:[/?#]|$)/.test(path)) {
+    return SELECT_COMPANY_PATH;
+  }
+  return `${SELECT_COMPANY_PATH}?returnTo=${encodeURIComponent(path)}`;
+}
