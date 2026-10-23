@@ -21,7 +21,8 @@ function AssistantThreadNotFound() {
 
 /**
  * UI-1 / AGUI-1b: `/assistant?agent=<urlKey>[&thread=<id>]` opens the AG-UI chat with that agent
- * (without a thread, the agent's latest thread, whose id is then added to the URL);
+ * (without a thread, the agent's latest thread). Once open, the address bar shows the path form
+ * `/assistant/<urlKey>/<threadId>`; those path routes (and redirects from this query form) are UI-2b's;
  * without an agent, the placeholder (UI-2 adds the agent/thread sidebar).
  */
 export default async function AssistantPage({

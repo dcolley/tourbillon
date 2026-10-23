@@ -17,7 +17,7 @@ import {
 type View = typeof import('./agent-chat');
 let AgentChatView: View['AgentChatView'];
 let AgentChat: View['AgentChat'];
-let withThreadParam: View['withThreadParam'];
+let agentChatHref: View['agentChatHref'];
 let Button: unknown;
 let WidgetToolCall: unknown;
 let AssistantPage: (p: { searchParams: Promise<Record<string, string | string[] | undefined>> }) => Promise<React.ReactElement>;
@@ -73,7 +73,7 @@ function buttons(node: React.ReactNode): Array<{ label: string; disabled: boolea
 describe('AGUI-1b assistant chat view', () => {
   before(async () => {
     (globalThis as { React?: unknown }).React = React;
-    ({ AgentChatView, AgentChat, withThreadParam } = await import('./agent-chat'));
+    ({ AgentChatView, AgentChat, agentChatHref } = await import('./agent-chat'));
     ({ Button } = await import('@/components/ui/button'));
     ({ WidgetToolCall } = await import('./widgets/widget-tool-call'));
     ({ AssistantEmptyState } = await import('./assistant-shell'));
@@ -247,8 +247,8 @@ describe('AGUI-1b assistant chat view', () => {
     });
   });
 
-  it('withThreadParam: sets thread=<id> on the current URL, keeping the agent', () => {
-    assert.equal(withThreadParam('http://localhost:3001/assistant?agent=alice', 't-1'), '/assistant?agent=alice&thread=t-1');
-    assert.equal(withThreadParam('http://localhost:3001/assistant?agent=alice&thread=old#x', 't 2'), '/assistant?agent=alice&thread=t+2#x');
+  it('agentChatHref: the assistant path form /assistant/<agent>/<thread>', () => {
+    assert.equal(agentChatHref('alice', 't-1'), '/assistant/alice/t-1');
+    assert.equal(agentChatHref('alice', 't 2/x'), '/assistant/alice/t%202%2Fx');
   });
 });

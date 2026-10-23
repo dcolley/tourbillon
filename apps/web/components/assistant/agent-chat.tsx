@@ -18,6 +18,7 @@ import type {
   UserMessageDelivery,
 } from '@/lib/agui/client/chat-state';
 import type { AguiThreadRef } from '@/lib/agui/client/thread-bootstrap';
+import { assistantAgentPath } from '@/lib/assistant/sidebar';
 import { useAgentChat, type AgentChatPhase } from './use-agent-chat';
 
 const DELIVERY_LABEL: Partial<Record<UserMessageDelivery, string>> = {
@@ -182,21 +183,23 @@ export function AgentChatView(props: AgentChatViewProps) {
   );
 }
 
-/** The current page URL with `thread=<id>` set (path, query and hash only). */
-export function withThreadParam(href: string, threadId: string): string {
-  const url = new URL(href);
-  url.searchParams.set('thread', threadId);
-  return `${url.pathname}${url.search}${url.hash}`;
+/**
+ * Link to an opened chat: the assistant path form `/assistant/<agent url key>/<threadId>`
+ * (lib/assistant/sidebar.ts assistantAgentPath, the route shape UI-2b serves).
+ */
+export function agentChatHref(agentKey: string, threadId: string): string {
+  return assistantAgentPath(agentKey, threadId);
 }
 
 export function AgentChat({ agentId, threadId }: { agentId: string; threadId?: string }) {
-  // Without a thread in the URL, record the opened thread there so a reload reopens it.
+  // Once the thread is open, show its link in the address bar so a reload reopens it.
   const onThreadOpened = React.useCallback(
     (ref: AguiThreadRef) => {
-      if (threadId || typeof window === 'undefined') return;
-      window.history.replaceState(null, '', withThreadParam(window.location.href, ref.threadId));
+      if (typeof window === 'undefined') return;
+      const href = agentChatHref(agentId, ref.threadId);
+      if (window.location.pathname + window.location.search !== href) window.history.replaceState(null, '', href);
     },
-    [threadId],
+    [agentId],
   );
   const chat = useAgentChat({ agentId, threadId, onThreadOpened });
   const [draft, setDraft] = React.useState('');
