@@ -18,6 +18,7 @@ import {
   writeChatLayoutMode,
   type ChatLayoutMode,
 } from '@/lib/chat-layout-storage';
+import { isControlChatEnabled } from '@/lib/feature-flags';
 
 export interface ChatOpenTarget {
   agentId: string;
@@ -54,7 +55,8 @@ interface ChatUiContextValue {
   activeCompanyId: string | null;
 }
 
-const ChatUiContext = createContext<ChatUiContextValue | null>(null);
+/** Exported for tests only; app code uses `useChatUi` / `useChatUiOptional`. */
+export const ChatUiContext = createContext<ChatUiContextValue | null>(null);
 
 export function useChatUi(): ChatUiContextValue {
   const ctx = useContext(ChatUiContext);
@@ -67,6 +69,17 @@ export function useChatUi(): ChatUiContextValue {
 /** Optional hook that returns null outside the provider (e.g. non-dashboard pages). */
 export function useChatUiOptional(): ChatUiContextValue | null {
   return useContext(ChatUiContext);
+}
+
+/**
+ * Layout the provider uses after mount. With the Control Pane chat flag off a saved layout
+ * (e.g. 'sidebar') is ignored, so it cannot auto-open or dock the pane.
+ */
+export function resolveChatLayoutMode(
+  chatEnabled: boolean,
+  readSaved: () => ChatLayoutMode = readChatLayoutMode,
+): ChatLayoutMode {
+  return chatEnabled ? readSaved() : 'fab';
 }
 
 function targetFromPageContext(
@@ -82,23 +95,38 @@ function targetFromPageContext(
   };
 }
 
+/**
+ * Chat state for dashboard pages. Always provides the context (so `ChatPageContext` callers
+ * keep working), but the chat UI itself (popover pane, floating button, docked sidebar via
+ * `ChatSidebarSlot`) only renders when `NEXT_PUBLIC_CONTROL_CHAT_ENABLED=true` (UI-0).
+ */
 export function ChatContextProvider({
   children,
   activeCompanyId: serverActiveCompanyId,
+  initialPageContext = null,
 }: {
   children: ReactNode;
   activeCompanyId: string | null;
+  /** Optional starting page context (normally set by `ChatPageContext` after mount). */
+  initialPageContext?: ChatUiContextValue['pageContext'];
 }) {
+  // Build-time flag: constant for the life of the bundle.
+  const chatEnabled = isControlChatEnabled();
   const [open, setOpen] = useState(false);
   const [target, setTarget] = useState<ChatOpenTarget | null>(null);
-  const [pageContext, setPageContextState] = useState<ChatUiContextValue['pageContext']>(null);
-  const [layoutMode, setLayoutModeState] = useState<ChatLayoutMode>('sidebar');
+  const [pageContext, setPageContextState] =
+    useState<ChatUiContextValue['pageContext']>(initialPageContext);
+  // Flag off: stay in 'fab' and ignore a saved layout, so a stored 'sidebar' cannot
+  // auto-open or dock the pane.
+  const [layoutMode, setLayoutModeState] = useState<ChatLayoutMode>(
+    chatEnabled ? 'sidebar' : 'fab',
+  );
   const [pinnedAgentId, setPinnedAgentId] = useState<string | null>(null);
   const [trackedCompanyId, setTrackedCompanyId] = useState<string | null>(serverActiveCompanyId);
 
   useEffect(() => {
-    setLayoutModeState(readChatLayoutMode());
-  }, []);
+    setLayoutModeState(resolveChatLayoutMode(chatEnabled));
+  }, [chatEnabled]);
 
   // Reset chat state when server-side active company changes
   useEffect(() => {
@@ -157,7 +185,7 @@ export function ChatContextProvider({
   // Sidebar mode: bind target to page context, but respect pinned agent.
   // Exception: agent pages select that agent when arriving (product requirement).
   useEffect(() => {
-    if (layoutMode !== 'sidebar') return;
+    if (!chatEnabled || layoutMode !== 'sidebar') return;
     const fromPage = targetFromPageContext(pageContext);
     if (!fromPage) return;
     setTarget((prev) => {
@@ -196,7 +224,7 @@ export function ChatContextProvider({
       return fromPage;
     });
     setOpen(true);
-  }, [layoutMode, pageContext, pinnedAgentId]);
+  }, [chatEnabled, layoutMode, pageContext, pinnedAgentId]);
 
   const handleAgentSwitch = useCallback((agentId: string, agentName: string) => {
     setPinnedAgentId(agentId);
@@ -236,6 +264,7 @@ export function ChatContextProvider({
   );
 
   const pane =
+    chatEnabled &&
     target &&
     (layoutMode === 'popover' || layoutMode === 'fab' ? (
       <AgentChatPane
@@ -258,15 +287,18 @@ export function ChatContextProvider({
     <ChatUiContext.Provider value={value}>
       {children}
       {pane}
-      <ChatFab />
+      {chatEnabled ? <ChatFab /> : null}
     </ChatUiContext.Provider>
   );
 }
 
-/** Docked chat for `layoutMode === 'sidebar'` — render inside the dashboard shell. */
+/**
+ * Docked chat for `layoutMode === 'sidebar'` — render inside the dashboard shell.
+ * Renders nothing while the Control Pane chat flag is off (UI-0), whatever layout is saved.
+ */
 export function ChatSidebarSlot() {
   const chat = useChatUiOptional();
-  if (!chat) return null;
+  if (!chat || !isControlChatEnabled()) return null;
   const { layoutMode, open, target, setLayoutMode, handleAgentSwitch, activeCompanyId } = chat;
   if (layoutMode !== 'sidebar' || !target || !open) return null;
 
