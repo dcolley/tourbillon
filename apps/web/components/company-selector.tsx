@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { setStoredCompanyId } from '@/lib/company-storage';
+import { resolveReturnTo } from '@/lib/return-to';
 import { syncActiveCompanyAction } from '@/app/(dashboard)/company/actions';
 import { CreateCompanyDialog } from '@/components/create-company-dialog';
 import { Button } from '@/components/ui/button';
@@ -13,7 +14,7 @@ import type { Company } from '@tourbillon/db';
 export function CompanySelector({ companies }: { companies: Company[] }) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const returnTo = searchParams.get('returnTo') || '/dashboard';
+  const returnTo = resolveReturnTo(searchParams.get('returnTo'));
   const [createOpen, setCreateOpen] = useState(false);
   const [selecting, setSelecting] = useState(false);
 
