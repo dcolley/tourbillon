@@ -233,6 +233,34 @@ describe('WID-1 widget specs (S3 strict rule)', () => {
     assert.throws(() => createWidgetSpecIndex([{ ...spec, answerSchema: z.strictObject({ data: z.json() }) }]), /lazy or recursive/);
   });
 
+  it('getter recursion ($ref) is refused at any depth; reused and .meta({ id }) schemas are not', () => {
+    const recursive: z.ZodType = z.strictObject({
+      name: z.string(),
+      get children() {
+        return z.array(recursive);
+      },
+    });
+    assert.match(widgetSchemaProblems(recursive).join('\n'), /recursive schemas \(\$ref\)/);
+    assert.match(widgetSchemaProblems(z.strictObject({ tree: recursive })).join('\n'), /recursive schemas \(\$ref\)/);
+    assert.throws(() => createWidgetSpecIndex([{ ...spec, answerSchema: recursive }]), /recursive schemas/);
+    const named = z.strictObject({ a: z.string() }).meta({ id: 'widgetTestNamedPart', description: 'named part' });
+    assert.deepEqual(widgetSchemaProblems(z.strictObject({ x: named, y: named })), []);
+    const shared = z.strictObject({ a: z.string() });
+    assert.deepEqual(widgetSchemaProblems(z.strictObject({ x: shared, y: z.array(shared) })), []);
+  });
+
+  it('output-side steps (transform, pipe, codec, overwrite) pass and the run gets the parsed output', () => {
+    const ok = (schema: z.ZodType) => assert.deepEqual(widgetSchemaProblems(schema), []);
+    ok(z.string().transform((v) => v.length));
+    ok(z.string().pipe(z.string().min(1)));
+    ok(z.codec(z.string(), z.number(), { decode: (v) => Number(v), encode: (v) => String(v) }));
+    ok(z.string().overwrite((v) => v.trim()));
+    const trimmed = { ...spec, answerSchema: z.strictObject({ choice: z.string().overwrite((v) => v.trim()) }) };
+    const result = acceptWidgetAnswer(trimmed, 'tc-t', { choice: '  yes ' });
+    assert.ok(result.ok);
+    assert.deepEqual(result.ok && result.record.answer, { choice: 'yes' });
+  });
+
   it('spec problems cover name, version range, props, answers and the reserved key', () => {
     assert.deepEqual(widgetSpecProblems(spec), []);
     assert.match(widgetSpecProblems({ ...spec, name: 'Bad-Name' })[0], /Invalid widget name/);

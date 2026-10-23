@@ -6,7 +6,9 @@ import {
   pendingOwnedWidgetCalls,
   recordWidgetOwner,
   resetWidgetOwnersForTests,
+  retireWidgetOwnersOfController,
   trackWidgetOwners,
+  widgetOwnerSweepThresholdForTests,
   widgetOwnerThreadCountForTests,
   widgetOwnership,
 } from './widget-owners';
@@ -104,5 +106,117 @@ describe('WID-1 widget owners', () => {
     const settled = fakeSession();
     recordWidgetOwner(settled, 'r', 't3', 'w9');
     assert.equal(hasOtherSessionPendingWidget(other, 'r', 't3'), false, 'answered widgets do not block');
+  });
+
+  it('the sweep threshold doubles past pending survivors, so a full table is not re-swept on every insert', () => {
+    const pending = fakeSession(['p']);
+    assert.equal(widgetOwnerSweepThresholdForTests(), 10_000);
+    for (let t = 0; t < 10_000; t += 1) recordWidgetOwner(pending, 'r', `t${t}`, 'p');
+    assert.equal(widgetOwnerThreadCountForTests(), 10_000);
+    recordWidgetOwner(pending, 'r', 'next', 'p');
+    // Sweep ran (nothing settled to drop), and the next one waits for twice the survivors.
+    assert.equal(widgetOwnerThreadCountForTests(), 10_001);
+    assert.equal(widgetOwnerSweepThresholdForTests(), 20_000);
+    recordWidgetOwner(pending, 'r', 'next2', 'p');
+    assert.equal(widgetOwnerSweepThresholdForTests(), 20_000, 'no new sweep below the threshold');
+  });
+});
+
+describe('WID-1 widget owners that have gone', () => {
+  beforeEach(() => resetWidgetOwnersForTests());
+
+  it('owner collected: its call counts as gone; refused only while still parked in the asking session', () => {
+    const RealWeakRef = globalThis.WeakRef;
+    const collected = new Set<object>();
+    class TestWeakRef<T extends object> {
+      constructor(private readonly target: T) {}
+      deref(): T | undefined {
+        return collected.has(this.target) ? undefined : this.target;
+      }
+    }
+    (globalThis as { WeakRef: unknown }).WeakRef = TestWeakRef;
+    try {
+      const owner = fakeSession(['w1']);
+      recordWidgetOwner(owner, 'r', 't', 'w1');
+      collected.add(owner);
+      const fannedOut = fakeSession(['w1']);
+      const fresh = fakeSession();
+      assert.equal(widgetOwnership(fresh, 'r', 't', 'w1'), 'gone');
+      assert.equal(hasOtherSessionPendingWidget(fannedOut, 'r', 't'), true, 'still parked here: fail closed');
+      assert.equal(hasOtherSessionPendingWidget(fresh, 'r', 't'), false);
+      assert.deepEqual(pendingOwnedWidgetCalls(owner, 'r', 't'), []);
+    } finally {
+      (globalThis as { WeakRef: unknown }).WeakRef = RealWeakRef;
+    }
+  });
+
+  it('controller dropped: parked owner runs are aborted once, records settle, other sessions may act', () => {
+    const oldController = {};
+    const liveController = {};
+    let parked = ['w1', 'w2'];
+    let aborts = 0;
+    const owner = {
+      ...fakeSession(),
+      suspensions: { has: ({ toolCallId }: { toolCallId: string }) => parked.includes(toolCallId) },
+      abort: () => {
+        aborts += 1;
+        parked = [];
+      },
+    };
+    const onLive = fakeSession(['w3']);
+    recordWidgetOwner(owner, 'r', 't', 'w1', oldController);
+    recordWidgetOwner(owner, 'r', 't2', 'w2', oldController);
+    recordWidgetOwner(onLive, 'r', 't3', 'w3', liveController);
+    const other = fakeSession();
+    assert.equal(hasOtherSessionPendingWidget(other, 'r', 't'), true);
+
+    assert.equal(retireWidgetOwnersOfController(oldController), 1);
+    assert.equal(aborts, 1, 'one abort per owner session');
+    assert.equal(hasOtherSessionPendingWidget(other, 'r', 't'), false);
+    assert.equal(hasOtherSessionPendingWidget(other, 'r', 't2'), false);
+    assert.equal(widgetOwnership(other, 'r', 't', 'w1'), 'gone');
+    assert.equal(widgetOwnership(owner, 'r', 't', 'w1'), 'gone', 'the dropped session itself is gone too');
+    // A session on another controller is untouched.
+    assert.equal(widgetOwnership(onLive, 'r', 't3', 'w3'), 'owner');
+    assert.equal(hasOtherSessionPendingWidget(other, 'r', 't3'), true);
+  });
+
+  it('controller dropped: an owner whose abort fails still counts as gone (no stranded thread)', () => {
+    const controller = {};
+    const owner = { ...fakeSession(['w1']), abort: () => { throw new Error('engine said no'); } };
+    const fannedOutOnNewController = fakeSession();
+    recordWidgetOwner(owner, 'r', 't', 'w1', controller);
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      assert.equal(retireWidgetOwnersOfController(controller), 1);
+    } finally {
+      console.warn = warn;
+    }
+    assert.equal(hasOtherSessionPendingWidget(fannedOutOnNewController, 'r', 't'), false);
+    assert.equal(widgetOwnership(fannedOutOnNewController, 'r', 't', 'w1'), 'gone');
+  });
+
+  it('a record whose controller was collected counts as gone', () => {
+    const RealWeakRef = globalThis.WeakRef;
+    const collected = new Set<object>();
+    class TestWeakRef<T extends object> {
+      constructor(private readonly target: T) {}
+      deref(): T | undefined {
+        return collected.has(this.target) ? undefined : this.target;
+      }
+    }
+    (globalThis as { WeakRef: unknown }).WeakRef = TestWeakRef;
+    try {
+      const controller = {};
+      const owner = fakeSession(['w1']);
+      recordWidgetOwner(owner, 'r', 't', 'w1', controller);
+      assert.equal(widgetOwnership(owner, 'r', 't', 'w1'), 'owner');
+      collected.add(controller);
+      assert.equal(widgetOwnership(owner, 'r', 't', 'w1'), 'gone');
+      assert.equal(hasOtherSessionPendingWidget(fakeSession(), 'r', 't'), false);
+    } finally {
+      (globalThis as { WeakRef: unknown }).WeakRef = RealWeakRef;
+    }
   });
 });

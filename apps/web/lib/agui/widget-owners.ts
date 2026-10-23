@@ -12,6 +12,12 @@
  * - per thread: at most MAX_RECORDS_PER_THREAD; the oldest settled record is dropped first;
  * - overall: when more than MAX_THREADS threads have records, settled records are swept (threads
  *   with a pending widget keep it), so one company's widgets cannot evict another's.
+ *
+ * Owners on a dropped chat controller are gone. Every request uses the agent's cached controller, so
+ * once a controller is dropped (agent model / settings change, provider toggle, cache clear) its
+ * sessions can never be reached again and their parked widgets can never be answered. The registry
+ * calls `retireWidgetOwnersOfController` when it drops one: the owner's parked run is aborted (which
+ * drops its parked suspensions) and its records count as settled, so the thread is usable again.
  */
 
 const MAX_RECORDS_PER_THREAD = 100;
@@ -23,12 +29,28 @@ interface ParkedView {
 
 interface WidgetOwnerRecord {
   owner: WeakRef<object>;
+  /** The chat controller the owner session belongs to (absent when not known). */
+  controller?: WeakRef<object>;
 }
 
 const g = globalThis as unknown as {
   tourbillonAguiWidgetOwners?: Map<string, Map<string, WidgetOwnerRecord>>;
   tourbillonAguiWidgetOwnersSweepAt?: number;
+  tourbillonAguiRetiredControllers?: WeakSet<object>;
 };
+
+function retiredControllers(): WeakSet<object> {
+  if (!g.tourbillonAguiRetiredControllers) g.tourbillonAguiRetiredControllers = new WeakSet();
+  return g.tourbillonAguiRetiredControllers;
+}
+
+/** The owner session while it can still act: undefined when collected or its controller was dropped. */
+function liveOwner(record: WidgetOwnerRecord): object | undefined {
+  const owner = record.owner.deref();
+  if (!owner || !record.controller) return owner;
+  const controller = record.controller.deref();
+  return controller && !retiredControllers().has(controller) ? owner : undefined;
+}
 
 function threads(): Map<string, Map<string, WidgetOwnerRecord>> {
   if (!g.tourbillonAguiWidgetOwners) g.tourbillonAguiWidgetOwners = new Map();
@@ -39,9 +61,9 @@ function threadKey(resourceId: string, threadId: string): string {
   return `${resourceId}\u0000${threadId}`;
 }
 
-/** True while the owner (if still alive) has the call parked. */
+/** True while the owner (if still live) has the call parked. */
 function isParked(record: WidgetOwnerRecord, toolCallId: string): boolean {
-  const owner = record.owner.deref() as ParkedView | undefined;
+  const owner = liveOwner(record) as ParkedView | undefined;
   return Boolean(owner?.suspensions?.has({ toolCallId }));
 }
 
@@ -69,8 +91,17 @@ function sweepSettled(): void {
   g.tourbillonAguiWidgetOwnersSweepAt = Math.max(MAX_THREADS, map.size * 2);
 }
 
-/** Records `session` as the owner of a widget call (first record wins; a replay keeps the owner). */
-export function recordWidgetOwner(session: object, resourceId: string, threadId: string, toolCallId: string): void {
+/**
+ * Records `session` as the owner of a widget call (first record wins; a replay keeps the owner).
+ * `controller` is the chat controller the session belongs to (see `retireWidgetOwnersOfController`).
+ */
+export function recordWidgetOwner(
+  session: object,
+  resourceId: string,
+  threadId: string,
+  toolCallId: string,
+  controller?: object,
+): void {
   const map = threads();
   const key = threadKey(resourceId, threadId);
   let bucket = map.get(key);
@@ -80,27 +111,29 @@ export function recordWidgetOwner(session: object, resourceId: string, threadId:
     bucket = new Map();
     map.set(key, bucket);
   }
-  bucket.set(toolCallId, { owner: new WeakRef(session) });
+  bucket.set(toolCallId, { owner: new WeakRef(session), ...(controller ? { controller: new WeakRef(controller) } : {}) });
   trimThread(bucket);
 }
 
-export type WidgetOwnership = 'owner' | 'other' | 'unknown';
+export type WidgetOwnership = 'owner' | 'other' | 'gone' | 'unknown';
 
 /**
- * `owner` when `session` asked this widget call, `other` when another session did (or the owner has
- * gone), `unknown` when no AG-UI run asked it.
+ * `owner` when `session` asked this widget call, `other` when another live session did, `gone` when
+ * the owner has gone (collected, or its controller was dropped), `unknown` when no AG-UI run asked it.
  */
 export function widgetOwnership(session: object, resourceId: string, threadId: string, toolCallId: string): WidgetOwnership {
   const record = threads().get(threadKey(resourceId, threadId))?.get(toolCallId);
   if (!record) return 'unknown';
-  return record.owner.deref() === session ? 'owner' : 'other';
+  const owner = liveOwner(record);
+  if (!owner) return 'gone';
+  return owner === session ? 'owner' : 'other';
 }
 
 /** Widget calls this session asked on this thread that are still parked in it. */
 export function pendingOwnedWidgetCalls(session: ParkedView & object, resourceId: string, threadId: string): string[] {
   const out: string[] = [];
   for (const [toolCallId, record] of threads().get(threadKey(resourceId, threadId)) ?? []) {
-    if (record.owner.deref() === session && session.suspensions?.has({ toolCallId })) out.push(toolCallId);
+    if (liveOwner(record) === session && session.suspensions?.has({ toolCallId })) out.push(toolCallId);
   }
   return out;
 }
@@ -111,7 +144,7 @@ export function pendingOwnedWidgetCalls(session: ParkedView & object, resourceId
  */
 export function hasOtherSessionPendingWidget(session: ParkedView & object, resourceId: string, threadId: string): boolean {
   for (const [toolCallId, record] of threads().get(threadKey(resourceId, threadId)) ?? []) {
-    const owner = record.owner.deref();
+    const owner = liveOwner(record);
     if (owner === session) continue;
     if (isParked(record, toolCallId) || (!owner && session.suspensions?.has({ toolCallId }))) return true;
   }
@@ -127,6 +160,7 @@ export function trackWidgetOwners(
   resourceId: string,
   threadId: string,
   isWidget: (toolName: string) => boolean,
+  controller?: object,
 ): () => void {
   return session.subscribe((event) => {
     if (event.type !== 'tool_suspended') return;
@@ -134,14 +168,45 @@ export function trackWidgetOwners(
     const toolName = typeof event.toolName === 'string' ? event.toolName : undefined;
     const eventThread = typeof event.threadId === 'string' ? event.threadId : undefined;
     if (!toolCallId || !toolName || (eventThread !== undefined && eventThread !== threadId)) return;
-    if (isWidget(toolName)) recordWidgetOwner(session, resourceId, threadId, toolCallId);
+    if (isWidget(toolName)) recordWidgetOwner(session, resourceId, threadId, toolCallId, controller);
   });
+}
+
+/**
+ * Called when a chat controller is dropped from the cache: its sessions can no longer be reached, so
+ * owners on it are gone. Aborts each such owner's run that is parked on a widget (dropping the parked
+ * suspensions) and leaves its records settled. Returns how many parked owner runs were aborted.
+ */
+export function retireWidgetOwnersOfController(controller: object): number {
+  retiredControllers().add(controller);
+  const aborted = new Set<object>();
+  for (const bucket of threads().values()) {
+    for (const [toolCallId, record] of bucket) {
+      if (record.controller?.deref() !== controller) continue;
+      const owner = record.owner.deref() as (ParkedView & { abort?: () => void }) | undefined;
+      if (!owner || aborted.has(owner) || !owner.suspensions?.has({ toolCallId })) continue;
+      aborted.add(owner);
+      try {
+        owner.abort?.();
+      } catch (err) {
+        console.warn('[agui] parked widget run not aborted on controller drop', {
+          error: err instanceof Error ? err.message.slice(0, 300) : String(err).slice(0, 300),
+        });
+      }
+    }
+  }
+  return aborted.size;
 }
 
 /** Test only: forget every record. */
 export function resetWidgetOwnersForTests(): void {
   threads().clear();
   g.tourbillonAguiWidgetOwnersSweepAt = undefined;
+}
+
+/** Test only: thread count at which the next new thread triggers a sweep. */
+export function widgetOwnerSweepThresholdForTests(): number {
+  return g.tourbillonAguiWidgetOwnersSweepAt ?? MAX_THREADS;
 }
 
 /** Test only: number of threads with records. */

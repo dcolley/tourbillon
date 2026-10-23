@@ -117,7 +117,8 @@ const isWidgetTool = (toolName: string) => Boolean(assistantWidgetSpecIndex.late
 
 /**
  * A dismissal-shaped resume entry (`cancelled`, no payload) for a call that is neither a parked widget
- * nor a pending tool approval in this session: answered with 400 like an unknown widget answer.
+ * nor a pending tool approval in this session: handled by the widget branch, which answers it with
+ * `accepted:false` / `not_pending` and resumes nothing (an unknown answer is a 400).
  */
 function isUnknownDismissal(
   session: { approval?: { getToolCallIds?(): string[] } },
@@ -242,14 +243,17 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
         // Mastra parks the call in every session watching the thread: only the asking session may answer.
         const ownership = widgetOwnership(session, resourceId, input.threadId, entry.toolCallId);
         const spec = suspendedWidgetSpec(assistantWidgetSpecIndex, session, entry.toolCallId);
-        if (ownership === 'other' || (ownership === 'unknown' && spec)) {
+        // Parked here but asked by another session, or its owner has gone: fail closed.
+        if (ownership === 'other' || (ownership !== 'owner' && spec)) {
           throw new ChatAgentError('This widget is waiting on another session', 409);
         }
-        if (ownership === 'unknown') {
+        if (ownership === 'unknown' && !isUnknownDismissal(session, entry)) {
           return NextResponse.json({ error: 'Unknown widget call' }, { status: 400 });
         }
         if (!spec) {
-          // The owner's widget was already answered or dismissed: nothing to resume.
+          // Nothing to resume: the owner's widget was already answered or dismissed, its owner has gone
+          // (controller dropped), or a dismissal / decline names a call that is no longer pending (e.g. an
+          // approval settled just before it arrived).
           return controlResponse(input.threadId, input.runId, action, {
             accepted: false,
             toolCallIds: [entry.toolCallId],
@@ -268,7 +272,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
           throw new ChatAgentError('This widget is no longer waiting for an answer', 409);
         }
         const toolCallId = responseClaim.toolCallId;
-        const untrackWidgets = trackWidgetOwners(session, resourceId, input.threadId, isWidgetTool);
+        const untrackWidgets = trackWidgetOwners(session, resourceId, input.threadId, isWidgetTool, controller);
         // The resumed tool must be in this run's toolsets even if the client did not re-declare it.
         setRequestWidgetSpecs(requestContext, [...offeredWidgets.filter((s) => s.name !== spec.name), spec]);
         const stream = aguiRunStream({
@@ -349,7 +353,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
     }
     const content = wrapMessageWithDashboardContext(request.message, request.context);
     // Records this session as the owner of any widget call the run asks (lib/agui/widget-owners.ts).
-    const untrackWidgets = trackWidgetOwners(session, resourceId, input.threadId, isWidgetTool);
+    const untrackWidgets = trackWidgetOwners(session, resourceId, input.threadId, isWidgetTool, controller);
 
     const stream = aguiRunStream({
       session,

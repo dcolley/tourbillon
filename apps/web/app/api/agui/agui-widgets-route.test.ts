@@ -25,7 +25,7 @@ import {
 } from '../../../lib/agui/testing/stub-agent-controller';
 import { listWidgetAnswers } from '../../../lib/agui/widgets';
 import { claimAguiRun } from '../../../lib/agui/run-claims';
-import { resetWidgetOwnersForTests } from '../../../lib/agui/widget-owners';
+import { resetWidgetOwnersForTests, retireWidgetOwnersOfController } from '../../../lib/agui/widget-owners';
 
 type Ev = BaseEvent & Record<string, any>;
 type Handler = (req: NextRequest, ctx: { params: Promise<{ agentId: string }> }) => Promise<Response>;
@@ -536,6 +536,41 @@ describe('WID-1 widgets over AG-UI (round trip)', () => {
     }
   });
 
+  it('owner gone (session collected) while the call is still parked in another session: refused, nothing resumes', async () => {
+    const RealWeakRef = globalThis.WeakRef;
+    const collected = new Set<object>();
+    class TestWeakRef<T extends object> {
+      constructor(private readonly target: T) {}
+      deref(): T | undefined {
+        return collected.has(this.target) ? undefined : this.target;
+      }
+    }
+    (globalThis as { WeakRef: unknown }).WeakRef = TestWeakRef;
+    try {
+      await seedThread('wt-gone');
+      const other = await stub.createSession(RESOURCE, OTHER_SCOPE);
+      sessions.set(OTHER_KEY, other);
+      await other.thread.switch({ threadId: 'wt-gone' });
+      const first = await run(client('wt-gone'), { tools: DECLARED });
+      assert.equal(first.events.at(-1)?.outcome?.type, 'interrupt');
+      await sleep(300);
+      assert.ok(other.suspensions.has({ toolCallId: WIDGET_CALL }), 'widget parked in the other session');
+      collected.add(sessions.get(SESSION_KEY));
+      for (const [label, entry] of [
+        ['answer', answerEntry('No')],
+        ['dismissal', [{ interruptId: WIDGET_CALL, status: 'cancelled' }]],
+      ] as const) {
+        const res = await post(resumeBody('wt-gone', entry as unknown[], otherScope));
+        assert.equal(res.status, 409, label);
+      }
+      await sleep(100);
+      assert.ok(other.suspensions.has({ toolCallId: WIDGET_CALL }), 'still parked');
+      assert.equal(stub.modelCalls, 1, 'nothing resumed');
+    } finally {
+      (globalThis as { WeakRef: unknown }).WeakRef = RealWeakRef;
+    }
+  });
+
   it('a parked widget call with no recorded owner is refused (fails closed)', async () => {
     await askWidget('wt-unowned');
     resetWidgetOwnersForTests();
@@ -617,11 +652,91 @@ describe('WID-1 widgets over AG-UI (round trip)', () => {
     assert.ok(sessions.get(SESSION_KEY).suspensions.has({ toolCallId: WIDGET_CALL }));
   });
 
-  it('a dismissal for a widget call nobody asked is a 400', async () => {
+  it('a dismissal for a widget call nobody asked changes nothing (accepted:false, not_pending)', async () => {
     await askWidget('wt-unknown-dismiss');
     const res = await post(resumeBody('wt-unknown-dismiss', [{ interruptId: 'no-such-call', status: 'cancelled' }]));
-    assert.equal(res.status, 400);
-    assert.equal((await res.json()).error, 'Unknown widget call');
+    assert.equal(res.status, 200);
+    const events = await readSse(res);
+    assert.deepEqual(events.find((e) => e.type === 'CUSTOM')?.value, {
+      action: 'toolApproval',
+      accepted: false,
+      toolCallIds: ['no-such-call'],
+      results: [{ toolCallId: 'no-such-call', accepted: false, reason: 'not_pending' }],
+    });
     await ownerStillAnswers('wt-unknown-dismiss');
+  });
+
+  /**
+   * The chat controller is rebuilt (agent model / settings / observational-memory change, provider
+   * toggle): the registry drops it and calls retireWidgetOwnersOfController. Requests then reach a new
+   * controller over the same storage, with new sessions.
+   */
+  async function rebuildController() {
+    const old = stub;
+    stub = await createStubAgentController({
+      script: () => stubText('t', ['Fresh reply.']),
+      controllerTools: requestScopedTools as never,
+      storage: old.storage,
+    });
+    const oldSessions = sessions;
+    sessions = new Map();
+    retireWidgetOwnersOfController(old.controller);
+    return { oldSessions };
+  }
+
+  for (const mode of ['attached', 'new'] as const) {
+    it(`a controller rebuild while a widget is pending aborts the parked run and frees the thread (${mode} other session)`, async () => {
+      const threadId = `wt-rebuild-${mode}`;
+      if (mode === 'attached') {
+        await seedThread(threadId);
+        const other = await stub.createSession(RESOURCE, OTHER_SCOPE);
+        sessions.set(OTHER_KEY, other);
+        await other.thread.switch({ threadId });
+        await run(client(threadId), { tools: DECLARED });
+        await sleep(300);
+      } else {
+        await askWidget(threadId);
+      }
+      const blocked = await post(controlBody(threadId, 'run', { sessionScope: 'other' }));
+      assert.equal(blocked.status, 409, 'pending before the rebuild');
+      await blocked.text();
+
+      const { oldSessions } = await rebuildController();
+      await sleep(50);
+      assert.ok(!oldSessions.get(SESSION_KEY).suspensions.has({ toolCallId: WIDGET_CALL }), 'parked run aborted');
+
+      // Another session (new controller) may run on the thread again.
+      const other = await readSse(await post(controlBody(threadId, 'run', { sessionScope: 'other' })));
+      assert.ok(!other.some((e) => e.type === 'RUN_ERROR'), JSON.stringify(other.find((e) => e.type === 'RUN_ERROR')));
+      assert.equal(text(other), 'Fresh reply.');
+      await sleep(300);
+      // The owner reconnects (same scope, new session): its old widget is gone, nothing resumes.
+      const late = await post(resumeBody(threadId, answerEntry('Yes')));
+      assert.equal(late.status, 200);
+      assert.deepEqual((await readSse(late)).find((e) => e.type === 'CUSTOM')?.value.results, [
+        { toolCallId: WIDGET_CALL, accepted: false, reason: 'not_pending' },
+      ]);
+      // ...and can run on the thread again.
+      const own = await readSse(await post(controlBody(threadId, 'run')));
+      assert.equal(text(own), 'Fresh reply.');
+      assert.ok(!own.some((e) => e.type === 'RUN_ERROR'));
+    });
+  }
+
+  it('without the rebuild hook the thread stays blocked (guards the regression)', async () => {
+    await askWidget('wt-rebuild-nohook');
+    const old = stub;
+    stub = await createStubAgentController({
+      script: () => stubText('t', ['Fresh reply.']),
+      controllerTools: requestScopedTools as never,
+      storage: old.storage,
+    });
+    sessions = new Map();
+    const res = await post(controlBody('wt-rebuild-nohook', 'run', { sessionScope: 'other' }));
+    assert.equal(res.status, 409);
+    await res.text();
+    retireWidgetOwnersOfController(old.controller);
+    const after = await readSse(await post(controlBody('wt-rebuild-nohook', 'run', { sessionScope: 'other' })));
+    assert.equal(text(after), 'Fresh reply.');
   });
 });

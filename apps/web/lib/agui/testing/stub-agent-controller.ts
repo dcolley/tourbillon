@@ -45,6 +45,8 @@ export interface StubControllerOptions {
    * `requestScopedTools` from @tourbillon/mastra/widget-tools.
    */
   controllerTools?: (args: { requestContext?: unknown }) => Record<string, unknown> | Promise<Record<string, unknown>>;
+  /** Reuse another stub's storage (a rebuilt controller over the same threads). */
+  storage?: unknown;
 }
 
 export async function createStubAgentController(options: StubControllerOptions) {
@@ -93,7 +95,7 @@ export async function createStubAgentController(options: StubControllerOptions) 
   }
 
   const agent = new Agent({ id: 'stub-agent', name: 'Stub', instructions: 'Test agent.', model, tools });
-  const storage = new InMemoryStore();
+  const storage = options.storage ?? new InMemoryStore();
   const controller = new AgentController({
     id: 'stub-controller',
     storage,
@@ -108,6 +110,7 @@ export async function createStubAgentController(options: StubControllerOptions) 
   return {
     controller,
     agent,
+    storage,
     get modelCalls() {
       return calls;
     },

@@ -118,8 +118,14 @@ export function widgetAnswerToolResult(answer: WidgetAnswer): string {
  * Every value must also have a described type: schemas that accept any value (`z.unknown()`,
  * `z.any()`, `z.custom()`, `z.json()`, and records or arrays of those) are refused at any depth, and so
  * are schemas whose JSON Schema does not describe what is validated: recursive or lazy schemas
- * (`z.lazy`, `$ref`), `z.preprocess` (runs a function before validation) and `z.promise`. Records
- * (`z.record`) with typed values are allowed: their keys are explicit.
+ * (`z.lazy`, getter recursion), `z.preprocess` (runs a function before validation) and `z.promise`.
+ * Records (`z.record`) with typed values are allowed: their keys are explicit. Reusing a schema or
+ * naming it with `.meta({ id })` is fine (only true recursion is refused).
+ *
+ * Output-side steps are allowed: `.transform()`, `.pipe()` (unless its input is a transform, as in
+ * `z.preprocess`), `z.codec`, `.overwrite()` and refinements. The JSON Schema (what the model and the
+ * client see) describes the input; the answer is validated against it and the run receives the
+ * parsed output, so a transform may change the value's type. Keep them pure and cheap.
  */
 export interface WidgetSpec<P = any, A = any> {
   name: string;
@@ -235,6 +241,23 @@ function refusedZodKinds(schema: unknown, out: Set<string>, seen = new Set<unkno
   }
 }
 
+/**
+ * JSON Schema with every reused or `.meta({ id })`-named schema inlined (fresh metadata registry), so
+ * a remaining `$ref` can only come from recursion (e.g. a getter that refers to its own object).
+ */
+function inlinedJsonSchemaOf(schema: z.ZodType): Record<string, unknown> | undefined {
+  try {
+    return z.toJSONSchema(schema, {
+      io: 'input',
+      unrepresentable: 'any',
+      reused: 'inline',
+      metadata: z.registry<Record<string, unknown>>(),
+    }) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+}
+
 /** True when a JSON Schema uses `$ref` anywhere (recursive schemas). */
 function usesRef(node: unknown): boolean {
   if (!node || typeof node !== 'object') return false;
@@ -254,7 +277,7 @@ export function widgetSchemaProblems(schema: z.ZodType, opts: { mustBeObject?: b
   const refused = new Set<string>();
   refusedZodKinds(schema, refused);
   for (const r of refused) problems.push(`(schema): ${r}`);
-  if (refused.size === 0 && usesRef(json)) problems.push('(schema): recursive schemas ($ref) are not allowed');
+  if (refused.size === 0 && usesRef(inlinedJsonSchemaOf(schema) ?? json)) problems.push('(schema): recursive schemas ($ref) are not allowed');
   const untyped: string[] = [];
   unconstrainedPaths(json, '', untyped);
   for (const p of untyped) problems.push(`${p}: value must have a described type (not unknown / any / custom)`);

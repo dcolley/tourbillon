@@ -17,6 +17,7 @@ import { getActiveCompany } from '@/lib/company';
 import { buildChatScopedApiKey, validateChatToken } from '@/lib/auth/chat-token';
 import { chatSessionIdForAgent } from '@tourbillon/shared/agent-token';
 import { ASSISTANT_THREAD_METADATA_KEYS } from '@/lib/assistant/sidebar';
+import { retireWidgetOwnersOfController } from '@/lib/agui/widget-owners';
 
 /** #110: re-mint chat tokens with less than this many seconds left. */
 const CHAT_TOKEN_REFRESH_SEC = 60 * 60;
@@ -29,9 +30,25 @@ const globalForChat = globalThis as unknown as {
   tourbillonChatApiKeys?: Map<string, string>;
 };
 
+/**
+ * A dropped controller's sessions can no longer be reached (every request uses the cached one), so
+ * runs parked on its sessions' widgets are aborted and their owners count as gone (WID-1).
+ */
+function retireDroppedController(pending: Promise<TourbillonChatController>): void {
+  pending.then(
+    (controller) => {
+      retireWidgetOwnersOfController(controller);
+    },
+    () => {},
+  );
+}
+
 /** Bust in-process controller cache (HMR / workspace requirement changes). */
 export function clearChatControllerCache(): void {
-  globalForChat.tourbillonChatControllers?.clear();
+  const cache = globalForChat.tourbillonChatControllers;
+  if (!cache) return;
+  for (const pending of cache.values()) retireDroppedController(pending);
+  cache.clear();
 }
 
 /**
@@ -47,7 +64,9 @@ export function invalidateChatControllerForAgent(agentId: string): void {
     }
   }
   for (const key of keysToDelete) {
+    const pending = cache.get(key);
     cache.delete(key);
+    if (pending) retireDroppedController(pending);
   }
 }
 
