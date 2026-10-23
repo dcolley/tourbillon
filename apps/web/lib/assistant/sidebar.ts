@@ -41,13 +41,12 @@ export interface AssistantSidebarSections {
   teams: AssistantTeam[];
 }
 
-/** Thread metadata keys written by the assistant view (kept out of chat thread tags). */
-export const ASSISTANT_THREAD_PINNED_KEY = 'assistantPinned';
+/**
+ * Thread metadata keys written by the assistant view (kept out of chat thread tags).
+ * Pins are per user and live in `assistant_thread_pins`, not in thread metadata.
+ */
 export const ASSISTANT_THREAD_READ_MESSAGE_KEY = 'assistantReadMessageId';
-export const ASSISTANT_THREAD_METADATA_KEYS: readonly string[] = [
-  ASSISTANT_THREAD_PINNED_KEY,
-  ASSISTANT_THREAD_READ_MESSAGE_KEY,
-];
+export const ASSISTANT_THREAD_METADATA_KEYS: readonly string[] = [ASSISTANT_THREAD_READ_MESSAGE_KEY];
 
 /** "waiting on you" wins over "running": the user is the blocker. */
 export function agentChatStatus(input: { running: boolean; pendingApprovals: number }): AssistantAgentStatus {

@@ -2,16 +2,20 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { resolveChatAgent } from '@/lib/chat';
 import {
+  assertAgentWritable,
   assistantErrorResponse,
+  assistantThreadTitleSchema,
   createAssistantThread,
   listAssistantThreads,
   openAssistantSession,
 } from '@/lib/assistant/threads';
 import { pickInitialThread } from '@/lib/assistant/sidebar';
+import { assistantViewerKey } from '@/lib/assistant/viewer';
+import { takeThreadCreateSlot } from '@/lib/assistant/create-limit';
 
 export const dynamic = 'force-dynamic';
 
-const createBodySchema = z.object({ title: z.string().trim().min(1).max(200).optional() }).strict();
+const createBodySchema = z.object({ title: assistantThreadTitleSchema.optional() }).strict();
 
 type Ctx = { params: Promise<{ agentId: string }> };
 
@@ -29,7 +33,7 @@ export async function GET(req: NextRequest, { params }: Ctx) {
     const query = req.nextUrl.searchParams.get('q');
 
     const session = await openAssistantSession(agent);
-    const threads = await listAssistantThreads(session, agent, { query, limit });
+    const threads = await listAssistantThreads(session, agent, { query, limit, viewerKey: await assistantViewerKey() });
     const initial = query ? null : pickInitialThread(threads, agent.id);
     return NextResponse.json({ agentId: agent.id, threads, initialThreadId: initial?.id ?? null });
   } catch (err) {
@@ -37,14 +41,26 @@ export async function GET(req: NextRequest, { params }: Ctx) {
   }
 }
 
-/** UI-2: start a new thread for the agent in the company's assistant resource. */
+/**
+ * UI-2: start a new thread for the agent in the company's assistant resource.
+ * 409 for an archived agent; 429 (with Retry-After) past the per-company creation limit.
+ */
 export async function POST(req: NextRequest, { params }: Ctx) {
   try {
     const { agentId } = await params;
     const agent = await resolveChatAgent(agentId);
     const parsed = createBodySchema.safeParse(await req.json().catch(() => ({})));
     if (!parsed.success) return NextResponse.json({ error: 'Invalid request body' }, { status: 400 });
+    assertAgentWritable(agent);
 
+    // Every accepted attempt counts, so a failing request cannot be retried past the limit.
+    const slot = takeThreadCreateSlot(agent.companyId);
+    if (!slot.ok) {
+      return NextResponse.json(
+        { error: `Too many new threads for this company; try again in ${slot.retryAfterSec}s` },
+        { status: 429, headers: { 'Retry-After': String(slot.retryAfterSec) } },
+      );
+    }
     const session = await openAssistantSession(agent);
     const thread = await createAssistantThread(session, agent, parsed.data);
     return NextResponse.json({ thread }, { status: 201 });

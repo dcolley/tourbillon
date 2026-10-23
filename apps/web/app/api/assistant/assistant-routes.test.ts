@@ -18,9 +18,10 @@ type Json = Record<string, any>;
 type Handler = (req: NextRequest, ctx: { params: Promise<Record<string, string>> }) => Promise<Response>;
 
 const AGENTS = [
-  { id: 'agent-a', urlKey: 'alice', name: 'Alice', companyId: 'company-a' },
-  { id: 'agent-b', urlKey: 'bob', name: 'Bob', companyId: 'company-a' },
-  { id: 'agent-x', urlKey: 'xavier', name: 'Xavier', companyId: 'company-x' },
+  { id: 'agent-a', urlKey: 'alice', name: 'Alice', companyId: 'company-a', status: 'active' },
+  { id: 'agent-b', urlKey: 'bob', name: 'Bob', companyId: 'company-a', status: 'active' },
+  { id: 'agent-x', urlKey: 'xavier', name: 'Xavier', companyId: 'company-x', status: 'active' },
+  { id: 'agent-z', urlKey: 'zed', name: 'Zed', companyId: 'company-a', status: 'archived' },
 ];
 const RESOURCE_A = 'company-company-a:chat:free';
 
@@ -29,6 +30,16 @@ let controller: any;
 let sessions: Map<string, any>;
 const sessionCalls: Array<{ agentId: string; resourceId?: string; scope?: string; createInitialThread?: boolean }> = [];
 const loaderCalls: string[] = [];
+let viewer = 'user-1';
+/** When set, session.thread.list() returns every resource's threads (as a broader storage query would). */
+let listAllResources = false;
+/** Calls to Mastra session write paths the assistant API must not use for rename/pin. */
+const sessionWrites: string[] = [];
+/** Calls into the single-statement thread store. */
+const storeCalls: string[] = [];
+/** Per-user pins, as the assistant_thread_pins table holds them. */
+let pins: Map<string, { userKey: string; companyId: string; agentId: string; threadId: string; at: number }>;
+let pinSeq = 0;
 
 class ChatAgentError extends Error {
   constructor(message: string, readonly status = 404) {
@@ -109,6 +120,8 @@ let agentsGET: (req: NextRequest) => Promise<Response>;
 let threadsGET: Handler;
 let threadsPOST: Handler;
 let threadPATCH: Handler;
+let resetThreadCreateLimitForTests: () => void;
+let threadsLib: typeof import('../../../lib/assistant/threads');
 
 const req = (url: string, init: { method?: string; body?: unknown } = {}) =>
   new NextRequest(`http://localhost${url}`, {
@@ -130,6 +143,83 @@ async function patch(agentId: string, threadId: string, body: unknown): Promise<
   return { status: res.status, body: (await res.json()) as Json };
 }
 
+/** Session proxy: records rename/switch/pin-metadata writes; optionally lists across resources. */
+function watched(s: any) {
+  const thread = new Proxy(s.thread, {
+    get(target, prop: string) {
+      const v = target[prop];
+      if (typeof v !== 'function') return v;
+      if (prop === 'list') {
+        return (opts?: Json) => target.list(listAllResources ? { ...opts, allResources: true } : opts);
+      }
+      if (prop === 'rename' || prop === 'switch') {
+        return (...args: unknown[]) => {
+          sessionWrites.push(prop);
+          return v.apply(target, args);
+        };
+      }
+      if (prop === 'setSettingOn' || prop === 'setSetting') {
+        return (arg: Json) => {
+          sessionWrites.push(`${prop}:${arg.key}`);
+          return v.call(target, arg);
+        };
+      }
+      return v.bind(target);
+    },
+  });
+  return new Proxy(s, { get: (target, prop) => (prop === 'thread' ? thread : target[prop]) });
+}
+
+type Scope = { threadId: string; resourceId: string; agentId: string };
+type PinScope = { userKey: string; companyId: string; agentId: string };
+const MAX_PINS = 50;
+/** In-memory stand-in for lib/assistant/thread-store (its SQL is covered in thread-store.test.ts). */
+const memoryThreadStore = {
+  ASSISTANT_MAX_PINS_PER_AGENT: MAX_PINS,
+  async renameAssistantThreadRow(scope: Scope, title: string) {
+    storeCalls.push('rename');
+    const mem = await controller.getMemoryStorage();
+    const t = await mem.getThreadById({ threadId: scope.threadId });
+    if (!t || t.resourceId !== scope.resourceId || t.metadata?.agentId !== scope.agentId) return false;
+    await mem.updateThread({ id: t.id, title, metadata: {} });
+    return true;
+  },
+  async markAssistantThreadReadRow(scope: Scope, messageId: string) {
+    storeCalls.push('read');
+    const mem = await controller.getMemoryStorage();
+    const t = await mem.getThreadById({ threadId: scope.threadId });
+    if (!t || t.resourceId !== scope.resourceId || t.metadata?.agentId !== scope.agentId) return false;
+    await mem.updateThread({ id: t.id, title: t.title, metadata: { assistantReadMessageId: messageId } });
+    return true;
+  },
+  async pinAssistantThread(scope: PinScope, threadId: string) {
+    storeCalls.push('pin');
+    const key = `${scope.userKey}::${threadId}`;
+    const others = [...pins.values()].filter(
+      (p) => p.userKey === scope.userKey && p.companyId === scope.companyId && p.agentId === scope.agentId && p.threadId !== threadId,
+    );
+    if (others.length >= MAX_PINS) return false;
+    pins.set(key, { ...scope, threadId, at: pins.get(key)?.at ?? ++pinSeq });
+    return true;
+  },
+  async unpinAssistantThread(scope: PinScope, threadId: string) {
+    storeCalls.push('unpin');
+    const p = pins.get(`${scope.userKey}::${threadId}`);
+    if (p && p.companyId === scope.companyId && p.agentId === scope.agentId) pins.delete(`${scope.userKey}::${threadId}`);
+  },
+  async listPinnedAssistantThreadIds(scope: PinScope) {
+    return [...pins.values()]
+      .filter((p) => p.userKey === scope.userKey && p.companyId === scope.companyId && p.agentId === scope.agentId)
+      .sort((a, b) => b.at - a.at)
+      .map((p) => p.threadId);
+  },
+};
+
+async function post(agentId: string, body: unknown = {}): Promise<{ status: number; body: Json; headers: Headers }> {
+  const res = await threadsPOST(req(`/api/assistant/agents/${agentId}/threads`, { method: 'POST', body }), ctx({ agentId }));
+  return { status: res.status, body: (await res.json()) as Json, headers: res.headers };
+}
+
 describe('UI-2 assistant sidebar API', () => {
   before(async () => {
     const Module = require('module');
@@ -146,11 +236,13 @@ describe('UI-2 assistant sidebar API', () => {
         };
       }
       if (id === '@/lib/mobile-auth') return { verifyMobileToken: async () => null };
+      if (id === '@/lib/assistant/viewer') return { assistantViewerKey: async () => viewer };
+      if (id === '@/lib/assistant/thread-store') return memoryThreadStore;
       if (id === '@/lib/assistant/agents') {
         return {
           listAssistantAgents: async (companyId: string) => {
             loaderCalls.push(companyId);
-            return AGENTS.filter((a) => a.companyId === companyId).map((a) => ({ id: a.id, name: a.name }));
+            return AGENTS.filter((a) => a.companyId === companyId && a.status !== 'archived').map((a) => ({ id: a.id, name: a.name }));
           },
         };
       }
@@ -177,7 +269,7 @@ describe('UI-2 assistant sidebar API', () => {
               createInitialThread: opts.createInitialThread,
             });
             // Same default as the controller: create an empty thread unless told not to.
-            return session(opts.resourceId!, opts.scope!, opts.createInitialThread !== false);
+            return watched(await session(opts.resourceId!, opts.scope!, opts.createInitialThread !== false));
           },
         };
       }
@@ -186,6 +278,8 @@ describe('UI-2 assistant sidebar API', () => {
     ({ GET: agentsGET } = await import('./agents/route'));
     ({ GET: threadsGET, POST: threadsPOST } = (await import('./agents/[agentId]/threads/route')) as any);
     ({ PATCH: threadPATCH } = (await import('./agents/[agentId]/threads/[threadId]/route')) as any);
+    ({ resetThreadCreateLimitForTests } = await import('../../../lib/assistant/create-limit'));
+    threadsLib = await import('../../../lib/assistant/threads');
   });
 
   beforeEach(async () => {
@@ -194,6 +288,12 @@ describe('UI-2 assistant sidebar API', () => {
     sessions = new Map();
     sessionCalls.length = 0;
     loaderCalls.length = 0;
+    sessionWrites.length = 0;
+    storeCalls.length = 0;
+    pins = new Map();
+    viewer = 'user-1';
+    listAllResources = false;
+    resetThreadCreateLimitForTests();
   });
 
   describe('auth and company scope', () => {
@@ -242,27 +342,26 @@ describe('UI-2 assistant sidebar API', () => {
       await seedThread({ id: 'other-co', title: 'Other plan', agentId: 'agent-a', resourceId: 'company-company-x:chat:free' });
     });
 
-    it('lists the agent’s own and shared threads in the active company only, latest activity first', async () => {
+    it('lists only the agent’s own threads in the active company, latest activity first', async () => {
       const { status, body } = await list('alice');
       assert.equal(status, 200);
       assert.equal(body.agentId, 'agent-a');
       assert.deepEqual(
         body.threads.map((t: Json) => [t.id, t.agentId, t.unread, t.pinned]),
         [
-          ['shared', null, false, false],
           ['own-new', 'agent-a', true, false],
           ['own-old', 'agent-a', true, false],
         ],
       );
       assert.equal(body.initialThreadId, 'own-new');
       const bob = await list('bob');
-      assert.deepEqual(bob.body.threads.map((t: Json) => t.id).sort(), ['bobs', 'shared']);
+      assert.deepEqual(bob.body.threads.map((t: Json) => t.id), ['bobs']);
       assert.equal(bob.body.initialThreadId, 'bobs');
     });
 
     it('search filters by title (case-insensitive) and does not pick an initial thread', async () => {
       const { body } = await list('alice', '?q=PLAN');
-      assert.deepEqual(body.threads.map((t: Json) => t.id).sort(), ['own-old', 'shared']);
+      assert.deepEqual(body.threads.map((t: Json) => t.id), ['own-old']);
       assert.equal(body.initialThreadId, null);
       assert.deepEqual((await list('alice', '?q=nomatch')).body.threads, []);
       assert.equal((await list('alice', '?limit=1')).body.threads.length, 1);
@@ -299,7 +398,7 @@ describe('UI-2 assistant sidebar API', () => {
     });
 
     it('threads outside the agent’s view are 404 and untouched', async () => {
-      for (const threadId of ['bobs', 'issue-ctx', 'other-co', 'missing']) {
+      for (const threadId of ['bobs', 'shared', 'issue-ctx', 'other-co', 'missing']) {
         const r = await patch('alice', threadId, { title: 'hijack' });
         assert.equal(r.status, 404, threadId);
         assert.equal(r.body.error, 'Thread not found');
@@ -329,6 +428,8 @@ describe('UI-2 assistant sidebar API', () => {
       const stored = await (await session(RESOURCE_A, 'check')).thread.getById({ threadId: thread.id });
       assert.equal(stored.resourceId, RESOURCE_A);
       assert.equal(stored.metadata.kind, 'chat');
+      assert.equal(stored.metadata.contextType, 'free');
+      assert.equal(stored.metadata.agentId, 'agent-a');
       const { body } = await list('alice');
       assert.equal(body.initialThreadId, thread.id);
       assert.deepEqual((await list('bob')).body.threads, []);
@@ -345,6 +446,259 @@ describe('UI-2 assistant sidebar API', () => {
         ctx({ agentId: 'xavier' }),
       );
       assert.equal(foreign.status, 404);
+    });
+  });
+  describe('tagging and visibility (AG-UI only accepts threads tagged to the agent)', () => {
+    beforeEach(async () => {
+      await seedThread({ id: 'own', title: 'Own', agentId: 'agent-a', turn: true });
+      await seedThread({ id: 'untagged', title: 'Untagged', turn: true });
+      await seedThread({ id: 'blank-owner', title: 'Blank owner', agentId: '' });
+    });
+
+    it('untagged threads are never offered and cannot be changed', async () => {
+      const { body } = await list('alice');
+      assert.deepEqual(body.threads.map((t: Json) => t.id), ['own']);
+      assert.deepEqual((await list('bob')).body.threads, []);
+      for (const threadId of ['untagged', 'blank-owner']) {
+        assert.equal((await patch('alice', threadId, { pinned: true })).status, 404, threadId);
+        assert.equal((await patch('alice', threadId, { read: true })).status, 404, threadId);
+      }
+      assert.equal(pins.size, 0);
+    });
+
+    it('every created thread is tagged kind=chat, contextType=free and agentId, with or without a title', async () => {
+      for (const body of [{}, { title: 'Named' }]) {
+        const r = await post('alice', body);
+        assert.equal(r.status, 201);
+        const stored = await (await session(RESOURCE_A, 'check')).thread.getById({ threadId: r.body.thread.id });
+        assert.equal(stored.metadata.kind, 'chat');
+        assert.equal(stored.metadata.contextType, 'free');
+        assert.equal(stored.metadata.agentId, 'agent-a');
+        assert.equal(r.body.thread.agentId, 'agent-a');
+        assert.ok((await list('alice')).body.threads.some((t: Json) => t.id === r.body.thread.id));
+      }
+    });
+  });
+
+  describe('free-chat resource filter and activity time', () => {
+    beforeEach(async () => {
+      await seedThread({ id: 'own', title: 'Own plan', agentId: 'agent-a', turn: true });
+      await seedThread({ id: 'issue-ctx', title: 'Issue plan', agentId: 'agent-a', resourceId: 'company-company-a:chat:issue:7', turn: true });
+      await seedThread({ id: 'pane', title: 'Pane plan', agentId: 'agent-a', resourceId: 'company-company-a:chat:agent:agent-a', turn: true });
+      await seedThread({ id: 'other-co', title: 'Other plan', agentId: 'agent-a', resourceId: 'company-company-x:chat:free', turn: true });
+    });
+
+    it('list keeps only the free-chat resource even when storage returns other resources', async () => {
+      listAllResources = true;
+      const ids = (await list('alice')).body.threads.map((t: Json) => t.id);
+      assert.deepEqual(ids, ['own']);
+      assert.deepEqual((await list('alice', '?q=plan')).body.threads.map((t: Json) => t.id), ['own']);
+    });
+
+    it('single-thread access is limited to the free-chat resource', async () => {
+      listAllResources = true;
+      for (const threadId of ['issue-ctx', 'pane', 'other-co']) {
+        assert.equal((await patch('alice', threadId, { read: true })).status, 404, threadId);
+        assert.equal((await patch('alice', threadId, { pinned: true })).status, 404, threadId);
+      }
+      assert.equal(pins.size, 0);
+    });
+
+    it('a pin row for a thread outside the resource is ignored', async () => {
+      pins.set('user-1::pane', { userKey: 'user-1', companyId: 'company-a', agentId: 'agent-a', threadId: 'pane', at: ++pinSeq });
+      pins.set('user-1::other-co', { userKey: 'user-1', companyId: 'company-a', agentId: 'agent-a', threadId: 'other-co', at: ++pinSeq });
+      assert.deepEqual((await list('alice')).body.threads.map((t: Json) => t.id), ['own']);
+    });
+
+    it('a thread with no messages reports its creation time as last activity', async () => {
+      const r = await post('alice', { title: 'Empty' });
+      assert.ok(r.body.thread.createdAt);
+      assert.equal(r.body.thread.lastActivityAt, r.body.thread.createdAt);
+      const listed = (await list('alice')).body.threads.find((t: Json) => t.id === r.body.thread.id);
+      assert.equal(listed.lastActivityAt, listed.createdAt);
+      const withTurn = (await list('alice')).body.threads.find((t: Json) => t.id === 'own');
+      assert.notEqual(withTurn.lastActivityAt, withTurn.createdAt);
+    });
+  });
+
+  describe('archived agents are read-only', () => {
+    beforeEach(async () => {
+      await seedThread({ id: 'zed-1', title: 'Zed history', agentId: 'agent-z', turn: true });
+    });
+
+    it('reads work; create, rename and pin → 409; nothing changes', async () => {
+      const l = await list('zed');
+      assert.equal(l.status, 200);
+      assert.deepEqual(l.body.threads.map((t: Json) => t.id), ['zed-1']);
+
+      const created = await post('zed', { title: 'New' });
+      assert.equal(created.status, 409);
+      assert.match(created.body.error, /archived/);
+      for (const body of [{ title: 'Renamed' }, { pinned: true }, { title: 'Renamed', read: true }]) {
+        const r = await patch('zed', 'zed-1', body);
+        assert.equal(r.status, 409, JSON.stringify(body));
+      }
+      assert.equal((await patch('zed', 'zed-1', { read: true })).status, 200, 'mark read is a read');
+
+      const after = (await list('zed')).body.threads;
+      assert.deepEqual(after.map((t: Json) => [t.id, t.title, t.pinned]), [['zed-1', 'Zed history', false]]);
+      assert.equal(pins.size, 0);
+      assert.ok(!storeCalls.includes('rename') && !storeCalls.includes('pin'));
+    });
+  });
+
+  describe('title validation', () => {
+    beforeEach(async () => {
+      await seedThread({ id: 'own', title: 'Own', agentId: 'agent-a' });
+    });
+
+    it('control characters in titles → 400 without touching storage', async () => {
+      for (const title of ['a\u0000b', 'line\nbreak', 'tab\there', 'del\u007f', 'c1\u0085', 'sep\u2028x']) {
+        const c = await post('alice', { title });
+        assert.equal(c.status, 400, JSON.stringify(title));
+        assert.deepEqual(c.body, { error: 'Invalid request body' });
+        const r = await patch('alice', 'own', { title });
+        assert.equal(r.status, 400, JSON.stringify(title));
+        assert.deepEqual(r.body, { error: 'Invalid request body' });
+      }
+      assert.deepEqual(storeCalls, []);
+      assert.equal((await list('alice')).body.threads.length, 1);
+      // Surrounding whitespace (including newlines) is trimmed, not refused.
+      assert.equal((await patch('alice', 'own', { title: '\n Fine \n' })).body.thread.title, 'Fine');
+    });
+
+    it('unexpected storage errors → 500 without the error text', async () => {
+      const original = memoryThreadStore.renameAssistantThreadRow;
+      memoryThreadStore.renameAssistantThreadRow = async () => {
+        throw new Error('invalid byte sequence for encoding "UTF8": 0x00 (relation mastra_threads)');
+      };
+      try {
+        const r = await patch('alice', 'own', { title: 'ok' });
+        assert.equal(r.status, 500);
+        assert.deepEqual(r.body, { error: 'Internal error' });
+      } finally {
+        memoryThreadStore.renameAssistantThreadRow = original;
+      }
+    });
+  });
+
+  describe('creation limit', () => {
+    it('per company: the 21st new thread in a minute → 429 with Retry-After; other companies unaffected', async () => {
+      const results = await Promise.all(Array.from({ length: 21 }, (_, i) => post(i % 2 ? 'alice' : 'bob', {})));
+      const statuses = results.map((r) => r.status).sort();
+      assert.deepEqual(statuses.filter((x) => x === 201).length, 20);
+      const limited = results.find((r) => r.status === 429)!;
+      assert.ok(limited, 'one request limited');
+      assert.match(limited.body.error, /Too many new threads/);
+      assert.ok(Number(limited.headers.get('retry-after')) >= 1);
+      const all = await (await session(RESOURCE_A, 'check')).thread.list();
+      assert.equal(all.length, 20, 'the limited request created nothing');
+
+      activeCompany = { id: 'company-x' };
+      assert.equal((await post('xavier', {})).status, 201);
+    });
+
+    it('invalid and archived requests do not use up the limit', async () => {
+      for (let i = 0; i < 25; i++) {
+        assert.equal((await post('alice', { title: '' })).status, 400);
+        assert.equal((await post('zed', {})).status, 409);
+      }
+      assert.equal((await post('alice', {})).status, 201);
+    });
+
+    it('pinned threads are loaded outside the newest-N scan', async () => {
+      await seedThread({ id: 'old-pinned', title: 'Old', agentId: 'agent-a' });
+      await seedThread({ id: 'mid', title: 'Mid', agentId: 'agent-a' });
+      await seedThread({ id: 'new', title: 'New', agentId: 'agent-a' });
+      assert.equal((await patch('alice', 'old-pinned', { pinned: true })).status, 200);
+      const agent = AGENTS[0];
+      const s = await threadsLib.openAssistantSession(agent);
+      const listed = await threadsLib.listAssistantThreads(s, agent, { viewerKey: 'user-1', scanLimit: 1 });
+      assert.deepEqual(listed.map((t) => [t.id, t.pinned]), [
+        ['old-pinned', true],
+        ['new', false],
+      ]);
+      // Another user's pins do not pull threads in.
+      const other = await threadsLib.listAssistantThreads(s, agent, { viewerKey: 'user-2', scanLimit: 1 });
+      assert.deepEqual(other.map((t) => t.id), ['new']);
+    });
+  });
+
+  describe('rename and pin are single writes', () => {
+    const N = 15;
+    beforeEach(async () => {
+      for (let i = 0; i < N; i++) await seedThread({ id: `c${i}`, title: `Thread ${i}`, agentId: 'agent-a' });
+    });
+
+    it('concurrent rename + pin on every thread: no lost titles or pins; no session read-modify-write', async () => {
+      const ops: Array<Promise<{ status: number }>> = [];
+      for (let i = 0; i < N; i++) {
+        ops.push(patch('alice', `c${i}`, { title: `Renamed ${i}` }));
+        ops.push(patch('alice', `c${i}`, { pinned: true }));
+        ops.push(patch('alice', `c${i}`, { read: true }));
+      }
+      const results = await Promise.all(ops);
+      assert.ok(results.every((r) => r.status === 200), JSON.stringify(results.map((r) => r.status)));
+      const threads = (await list('alice', '?limit=200')).body.threads;
+      assert.equal(threads.length, N);
+      for (const t of threads) {
+        const i = t.id.slice(1);
+        assert.equal(t.title, `Renamed ${i}`);
+        assert.equal(t.pinned, true, t.id);
+      }
+      assert.deepEqual(
+        sessionWrites.filter((w) => w === 'rename' || w === 'switch' || w.startsWith('setSettingOn:assistant')),
+        [],
+      );
+      assert.equal(storeCalls.filter((c) => c === 'rename').length, N);
+      assert.equal(storeCalls.filter((c) => c === 'pin').length, N);
+    });
+  });
+
+  describe('per-user pins', () => {
+    beforeEach(async () => {
+      await seedThread({ id: 'p1', title: 'One', agentId: 'agent-a' });
+      await seedThread({ id: 'p2', title: 'Two', agentId: 'agent-a' });
+    });
+
+    it('each user sees only their own pins; nothing is written to thread metadata', async () => {
+      viewer = 'user-1';
+      assert.equal((await patch('alice', 'p1', { pinned: true })).body.thread.pinned, true);
+      viewer = 'user-2';
+      let threads = (await list('alice')).body.threads;
+      assert.deepEqual(threads.map((t: Json) => [t.id, t.pinned]), [['p2', false], ['p1', false]]);
+      assert.equal((await patch('alice', 'p2', { pinned: true })).body.thread.pinned, true);
+      threads = (await list('alice')).body.threads;
+      assert.deepEqual(threads.map((t: Json) => [t.id, t.pinned]), [['p2', true], ['p1', false]]);
+
+      viewer = 'user-1';
+      threads = (await list('alice')).body.threads;
+      assert.deepEqual(threads.map((t: Json) => [t.id, t.pinned]), [['p1', true], ['p2', false]]);
+      // Unpin is per user too.
+      await patch('alice', 'p1', { pinned: false });
+      viewer = 'user-2';
+      assert.equal((await list('alice')).body.threads.find((t: Json) => t.id === 'p2').pinned, true);
+
+      const s = await session(RESOURCE_A, 'check');
+      for (const id of ['p1', 'p2']) {
+        const md = (await s.thread.getById({ threadId: id })).metadata;
+        assert.ok(!('assistantPinned' in md), id);
+      }
+    });
+
+    it('pins are scoped to the agent; pinning is idempotent; the per-agent cap → 409', async () => {
+      await patch('alice', 'p1', { pinned: true });
+      await patch('alice', 'p1', { pinned: true });
+      assert.equal(pins.size, 1);
+      assert.deepEqual((await list('bob')).body.threads, []);
+      // p1 plus MAX_PINS - 1 others: the cap is reached.
+      for (let i = 0; i < MAX_PINS - 1; i++) {
+        pins.set(`user-1::fake-${i}`, { userKey: 'user-1', companyId: 'company-a', agentId: 'agent-a', threadId: `fake-${i}`, at: ++pinSeq });
+      }
+      const r = await patch('alice', 'p2', { pinned: true });
+      assert.equal(r.status, 409);
+      assert.match(r.body.error, /Pin limit/);
+      assert.equal((await patch('alice', 'p1', { pinned: true })).status, 200, 're-pinning an existing pin is fine');
     });
   });
 });
