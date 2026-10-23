@@ -3,7 +3,14 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { z } from 'zod';
 import { createWidgetSpecIndex, type WidgetSpec } from '@tourbillon/shared/widgets';
-import { selectWidgetSpecs, suspendedWidgetSpec, widgetAnswersFromMessages, widgetResumeFromEntry } from './widgets';
+import {
+  isWidgetAnswerEntry,
+  listWidgetAnswers,
+  selectWidgetSpecs,
+  suspendedWidgetSpec,
+  widgetAnswersFromMessages,
+  widgetResumeFromEntry,
+} from './widgets';
 
 const picker: WidgetSpec = {
   name: 'testPicker',
@@ -109,5 +116,32 @@ describe('WID-1 widgetAnswersFromMessages', () => {
     assert.deepEqual(widgetAnswersFromMessages(index, messages), [
       { toolCallId: 'c1', widget: 'testPicker', version: 2, answer: { choice: 'a' }, answeredAt: '2026-10-23T15:00:00.000Z' },
     ]);
+  });
+});
+
+describe('WID-1 isWidgetAnswerEntry', () => {
+  it('only resolved entries whose payload has an own `answer` field look like widget answers', () => {
+    assert.equal(isWidgetAnswerEntry({ status: 'resolved', payload: { answer: null } }), true);
+    assert.equal(isWidgetAnswerEntry({ status: 'resolved', payload: { answer: { choice: 'a' } } }), true);
+    assert.equal(isWidgetAnswerEntry({ status: 'resolved', payload: { approved: true } }), false);
+    assert.equal(isWidgetAnswerEntry({ status: 'resolved' }), false);
+    assert.equal(isWidgetAnswerEntry({ status: 'resolved', payload: [{ answer: 1 }] }), false);
+    assert.equal(isWidgetAnswerEntry({ status: 'resolved', payload: Object.create({ answer: 1 }) }), false);
+    assert.equal(isWidgetAnswerEntry({ status: 'cancelled', payload: { answer: 1 } }), false);
+  });
+});
+
+describe('WID-1 listWidgetAnswers scoping', () => {
+  const session = (metadata: unknown) => ({
+    thread: {
+      getById: async () => (metadata === undefined ? null : { metadata }),
+      listMessages: async () => ({ messages: [] }),
+    },
+  });
+  it('reads only a thread tagged to the given agent', async () => {
+    assert.deepEqual(await listWidgetAnswers(index, session({ agentId: 'a1' }), 't', { agentId: 'a1' }), []);
+    await assert.rejects(listWidgetAnswers(index, session({ agentId: 'a2' }), 't', { agentId: 'a1' }), /Thread not found/);
+    await assert.rejects(listWidgetAnswers(index, session({}), 't', { agentId: 'a1' }), /Thread not found/);
+    await assert.rejects(listWidgetAnswers(index, session(undefined), 't', { agentId: 'a1' }), /Thread not found/);
   });
 });

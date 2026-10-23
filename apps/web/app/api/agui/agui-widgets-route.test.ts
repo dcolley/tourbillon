@@ -24,6 +24,8 @@ import {
   type StubAgentController,
 } from '../../../lib/agui/testing/stub-agent-controller';
 import { listWidgetAnswers } from '../../../lib/agui/widgets';
+import { claimAguiRun } from '../../../lib/agui/run-claims';
+import { resetWidgetOwnersForTests } from '../../../lib/agui/widget-owners';
 
 type Ev = BaseEvent & Record<string, any>;
 type Handler = (req: NextRequest, ctx: { params: Promise<{ agentId: string }> }) => Promise<Response>;
@@ -32,6 +34,9 @@ const AGENT = { id: 'agent-a', urlKey: 'alice', name: 'Alice', companyId: 'compa
 const RESOURCE = 'company-company-a:chat:free';
 const SCOPE = 'agui:agent-a';
 const SESSION_KEY = `${RESOURCE}::${SCOPE}`;
+const OTHER_SCOPE = `${SCOPE}:other`;
+const OTHER_KEY = `${RESOURCE}::${OTHER_SCOPE}`;
+const OWNER = { agentId: AGENT.id };
 
 const picker: WidgetSpec = {
   name: 'testPicker',
@@ -191,6 +196,7 @@ describe('WID-1 widgets over AG-UI (round trip)', () => {
 
   beforeEach(async () => {
     sessions = new Map();
+    resetWidgetOwnersForTests();
     stub = await createStubAgentController({
       script: (_call, prompt) =>
         prompt.some((m) => m.role === 'tool')
@@ -266,7 +272,7 @@ describe('WID-1 widgets over AG-UI (round trip)', () => {
 
     const session = sessions.get(SESSION_KEY);
     assert.equal(session.suspensions.has({ toolCallId: WIDGET_CALL }), false);
-    const stored = await listWidgetAnswers(specIndex, session, 'wt-answer');
+    const stored = await listWidgetAnswers(specIndex, session, 'wt-answer', OWNER);
     assert.equal(stored.length, 1);
     assert.deepEqual(
       { ...stored[0], answeredAt: undefined },
@@ -296,13 +302,13 @@ describe('WID-1 widgets over AG-UI (round trip)', () => {
     assert.equal(stub.modelCalls, 1);
     const session = sessions.get(SESSION_KEY);
     assert.ok(session.suspensions.has({ toolCallId: WIDGET_CALL }));
-    assert.deepEqual(await listWidgetAnswers(specIndex, session, 'wt-invalid'), []);
+    assert.deepEqual(await listWidgetAnswers(specIndex, session, 'wt-invalid', OWNER), []);
 
     const ok = await readSse(
       await post(resumeBody('wt-invalid', [{ interruptId: WIDGET_CALL, status: 'resolved', payload: { answer: { choice: 'Yes' } } }])),
     );
     assert.equal(ok.find((e) => e.type === 'TOOL_CALL_RESULT')?.toolCallId, WIDGET_CALL);
-    assert.deepEqual((await listWidgetAnswers(specIndex, session, 'wt-invalid'))[0].answer, { choice: 'Yes' });
+    assert.deepEqual((await listWidgetAnswers(specIndex, session, 'wt-invalid', OWNER))[0].answer, { choice: 'Yes' });
   });
 
   it('mixing a widget answer with other decisions is refused (one widget per request)', async () => {
@@ -323,7 +329,7 @@ describe('WID-1 widgets over AG-UI (round trip)', () => {
     const result = events.find((e) => e.type === 'TOOL_CALL_RESULT');
     assert.deepEqual(JSON.parse(result!.content), { widget: 'testPicker', version: 1, dismissed: true });
     assert.equal(text(events), 'Thanks, noted.');
-    assert.deepEqual(await listWidgetAnswers(specIndex, sessions.get(SESSION_KEY), 'wt-dismiss'), []);
+    assert.deepEqual(await listWidgetAnswers(specIndex, sessions.get(SESSION_KEY), 'wt-dismiss', OWNER), []);
   });
 
   it('a widget is answered once: of two concurrent answers one resumes, the other is refused; a late repeat changes nothing', async () => {
@@ -349,12 +355,12 @@ describe('WID-1 widgets over AG-UI (round trip)', () => {
     assert.ok(loser.status === 409 || loser.accepted === false, JSON.stringify(outcomes));
     await sleep(300);
     const session = sessions.get(SESSION_KEY);
-    const stored = await listWidgetAnswers(specIndex, session, 'wt-once');
+    const stored = await listWidgetAnswers(specIndex, session, 'wt-once', OWNER);
     assert.equal(stored.length, 1);
     const late = await readSse(await post(body('No')));
     assert.equal(late.find((e) => e.type === 'CUSTOM')?.value.accepted, false);
     assert.ok(!late.some((e) => e.type === 'TOOL_CALL_RESULT'));
-    assert.deepEqual(await listWidgetAnswers(specIndex, session, 'wt-once'), stored);
+    assert.deepEqual(await listWidgetAnswers(specIndex, session, 'wt-once', OWNER), stored);
     assert.equal(stub.modelCalls, 2);
   });
 
@@ -366,7 +372,7 @@ describe('WID-1 widgets over AG-UI (round trip)', () => {
         assert.ok(!events.some((e) => e.type === 'TOOL_CALL_RESULT'), label);
         assert.equal(events.find((e) => e.type === 'CUSTOM')?.value.accepted, false, label);
       } else {
-        assert.equal(res.status, 404, label);
+        assert.ok(res.status === 404 || res.status === 409, `${label}: ${res.status}`);
       }
     };
     const answer = [{ interruptId: WIDGET_CALL, status: 'resolved', payload: { answer: { choice: 'No' } } }];
@@ -378,6 +384,172 @@ describe('WID-1 widgets over AG-UI (round trip)', () => {
     const session = sessions.get(SESSION_KEY);
     assert.ok(session.suspensions.has({ toolCallId: WIDGET_CALL }));
     assert.equal(stub.modelCalls, 1);
-    assert.deepEqual(await listWidgetAnswers(specIndex, session, 'wt-session'), []);
+    assert.deepEqual(await listWidgetAnswers(specIndex, session, 'wt-session', OWNER), []);
+  });
+
+  const answerEntry = (choice = 'No') => [{ interruptId: WIDGET_CALL, status: 'resolved', payload: { answer: { choice } } }];
+  const otherScope = { forwardedProps: { tourbillon: { sessionScope: 'other' } } };
+
+  /** Asserts the owner's widget is still pending and unanswered, then that the owner can answer it. */
+  async function ownerStillAnswers(threadId: string) {
+    const owner = sessions.get(SESSION_KEY);
+    assert.ok(owner.suspensions.has({ toolCallId: WIDGET_CALL }), 'owner widget still pending');
+    assert.equal(stub.modelCalls, 1, 'nothing resumed');
+    assert.deepEqual(await listWidgetAnswers(specIndex, owner, threadId, OWNER), []);
+    const events = await readSse(await post(resumeBody(threadId, answerEntry('Yes'))));
+    assert.ok(!events.some((e) => e.type === 'RUN_ERROR'), JSON.stringify(events.find((e) => e.type === 'RUN_ERROR')));
+    const result = events.find((e) => e.type === 'TOOL_CALL_RESULT');
+    assert.deepEqual(JSON.parse(result!.content).answer, { choice: 'Yes' });
+    const stored = await listWidgetAnswers(specIndex, owner, threadId, OWNER);
+    assert.deepEqual(stored.map((a) => a.answer), [{ choice: 'Yes' }]);
+  }
+
+  it('two sessions on the thread: only the session that asked the widget may answer or dismiss it', async () => {
+    // The other session is attached to the thread before the widget is asked, so Mastra parks the
+    // suspended call in it too (it watches the thread).
+    await seedThread('wt-two');
+    const other = await stub.createSession(RESOURCE, OTHER_SCOPE);
+    sessions.set(OTHER_KEY, other);
+    await other.thread.switch({ threadId: 'wt-two' });
+    const agent = client('wt-two');
+    const first = await run(agent, { tools: DECLARED });
+    assert.equal(first.events.at(-1)?.outcome?.type, 'interrupt');
+    await sleep(300);
+    assert.ok(other.suspensions.has({ toolCallId: WIDGET_CALL }), 'widget parked in the other session');
+
+    for (const [label, entry] of [
+      ['answer', answerEntry('No')],
+      ['dismissal', [{ interruptId: WIDGET_CALL, status: 'cancelled' }]],
+    ] as const) {
+      const res = await post(resumeBody('wt-two', entry as unknown[], otherScope));
+      assert.equal(res.status, 409, label);
+      assert.match((await res.json()).error, /another session/, label);
+    }
+    assert.ok(other.suspensions.has({ toolCallId: WIDGET_CALL }));
+    await ownerStillAnswers('wt-two');
+
+    // After the answer, a repeat from the other session is still refused (not "accepted:false").
+    const late = await post(resumeBody('wt-two', answerEntry('No'), otherScope));
+    assert.equal(late.status, 409);
+    assert.equal(stub.modelCalls, 2);
+  });
+
+  it('a newly opened session that adopts the thread cannot answer the widget', async () => {
+    await askWidget('wt-fresh');
+    // The fresh session is created by this request and adopts the thread.
+    const res = await post(resumeBody('wt-fresh', answerEntry('No'), otherScope));
+    assert.equal(res.status, 409);
+    const other = sessions.get(OTHER_KEY);
+    assert.equal(other.thread.getId(), 'wt-fresh');
+    // Live, the adopting session can also have the call parked (Mastra fan-out): still refused.
+    const parked = sessions.get(SESSION_KEY).suspensions.get({ toolCallId: WIDGET_CALL });
+    other.suspensions.register({ toolCallId: WIDGET_CALL, ...parked });
+    for (const entry of [answerEntry('No'), [{ interruptId: WIDGET_CALL, status: 'cancelled' }]]) {
+      assert.equal((await post(resumeBody('wt-fresh', entry, otherScope))).status, 409);
+    }
+    await ownerStillAnswers('wt-fresh');
+  });
+
+  it("the owner's answer is refused while its own run is open on the thread (run claim)", async () => {
+    await askWidget('wt-claimed');
+    const owner = sessions.get(SESSION_KEY);
+    const claim = claimAguiRun(owner, RESOURCE, 'wt-claimed')!;
+    const realRunId = owner.getCurrentRunId;
+    owner.getCurrentRunId = () => 'busy-run';
+    try {
+      const res = await post(resumeBody('wt-claimed', answerEntry('No')));
+      assert.equal(res.status, 409);
+      assert.match((await res.json()).error, /run is open/);
+    } finally {
+      owner.getCurrentRunId = realRunId;
+      claim.release();
+    }
+    await ownerStillAnswers('wt-claimed');
+  });
+
+  it("the owner's answer is refused while another response holds the widget (suspension claim), and frees the run claim", async () => {
+    await askWidget('wt-held');
+    const owner = sessions.get(SESSION_KEY);
+    assert.equal(owner.claimToolResponse(WIDGET_CALL), true);
+    try {
+      const res = await post(resumeBody('wt-held', answerEntry('No')));
+      assert.equal(res.status, 409);
+      assert.match((await res.json()).error, /no longer waiting/);
+    } finally {
+      owner.releaseToolResponse(WIDGET_CALL);
+    }
+    // The run claim taken for the refused request was released: the owner can answer now.
+    await ownerStillAnswers('wt-held');
+  });
+
+  it('an answer for a widget call nobody asked is a 400; an approval decision still goes to the approval path', async () => {
+    await askWidget('wt-unknown');
+    const res = await post(
+      resumeBody('wt-unknown', [{ interruptId: 'no-such-call', status: 'resolved', payload: { answer: { choice: 'No' } } }]),
+    );
+    assert.equal(res.status, 400);
+    assert.equal((await res.json()).error, 'Unknown widget call');
+    const approval = await readSse(
+      await post(resumeBody('wt-unknown', [{ interruptId: 'no-such-call', status: 'resolved', payload: { approved: true } }])),
+    );
+    assert.equal(approval.find((e) => e.type === 'CUSTOM')?.value.accepted, false);
+    await ownerStillAnswers('wt-unknown');
+  });
+
+  it('a steer while the widget is pending is refused (409) and changes nothing', async () => {
+    await askWidget('wt-steer');
+    const steer = await post({
+      threadId: 'wt-steer',
+      runId: 'r-steer',
+      messages: [{ id: 'u2', role: 'user', content: 'actually, wait' }],
+      tools: [],
+      context: [],
+      forwardedProps: { tourbillon: { action: 'steer' } },
+    });
+    assert.equal(steer.status, 409);
+    assert.match((await steer.json()).error, /widget is waiting/);
+    await ownerStillAnswers('wt-steer');
+  });
+
+  it("a failure while resuming the owner's widget shows a generic error, not the engine's text", async () => {
+    await askWidget('wt-error');
+    const owner = sessions.get(SESSION_KEY);
+    const realResume = owner.resumeToolCall;
+    owner.resumeToolCall = async () => {
+      throw new Error('engine internals: could not find a suspended run r-123 for thread t-456');
+    };
+    const warn = console.warn;
+    const logged: unknown[] = [];
+    console.warn = (...args: unknown[]) => {
+      logged.push(args);
+    };
+    try {
+      const events = await readSse(await post(resumeBody('wt-error', answerEntry('No'))));
+      const err = events.find((e) => e.type === 'RUN_ERROR');
+      assert.ok(err, JSON.stringify(types(events)));
+      assert.equal(err!.message, 'The widget answer could not be processed. Please try again.');
+      assert.doesNotMatch(JSON.stringify(events), /engine internals|suspended run/);
+      assert.match(JSON.stringify(logged), /engine internals/);
+    } finally {
+      console.warn = warn;
+      owner.resumeToolCall = realResume;
+    }
+  });
+
+  it('a parked widget call with no recorded owner is refused (fails closed)', async () => {
+    await askWidget('wt-unowned');
+    resetWidgetOwnersForTests();
+    const res = await post(resumeBody('wt-unowned', answerEntry('No')));
+    assert.equal(res.status, 409);
+    assert.ok(sessions.get(SESSION_KEY).suspensions.has({ toolCallId: WIDGET_CALL }));
+    assert.equal(stub.modelCalls, 1);
+  });
+
+  it('listWidgetAnswers refuses a thread tagged to another agent', async () => {
+    await askWidget('wt-list');
+    const owner = sessions.get(SESSION_KEY);
+    await assert.rejects(listWidgetAnswers(specIndex, owner, 'wt-list', { agentId: 'agent-b' }), /Thread not found/);
+    await assert.rejects(listWidgetAnswers(specIndex, owner, 'no-such-thread', OWNER), /Thread not found/);
+    assert.deepEqual(await listWidgetAnswers(specIndex, owner, 'wt-list', OWNER), []);
   });
 });

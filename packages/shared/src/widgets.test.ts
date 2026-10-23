@@ -188,6 +188,37 @@ describe('WID-1 widget specs (S3 strict rule)', () => {
     assert.deepEqual(widgetSchemaProblems(z.record(z.string(), z.number())), []);
   });
 
+  it('schemas that accept any value are refused at any depth (unknown, any, custom, records / arrays of those)', () => {
+    const untyped = 'value must have a described type (not unknown / any / custom)';
+    assert.deepEqual(widgetSchemaProblems(z.unknown()), [`(root): ${untyped}`]);
+    assert.deepEqual(widgetSchemaProblems(z.any()), [`(root): ${untyped}`]);
+    assert.deepEqual(widgetSchemaProblems(z.custom<string>((v) => typeof v === 'string')), [`(root): ${untyped}`]);
+    assert.deepEqual(widgetSchemaProblems(z.record(z.string(), z.unknown())), [`{}: ${untyped}`]);
+    assert.deepEqual(widgetSchemaProblems(z.array(z.unknown())), [`[]: ${untyped}`]);
+    assert.deepEqual(widgetSchemaProblems(z.strictObject({ a: z.strictObject({ b: z.any() }) })), [`a.b: ${untyped}`]);
+    assert.deepEqual(widgetSchemaProblems(z.strictObject({ a: z.array(z.strictObject({ b: z.unknown() })) })), [`a[].b: ${untyped}`]);
+    assert.deepEqual(widgetSchemaProblems(z.union([z.string(), z.unknown()])), [`(root): ${untyped}`]);
+    // Typed values of every common kind comply.
+    assert.deepEqual(
+      widgetSchemaProblems(
+        z.strictObject({
+          s: z.string(),
+          n: z.number().optional(),
+          t: z.tuple([z.string(), z.number()]),
+          r: z.record(z.string(), z.string()),
+          e: z.enum(['a', 'b']),
+          l: z.literal('x'),
+          u: z.union([z.string(), z.number()]),
+          nul: z.string().nullable(),
+          d: z.boolean().default(false),
+        }),
+      ),
+      [],
+    );
+    assert.match(widgetSpecProblems({ ...spec, answerSchema: z.strictObject({ value: z.unknown() }) }).join(), /answer value: value must have a described type/);
+    assert.throws(() => createWidgetSpecIndex([{ ...spec, answerSchema: z.any() }]), /described type/);
+  });
+
   it('spec problems cover name, version range, props, answers and the reserved key', () => {
     assert.deepEqual(widgetSpecProblems(spec), []);
     assert.match(widgetSpecProblems({ ...spec, name: 'Bad-Name' })[0], /Invalid widget name/);

@@ -130,6 +130,11 @@ export interface AguiRunStreamOptions {
   droppedQueuedTurns?: () => number;
   /** Tool calls resumed by this run (announced by an earlier run); see AguiEventMapperOptions. */
   resumedToolCallIds?: readonly string[];
+  /**
+   * When set, RUN_ERROR carries this message instead of the engine's error text; the original text
+   * is logged server-side (truncated).
+   */
+  publicRunError?: string;
 }
 
 export const AGUI_SSE_HEADERS = {
@@ -246,6 +251,14 @@ export function aguiRunStream(opts: AguiRunStreamOptions): ReadableStream<Uint8A
       const finish = (override?: Parameters<typeof mapper.finish>[0]) => {
         if (closed) return;
         const events = mapper.finish(override);
+        if (opts.publicRunError) {
+          for (const event of events) {
+            if (event.type !== EventType.RUN_ERROR) continue;
+            const raw = String((event as { message?: unknown }).message ?? '');
+            console.warn('[agui] run failed', { runId: opts.runId.slice(0, 100), error: raw.slice(0, 300) });
+            (event as { message?: string }).message = opts.publicRunError;
+          }
+        }
         let dropped = 0;
         try {
           dropped = opts.droppedQueuedTurns?.() ?? 0;

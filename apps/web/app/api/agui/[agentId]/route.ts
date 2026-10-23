@@ -32,7 +32,12 @@
  * suspended widget call carries the user's answer (`payload: { answer }`) or a dismissal
  * (`status: 'cancelled'`); the answer is validated against the server spec, then the suspended tool
  * is resumed on a new streaming run (one widget per request). Refused with 400 when the answer is
- * invalid or mixed with other decisions, 409 when the call was already answered or a run is open.
+ * invalid, mixed with other decisions or for a widget call no AG-UI run asked; 409 when another
+ * session asked the widget (only the asking session may answer or dismiss it, see
+ * lib/agui/widget-owners.ts) or a run is open; an owner's repeat after the answer gets
+ * `accepted:false`. A steer is refused with 409 while this session has a widget waiting (answer or
+ * dismiss it first); a follow-up is queued and runs after the answer. Run errors on a resumed widget
+ * run carry a generic message; details are logged server-side.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { EventType, type BaseEvent } from '@ag-ui/core';
@@ -65,7 +70,8 @@ import {
 import { runWithHeartbeatContext } from '@tourbillon/mastra';
 import { setRequestWidgetSpecs } from '@tourbillon/mastra/widget-tools';
 import { assistantWidgetSpecIndex } from '@/components/assistant/widgets/specs';
-import { selectWidgetSpecs, suspendedWidgetSpec, widgetResumeFromEntry } from '@/lib/agui/widgets';
+import { isWidgetAnswerEntry, selectWidgetSpecs, suspendedWidgetSpec, widgetResumeFromEntry } from '@/lib/agui/widgets';
+import { pendingOwnedWidgetCalls, trackWidgetOwners, widgetOwnership } from '@/lib/agui/widget-owners';
 
 export const dynamic = 'force-dynamic';
 
@@ -100,6 +106,10 @@ async function bindThread(session: TourbillonChatSession, threadId: string) {
   }
   await session.thread.switch({ threadId });
 }
+
+const isWidgetTool = (toolName: string) => Boolean(assistantWidgetSpecIndex.latest(toolName)?.frontendTool);
+
+const WIDGET_RUN_ERROR = 'The widget answer could not be processed. Please try again.';
 
 function controlResponse(threadId: string, runId: string, action: string, value: Record<string, unknown>) {
   const events: BaseEvent[] = [
@@ -160,6 +170,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
       threadId: input.threadId,
     };
 
+    // A steer would abort the run parked on this session's widget and drop the widget: refuse it.
+    if (action === 'steer' && onThread && pendingOwnedWidgetCalls(session, resourceId, input.threadId).length > 0) {
+      throw new ChatAgentError('A widget is waiting for an answer; answer or dismiss it first', 409);
+    }
     const queueOnOpenRun = action === 'followUp' && Boolean(active) && onThread;
     const isControl =
       action === 'abort' ||
@@ -185,7 +199,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
       }
       const widgetEntries =
         action === 'toolApproval'
-          ? request.resume.filter((e) => suspendedWidgetSpec(assistantWidgetSpecIndex, session, e.toolCallId))
+          ? request.resume.filter(
+              (e) =>
+                Boolean(suspendedWidgetSpec(assistantWidgetSpecIndex, session, e.toolCallId)) ||
+                widgetOwnership(session, resourceId, input.threadId, e.toolCallId) !== 'unknown' ||
+                isWidgetAnswerEntry(e),
+            )
           : [];
       if (widgetEntries.length > 0) {
         if (request.toolDecisions.length !== 1) {
@@ -195,20 +214,36 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
           );
         }
         const entry = widgetEntries[0];
-        const spec = suspendedWidgetSpec(assistantWidgetSpecIndex, session, entry.toolCallId)!;
+        // Mastra parks the call in every session watching the thread: only the asking session may answer.
+        const ownership = widgetOwnership(session, resourceId, input.threadId, entry.toolCallId);
+        const spec = suspendedWidgetSpec(assistantWidgetSpecIndex, session, entry.toolCallId);
+        if (ownership === 'other' || (ownership === 'unknown' && spec)) {
+          throw new ChatAgentError('This widget is waiting on another session', 409);
+        }
+        if (ownership === 'unknown') {
+          return NextResponse.json({ error: 'Unknown widget call' }, { status: 400 });
+        }
+        if (!spec) {
+          // The owner's widget was already answered or dismissed: nothing to resume.
+          return controlResponse(input.threadId, input.runId, action, {
+            accepted: false,
+            toolCallIds: [entry.toolCallId],
+            results: [{ toolCallId: entry.toolCallId, accepted: false, reason: 'not_pending' }],
+          });
+        }
         const decision = widgetResumeFromEntry(spec, entry);
         if (!decision.ok) {
           return NextResponse.json({ error: 'Invalid widget answer', issues: decision.issues }, { status: 400 });
         }
-        if (claimed) throw new ChatAgentError('A run is open on this thread; retry shortly', 409);
-        const responseClaim = session.claimToolSuspension(entry.toolCallId);
-        if (!responseClaim.accepted) throw new ChatAgentError('This widget is no longer waiting for an answer', 409);
-        const toolCallId = responseClaim.toolCallId;
         const claim = claimAguiRun(session, resourceId, input.threadId);
-        if (!claim) {
-          session.releaseToolResponse(toolCallId);
-          throw new ChatAgentError('A run is open on this thread; retry shortly', 409);
+        if (!claim) throw new ChatAgentError('A run is open on this thread; retry shortly', 409);
+        const responseClaim = session.claimToolSuspension(entry.toolCallId);
+        if (!responseClaim.accepted) {
+          claim.release();
+          throw new ChatAgentError('This widget is no longer waiting for an answer', 409);
         }
+        const toolCallId = responseClaim.toolCallId;
+        const untrackWidgets = trackWidgetOwners(session, resourceId, input.threadId, isWidgetTool);
         // The resumed tool must be in this run's toolsets even if the client did not re-declare it.
         setRequestWidgetSpecs(requestContext, [...offeredWidgets.filter((s) => s.name !== spec.name), spec]);
         const stream = aguiRunStream({
@@ -219,7 +254,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
           resourceId,
           signal: req.signal,
           resumedToolCallIds: [toolCallId],
+          publicRunError: WIDGET_RUN_ERROR,
           onClose: () => {
+            untrackWidgets();
             session.releaseToolResponse(toolCallId);
             claim.release();
           },
@@ -286,6 +323,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
       throw err;
     }
     const content = wrapMessageWithDashboardContext(request.message, request.context);
+    // Records this session as the owner of any widget call the run asks (lib/agui/widget-owners.ts).
+    const untrackWidgets = trackWidgetOwners(session, resourceId, input.threadId, isWidgetTool);
 
     const stream = aguiRunStream({
       session,
@@ -294,7 +333,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
       mastraThreadId: input.threadId,
       resourceId,
       signal: req.signal,
-      onClose: claim.release,
+      onClose: () => {
+        untrackWidgets();
+        claim.release();
+      },
       takeQueuedTurn: claim.takeQueuedTurn,
       droppedQueuedTurns: () => claim.droppedTurns() + claim.queuedTurns(),
       start: () =>

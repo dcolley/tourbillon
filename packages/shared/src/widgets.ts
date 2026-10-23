@@ -115,7 +115,9 @@ export function widgetAnswerToolResult(answer: WidgetAnswer): string {
  *
  * Rule (checked at registration): `propsSchema` is a `z.strictObject`, and every object inside the
  * props and answer schemas is strict too, so unknown keys are refused instead of silently stripped.
- * Records (`z.record`) are allowed: their keys are explicit.
+ * Every value must also have a described type: schemas that accept any value (`z.unknown()`,
+ * `z.any()`, `z.custom()`, and records or arrays of those) are refused at any depth. Records
+ * (`z.record`) with typed values are allowed: their keys are explicit.
  */
 export interface WidgetSpec<P = any, A = any> {
   name: string;
@@ -164,6 +166,42 @@ function looseObjectPaths(node: unknown, path: string, out: string[]): void {
   }
 }
 
+/** Keywords that constrain a JSON Schema value; a schema with none of them accepts anything. */
+const CONSTRAINING_KEYWORDS = ['type', 'const', 'enum', 'anyOf', 'oneOf', 'allOf', '$ref', 'not'];
+
+/** Paths of sub-schemas that accept any value (`{}` or `true`, e.g. z.unknown / z.any / z.custom). */
+function unconstrainedPaths(node: unknown, path: string, out: string[]): void {
+  const at = path || '(root)';
+  if (node === true) {
+    out.push(at);
+    return;
+  }
+  if (!node || typeof node !== 'object' || Array.isArray(node)) return;
+  const n = node as Record<string, unknown>;
+  if (!CONSTRAINING_KEYWORDS.some((k) => k in n)) {
+    out.push(at);
+    return;
+  }
+  const child = (sub: unknown, p: string) => unconstrainedPaths(sub, p, out);
+  if (n.properties && typeof n.properties === 'object') {
+    for (const [prop, sub] of Object.entries(n.properties)) child(sub, path ? `${path}.${prop}` : prop);
+  }
+  if (Array.isArray(n.items)) n.items.forEach((sub, i) => child(sub, `${path}[${i}]`));
+  else if (n.items !== undefined) child(n.items, `${path}[]`);
+  if (Array.isArray(n.prefixItems)) n.prefixItems.forEach((sub, i) => child(sub, `${path}[${i}]`));
+  // Objects with properties and open extra keys are already reported by the strict-object rule.
+  if (!n.properties && n.additionalProperties !== undefined && n.additionalProperties !== false) {
+    child(n.additionalProperties, `${path}{}`);
+  }
+  for (const key of ['anyOf', 'oneOf', 'allOf'] as const) {
+    if (Array.isArray(n[key])) (n[key] as unknown[]).forEach((sub) => child(sub, path));
+  }
+  for (const key of ['$defs', 'definitions'] as const) {
+    const defs = n[key];
+    if (defs && typeof defs === 'object') for (const [name, sub] of Object.entries(defs)) child(sub, `#${name}`);
+  }
+}
+
 /** Problems with a widget schema under the strict rule (empty when it complies). */
 export function widgetSchemaProblems(schema: z.ZodType, opts: { mustBeObject?: boolean } = {}): string[] {
   const json = jsonSchemaOf(schema);
@@ -173,6 +211,9 @@ export function widgetSchemaProblems(schema: z.ZodType, opts: { mustBeObject?: b
   const loose: string[] = [];
   looseObjectPaths(json, '', loose);
   for (const p of loose) problems.push(`${p}: object must be strict (z.strictObject)`);
+  const untyped: string[] = [];
+  unconstrainedPaths(json, '', untyped);
+  for (const p of untyped) problems.push(`${p}: value must have a described type (not unknown / any / custom)`);
   return problems;
 }
 

@@ -52,6 +52,22 @@ export function suspendedWidgetSpec(
   return spec?.frontendTool ? spec : undefined;
 }
 
+/**
+ * True for a resume entry shaped like a widget answer (`status: 'resolved'`, `payload` with an
+ * `answer` field). Tool approvals carry `{ approved }`; the route uses this to answer an unknown
+ * widget call id with 400 instead of routing it to the approval path.
+ */
+export function isWidgetAnswerEntry(entry: { status: string; payload?: unknown }): boolean {
+  const payload = entry.payload;
+  return (
+    entry.status === 'resolved' &&
+    typeof payload === 'object' &&
+    payload !== null &&
+    !Array.isArray(payload) &&
+    Object.prototype.hasOwnProperty.call(payload, 'answer')
+  );
+}
+
 /** AG-UI resume payload for a widget answer: only `answer` (unknown fields are refused). */
 const widgetResumePayloadSchema = z.strictObject({ answer: z.unknown() });
 
@@ -118,12 +134,27 @@ export function widgetAnswersFromMessages(index: WidgetSpecIndex, messages: read
   return out;
 }
 
-/** Widget answers stored in a thread (via the session's thread API). */
+/**
+ * Widget answers stored in a thread (via the session's thread API). The thread must exist and be
+ * tagged to `agentId` (as the AG-UI route's thread check, #156); otherwise this throws 'Thread not
+ * found'. Mastra's listMessages additionally refuses a thread outside the session's resource.
+ */
 export async function listWidgetAnswers(
   index: WidgetSpecIndex,
-  session: { thread: { listMessages(args: { threadId: string }): Promise<unknown> } },
+  session: {
+    thread: {
+      getById(args: { threadId: string }): Promise<{ metadata?: unknown } | null | undefined>;
+      listMessages(args: { threadId: string }): Promise<unknown>;
+    };
+  },
   threadId: string,
+  owner: { agentId: string },
 ): Promise<StoredWidgetAnswer[]> {
+  const thread = await session.thread.getById({ threadId });
+  const taggedAgent = (thread?.metadata as Record<string, unknown> | undefined)?.agentId;
+  if (!thread || typeof owner?.agentId !== 'string' || taggedAgent !== owner.agentId) {
+    throw new Error('Thread not found');
+  }
   const result = await session.thread.listMessages({ threadId });
   const messages = Array.isArray(result) ? result : ((result as { messages?: unknown[] })?.messages ?? []);
   return widgetAnswersFromMessages(index, messages as StoredMessage[]);
