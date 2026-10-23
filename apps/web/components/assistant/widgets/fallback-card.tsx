@@ -1,6 +1,13 @@
 import * as React from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { WIDGET_FALLBACK_MESSAGES, redactWidgetValue, type WidgetFallbackReason } from '@tourbillon/shared/widgets';
+import {
+  WIDGET_FALLBACK_MESSAGES,
+  WIDGET_MAX_ARGS_BYTES,
+  WIDGET_MAX_PREVIEW_CHARS,
+  redactWidgetValue,
+  widgetJsonBytes,
+  type WidgetFallbackReason,
+} from '@tourbillon/shared/widgets';
 
 export type ToolCardStatus = 'running' | 'done' | 'failed';
 
@@ -16,8 +23,13 @@ export interface FallbackToolCardProps {
 
 const STATUS_LABEL: Record<ToolCardStatus, string> = { running: 'Running', done: 'Done', failed: 'Failed' };
 
-function argsPreview(args: unknown): string | null {
+/** Shown in place of a longer preview's tail. */
+export const PREVIEW_TRUNCATED = '… (truncated)';
+
+/** Redacted, pretty-printed args as plain text (rendered as a text node, never as HTML), capped in size. */
+export function argsPreview(args: unknown): string | null {
   if (args === undefined || args === null || args === '') return null;
+  if (widgetJsonBytes(args) > WIDGET_MAX_ARGS_BYTES) return '(arguments too large to show)';
   let value = args;
   if (typeof args === 'string') {
     try {
@@ -27,7 +39,8 @@ function argsPreview(args: unknown): string | null {
     }
   }
   try {
-    return JSON.stringify(redactWidgetValue(value), null, 2);
+    const text = JSON.stringify(redactWidgetValue(value), null, 2);
+    return text.length > WIDGET_MAX_PREVIEW_CHARS ? text.slice(0, WIDGET_MAX_PREVIEW_CHARS) + PREVIEW_TRUNCATED : text;
   } catch {
     return '(arguments could not be shown)';
   }

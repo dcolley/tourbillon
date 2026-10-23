@@ -40,6 +40,11 @@ export interface StubControllerOptions {
   chunkDelayMs?: number;
   /** Server tools registered on the agent: id → execute. */
   tools?: Record<string, (input: any) => Promise<unknown> | unknown>;
+  /**
+   * AgentController `tools` resolver (request-scoped tools), as the chat controller sets it — e.g.
+   * `requestScopedTools` from @tourbillon/mastra/widget-tools.
+   */
+  controllerTools?: (args: { requestContext?: unknown }) => Record<string, unknown> | Promise<Record<string, unknown>>;
 }
 
 export async function createStubAgentController(options: StubControllerOptions) {
@@ -53,10 +58,16 @@ export async function createStubAgentController(options: StubControllerOptions) 
 
   let calls = 0;
   const prompts: Array<Array<{ role: string; content: unknown }>> = [];
+  /** Tools offered to the model on each call (name + description). */
+  const offeredTools: Array<Array<{ name: string; description?: string; inputSchema?: unknown }>> = [];
   const model = new MastraLanguageModelV2Mock({
-    doStream: async (opts: { prompt: Array<{ role: string; content: unknown }> }) => {
+    doStream: async (opts: {
+      prompt: Array<{ role: string; content: unknown }>;
+      tools?: Array<{ name: string; description?: string; inputSchema?: unknown }>;
+    }) => {
       calls += 1;
       prompts.push(opts.prompt);
+      offeredTools.push((opts.tools ?? []).map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })));
       const turn = options.script(calls, opts.prompt);
       const hasToolCall = turn.some((c) => c.type === 'tool-call');
       const chunks = [
@@ -91,6 +102,7 @@ export async function createStubAgentController(options: StubControllerOptions) 
     agent,
     modes: [{ id: 'default', name: 'Default', default: true, defaultModelId: 'stub/stub' }],
     initialState: { yolo: true },
+    ...(options.controllerTools ? { tools: options.controllerTools } : {}),
   });
   await controller.init();
   return {
@@ -100,6 +112,7 @@ export async function createStubAgentController(options: StubControllerOptions) 
       return calls;
     },
     prompts,
+    offeredTools,
     /** Same shape as registry.getChatSession → controller.createSession. */
     createSession: (resourceId: string, scope?: string) =>
       controller.createSession({

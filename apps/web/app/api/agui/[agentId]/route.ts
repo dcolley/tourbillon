@@ -26,6 +26,13 @@
  * are queued on the claim; any that will not run (abort, error, run ended first) are reported to the
  * client as a `tourbillon.follow_up_dropped` CUSTOM event on the open run, and the abort control
  * response carries `droppedFollowUps`. See lib/agui/run-claims.ts.
+ *
+ * Widgets (WID-1, see lib/agui/widgets.ts): widget tools declared by the client in `tools` and known
+ * to the server are offered to the run as suspending frontend tools. An AG-UI `resume` entry for a
+ * suspended widget call carries the user's answer (`payload: { answer }`) or a dismissal
+ * (`status: 'cancelled'`); the answer is validated against the server spec, then the suspended tool
+ * is resumed on a new streaming run (one widget per request). Refused with 400 when the answer is
+ * invalid or mixed with other decisions, 409 when the call was already answered or a run is open.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { EventType, type BaseEvent } from '@ag-ui/core';
@@ -56,6 +63,9 @@ import {
   expectRunContinuation,
 } from '@/lib/agui/session-stream';
 import { runWithHeartbeatContext } from '@tourbillon/mastra';
+import { setRequestWidgetSpecs } from '@tourbillon/mastra/widget-tools';
+import { assistantWidgetSpecIndex } from '@/components/assistant/widgets/specs';
+import { selectWidgetSpecs, suspendedWidgetSpec, widgetResumeFromEntry } from '@/lib/agui/widgets';
 
 export const dynamic = 'force-dynamic';
 
@@ -135,6 +145,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
 
     // ---- No await from here until the run is claimed (or the control action is decided). ----
     const requestContext = createChatRequestContext(agent);
+    // Widget tools the client declared and the server knows (request-scoped, see lib/agui/widgets.ts).
+    const offeredWidgets = selectWidgetSpecs(assistantWidgetSpecIndex, input.tools);
+    if (offeredWidgets.length > 0) setRequestWidgetSpecs(requestContext, offeredWidgets);
     const running = Boolean(session.getCurrentRunId());
     const claimed = isAguiRunClaimed(session, resourceId, input.threadId);
     const active = activeAguiRun(session, resourceId, input.threadId);
@@ -169,6 +182,59 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
           accepted: running,
           ...(droppedFollowUps > 0 ? { droppedFollowUps } : {}),
         });
+      }
+      const widgetEntries =
+        action === 'toolApproval'
+          ? request.resume.filter((e) => suspendedWidgetSpec(assistantWidgetSpecIndex, session, e.toolCallId))
+          : [];
+      if (widgetEntries.length > 0) {
+        if (request.toolDecisions.length !== 1) {
+          return NextResponse.json(
+            { error: 'Answer one widget per request, without other tool decisions' },
+            { status: 400 },
+          );
+        }
+        const entry = widgetEntries[0];
+        const spec = suspendedWidgetSpec(assistantWidgetSpecIndex, session, entry.toolCallId)!;
+        const decision = widgetResumeFromEntry(spec, entry);
+        if (!decision.ok) {
+          return NextResponse.json({ error: 'Invalid widget answer', issues: decision.issues }, { status: 400 });
+        }
+        if (claimed) throw new ChatAgentError('A run is open on this thread; retry shortly', 409);
+        const responseClaim = session.claimToolSuspension(entry.toolCallId);
+        if (!responseClaim.accepted) throw new ChatAgentError('This widget is no longer waiting for an answer', 409);
+        const toolCallId = responseClaim.toolCallId;
+        const claim = claimAguiRun(session, resourceId, input.threadId);
+        if (!claim) {
+          session.releaseToolResponse(toolCallId);
+          throw new ChatAgentError('A run is open on this thread; retry shortly', 409);
+        }
+        // The resumed tool must be in this run's toolsets even if the client did not re-declare it.
+        setRequestWidgetSpecs(requestContext, [...offeredWidgets.filter((s) => s.name !== spec.name), spec]);
+        const stream = aguiRunStream({
+          session,
+          threadId: input.threadId,
+          runId: input.runId,
+          mastraThreadId: input.threadId,
+          resourceId,
+          signal: req.signal,
+          resumedToolCallIds: [toolCallId],
+          onClose: () => {
+            session.releaseToolResponse(toolCallId);
+            claim.release();
+          },
+          takeQueuedTurn: claim.takeQueuedTurn,
+          droppedQueuedTurns: () => claim.droppedTurns() + claim.queuedTurns(),
+          start: () =>
+            runWithHeartbeatContext(heartbeat, () =>
+              session.respondToToolSuspension({
+                resumeData: decision.resume,
+                toolCallId,
+                requestContext: requestContext as never,
+              }),
+            ),
+        });
+        return new Response(stream, { headers: AGUI_SSE_HEADERS });
       }
       if (action === 'toolApproval') {
         const results: Array<ToolApprovalResult & { toolCallId: string }> = [];

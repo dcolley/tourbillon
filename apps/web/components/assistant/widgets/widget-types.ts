@@ -3,8 +3,7 @@
  * Only compiled components are registered; nothing is authored or evaluated at runtime.
  */
 import type * as React from 'react';
-import type { z } from 'zod';
-import type { ParsedWidgetCall, WidgetFallbackReason } from '@tourbillon/shared/widgets';
+import type { ParsedWidgetCall, WidgetFallbackReason, WidgetFrontendTool, WidgetSpec } from '@tourbillon/shared/widgets';
 
 export type WidgetStatus = 'pending' | 'answered';
 
@@ -19,17 +18,12 @@ export interface WidgetComponentProps<P, A> {
   onAnswer?: (answer: A) => void;
 }
 
-export interface WidgetDefinition<P = any, A = any> {
-  name: string;
-  version: number;
-  /** Shown to the model when the widget is declared as a frontend tool. */
-  description: string;
-  propsSchema: z.ZodType<P>;
-  /** Present for interactive widgets: answers are validated before they go back to the run. */
-  answerSchema?: z.ZodType<A>;
+/**
+ * A widget spec (name, version, description, strict props / answer schemas; see
+ * @tourbillon/shared/widgets) paired with its compiled component.
+ */
+export interface WidgetDefinition<P = any, A = any> extends WidgetSpec<P, A> {
   component: React.ComponentType<WidgetComponentProps<P, A>>;
-  /** Declared to the agent as an AG-UI frontend tool (latest version only). */
-  frontendTool?: boolean;
 }
 
 export type WidgetResolution =
@@ -44,10 +38,6 @@ export type WidgetResolution =
     };
 
 /** AG-UI `Tool` shape (name, description, JSON Schema parameters). */
-export interface FrontendToolDefinition {
-  name: string;
-  description: string;
-  parameters: Record<string, unknown>;
-}
+export type FrontendToolDefinition = WidgetFrontendTool;
 
 export type WidgetWarn = (message: string, details: Record<string, unknown>) => void;

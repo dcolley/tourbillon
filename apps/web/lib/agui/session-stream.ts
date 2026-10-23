@@ -128,6 +128,8 @@ export interface AguiRunStreamOptions {
    * RUN_FINISHED / RUN_ERROR so the client knows its follow-up was not processed.
    */
   droppedQueuedTurns?: () => number;
+  /** Tool calls resumed by this run (announced by an earlier run); see AguiEventMapperOptions. */
+  resumedToolCallIds?: readonly string[];
 }
 
 export const AGUI_SSE_HEADERS = {
@@ -178,6 +180,7 @@ export function aguiRunStream(opts: AguiRunStreamOptions): ReadableStream<Uint8A
     threadId: opts.threadId,
     runId: opts.runId,
     mastraThreadId: opts.mastraThreadId,
+    resumedToolCallIds: opts.resumedToolCallIds,
   });
   const { session } = opts;
 

@@ -36,8 +36,8 @@ const picker: WidgetDefinition = {
   name: 'testPicker',
   version: 1,
   description: 'Test widget.',
-  propsSchema: z.object({ question: z.string().min(1), options: z.array(z.string()).min(2) }),
-  answerSchema: z.object({ choice: z.string() }),
+  propsSchema: z.strictObject({ question: z.string().min(1), options: z.array(z.string()).min(2) }),
+  answerSchema: z.strictObject({ choice: z.string() }),
   component: TestPicker,
   frontendTool: true,
 };
@@ -89,6 +89,20 @@ describe('WID-1 WidgetToolCall', () => {
     assert.equal(results.length, 1);
     assert.equal(results[0].toolResult, JSON.stringify({ widget: 'testPicker', version: 1, answer: { choice: 'Yes' } }));
     assert.equal(results[0].record.toolCallId, 'call-1');
+  });
+
+  it('only the first accepted answer is handed back while the card waits for the stored answer', () => {
+    const results: unknown[] = [];
+    render(
+      React.createElement(WidgetToolCall, {
+        registry,
+        toolCall: stubCall({ question: 'Ship today?', options: ['Yes', 'No'] }),
+        onAnswer: (r) => results.push(r),
+      }),
+    );
+    lastOnAnswer!({ choice: 'Yes' });
+    lastOnAnswer!({ choice: 'No' });
+    assert.equal(results.length, 1);
   });
 
   it('an answered widget renders locked with its answer and takes no further answers', () => {
@@ -145,6 +159,38 @@ describe('WID-1 FallbackToolCard', () => {
     assert.match(html, /weather/);
     assert.match(html, /\[redacted\]/);
     assert.doesNotMatch(html, /sk-not-shown/);
+  });
+
+  it('masks token-style keys at any depth', () => {
+    const html = renderToStaticMarkup(
+      React.createElement(FallbackToolCard, {
+        toolName: 't',
+        args: { token: 'tok-value-1', nested: { accessToken: 'tok-value-2', refresh_token: 'tok-value-3' }, query: 'shown' },
+      }),
+    );
+    assert.doesNotMatch(html, /tok-value-[123]/);
+    assert.equal(html.match(/\[redacted\]/g)?.length, 3);
+    assert.match(html, /shown/);
+  });
+
+  it('raw HTML in args is shown as text, never as markup', () => {
+    const hostile = '<img src=x onerror="alert(1)"><script>alert(2)</script>';
+    for (const args of [{ note: hostile }, JSON.stringify({ note: hostile })]) {
+      const html = renderToStaticMarkup(React.createElement(FallbackToolCard, { toolName: '<b>tool</b>', args }));
+      assert.doesNotMatch(html, /<img|<script|<b>/);
+      assert.match(html, /&lt;img src=x onerror=/);
+      assert.match(html, /&lt;b&gt;tool&lt;\/b&gt;/);
+    }
+  });
+
+  it('long arguments are truncated and oversized ones are not parsed or shown', () => {
+    const long = renderToStaticMarkup(React.createElement(FallbackToolCard, { toolName: 't', args: { text: 'y'.repeat(6000) } }));
+    assert.match(long, /… \(truncated\)/);
+    const longestRun = Math.max(...(long.match(/y+/g) ?? ['']).map((r) => r.length));
+    assert.ok(longestRun > 3900 && longestRun < 4000, String(longestRun));
+    const huge = renderToStaticMarkup(React.createElement(FallbackToolCard, { toolName: 't', args: 'z'.repeat(20 * 1024) }));
+    assert.match(huge, /arguments too large to show/);
+    assert.doesNotMatch(huge, /zzzz/);
   });
 
   it('handles missing name, no args and unreadable args', () => {
