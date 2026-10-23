@@ -2,8 +2,9 @@
  * UI-1 route smoke test for `/`, `/assistant` and `/dashboard`:
  * - the route files exist and nothing else claims `/` (a page directly in app/(assistant)/
  *   would collide with app/page.tsx);
- * - `/` stays public and redirects to the stored view; `/assistant` and `/dashboard` need the
- *   same board session (proxy) and both layouts use CompanyGate.
+ * - `/` stays public: the landing page signed out, a redirect to the stored view signed in;
+ *   `/assistant` and `/dashboard` need the same board session (proxy) and both layouts use
+ *   CompanyGate.
  */
 import { describe, it, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -39,10 +40,13 @@ describe('UI-1 view routes', () => {
     assert.ok(!existsSync(join(APP, '(dashboard)', 'page.tsx')), 'no second page for /');
   });
 
-  it('/ redirects client-side to the stored view', () => {
-    const src = readFileSync(join(APP, 'page.tsx'), 'utf8');
-    assert.match(src, /^'use client';/);
-    assert.match(src, /router\.replace\(homeRedirectPath\(\)\)/);
+  it('/ picks the view by board session: landing page signed out, stored view signed in', () => {
+    const page = readFileSync(join(APP, 'page.tsx'), 'utf8');
+    assert.doesNotMatch(page, /^'use client';/, 'server component: reads the session cookie');
+    assert.match(page, /<HomeView signedIn=\{await hasBoardSession\(\)\} \/>/);
+    const redirect = readFileSync(join(APP, '..', 'components', 'home-redirect.tsx'), 'utf8');
+    assert.match(redirect, /^'use client';/);
+    assert.match(redirect, /router\.replace\(homeRedirectPath\(\)\)/);
   });
 
   it('both view layouts use CompanyGate and never list companies without a board session', () => {
