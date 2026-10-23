@@ -44,6 +44,36 @@ describe('#105 safeNext (open redirect)', () => {
     assert.equal(safeNext('/agent/alice?tab=config#x'), '/agent/alice?tab=config#x');
     assert.equal(safeNext('/issue/A-1?next=%2F%2Fevil.com'), '/issue/A-1?next=%2F%2Fevil.com');
     assert.equal(safeNext('/a/../agent'), '/agent');
+    assert.equal(safeNext('/%2e/agent'), '/agent');
+    assert.equal(safeNext('/docs/a%5cb'), '/docs/a%5cb');
+  });
+
+  const normalisedNotSameSite = [
+    '/.//example.com',
+    '/a/..//example.com',
+    '/..//example.com',
+    '/%2e//example.com',
+    '/%2E%2E//example.com',
+    '/x/../..//example.com',
+    '/./%2e/..//example.com',
+    '/%5c/example.com',
+    '/%5C%5Cexample.com',
+    '/%2f/example.com',
+    '/.%2f/example.com',
+  ];
+  for (const v of normalisedNotSameSite) {
+    it(`rejects normalised paths that are not same-site: ${JSON.stringify(v)}`, () => {
+      assert.equal(safeNext(v), SAFE_NEXT_FALLBACK);
+      assert.equal(sameOriginPath(v, 'https://tb.example'), null);
+    });
+  }
+
+  it('the result is always a single-slash path that passes the check again', () => {
+    for (const v of ['/dashboard', '/a/../agent', '/x/./y/', '/%2e/agent', ...normalisedNotSameSite]) {
+      const out = safeNext(v);
+      assert.ok(out.startsWith('/') && !out.startsWith('//'), out);
+      assert.equal(safeNext(out), out);
+    }
   });
 
   it('client re-check uses the real origin', () => {

@@ -1,21 +1,10 @@
-import Link from 'next/link';
-import { Button } from '@/components/ui/button';
+import { HomeView } from '@/components/home-view';
+import { hasBoardSession } from '@/lib/company';
 
-export default function HomePage() {
-  return (
-    <main className="flex min-h-screen flex-col items-center justify-center gap-6 p-8">
-      <div className="space-y-2 text-center">
-        <h1 className="text-4xl font-bold tracking-tight">Tourbillon</h1>
-        <p className="text-lg text-muted-foreground">
-          Open-source AI agent orchestration — Mastra.ai + LM Studio
-        </p>
-      </div>
-      <div className="flex gap-4">
-        <Button render={<Link href="/dashboard" />}>Open Dashboard</Button>
-        <Button variant="outline" render={<a href="https://github.com/dcolley/tourbillon" target="_blank" rel="noopener noreferrer" />}>
-          GitHub
-        </Button>
-      </div>
-    </main>
-  );
+/**
+ * `/` stays public (proxy.ts). Signed out → the landing page as before; signed in (board
+ * session) → redirect to the stored view, default /assistant.
+ */
+export default async function HomePage() {
+  return <HomeView signedIn={await hasBoardSession()} />;
 }
