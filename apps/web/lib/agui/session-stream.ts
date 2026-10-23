@@ -15,6 +15,21 @@ export interface AguiSession {
   subscribe(listener: (event: AguiSourceEvent) => void): () => void;
   abort(): void;
   getCurrentRunId(): string | null | undefined;
+  /** Mastra: drops follow-ups still being prepared and the follow-up binding. */
+  cleanupFollowUpBinding?(): void;
+  /** Mastra: the session's follow-up queue. */
+  followUps?: { clear(): void };
+}
+
+/** Client gone: stop the run and drop any queued turns so nothing runs for a closed stream. */
+function abortAndDropQueued(session: AguiSession): void {
+  try {
+    session.followUps?.clear();
+    session.cleanupFollowUpBinding?.();
+  } catch {
+    /* best effort */
+  }
+  if (session.getCurrentRunId()) session.abort();
 }
 
 const continuationExpected = new WeakMap<object, number>();
@@ -52,6 +67,13 @@ export interface AguiRunStreamOptions {
   continuationTimeoutMs?: number;
   /** SSE comment keep-alive interval. */
   heartbeatMs?: number;
+  /** Called once when the stream closes for any reason (finish, error, client disconnect). */
+  onClose?: () => void;
+  /**
+   * Next turn queued on this run (AG-UI follow-up), started after the current turn completes. Queued
+   * turns that have not started when the stream closes are never started.
+   */
+  takeQueuedTurn?: () => (() => Promise<void>) | undefined;
 }
 
 export const AGUI_SSE_HEADERS = {
@@ -114,6 +136,17 @@ export function aguiRunStream(opts: AguiRunStreamOptions): ReadableStream<Uint8A
   let queuedFollowUps = 0;
   let onAbort: (() => void) | undefined;
 
+  let closeNotified = false;
+  const notifyClose = () => {
+    if (closeNotified) return;
+    closeNotified = true;
+    try {
+      opts.onClose?.();
+    } catch {
+      /* ignore */
+    }
+  };
+
   const clearFinishTimer = () => {
     if (finishTimer) clearTimeout(finishTimer);
     finishTimer = undefined;
@@ -142,6 +175,7 @@ export function aguiRunStream(opts: AguiRunStreamOptions): ReadableStream<Uint8A
         } catch {
           /* already closed */
         }
+        notifyClose();
       };
 
       const finish = (override?: Parameters<typeof mapper.finish>[0]) => {
@@ -172,6 +206,20 @@ export function aguiRunStream(opts: AguiRunStreamOptions): ReadableStream<Uint8A
           queuedFollowUps = typeof event.count === 'number' ? event.count : 0;
         } else if (event.type === 'agent_end') {
           running = false;
+          if (event.reason === 'complete' && opts.takeQueuedTurn) {
+            const next = opts.takeQueuedTurn();
+            if (next) {
+              // Keep the run open for the queued turn; start it once the finished turn has settled.
+              scheduleFinish(continuationTimeoutMs);
+              setTimeout(() => {
+                if (closed) return;
+                next().catch((err: unknown) => {
+                  finish({ error: err instanceof Error ? err.message : String(err) });
+                });
+              }, 0);
+              return;
+            }
+          }
           const restartExpected =
             (event.reason === 'aborted' && peekContinuation(session)) ||
             (event.reason === 'complete' && queuedFollowUps > 0);
@@ -182,7 +230,7 @@ export function aguiRunStream(opts: AguiRunStreamOptions): ReadableStream<Uint8A
       if (opts.signal) {
         onAbort = () => {
           if (closed) return;
-          if (session.getCurrentRunId()) session.abort();
+          abortAndDropQueued(session);
           // The client has gone; nothing more can be delivered.
           teardown();
         };
@@ -222,7 +270,8 @@ export function aguiRunStream(opts: AguiRunStreamOptions): ReadableStream<Uint8A
       if (heartbeat) clearInterval(heartbeat);
       unsubscribe?.();
       if (onAbort) opts.signal?.removeEventListener('abort', onAbort);
-      if (session.getCurrentRunId()) session.abort();
+      abortAndDropQueued(session);
+      notifyClose();
     },
   });
 }

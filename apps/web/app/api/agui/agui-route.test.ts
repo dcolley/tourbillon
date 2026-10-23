@@ -25,6 +25,9 @@ type Handler = (req: NextRequest, ctx: { params: Promise<{ agentId: string }> })
 
 const AGENT = { id: 'agent-a', urlKey: 'alice', name: 'Alice', companyId: 'company-a', modelId: 'm' };
 const DEFAULT_RESOURCE = 'company-company-a:chat:free';
+/** Server-pinned AG-UI session scope for agent-a. */
+const SCOPE = 'agui:agent-a';
+const SESSION_KEY = `${DEFAULT_RESOURCE}::${SCOPE}`;
 
 let authMode: 'ok' | 'no-company' | 'agent-token' = 'ok';
 let stub: StubAgentController;
@@ -77,10 +80,20 @@ async function readSse(res: Response): Promise<Ev[]> {
 /** Runs a turn with the official client against the route. */
 async function clientRun(
   threadId: string,
-  opts: { query?: string; forwardedProps?: unknown; onEvent?: (e: Ev, agent: HttpAgent) => void; message?: string } = {},
+  opts: {
+    query?: string;
+    forwardedProps?: unknown;
+    onEvent?: (e: Ev, agent: HttpAgent) => void;
+    message?: string;
+    noSeed?: boolean;
+  } = {},
 ) {
   const events: Ev[] = [];
   let failure: unknown;
+  if (!opts.noSeed) {
+    const seeder = await stub.createSession(DEFAULT_RESOURCE, 'seed-check');
+    if (!(await seeder.thread.getById({ threadId }))) await seedThread(threadId);
+  }
   const agent = new HttpAgent({
     url: `http://localhost/api/agui/alice${opts.query ?? ''}`,
     threadId,
@@ -114,6 +127,15 @@ async function clientRun(
     });
   return { events, failure };
 }
+
+/** Threads are created through the chat thread API (tagged to the agent); the AG-UI route never creates one. */
+async function seedThread(threadId: string, opts: { resourceId?: string; agentId?: string | null } = {}) {
+  const seeder = await stub.createSession(opts.resourceId ?? DEFAULT_RESOURCE, `seed-${threadId}`);
+  await seeder.thread.create({ id: threadId });
+  if (opts.agentId !== null) await seeder.thread.setSetting({ key: 'agentId', value: opts.agentId ?? AGENT.id });
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const types = (events: Ev[]) => events.map((e) => e.type);
 const text = (events: Ev[]) =>
@@ -269,12 +291,12 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
       assert.equal(controllerCalls.length, 1);
       assert.equal(controllerCalls[0].agent, AGENT);
       assert.deepEqual(controllerCalls[0].opts, { modelIdOverride: 'provider/model-x' });
-      assert.deepEqual(sessionCalls, [{ resourceId: DEFAULT_RESOURCE, scope: 'agui' }]);
+      assert.deepEqual(sessionCalls, [{ resourceId: DEFAULT_RESOURCE, scope: SCOPE }]);
       assert.deepEqual(heartbeatCalls, [
         { runId: 'chat-agent-a', companyId: 'company-a', agentId: 'agent-a', threadId: 'agui-thread-1' },
       ]);
       // The AG-UI thread is the Mastra memory thread in the company resource, tagged to the agent.
-      const session = sessions.get(`${DEFAULT_RESOURCE}::agui`);
+      const session = sessions.get(SESSION_KEY);
       assert.equal(session.thread.getId(), 'agui-thread-1');
       const thread = await session.thread.getById({ threadId: 'agui-thread-1' });
       assert.equal(thread.resourceId, DEFAULT_RESOURCE);
@@ -287,7 +309,7 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
       script = () => stubText('t', ['again']);
       const { events } = await clientRun('agui-thread-2', { message: 'second message' });
       assert.equal(text(events), 'again');
-      const session = sessions.get(`${DEFAULT_RESOURCE}::agui`);
+      const session = sessions.get(SESSION_KEY);
       assert.equal(session.thread.getId(), 'agui-thread-2');
       const stored = JSON.stringify(await session.thread.listMessages({ threadId: 'agui-thread-2' }));
       assert.match(stored, /please echo hi/);
@@ -298,7 +320,9 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
 
     it('dashboard context and session scope are honoured', async () => {
       script = () => stubText('t', ['ok']);
+      await seedThread('agui-thread-3', { resourceId: 'company-company-a:chat:issue:42' });
       await clientRun('agui-thread-3', {
+        noSeed: true,
         forwardedProps: {
           tourbillon: {
             resourceId: 'company-company-a:chat:issue:42',
@@ -307,7 +331,8 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
           },
         },
       });
-      assert.deepEqual(sessionCalls, [{ resourceId: 'company-company-a:chat:issue:42', scope: 'panel-1' }]);
+      // The client scope is a sub-scope of the server-pinned agent scope.
+      assert.deepEqual(sessionCalls, [{ resourceId: 'company-company-a:chat:issue:42', scope: `${SCOPE}:panel-1` }]);
       assert.match(promptText(stub.prompts[0].at(-1)), /\[Dashboard context\]/);
     });
 
@@ -321,7 +346,7 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
             status = -1;
             void request('alice', input('agui-thread-4')).then((r) => {
               status = r.status;
-              sessions.get(`${DEFAULT_RESOURCE}::agui`).abort();
+              sessions.get(SESSION_KEY).abort();
             });
           }
         },
@@ -337,7 +362,7 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
       await clientRun('agui-thread-5', {
         onEvent: (e, agent) => {
           if (e.type === 'RUN_STARTED') {
-            sessions.get(`${DEFAULT_RESOURCE}::agui`).subscribe((ev: any) => {
+            sessions.get(SESSION_KEY).subscribe((ev: any) => {
               if (ev.type === 'agent_end') ends.push(ev.reason);
             });
           }
@@ -381,7 +406,8 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
         assert.equal(failure, undefined);
         const ctl = await control!;
         assert.deepEqual(types(ctl), ['RUN_STARTED', 'CUSTOM', 'RUN_FINISHED']);
-        assert.deepEqual(ctl[1].value, { action, accepted: true });
+        // A follow-up on an open AG-UI run is queued on that run.
+        assert.deepEqual(ctl[1].value, action === 'followUp' ? { action, accepted: true, queued: 1 } : { action, accepted: true });
         assert.equal(types(events).filter((t) => t === 'RUN_FINISHED').length, 1);
         assert.ok(text(events).endsWith('second-turn'), text(events));
         assert.match(JSON.stringify(stub.prompts[1]), new RegExp(`${action} message`));
@@ -409,16 +435,18 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
 
     it('control for a thread the session is not on → 404', async () => {
       await clientRun('agui-thread-a');
+      await seedThread('agui-thread-b');
       const res = await request('alice', input('agui-thread-b', { forwardedProps: { tourbillon: { action: 'abort' } } }, ''));
       assert.equal(res.status, 404);
     });
 
     it('tool approval via forwardedProps and via AG-UI resume entries', async () => {
       await clientRun('agui-thread-approve');
-      const session = sessions.get(`${DEFAULT_RESOURCE}::agui`);
+      const session = sessions.get(SESSION_KEY);
       const decisions: unknown[] = [];
-      session.respondToToolApproval = async (args: unknown) => {
+      session.respondToToolApproval = (args: { toolCallId: string }) => {
         decisions.push(args);
+        return args.toolCallId === 'c1' ? { accepted: true } : { accepted: false, reason: 'not_pending' };
       };
       const a = await readSse(
         await request(
@@ -426,15 +454,150 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
           input('agui-thread-approve', { forwardedProps: { tourbillon: { action: 'toolApproval', toolCallId: 'c1', approved: true } } }, ''),
         ),
       );
-      assert.deepEqual(a[1].value, { action: 'toolApproval', accepted: true, toolCallIds: ['c1'] });
+      assert.deepEqual(a[1].value, {
+        action: 'toolApproval',
+        accepted: true,
+        toolCallIds: ['c1'],
+        results: [{ toolCallId: 'c1', accepted: true }],
+      });
       const b = await readSse(
         await request('alice', input('agui-thread-approve', { resume: [{ interruptId: 'c2', status: 'cancelled' }] }, '')),
       );
-      assert.deepEqual(b[1].value, { action: 'toolApproval', accepted: true, toolCallIds: ['c2'] });
+      // The Mastra result is passed through: nothing was pending for c2.
+      assert.deepEqual(b[1].value, {
+        action: 'toolApproval',
+        accepted: false,
+        toolCallIds: ['c2'],
+        results: [{ toolCallId: 'c2', accepted: false, reason: 'not_pending' }],
+      });
       assert.deepEqual(decisions, [
         { toolCallId: 'c1', decision: 'approve', requestContext },
         { toolCallId: 'c2', decision: 'decline', requestContext },
       ]);
+    });
+  });
+  describe('thread ownership on every request', () => {
+    it('a session already on another agent\'s thread cannot run or act on it', async () => {
+      await seedThread('bobs-current', { agentId: 'agent-b' });
+      // The pinned session for agent-a ends up bound to a thread of agent-b (e.g. it adopted the newest
+      // thread of the shared resource when it was created).
+      const session = await stub.createSession(DEFAULT_RESOURCE, SCOPE);
+      sessions.set(SESSION_KEY, session);
+      await session.thread.switch({ threadId: 'bobs-current' });
+      assert.equal(session.thread.getId(), 'bobs-current');
+
+      const run = await request('alice', input('bobs-current'));
+      assert.equal(run.status, 404);
+      for (const action of ['abort', 'steer', 'followUp'] as const) {
+        const res = await request('alice', input('bobs-current', { forwardedProps: { tourbillon: { action } } }, 'x'));
+        assert.equal(res.status, 404, action);
+      }
+      const approval = await request(
+        'alice',
+        input('bobs-current', { forwardedProps: { tourbillon: { action: 'toolApproval', toolCallId: 'c1', approved: true } } }, ''),
+      );
+      assert.equal(approval.status, 404);
+      assert.equal(stub.modelCalls, 0);
+    });
+
+    it('an untagged thread in the resource is refused', async () => {
+      await seedThread('untagged', { agentId: null });
+      assert.equal((await request('alice', input('untagged'))).status, 404);
+      assert.equal(stub.modelCalls, 0);
+    });
+
+    it('a client sessionScope stays inside the agent\'s pinned scope', async () => {
+      await seedThread('scoped', { agentId: 'agent-b' });
+      for (const sessionScope of ['agui', 'agui:agent-b', 'x']) {
+        sessionCalls.length = 0;
+        const res = await request('alice', input('scoped', { forwardedProps: { tourbillon: { sessionScope } } }));
+        assert.equal(res.status, 404, sessionScope);
+        assert.deepEqual(sessionCalls, [{ resourceId: DEFAULT_RESOURCE, scope: `${SCOPE}:${sessionScope}` }]);
+      }
+      assert.equal(stub.modelCalls, 0);
+    });
+
+    it('an unknown thread id → 404 and no thread is created', async () => {
+      const res = await request('alice', input('never-created'));
+      assert.equal(res.status, 404);
+      const probe = await stub.createSession(DEFAULT_RESOURCE, 'probe');
+      assert.equal(await probe.thread.getById({ threadId: 'never-created' }), null);
+      assert.equal(stub.modelCalls, 0);
+    });
+  });
+
+  describe('one run at a time', () => {
+    const slowScript = () => {
+      chunkDelayMs = 10;
+      script = () => stubText('t', Array.from({ length: 10 }, (_, i) => `w${i} `));
+    };
+
+    it('parallel runs on the same thread: exactly one is accepted', async () => {
+      slowScript();
+      await seedThread('race-1');
+      const responses = await Promise.all(Array.from({ length: 10 }, () => request('alice', input('race-1'))));
+      const statuses = responses.map((r) => r.status).sort();
+      assert.deepEqual(statuses, [200, 409, 409, 409, 409, 409, 409, 409, 409, 409]);
+      await Promise.all(responses.filter((r) => r.status === 200).map(readSse));
+      assert.equal(stub.modelCalls, 1);
+    });
+
+    it('parallel runs on the same thread from different session scopes: exactly one is accepted', async () => {
+      slowScript();
+      await seedThread('race-2');
+      const responses = await Promise.all(
+        ['p1', 'p2', 'p3', 'p4'].map((sessionScope) =>
+          request('alice', input('race-2', { forwardedProps: { tourbillon: { sessionScope } } })),
+        ),
+      );
+      assert.deepEqual(responses.map((r) => r.status).sort(), [200, 409, 409, 409]);
+      await Promise.all(responses.filter((r) => r.status === 200).map(readSse));
+      assert.equal(stub.modelCalls, 1);
+    });
+
+    it('parallel runs on different threads of one session: exactly one is accepted', async () => {
+      slowScript();
+      await seedThread('race-3a');
+      await seedThread('race-3b');
+      const responses = await Promise.all([request('alice', input('race-3a')), request('alice', input('race-3b'))]);
+      assert.deepEqual(responses.map((r) => r.status).sort(), [200, 409]);
+      await Promise.all(responses.filter((r) => r.status === 200).map(readSse));
+    });
+
+    it('the claim is released when the stream closes, so the next run is accepted', async () => {
+      script = () => stubText('t', ['one']);
+      await seedThread('race-4');
+      const first = await request('alice', input('race-4'));
+      assert.equal(first.status, 200);
+      await readSse(first);
+      const second = await request('alice', input('race-4'));
+      assert.equal(second.status, 200);
+      await readSse(second);
+    });
+
+    it('client disconnect drops queued follow-ups', async () => {
+      chunkDelayMs = 20;
+      script = (call) =>
+        call === 1 ? stubText('t1', Array.from({ length: 30 }, (_, i) => `w${i} `)) : stubText('t2', ['queued-turn']);
+      let queued: Promise<Response> | undefined;
+      let disconnected = false;
+      await clientRun('agui-thread-drop', {
+        onEvent: (e, agent) => {
+          if (e.type === 'TEXT_MESSAGE_CONTENT' && !queued) {
+            queued = request('alice', input('agui-thread-drop', { forwardedProps: { tourbillon: { action: 'followUp' } } }, 'later'));
+            void queued.then(async (r) => {
+              assert.equal(r.status, 200);
+              await sleep(60);
+              disconnected = true;
+              agent.abortRun();
+            });
+          }
+        },
+      });
+      const until = Date.now() + 3000;
+      while (!disconnected && Date.now() < until) await sleep(10);
+      await sleep(500);
+      assert.equal(stub.modelCalls, 1, 'the queued follow-up must not run after the stream closed');
     });
   });
 });

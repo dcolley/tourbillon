@@ -49,6 +49,16 @@ export interface ParsedAguiRequest {
   toolDecisions: AguiToolDecision[];
 }
 
+/**
+ * Session scope is pinned server-side to the agent: AG-UI sessions stay apart from the assistant
+ * view's REST sessions and from other agents' sessions. A client `sessionScope` only picks a
+ * sub-scope inside it.
+ */
+export function aguiSessionScope(agent: { id: string }, clientScope?: string): string {
+  const base = `agui:${agent.id}`;
+  return clientScope ? `${base}:${clientScope}` : base;
+}
+
 export class AguiInputError extends Error {
   constructor(message: string) {
     super(message);
