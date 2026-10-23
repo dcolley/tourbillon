@@ -35,6 +35,8 @@ export const AGUI_CUSTOM = {
   /** Queued follow-ups that will not run (run aborted, failed or ended first); value `{ count }`. */
   followUpDropped: 'tourbillon.follow_up_dropped',
   control: 'tourbillon.control',
+  /** OBS-1: the run's trace, right after RUN_STARTED; value `{ traceId, traceUrl? }` (traceUrl only when Phoenix UI is configured). */
+  trace: 'tourbillon.trace',
 } as const;
 
 function str(value: unknown): string | undefined {
