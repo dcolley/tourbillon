@@ -28,7 +28,13 @@ const RESOURCE_A = 'company-company-a:chat:free';
 let activeCompany: { id: string } | null = { id: 'company-a' };
 let controller: any;
 let sessions: Map<string, any>;
-const sessionCalls: Array<{ agentId: string; resourceId?: string; scope?: string; createInitialThread?: boolean }> = [];
+const sessionCalls: Array<{
+  agentId: string;
+  resourceId?: string;
+  scope?: string;
+  createInitialThread?: boolean;
+  threadId?: string;
+}> = [];
 const loaderCalls: string[] = [];
 let viewer = 'user-1';
 /** When set, session.thread.list() returns every resource's threads (as a broader storage query would). */
@@ -120,6 +126,7 @@ let agentsGET: (req: NextRequest) => Promise<Response>;
 let threadsGET: Handler;
 let threadsPOST: Handler;
 let threadPATCH: Handler;
+let threadGET: Handler;
 let resetThreadCreateLimitForTests: () => void;
 let threadsLib: typeof import('../../../lib/assistant/threads');
 
@@ -133,6 +140,10 @@ const ctx = (params: Record<string, string>) => ({ params: Promise.resolve(param
 
 async function list(agentId: string, query = ''): Promise<{ status: number; body: Json }> {
   const res = await threadsGET(req(`/api/assistant/agents/${agentId}/threads${query}`), ctx({ agentId }));
+  return { status: res.status, body: (await res.json()) as Json };
+}
+async function getThread(agentId: string, threadId: string): Promise<{ status: number; body: Json }> {
+  const res = await threadGET(req(`/api/assistant/agents/${agentId}/threads/${threadId}`), ctx({ agentId, threadId }));
   return { status: res.status, body: (await res.json()) as Json };
 }
 async function patch(agentId: string, threadId: string, body: unknown): Promise<{ status: number; body: Json }> {
@@ -260,14 +271,34 @@ describe('UI-2 assistant sidebar API', () => {
           getChatSession: async (
             _c: unknown,
             agent: { id: string },
-            opts: { resourceId?: string; scope?: string; createInitialThread?: boolean },
+            opts: {
+              resourceId?: string;
+              scope?: string;
+              createInitialThread?: boolean;
+              threadId?: string;
+              tags?: Record<string, string>;
+            },
           ) => {
             sessionCalls.push({
               agentId: agent.id,
               resourceId: opts.resourceId,
               scope: opts.scope,
               createInitialThread: opts.createInitialThread,
+              ...(opts.threadId ? { threadId: opts.threadId } : {}),
             });
+            if (opts.threadId) {
+              // Same arguments as lib/chat/registry.ts getChatSession for a session opened on a thread id.
+              return watched(
+                await controller.createSession({
+                  resourceId: opts.resourceId,
+                  id: opts.threadId,
+                  ownerId: controller.id,
+                  tags: opts.tags,
+                  scope: opts.scope,
+                  threadId: opts.threadId,
+                }),
+              );
+            }
             // Same default as the controller: create an empty thread unless told not to.
             return watched(await session(opts.resourceId!, opts.scope!, opts.createInitialThread !== false));
           },
@@ -277,7 +308,7 @@ describe('UI-2 assistant sidebar API', () => {
     };
     ({ GET: agentsGET } = await import('./agents/route'));
     ({ GET: threadsGET, POST: threadsPOST } = (await import('./agents/[agentId]/threads/route')) as any);
-    ({ PATCH: threadPATCH } = (await import('./agents/[agentId]/threads/[threadId]/route')) as any);
+    ({ PATCH: threadPATCH, GET: threadGET } = (await import('./agents/[agentId]/threads/[threadId]/route')) as any);
     ({ resetThreadCreateLimitForTests } = await import('../../../lib/assistant/create-limit'));
     threadsLib = await import('../../../lib/assistant/threads');
   });
@@ -407,6 +438,22 @@ describe('UI-2 assistant sidebar API', () => {
       assert.equal((await s.thread.getById({ threadId: 'bobs' })).title, 'Bob plan');
     });
 
+    it('GET one thread: the agent’s own thread; anything outside its view → 404', async () => {
+      const own = await getThread('alice', 'own-old');
+      assert.equal(own.status, 200);
+      assert.equal(own.body.thread.id, 'own-old');
+      assert.equal(own.body.thread.title, 'Weekly plan');
+      assert.equal(own.body.thread.agentId, 'agent-a');
+      for (const threadId of ['bobs', 'shared', 'issue-ctx', 'other-co', 'missing']) {
+        const r = await getThread('alice', threadId);
+        assert.equal(r.status, 404, threadId);
+        assert.deepEqual(r.body, { error: 'Thread not found' });
+      }
+      assert.equal((await getThread('xavier', 'own-old')).status, 404);
+      activeCompany = null;
+      assert.equal((await getThread('alice', 'own-old')).status, 400);
+    });
+
     it('invalid PATCH bodies → 400', async () => {
       for (const body of [{}, { title: '' }, { pinned: 'yes' }, { read: false }, { title: 'x', extra: 1 }, 'not json']) {
         assert.equal((await patch('alice', 'own-old', body)).status, 400, JSON.stringify(body));
@@ -433,6 +480,30 @@ describe('UI-2 assistant sidebar API', () => {
       const { body } = await list('alice');
       assert.equal(body.initialThreadId, thread.id);
       assert.deepEqual((await list('bob')).body.threads, []);
+    });
+
+    it('creating a thread leaves the shared assistant session on its thread; the one-off session is removed', async () => {
+      await seedThread({ id: 'busy', title: 'Busy', agentId: 'agent-a', turn: true });
+      await list('alice');
+      const shared = sessions.get(`${RESOURCE_A}::assistant`);
+      const before = shared.thread.getId();
+      assert.equal(before, 'busy');
+      const deleted: string[] = [];
+      const deleteSession = controller.deleteSession.bind(controller);
+      controller.deleteSession = async (o: { resourceId: string; scope?: string }) => {
+        deleted.push(o.scope ?? '');
+        return deleteSession(o);
+      };
+      sessionWrites.length = 0;
+      const r = await post('alice', { title: 'Second' });
+      assert.equal(r.status, 201);
+      assert.equal(shared.thread.getId(), before);
+      assert.ok(!sessionWrites.includes('switch'));
+      const create = sessionCalls.find((c) => c.threadId === r.body.thread.id);
+      assert.ok(create && create.scope?.startsWith(threadsLib.ASSISTANT_CREATE_SCOPE_PREFIX), JSON.stringify(sessionCalls));
+      assert.deepEqual(deleted, [create.scope]);
+      assert.equal(r.body.thread.title, 'Second');
+      assert.deepEqual((await list('alice')).body.threads.map((t: Json) => t.id), [r.body.thread.id, 'busy']);
     });
 
     it('rejects bad bodies and other companies’ agents', async () => {
