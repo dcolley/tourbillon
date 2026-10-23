@@ -38,6 +38,27 @@ describe('company selector returnTo', () => {
     ' /dashboard',
     'javascript:alert(1)',
   ];
+
+  const normalisedNotSameSite = [
+    '/.//example.com',
+    '/a/..//example.com',
+    '/..//example.com',
+    '/%2e//example.com',
+    '/%2E%2E//example.com',
+    '/x/../..//example.com',
+    '/.\\/example.com',
+    '/%5c/example.com',
+    '/%5C%5Cexample.com',
+    '/%2f/example.com',
+    '/.%2f/example.com',
+  ];
+  for (const value of normalisedNotSameSite) {
+    it(`rejects normalised paths that are not same-site: ${JSON.stringify(value)}`, () => {
+      assert.equal(resolveReturnTo(value), '/assistant');
+      storeView('control');
+      assert.equal(resolveReturnTo(value), '/dashboard');
+    });
+  }
   for (const value of notRelative) {
     it(`falls back to the stored view for ${JSON.stringify(value)}`, () => {
       assert.equal(resolveReturnTo(value), '/assistant');
@@ -57,5 +78,17 @@ describe('company selector returnTo', () => {
     const src = readFileSync(join(__dirname, '..', 'components', 'company-selector.tsx'), 'utf8');
     assert.match(src, /from '@\/lib\/company-return-to'/);
     assert.doesNotMatch(src, /function resolveReturnTo/);
+  });
+
+  it('every navigation in the company selector goes through resolveReturnTo', () => {
+    const src = readFileSync(join(__dirname, '..', 'components', 'company-selector.tsx'), 'utf8');
+    const navCalls = [...src.matchAll(/router\s*\.\s*(push|replace|prefetch)\s*\(([^)]*\)?)/g)];
+    assert.ok(navCalls.length >= 3, `expected the selector's router calls, found ${navCalls.length}`);
+    for (const [call, , arg] of navCalls) {
+      assert.match(arg, /^resolveReturnTo\(returnToParam\)$/, call);
+    }
+    assert.doesNotMatch(src, /\bredirect\s*\(/);
+    assert.doesNotMatch(src, /(window\.)?location\s*(\.\s*(assign|replace|href)|=)/);
+    assert.doesNotMatch(src, /<Link\b|href=\{\s*returnTo/);
   });
 });
