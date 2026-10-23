@@ -5,7 +5,7 @@ import {
   createChatRequestContext,
   resolveChatAgent,
 } from '@/lib/chat';
-import { chatErrorResponse, decodeResourceId, openChatRouteSession, assertChatSessionGuard, controlChatDisabledResponse } from '@/lib/chat/route-helpers';
+import { chatErrorResponse, decodeResourceId, openChatRouteSession, controlChatDisabledResponse } from '@/lib/chat/route-helpers';
 import { chatModelIdFromSearch } from '@/lib/chat/model-query';
 
 const bodySchema = z.object({
@@ -32,7 +32,6 @@ export async function POST(
       resourceId,
       scope: sessionScope,
     });
-    await assertChatSessionGuard(session, 'tool-approval');
     const requestContext = createChatRequestContext(agent);
     session.respondToToolApproval({
       toolCallId: body.toolCallId,

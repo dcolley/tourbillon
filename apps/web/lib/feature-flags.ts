@@ -15,11 +15,56 @@ export function isControlChatEnabled(): boolean {
 }
 
 /**
+ * The assistant (the AG-UI chat endpoint, /api/agui/[agentId]) is available unless
+ * ASSISTANT_ENABLED is exactly 'false'. Read on the server at request time.
+ */
+export function isAssistantAvailable(): boolean {
+  return process.env.ASSISTANT_ENABLED !== 'false';
+}
+
+/**
  * Server-side switch for the legacy Control Pane chat API (/api/chat/[agentId]/sessions/**).
- * Both CONTROL_CHAT_ENABLED (read on the server at request time) and the build-time
- * NEXT_PUBLIC_CONTROL_CHAT_ENABLED must be exactly 'true'; otherwise those routes answer 404.
- * Hiding the pane alone does not turn the routes off, so they check this on the server.
+ * On only when CONTROL_CHAT_ENABLED is exactly 'true', the build-time
+ * NEXT_PUBLIC_CONTROL_CHAT_ENABLED was 'true' at build, and the assistant is not available.
+ * While the assistant is available the legacy API stays off whatever its flags say (it can act on
+ * the same threads as assistant runs). Hiding the pane alone does not turn the routes off, so they
+ * check this on the server.
  */
 export function isControlChatServerEnabled(): boolean {
-  return process.env.CONTROL_CHAT_ENABLED === 'true' && isControlChatEnabled();
+  return process.env.CONTROL_CHAT_ENABLED === 'true' && isControlChatEnabled() && !isAssistantAvailable();
+}
+
+/**
+ * Startup notes about the legacy Control Pane chat flags. They name the variables only, never
+ * their values. Empty when no legacy flag is set.
+ */
+export function legacyControlChatStartupWarnings(): string[] {
+  const server = process.env.CONTROL_CHAT_ENABLED === 'true';
+  const build = isControlChatEnabled();
+  if (!server && !build) return [];
+  const prefix = '[control-chat]';
+  if (isAssistantAvailable()) {
+    return [
+      `${prefix} Legacy Control Pane chat flags are set but ignored while the assistant is available: ` +
+        'the legacy chat session API (/api/chat/<agent>/sessions/...) stays off (404). ' +
+        'It can only be used with ASSISTANT_ENABLED=false.',
+    ];
+  }
+  if (!server || !build) {
+    return [
+      `${prefix} The legacy chat session API needs both CONTROL_CHAT_ENABLED and ` +
+        'NEXT_PUBLIC_CONTROL_CHAT_ENABLED (at build time) set to "true"; it stays off (404).',
+    ];
+  }
+  return [
+    `${prefix} The assistant is off (ASSISTANT_ENABLED=false) and the legacy chat session API is on.`,
+  ];
+}
+
+/** Logs legacyControlChatStartupWarnings() once per process (called from instrumentation). */
+export function logLegacyControlChatStartupWarnings(log: (message: string) => void = console.warn): void {
+  const g = globalThis as { tourbillonControlChatStartupLogged?: boolean };
+  if (g.tourbillonControlChatStartupLogged) return;
+  g.tourbillonControlChatStartupLogged = true;
+  for (const message of legacyControlChatStartupWarnings()) log(message);
 }

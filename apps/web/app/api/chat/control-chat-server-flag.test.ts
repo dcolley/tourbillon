@@ -1,18 +1,15 @@
 /**
  * The legacy Control Pane chat session routes (/api/chat/[agentId]/sessions/**) are off on the
- * server unless CONTROL_CHAT_ENABLED and NEXT_PUBLIC_CONTROL_CHAT_ENABLED are both exactly 'true'.
- * Off: every handler answers 404 before resolving the agent. On: handlers run as before, and the
- * ones that change a run or a thread ask the registered session guard first (409 when it refuses).
+ * server unless CONTROL_CHAT_ENABLED and NEXT_PUBLIC_CONTROL_CHAT_ENABLED are both exactly 'true'
+ * AND the assistant is off (ASSISTANT_ENABLED=false). While the assistant is available they stay off
+ * whatever the legacy flags say. Off: every handler answers 404 before resolving the agent.
+ * On: handlers run as before.
  *
  * '@/lib/chat' is mocked at the registry boundary; the session is a recording fake.
  */
 import { describe, it, before, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { NextRequest } from 'next/server';
-import type { ChatSessionAction, ChatSessionGuard } from '@/lib/chat/route-helpers';
-
-// Loaded in before(), after '@/lib/chat' is mocked (route-helpers imports it).
-let setChatSessionGuard: (guard: ChatSessionGuard | null) => void;
 
 const env = process.env as Record<string, string | undefined>;
 type Handler = (req: NextRequest, ctx: { params: Promise<Record<string, string>> }) => Promise<Response>;
@@ -56,7 +53,7 @@ function fakeSession() {
   };
 }
 
-type Route = { name: string; method: string; path: string; body?: unknown; guard?: ChatSessionAction; threadId?: string; effect?: string };
+type Route = { name: string; method: string; path: string; body?: unknown; effect?: string };
 const ROUTES: Route[] = [
   { name: 'sessions', method: 'POST', path: '[agentId]/sessions/route', body: {} },
   { name: 'session', method: 'GET', path: '[agentId]/sessions/[resourceId]/route' },
@@ -64,14 +61,14 @@ const ROUTES: Route[] = [
   { name: 'threads GET', method: 'GET', path: '[agentId]/sessions/[resourceId]/threads/route' },
   { name: 'threads POST', method: 'POST', path: '[agentId]/sessions/[resourceId]/threads/route', body: {} },
   { name: 'thread messages', method: 'GET', path: '[agentId]/sessions/[resourceId]/threads/[threadId]/messages/route' },
-  { name: 'messages', method: 'POST', path: '[agentId]/sessions/[resourceId]/messages/route', body: { message: 'hi' }, guard: 'send', threadId: 't-1', effect: 'sendMessage' },
-  { name: 'follow-up', method: 'POST', path: '[agentId]/sessions/[resourceId]/follow-up/route', body: { message: 'hi' }, guard: 'follow-up', threadId: 't-1', effect: 'followUp' },
-  { name: 'steer', method: 'POST', path: '[agentId]/sessions/[resourceId]/steer/route', body: { message: 'hi' }, guard: 'steer', threadId: 't-1', effect: 'steer' },
-  { name: 'abort', method: 'POST', path: '[agentId]/sessions/[resourceId]/abort/route', guard: 'abort', threadId: 't-1', effect: 'abort' },
-  { name: 'tool-approval', method: 'POST', path: '[agentId]/sessions/[resourceId]/tool-approval/route', body: { toolCallId: 'c1', approved: false }, guard: 'tool-approval', threadId: 't-1', effect: 'respondToToolApproval' },
-  { name: 'thread switch', method: 'POST', path: '[agentId]/sessions/[resourceId]/thread/route', body: { threadId: 't-2' }, guard: 'switch-thread', threadId: 't-2', effect: 'thread.switch' },
-  { name: 'thread rename', method: 'PATCH', path: '[agentId]/sessions/[resourceId]/threads/[threadId]/route', body: { title: 'New' }, guard: 'rename-thread', threadId: 't-2', effect: 'thread.rename' },
-  { name: 'thread delete', method: 'DELETE', path: '[agentId]/sessions/[resourceId]/threads/[threadId]/route', guard: 'delete-thread', threadId: 't-2', effect: 'thread.delete' },
+  { name: 'messages', method: 'POST', path: '[agentId]/sessions/[resourceId]/messages/route', body: { message: 'hi' }, effect: 'sendMessage' },
+  { name: 'follow-up', method: 'POST', path: '[agentId]/sessions/[resourceId]/follow-up/route', body: { message: 'hi' }, effect: 'followUp' },
+  { name: 'steer', method: 'POST', path: '[agentId]/sessions/[resourceId]/steer/route', body: { message: 'hi' }, effect: 'steer' },
+  { name: 'abort', method: 'POST', path: '[agentId]/sessions/[resourceId]/abort/route', effect: 'abort' },
+  { name: 'tool-approval', method: 'POST', path: '[agentId]/sessions/[resourceId]/tool-approval/route', body: { toolCallId: 'c1', approved: false }, effect: 'respondToToolApproval' },
+  { name: 'thread switch', method: 'POST', path: '[agentId]/sessions/[resourceId]/thread/route', body: { threadId: 't-2' }, effect: 'thread.switch' },
+  { name: 'thread rename', method: 'PATCH', path: '[agentId]/sessions/[resourceId]/threads/[threadId]/route', body: { title: 'New' }, effect: 'thread.rename' },
+  { name: 'thread delete', method: 'DELETE', path: '[agentId]/sessions/[resourceId]/threads/[threadId]/route', effect: 'thread.delete' },
 ];
 
 const handlers = new Map<string, Handler>();
@@ -93,10 +90,12 @@ async function call(route: Route): Promise<Response> {
 const enable = () => {
   env.CONTROL_CHAT_ENABLED = 'true';
   env.NEXT_PUBLIC_CONTROL_CHAT_ENABLED = 'true';
+  env.ASSISTANT_ENABLED = 'false';
 };
 
-describe('legacy chat session routes: server-side flag and session guard', () => {
-  const saved = { a: env.CONTROL_CHAT_ENABLED, b: env.NEXT_PUBLIC_CONTROL_CHAT_ENABLED };
+describe('legacy chat session routes: server-side flag, off while the assistant is available', () => {
+  const KEYS = ['CONTROL_CHAT_ENABLED', 'NEXT_PUBLIC_CONTROL_CHAT_ENABLED', 'ASSISTANT_ENABLED'] as const;
+  const saved = Object.fromEntries(KEYS.map((k) => [k, env[k]]));
 
   before(async () => {
     const Module = require('module');
@@ -129,7 +128,6 @@ describe('legacy chat session routes: server-side flag and session guard', () =>
       return originalRequire.apply(this, arguments as unknown as [string]);
     };
     try {
-      ({ setChatSessionGuard } = await import('@/lib/chat/route-helpers'));
       for (const route of ROUTES) {
         const mod = await import(`./${route.path}`);
         handlers.set(route.name, mod[route.method] as Handler);
@@ -142,24 +140,24 @@ describe('legacy chat session routes: server-side flag and session guard', () =>
   beforeEach(() => {
     resolved = 0;
     calls = [];
-    delete env.CONTROL_CHAT_ENABLED;
-    delete env.NEXT_PUBLIC_CONTROL_CHAT_ENABLED;
-    setChatSessionGuard(null);
+    for (const k of KEYS) delete env[k];
   });
 
   afterEach(() => {
-    setChatSessionGuard(null);
-    if (saved.a === undefined) delete env.CONTROL_CHAT_ENABLED;
-    else env.CONTROL_CHAT_ENABLED = saved.a;
-    if (saved.b === undefined) delete env.NEXT_PUBLIC_CONTROL_CHAT_ENABLED;
-    else env.NEXT_PUBLIC_CONTROL_CHAT_ENABLED = saved.b;
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete env[k];
+      else env[k] = saved[k];
+    }
   });
 
   const offCases: Array<[string, Record<string, string>]> = [
     ['both unset', {}],
-    ['only the server flag', { CONTROL_CHAT_ENABLED: 'true' }],
-    ['only the build-time flag', { NEXT_PUBLIC_CONTROL_CHAT_ENABLED: 'true' }],
-    ['values other than "true"', { CONTROL_CHAT_ENABLED: '1', NEXT_PUBLIC_CONTROL_CHAT_ENABLED: 'TRUE' }],
+    ['both legacy flags on, assistant available (ASSISTANT_ENABLED unset)', { CONTROL_CHAT_ENABLED: 'true', NEXT_PUBLIC_CONTROL_CHAT_ENABLED: 'true' }],
+    ['both legacy flags on, ASSISTANT_ENABLED=true', { CONTROL_CHAT_ENABLED: 'true', NEXT_PUBLIC_CONTROL_CHAT_ENABLED: 'true', ASSISTANT_ENABLED: 'true' }],
+    ['both legacy flags on, ASSISTANT_ENABLED not exactly "false"', { CONTROL_CHAT_ENABLED: 'true', NEXT_PUBLIC_CONTROL_CHAT_ENABLED: 'true', ASSISTANT_ENABLED: 'FALSE' }],
+    ['assistant off, only the server flag', { CONTROL_CHAT_ENABLED: 'true', ASSISTANT_ENABLED: 'false' }],
+    ['assistant off, only the build-time flag', { NEXT_PUBLIC_CONTROL_CHAT_ENABLED: 'true', ASSISTANT_ENABLED: 'false' }],
+    ['assistant off, values other than "true"', { CONTROL_CHAT_ENABLED: '1', NEXT_PUBLIC_CONTROL_CHAT_ENABLED: 'TRUE', ASSISTANT_ENABLED: 'false' }],
   ];
   for (const [label, values] of offCases) {
     it(`off (${label}): every session route answers 404 without touching the agent or session`, async () => {
@@ -174,17 +172,7 @@ describe('legacy chat session routes: server-side flag and session guard', () =>
     });
   }
 
-  it('off: a registered guard is never consulted', async () => {
-    let asked = 0;
-    setChatSessionGuard(() => {
-      asked += 1;
-      return 'refused';
-    });
-    for (const route of ROUTES) assert.equal((await call(route)).status, 404, route.name);
-    assert.equal(asked, 0);
-  });
-
-  it('on: every session route runs (the agent is resolved, no flag 404)', async () => {
+  it('on (legacy flags on, assistant off): every session route runs (the agent is resolved, no flag 404)', async () => {
     enable();
     for (const route of ROUTES) {
       const before = resolved;
@@ -194,7 +182,7 @@ describe('legacy chat session routes: server-side flag and session guard', () =>
     }
   });
 
-  it('on, no guard registered: changing routes go through', async () => {
+  it('on (legacy flags on, assistant off): changing routes reach the session', async () => {
     enable();
     for (const route of ROUTES.filter((r) => r.effect)) {
       calls = [];
@@ -202,45 +190,5 @@ describe('legacy chat session routes: server-side flag and session guard', () =>
       assert.equal(res.status, 200, route.name);
       assert.ok(calls.includes(route.effect!), `${route.name} called ${route.effect} (got ${calls.join(',')})`);
     }
-  });
-
-  it('on, guard refuses: changing routes answer 409 and leave the run and thread alone', async () => {
-    enable();
-    const seen: Array<{ action: string; resourceId?: string; threadId?: string }> = [];
-    setChatSessionGuard((_session, ctx) => {
-      seen.push(ctx);
-      return 'This thread is waiting on another session';
-    });
-    for (const route of ROUTES) {
-      calls = [];
-      const res = await call(route);
-      if (route.guard) {
-        assert.equal(res.status, 409, route.name);
-        assert.deepEqual(await res.json(), { error: 'This thread is waiting on another session' }, route.name);
-        assert.ok(!calls.includes(route.effect!), `${route.name} did not call ${route.effect}`);
-      } else {
-        assert.ok(res.status < 400, `${route.name} (read/open) is not guarded: ${res.status}`);
-      }
-    }
-    assert.deepEqual(
-      seen,
-      ROUTES.filter((r) => r.guard).map((r) => ({ action: r.guard, resourceId: RES, threadId: r.threadId })),
-      'guard asked once per changing route, with the action, the resource and the thread acted on',
-    );
-  });
-
-  it('on, guard allows (async, empty result): changing routes go through', async () => {
-    enable();
-    let asked = 0;
-    setChatSessionGuard(async () => {
-      asked += 1;
-      return null;
-    });
-    for (const route of ROUTES.filter((r) => r.effect)) {
-      calls = [];
-      assert.equal((await call(route)).status, 200, route.name);
-      assert.ok(calls.includes(route.effect!), route.name);
-    }
-    assert.equal(asked, ROUTES.filter((r) => r.guard).length);
   });
 });

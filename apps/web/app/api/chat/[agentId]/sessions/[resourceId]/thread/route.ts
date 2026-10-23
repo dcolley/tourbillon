@@ -4,7 +4,7 @@ import {
   getOrCreateChatController,
   resolveChatAgent,
 } from '@/lib/chat';
-import { chatErrorResponse, decodeResourceId, openChatRouteSession, requireChatThread, assertChatSessionGuard, controlChatDisabledResponse } from '@/lib/chat/route-helpers';
+import { chatErrorResponse, decodeResourceId, openChatRouteSession, requireChatThread, controlChatDisabledResponse } from '@/lib/chat/route-helpers';
 import { chatModelIdFromSearch } from '@/lib/chat/model-query';
 
 const bodySchema = z.object({
@@ -32,7 +32,6 @@ export async function POST(
     });
 
     await requireChatThread(session, agent, resourceId, body.threadId);
-    await assertChatSessionGuard(session, 'switch-thread', body.threadId);
 
     if (session.thread.getId() !== body.threadId) {
       await session.thread.switch({ threadId: body.threadId });
