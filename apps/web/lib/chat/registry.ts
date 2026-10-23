@@ -16,6 +16,7 @@ import { and, eq } from 'drizzle-orm';
 import { getActiveCompany } from '@/lib/company';
 import { buildChatScopedApiKey, validateChatToken } from '@/lib/auth/chat-token';
 import { chatSessionIdForAgent } from '@tourbillon/shared/agent-token';
+import { ASSISTANT_THREAD_METADATA_KEYS } from '@/lib/assistant/sidebar';
 
 /** #110: re-mint chat tokens with less than this many seconds left. */
 const CHAT_TOKEN_REFRESH_SEC = 60 * 60;
@@ -203,6 +204,8 @@ export async function getChatSession(
     threadId?: string;
     tags?: Record<string, string>;
     scope?: string;
+    /** false: do not create an empty thread when the session has none to bind (default: create). */
+    createInitialThread?: boolean;
   },
 ): Promise<TourbillonChatSession> {
   const resourceId =
@@ -218,6 +221,7 @@ export async function getChatSession(
     scope: opts?.scope,
     threadId: opts?.threadId,
     requestContext: requestContext as never,
+    ...(opts?.createInitialThread === false ? { createInitialThread: false } : {}),
   });
 }
 
@@ -231,6 +235,7 @@ export function isReservedThreadMetadataKey(key: string): boolean {
     key === 'observationThreshold' ||
     key === 'reflectionThreshold' ||
     key === 'tokenUsage' ||
+    ASSISTANT_THREAD_METADATA_KEYS.includes(key) ||
     key.startsWith('modeModelId_')
   );
 }
