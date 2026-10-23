@@ -8,6 +8,7 @@ import {
   listDisabledLlmProviderIds,
   isLlmProviderEnabledForCompany,
   setCompanyLlmProviderEnabled,
+  resolveCompanyLlmProviderRow,
   type LlmProvider,
 } from '@tourbillon/db';
 import {
@@ -373,6 +374,33 @@ export async function getLlmProviderRecordById(id: string): Promise<LlmProviderR
   await ensureDefaultLlmProviders();
   const row = await getLlmProviderRowById(id);
   return row ? toLlmProviderRecord(row) : null;
+}
+
+/**
+ * PRV-1: id of the provider an agent in this company effectively uses. `providerId` null means
+ * the registry default. A provider switched off for the company moves to the company default.
+ * Returns null when nothing is configured (env path). Throws NoEnabledLlmProviderError when
+ * every provider is off for the company.
+ */
+export async function effectiveLlmProviderIdForCompany(
+  companyId: string,
+  providerId: string | null | undefined,
+): Promise<string | null> {
+  const requested = providerId || (await getDefaultLlmProviderRecord())?.id || null;
+  if (!requested) return null;
+  const { row } = await resolveCompanyLlmProviderRow(companyId, requested);
+  return row?.id ?? null;
+}
+
+/** PRV-1: provider a new agent in this company starts on (company default). */
+export async function getCompanyDefaultLlmProviderRecord(
+  companyId: string,
+): Promise<LlmProviderRecord | null> {
+  const registryDefault = await getDefaultLlmProviderRecord();
+  if (!registryDefault) return null;
+  const effectiveId = await effectiveLlmProviderIdForCompany(companyId, registryDefault.id);
+  if (!effectiveId || effectiveId === registryDefault.id) return registryDefault;
+  return (await getLlmProviderRecordById(effectiveId)) ?? registryDefault;
 }
 
 /**

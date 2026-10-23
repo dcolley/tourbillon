@@ -250,6 +250,93 @@ describe('company_llm_providers', () => {
       assert.equal(row.details.runId, 'run-1');
       assert.match(row.details.message, /Local studio is switched off.*Writer ran on Default gateway/);
     });
+
+    it('writes the fallback warning once per agent per provider change, not per run', async () => {
+      const fallback = (over: Record<string, unknown> = {}) =>
+        q.recordLlmProviderFallback(
+          {
+            companyId: 'co-a',
+            agentId: 'agent-1',
+            agentName: 'Writer',
+            from: { id: 'p-local', name: 'Local studio' },
+            to: { id: 'p-default', name: 'Default gateway' },
+            context: 'heartbeat',
+            ...over,
+          },
+          database,
+        );
+      const count = async () =>
+        (await database.select().from(schema.activityLog)).filter(
+          (r: { action: string }) => r.action === 'llm_provider.fallback',
+        ).length;
+
+      await q.setCompanyLlmProviderEnabled(
+        { companyId: 'co-a', providerId: 'p-local', enabled: false, actor },
+        database,
+      );
+      assert.equal(await fallback({ runId: 'run-1' }), true);
+      // Next heartbeat and chat turns: same agent, same from/to, no switch since: no new row.
+      assert.equal(await fallback({ runId: 'run-2' }), false);
+      assert.equal(await fallback({ context: 'chat' }), false);
+      assert.equal(await count(), 1);
+
+      // Another agent gets its own warning.
+      assert.equal(await fallback({ agentId: 'agent-2' }), true);
+
+      // The fallback target changes: new warning.
+      assert.equal(await fallback({ to: { id: 'p-cloud', name: 'Cloud' } }), true);
+      assert.equal(await fallback({ to: { id: 'p-cloud', name: 'Cloud' } }), false);
+
+      // The provider is switched back on and off again: one new warning, then quiet.
+      await q.setCompanyLlmProviderEnabled(
+        { companyId: 'co-a', providerId: 'p-local', enabled: true, actor },
+        database,
+      );
+      await q.setCompanyLlmProviderEnabled(
+        { companyId: 'co-a', providerId: 'p-local', enabled: false, actor },
+        database,
+      );
+      assert.equal(await fallback({ to: { id: 'p-cloud', name: 'Cloud' } }), true);
+      assert.equal(await fallback({ to: { id: 'p-cloud', name: 'Cloud' } }), false);
+      assert.equal(await count(), 4);
+    });
+
+    it('concurrent fallback writes for one agent produce one row', async () => {
+      const input = {
+        companyId: 'co-a',
+        agentId: 'agent-1',
+        from: { id: 'p-local', name: 'Local studio' },
+        to: { id: 'p-default', name: 'Default gateway' },
+        context: 'chat' as const,
+      };
+      const results = await Promise.all([
+        q.recordLlmProviderFallback(input, database),
+        q.recordLlmProviderFallback({ ...input, context: 'heartbeat' }, database),
+      ]);
+      assert.deepEqual(results.filter(Boolean).length, 1);
+    });
+
+    it('refuses a provider switched off for the company, naming it', async () => {
+      await q.setCompanyLlmProviderEnabled(
+        { companyId: 'co-a', providerId: 'p-local', enabled: false, actor },
+        database,
+      );
+      await assert.rejects(
+        () => q.assertLlmProviderEnabledForCompany('co-a', 'p-local', database),
+        (err: Error & { providerId?: string; providerName?: string }) => {
+          assert.equal(err.name, 'LlmProviderDisabledForCompanyError');
+          assert.equal(err.providerId, 'p-local');
+          assert.equal(err.providerName, 'Local studio');
+          assert.match(err.message, /"Local studio" is switched off for this company/);
+          return true;
+        },
+      );
+      // On for the company, on for another company, empty and unknown ids: no error.
+      await q.assertLlmProviderEnabledForCompany('co-a', 'p-default', database);
+      await q.assertLlmProviderEnabledForCompany('co-b', 'p-local', database);
+      await q.assertLlmProviderEnabledForCompany('co-a', null, database);
+      await q.assertLlmProviderEnabledForCompany('co-a', 'p-gone', database);
+    });
   });
 });
 

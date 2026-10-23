@@ -203,6 +203,8 @@ describe('#106 board-guarded routes', () => {
           deleteLlmProvider: async () => {},
           getLlmProviderRecordById: async (id2: string) => (id2 === 'prov-1' ? { id: 'prov-1' } : null),
           getDefaultLlmProviderRecord: async () => null,
+          isLlmProviderOnForCompany: async () => true,
+          effectiveLlmProviderIdForCompany: async () => null,
           llmProviderErrorBody: (err: Error) => ({ body: { error: err.message }, status: 400 }),
         };
       }

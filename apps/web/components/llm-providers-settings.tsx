@@ -174,7 +174,7 @@ export function LlmProvidersSettings({
     setStoredHeaderNames(provider.headerNames ?? Object.keys(provider.headers));
     setHeadersWriteOnly(Array.isArray(provider.headerNames));
     setModelSuggestions([]);
-    void fetch(`/api/models?providerId=${encodeURIComponent(provider.id)}`)
+    void fetch(`/api/models?providerId=${encodeURIComponent(provider.id)}&includeDisabled=1`)
       .then((res) => (res.ok ? res.json() : { models: [] }))
       .then((data: { models?: Array<{ id: string }> }) =>
         setModelSuggestions((data.models ?? []).map((m) => m.id)),
@@ -288,7 +288,7 @@ export function LlmProvidersSettings({
     setTestResult(null);
     setError(null);
     try {
-      const res = await fetch(`/api/models?providerId=${encodeURIComponent(id)}`);
+      const res = await fetch(`/api/models?providerId=${encodeURIComponent(id)}&includeDisabled=1`);
       const data = (await res.json()) as { models?: Array<{ id: string }>; error?: string };
       if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
       const count = data.models?.length ?? 0;

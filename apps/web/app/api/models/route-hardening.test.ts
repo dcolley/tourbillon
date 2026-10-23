@@ -71,6 +71,10 @@ describe('GET /api/models provider hardening', () => {
           listLlmProviderRows: async () => rows,
           getLlmProviderRowById: async (rid: string) => rows.find((r) => r.id === rid) ?? null,
           getDefaultLlmProviderRow: async () => rows.find((r) => r.isDefault) ?? null,
+          resolveCompanyLlmProviderRow: async (_c: string, pid: string | null) => ({
+            row: rows.find((r) => r.id === pid) ?? null,
+            fallbackFrom: null,
+          }),
           db: {
             query: { agents: { findFirst: async () => agent } },
             insert: () => ({
@@ -93,6 +97,7 @@ describe('GET /api/models provider hardening', () => {
         return {
           requireBoardIdentity: async () => ({ ok: true, value: true }),
           requireBoardCompany: async () => ({ ok: true, value: { id: 'co-1' } }),
+          activeBoardCompanyOrNull: async () => null,
         };
       }
       return originalRequire.apply(this, arguments as unknown as [string]);

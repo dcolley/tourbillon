@@ -5,7 +5,8 @@
  * provider here instead of reading `agents.provider_id` directly:
  * - provider on for the company → used as before;
  * - provider off → the company default (falls back per `chooseCompanyLlmProvider`), with a
- *   warning in the activity log when `recordWarning` is set (one per run / chat session);
+ *   warning in the activity log when `recordWarning` is set (written once per agent per
+ *   provider change, not per run or chat turn; see `recordLlmProviderFallback`);
  * - nothing on → `NoEnabledLlmProviderError` (callers fail the run with its message).
  * Agents without a provider keep the existing env / registry-default path.
  */
@@ -31,7 +32,7 @@ export type ResolveAgentProviderOptions = {
 
 export type ResolveAgentProviderDeps = {
   resolve?: typeof resolveCompanyLlmProviderRow;
-  record?: typeof recordLlmProviderFallback;
+  record?: (...args: Parameters<typeof recordLlmProviderFallback>) => Promise<unknown>;
   warn?: (line: string) => void;
 };
 

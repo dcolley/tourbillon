@@ -5,7 +5,7 @@
  * so companies created before PRV-1 (and companies nobody has configured) see every provider.
  * Provider level only: per-model switches are a later story (PRV-2).
  */
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, sql } from 'drizzle-orm';
 import type { PgDatabase, PgQueryResultHKT } from 'drizzle-orm/pg-core';
 import { db } from './client';
 import type * as schema from './schema/index';
@@ -223,7 +223,56 @@ export async function resolveCompanyLlmProviderRow(
   }
 }
 
-/** Activity warning when a run moved off a provider that is switched off for the company. */
+/** Text used wherever a save onto a switched-off provider is refused. */
+export function llmProviderDisabledForCompanyMessage(providerName: string): string {
+  return `The LLM provider "${providerName}" is switched off for this company. Pick another provider, or switch it on in Settings → LLM providers.`;
+}
+
+/** Thrown when an agent would be saved onto a provider that is switched off for its company. */
+export class LlmProviderDisabledForCompanyError extends Error {
+  readonly companyId: string;
+  readonly providerId: string;
+  readonly providerName: string;
+
+  constructor(companyId: string, providerId: string, providerName: string) {
+    super(llmProviderDisabledForCompanyMessage(providerName));
+    this.name = 'LlmProviderDisabledForCompanyError';
+    this.companyId = companyId;
+    this.providerId = providerId;
+    this.providerName = providerName;
+  }
+}
+
+/**
+ * Refuse a provider that is switched off for the company.
+ * No-op for an empty id or an id that does not exist (existing behaviour for those).
+ */
+export async function assertLlmProviderEnabledForCompany(
+  companyId: string,
+  providerId: string | null | undefined,
+  database: CompanyLlmProviderDb = defaultDb,
+): Promise<void> {
+  if (!providerId) return;
+  const [provider] = await database
+    .select({ id: llmProviders.id, name: llmProviders.name })
+    .from(llmProviders)
+    .where(eq(llmProviders.id, providerId))
+    .limit(1);
+  if (!provider) return;
+  if (await isLlmProviderEnabledForCompany(companyId, providerId, database)) return;
+  throw new LlmProviderDisabledForCompanyError(companyId, provider.id, provider.name);
+}
+
+const FALLBACK_ACTION = 'llm_provider.fallback';
+const TOGGLE_ACTIONS = ['llm_provider.enabled_for_company', 'llm_provider.disabled_for_company'];
+
+/**
+ * Activity warning when a run moved off a provider that is switched off for the company.
+ *
+ * Written once per agent per provider change, not once per run or chat turn: skipped when the
+ * agent's latest warning has the same from/to providers and the `from` provider has not been
+ * switched on or off for the company since. Returns true when a row was written.
+ */
 export async function recordLlmProviderFallback(
   input: {
     companyId: string;
@@ -235,24 +284,65 @@ export async function recordLlmProviderFallback(
     runId?: string | null;
   },
   database: CompanyLlmProviderDb = defaultDb,
-): Promise<void> {
-  await database.insert(activityLog).values({
-    companyId: input.companyId,
-    actorType: 'system',
-    actorId: 'llm-provider-resolver',
-    actorName: 'Provider check',
-    action: 'llm_provider.fallback',
-    entityType: 'agent',
-    entityId: input.agentId,
-    details: {
-      level: 'warning',
-      message: `${input.from.name} is switched off for this company; ${input.agentName ?? 'the agent'} ran on ${input.to.name} instead.`,
-      fromProviderId: input.from.id,
-      fromProviderName: input.from.name,
-      toProviderId: input.to.id,
-      toProviderName: input.to.name,
-      context: input.context,
-      ...(input.runId ? { runId: input.runId } : {}),
-    },
+): Promise<boolean> {
+  return database.transaction(async (tx) => {
+    // Serialise concurrent chat and heartbeat runs for the same agent.
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`llm_provider.fallback:${input.agentId}`}))`);
+
+    const [last] = await tx
+      .select({ createdAt: activityLog.createdAt, details: activityLog.details })
+      .from(activityLog)
+      .where(
+        and(
+          eq(activityLog.companyId, input.companyId),
+          eq(activityLog.action, FALLBACK_ACTION),
+          eq(activityLog.entityType, 'agent'),
+          eq(activityLog.entityId, input.agentId),
+        ),
+      )
+      .orderBy(desc(activityLog.createdAt))
+      .limit(1);
+
+    if (last) {
+      const details = (last.details ?? {}) as { fromProviderId?: unknown; toProviderId?: unknown };
+      const samePair = details.fromProviderId === input.from.id && details.toProviderId === input.to.id;
+      if (samePair) {
+        const [toggled] = await tx
+          .select({ id: activityLog.id })
+          .from(activityLog)
+          .where(
+            and(
+              eq(activityLog.companyId, input.companyId),
+              inArray(activityLog.action, TOGGLE_ACTIONS),
+              eq(activityLog.entityType, 'llm_provider'),
+              eq(activityLog.entityId, input.from.id),
+              gte(activityLog.createdAt, last.createdAt),
+            ),
+          )
+          .limit(1);
+        if (!toggled) return false;
+      }
+    }
+
+    await tx.insert(activityLog).values({
+      companyId: input.companyId,
+      actorType: 'system',
+      actorId: 'llm-provider-resolver',
+      actorName: 'Provider check',
+      action: FALLBACK_ACTION,
+      entityType: 'agent',
+      entityId: input.agentId,
+      details: {
+        level: 'warning',
+        message: `${input.from.name} is switched off for this company; ${input.agentName ?? 'the agent'} ran on ${input.to.name} instead.`,
+        fromProviderId: input.from.id,
+        fromProviderName: input.from.name,
+        toProviderId: input.to.id,
+        toProviderName: input.to.name,
+        context: input.context,
+        ...(input.runId ? { runId: input.runId } : {}),
+      },
+    });
+    return true;
   });
 }
