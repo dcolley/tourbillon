@@ -1,5 +1,5 @@
 {
-  "id": "2602da46-bced-4839-be48-b57eb052f4ec",
+  "id": "c47c1c20-a868-4cf4-94cb-5d04ba14d552",
   "prevId": "71fda83d-f6e0-4a3c-b313-ec873d81546d",
   "version": "7",
   "dialect": "postgresql",
@@ -108,6 +108,106 @@
           ]
         }
       },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.company_llm_providers": {
+      "name": "company_llm_providers",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "provider_id": {
+          "name": "provider_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "enabled": {
+          "name": "enabled",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "updated_by": {
+          "name": "updated_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "company_llm_providers_company_provider_uidx": {
+          "name": "company_llm_providers_company_provider_uidx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "provider_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "company_llm_providers_company_id_companies_id_fk": {
+          "name": "company_llm_providers_company_id_companies_id_fk",
+          "tableFrom": "company_llm_providers",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "company_llm_providers_provider_id_llm_providers_id_fk": {
+          "name": "company_llm_providers_provider_id_llm_providers_id_fk",
+          "tableFrom": "company_llm_providers",
+          "tableTo": "llm_providers",
+          "columnsFrom": [
+            "provider_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
@@ -2474,113 +2574,6 @@
           ]
         }
       },
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.assistant_thread_pins": {
-      "name": "assistant_thread_pins",
-      "schema": "",
-      "columns": {
-        "user_key": {
-          "name": "user_key",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "company_id": {
-          "name": "company_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "agent_id": {
-          "name": "agent_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "thread_id": {
-          "name": "thread_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "assistant_thread_pins_user_agent_idx": {
-          "name": "assistant_thread_pins_user_agent_idx",
-          "columns": [
-            {
-              "expression": "user_key",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "company_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "agent_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "assistant_thread_pins_company_id_companies_id_fk": {
-          "name": "assistant_thread_pins_company_id_companies_id_fk",
-          "tableFrom": "assistant_thread_pins",
-          "tableTo": "companies",
-          "columnsFrom": [
-            "company_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "assistant_thread_pins_agent_id_agents_id_fk": {
-          "name": "assistant_thread_pins_agent_id_agents_id_fk",
-          "tableFrom": "assistant_thread_pins",
-          "tableTo": "agents",
-          "columnsFrom": [
-            "agent_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {
-        "assistant_thread_pins_user_key_thread_id_pk": {
-          "name": "assistant_thread_pins_user_key_thread_id_pk",
-          "columns": [
-            "user_key",
-            "thread_id"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false

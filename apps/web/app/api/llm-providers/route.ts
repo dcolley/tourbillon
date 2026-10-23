@@ -3,16 +3,18 @@ import {
   createLlmProvider,
   LlmProviderValidationError,
   llmProviderErrorBody,
-  listLlmProvidersPublic,
+  listLlmProvidersForCompany,
 } from '@/lib/llm-providers';
-import { requireBoardIdentity } from '@/lib/board-route-auth';
+import { activeBoardCompanyOrNull, requireBoardIdentity } from '@/lib/board-route-auth';
 
 // #106: provider config is instance-global and steers all agent LLM traffic: board only.
+// PRV-1: each provider carries `enabledForCompany` for the board's active company.
 export async function GET(req: NextRequest) {
   const auth = await requireBoardIdentity(req);
   if (!auth.ok) return auth.response;
   try {
-    const providers = await listLlmProvidersPublic();
+    const company = await activeBoardCompanyOrNull(req);
+    const providers = await listLlmProvidersForCompany(company?.id ?? null);
     return NextResponse.json({ providers });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Failed to list providers';

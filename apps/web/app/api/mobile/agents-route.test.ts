@@ -225,6 +225,9 @@ describe('Mobile API Routes - New JWT endpoints', () => {
           listLlmProvidersPublic: async () => [
             { id: 'provider-1', name: 'LM Studio', type: 'lmstudio', isDefault: true },
           ],
+          listLlmProvidersForCompanyPicker: async () => [
+            { id: 'provider-1', name: 'LM Studio', type: 'lmstudio', isDefault: true, enabledForCompany: true },
+          ],
         };
       }
 

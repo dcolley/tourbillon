@@ -3,7 +3,7 @@
  * No control-plane inline; same tools as heartbeat; dedicated thread storage.
  */
 import type { Agent as AgentRecord } from '@tourbillon/db';
-import { getLlmProviderRowById } from '@tourbillon/db';
+import { resolveAgentProviderRow } from './company-provider';
 import type {
   AgentController,
   AgentControllerMode,
@@ -195,9 +195,11 @@ export async function createChatAgentWithSkills(
     effectiveRecord.adapterType,
     effectiveRecord.adapterConfig,
   );
-  const providerRow = effectiveRecord.providerId
-    ? await getLlmProviderRowById(effectiveRecord.providerId)
-    : null;
+  // PRV-1: honour the company's provider switches; one activity warning per chat agent build.
+  const { row: providerRow } = await resolveAgentProviderRow(effectiveRecord, {
+    context: 'chat',
+    recordWarning: true,
+  });
   const providerRecord = providerRow ? llmProviderRowToRecord(providerRow) : null;
   const providerConfig = resolveModelProviderConfig(
     providerOverrides,
@@ -290,9 +292,7 @@ export async function createChatController(
     agentRecord.runtimeConfig as AgentRuntimeConfig,
   );
   const memory = await getAgentMemory(options?.companySettings ?? null, agentRecord.runtimeConfig as AgentRuntimeConfig);
-  const providerRow = agentRecord.providerId
-    ? await getLlmProviderRowById(agentRecord.providerId)
-    : null;
+  const { row: providerRow } = await resolveAgentProviderRow(agentRecord, { context: 'chat' });
   const providerRecord = providerRow ? llmProviderRowToRecord(providerRow) : null;
   const contextBudget = resolveAgentContextBudget(agentRecord, providerRecord, 'chat');
 

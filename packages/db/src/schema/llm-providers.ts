@@ -1,5 +1,6 @@
-import { pgTable, text, timestamp, boolean, jsonb } from 'drizzle-orm/pg-core';
+import { pgTable, text, timestamp, boolean, jsonb, uniqueIndex } from 'drizzle-orm/pg-core';
 import { createId } from '../utils';
+import { companies } from './companies';
 
 export const llmProviderTypes = [
   'lmstudio',
@@ -34,3 +35,29 @@ export const llmProviders = pgTable('llm_providers', {
 
 export type LlmProvider = typeof llmProviders.$inferSelect;
 export type NewLlmProvider = typeof llmProviders.$inferInsert;
+
+/**
+ * PRV-1: per-company on/off switch for a provider. No row means enabled, so existing companies
+ * keep every provider until someone switches one off.
+ */
+export const companyLlmProviders = pgTable(
+  'company_llm_providers',
+  {
+    id: text('id').primaryKey().$defaultFn(createId),
+    companyId: text('company_id')
+      .notNull()
+      .references(() => companies.id, { onDelete: 'cascade' }),
+    providerId: text('provider_id')
+      .notNull()
+      .references(() => llmProviders.id, { onDelete: 'cascade' }),
+    enabled: boolean('enabled').notNull().default(true),
+    updatedBy: text('updated_by'),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('company_llm_providers_company_provider_uidx').on(table.companyId, table.providerId),
+  ],
+);
+
+export type CompanyLlmProvider = typeof companyLlmProviders.$inferSelect;
+export type NewCompanyLlmProvider = typeof companyLlmProviders.$inferInsert;

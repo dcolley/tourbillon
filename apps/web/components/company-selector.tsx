@@ -8,12 +8,13 @@ import { CreateCompanyDialog } from '@/components/create-company-dialog';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { StatusBadge } from '@/lib/status-badges';
+import { resolveReturnTo } from '@/lib/company-return-to';
 import type { Company } from '@tourbillon/db';
 
 export function CompanySelector({ companies }: { companies: Company[] }) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const returnTo = searchParams.get('returnTo') || '/dashboard';
+  const returnToParam = searchParams.get('returnTo');
   const [createOpen, setCreateOpen] = useState(false);
   const [selecting, setSelecting] = useState(false);
 
@@ -24,15 +25,15 @@ export function CompanySelector({ companies }: { companies: Company[] }) {
     setSelecting(true);
     setStoredCompanyId(only.id);
     void syncActiveCompanyAction(only.id).then(() => {
-      router.push(returnTo);
+      router.push(resolveReturnTo(returnToParam));
     });
-  }, [companies, returnTo, router, selecting]);
+  }, [companies, returnToParam, router, selecting]);
 
   async function selectCompany(companyId: string) {
     setSelecting(true);
     setStoredCompanyId(companyId);
     await syncActiveCompanyAction(companyId);
-    router.push(returnTo);
+    router.push(resolveReturnTo(returnToParam));
   }
 
   async function handleCreated(companyId: string) {
@@ -40,7 +41,7 @@ export function CompanySelector({ companies }: { companies: Company[] }) {
     setStoredCompanyId(companyId);
     await syncActiveCompanyAction(companyId);
     setCreateOpen(false);
-    router.push(returnTo);
+    router.push(resolveReturnTo(returnToParam));
   }
 
   if (companies.length === 1 && selecting) {

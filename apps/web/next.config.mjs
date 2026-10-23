@@ -35,6 +35,9 @@ const nextConfig = {
   env: {
     TOURBILLON_BUILD_COMMIT: resolveGitCommit(),
     TOURBILLON_BUILD_DATE: process.env.TOURBILLON_BUILD_DATE ?? new Date().toISOString(),
+    // UI-0: always inline the Control Pane chat flag at build time (server and client bundles),
+    // so an unset value cannot differ between server render and browser. Rebuild to change it.
+    NEXT_PUBLIC_CONTROL_CHAT_ENABLED: process.env.NEXT_PUBLIC_CONTROL_CHAT_ENABLED ?? '',
   },
   ...(allowedDevOrigins?.length ? { allowedDevOrigins } : {}),
   transpilePackages: [

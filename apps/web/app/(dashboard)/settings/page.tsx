@@ -21,7 +21,7 @@ import {
 import { LlmProvidersSettings } from '@/components/llm-providers-settings';
 import { PasswordInput } from '@/components/ui/password-input';
 import { ObservationalMemorySettingsForm } from '@/components/observational-memory-settings-form';
-import { listLlmProvidersPublic } from '@/lib/llm-providers';
+import { listLlmProvidersForCompanyPicker } from '@/lib/llm-providers';
 import { actionError, actionSuccess, type ActionResult } from '@/lib/action-result';
 import { CompanySettingsTabs } from './company-settings-tabs';
 import { redactBaseURL } from '@/lib/provider-safety';
@@ -172,7 +172,11 @@ export default async function SettingsPage() {
   if (!company) return null;
   const integrationSettings = parseCompanySettings(company.settings);
   const omResolved = resolveObservationalMemoryModel(integrationSettings);
-  const providers = await listLlmProvidersPublic();
+  // PRV-1: pickers on this page offer the providers switched on for this company.
+  const providers = await listLlmProvidersForCompanyPicker(
+    company.id,
+    integrationSettings.observationalMemory?.providerId ?? null,
+  );
 
   const llm = resolveModelProviderConfig();
 
@@ -252,7 +256,7 @@ export default async function SettingsPage() {
           />
         }
         runtime={<RuntimeTab envSettings={envSettings} />}
-        providers={<ProvidersTab />}
+        providers={<ProvidersTab companyId={company.id} companyName={company.name} />}
       />
     </div>
   );
@@ -649,10 +653,10 @@ function RuntimeTab({ envSettings }: { envSettings: Array<{ label: string; value
   );
 }
 
-function ProvidersTab() {
+function ProvidersTab({ companyId, companyName }: { companyId: string; companyName: string }) {
   return (
     <section className="space-y-4">
-      <LlmProvidersSettings />
+      <LlmProvidersSettings companyId={companyId} companyName={companyName} />
     </section>
   );
 }

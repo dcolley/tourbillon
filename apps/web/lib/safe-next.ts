@@ -6,7 +6,10 @@
  *   1. require exactly one leading `/` (no `//`);
  *   2. reject any control character, whitespace or backslash anywhere;
  *   3. resolve against an origin and require the origin to be unchanged
- *      (`new URL(next, origin).origin === origin`), returning the normalised path.
+ *      (`new URL(next, origin).origin === origin`), returning the normalised path;
+ *   4. re-check the normalised path: dot segments (including `%2e`) can collapse to a
+ *      leading `//`, so the result must still start with exactly one `/` and must not
+ *      start with a backslash or an encoded slash/backslash, even once percent-decoded.
  * Anything else falls back to `/dashboard`.
  * Pure module: used by the /unlock server page and re-checked in the client form.
  */
@@ -16,6 +19,9 @@ export const SAFE_NEXT_FALLBACK = '/dashboard';
 const CHECK_ORIGIN = 'http://tourbillon.invalid';
 
 const UNSAFE_CHARS = /[\u0000-\u001F\u007F\\\s]/;
+
+/** A path that a browser or router could read as protocol-relative (`//`, `/\`, `/%2f`, `/%5c`). */
+const NOT_SINGLE_LEADING_SLASH = /^\/(?:[\/\\]|%2f|%5c)/i;
 
 /** Same-origin check for a relative path against a given origin; returns the normalised path or null. */
 export function sameOriginPath(next: string, origin: string): string | null {
@@ -29,7 +35,26 @@ export function sameOriginPath(next: string, origin: string): string | null {
     return null;
   }
   if (url.origin !== new URL(origin).origin) return null;
-  return url.pathname + url.search + url.hash;
+  const path = url.pathname;
+  if (!isSingleSlashPath(path)) return null;
+  // A later decode (router or server) must not turn the path into one that leaves the site either.
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(path);
+  } catch {
+    return null;
+  }
+  if (decoded !== path) {
+    const asSlashes = decoded.replace(/\\/g, '/').replace(/[\u0000-\u001F\u007F]/g, '');
+    if (!asSlashes.startsWith('/') || asSlashes.startsWith('//')) return null;
+    const again = new URL(asSlashes, origin);
+    if (again.origin !== url.origin || NOT_SINGLE_LEADING_SLASH.test(again.pathname)) return null;
+  }
+  return path + url.search + url.hash;
+}
+
+function isSingleSlashPath(path: string): boolean {
+  return path.startsWith('/') && !NOT_SINGLE_LEADING_SLASH.test(path) && !UNSAFE_CHARS.test(path);
 }
 
 export function safeNext(next: string | string[] | undefined | null): string {

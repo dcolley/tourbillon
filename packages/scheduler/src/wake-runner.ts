@@ -1,4 +1,4 @@
-import { db, agents, heartbeatRuns, companies, costEvents, issues, activityLog, approvals, getLlmProviderRowById } from '@tourbillon/db';
+import { db, agents, heartbeatRuns, companies, costEvents, issues, activityLog, approvals, type LlmProvider } from '@tourbillon/db';
 import { eq, and, sql, lt } from 'drizzle-orm';
 import {
   createDurableAgentWithSkills,
@@ -17,6 +17,7 @@ import {
   tripwireDetectorRegistry,
   runWithHeartbeatContext,
   registerKnownSecretValues,
+  resolveAgentProviderRow,
 } from '@tourbillon/mastra';
 import type { HeartbeatJobData, AgentRuntimeConfig } from '@tourbillon/shared';
 import {
@@ -417,9 +418,29 @@ async function runWake(
   const runTracer = agentTracer.child({ runId, taskId });
   const runStartedAt = new Date();
 
-  const providerRow = agentRecord.providerId
-    ? await getLlmProviderRowById(agentRecord.providerId)
-    : null;
+  // PRV-1: honour the company's provider switches. A provider switched off for this company
+  // falls back to the company default (activity warning, once per run); with nothing on, the
+  // run is created and then failed with a clear message below.
+  let providerRow: LlmProvider | null = null;
+  let providerFallbackFrom: LlmProvider | null = null;
+  let providerUnavailableError: string | null = null;
+  if (agentRecord.providerId) {
+    try {
+      const resolved = await resolveAgentProviderRow(agentRecord, {
+        context: 'heartbeat',
+        recordWarning: true,
+        runId,
+      });
+      providerRow = resolved.row;
+      providerFallbackFrom = resolved.fallbackFrom;
+    } catch (err) {
+      if (err instanceof Error && err.name === 'NoEnabledLlmProviderError') {
+        providerUnavailableError = err.message;
+      } else {
+        throw err;
+      }
+    }
+  }
   const providerRecord = providerRow ? toLlmProviderRecord(providerRow) : null;
   const providerConfig = resolveModelProviderConfig(
     modelProviderOverridesFromAgent(agentRecord.adapterType, agentRecord.adapterConfig),
@@ -459,8 +480,17 @@ async function runWake(
       approvalNote: wake.approvalNote,
       linkedIssueIds: wake.linkedIssueIds,
       ...(wake.resumeOfRunId ? { resumeOfRunId: wake.resumeOfRunId } : {}),
-      providerId: agentRecord.providerId ?? null,
+      providerId: providerRow?.id ?? agentRecord.providerId ?? null,
       providerName: providerRow?.name ?? providerConfig.providerName ?? providerConfig.provider,
+      ...(providerFallbackFrom
+        ? {
+            providerFallback: {
+              fromProviderId: providerFallbackFrom.id,
+              fromProviderName: providerFallbackFrom.name,
+              reason: 'disabled_for_company',
+            },
+          }
+        : {}),
       modelId: agentRecord.modelId ?? null,
     },
     startedAt: runStartedAt,
@@ -468,6 +498,12 @@ async function runWake(
   });
   runTracer.info('heartbeat run created');
   opts.onRunCreated?.(runId);
+
+  if (providerUnavailableError) {
+    runTracer.warn('failed: no LLM provider enabled for company', { providerId: agentRecord.providerId });
+    await recordHeartbeatFailure(runId, providerUnavailableError, companyId, agentId);
+    return { runId, status: 'failed', errorText: providerUnavailableError };
+  }
 
   if (assignedIssue && assignedIssue.assigneeAgentId !== agentId) {
     const errorText = `Task ${taskId} is assigned to agent ${assignedIssue.assigneeAgentId}, not ${agentId}`;
