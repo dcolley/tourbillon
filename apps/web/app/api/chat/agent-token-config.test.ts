@@ -37,7 +37,7 @@ describe('#110 /api/chat/* with no agent token secret', () => {
         return {
           ChatAgentError,
           resolveChatAgent: async () => agent,
-          chatResourceId: () => 'res-1',
+          chatResourceId: () => 'company-company-a:chat:free',
           chatContextFromTags: () => ({}),
           getOrCreateChatController: async () => ({ id: 'ctrl-1' }),
           // Mirrors registry.getChatSession → createChatRequestContext → getOrCreateChatApiKey.
@@ -74,13 +74,13 @@ describe('#110 /api/chat/* with no agent token secret', () => {
 
   const call = (name: string) => {
     const method = name.split(' ')[0];
-    const req = new NextRequest('http://localhost/api/chat/alice/sessions/res-1/thread', {
+    const req = new NextRequest('http://localhost/api/chat/alice/sessions/company-company-a%3Achat%3Afree/thread', {
       method,
       headers: { 'content-type': 'application/json', cookie: 'active_company_id=company-a' },
       ...(method === 'POST' ? { body: JSON.stringify({ threadId: 't-1' }) } : {}),
     });
     return routes[name](req, {
-      params: Promise.resolve({ agentId: 'alice', resourceId: 'res-1', threadId: 't-1' }),
+      params: Promise.resolve({ agentId: 'alice', resourceId: 'company-company-a:chat:free', threadId: 't-1' }),
     });
   };
 

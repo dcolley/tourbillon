@@ -2,12 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import {
   getOrCreateChatController,
-  getChatSession,
   resolveChatAgent,
   extractThreadTags,
   isReservedThreadMetadataKey,
 } from '@/lib/chat';
-import { chatErrorResponse, decodeResourceId } from '@/lib/chat/route-helpers';
+import { chatErrorResponse, decodeResourceId, openChatRouteSession } from '@/lib/chat/route-helpers';
 import { chatModelIdFromSearch } from '@/lib/chat/model-query';
 
 const createBodySchema = z.object({
@@ -38,7 +37,7 @@ export async function GET(
 
     const agent = await resolveChatAgent(agentKey);
     const controller = await getOrCreateChatController(agent, { modelIdOverride: chatModelIdFromSearch(req) });
-    const session = await getChatSession(controller, agent, {
+    const session = await openChatRouteSession(controller, agent, {
       resourceId,
       scope: sessionScope,
     });
@@ -120,13 +119,13 @@ export async function POST(
 
     const agent = await resolveChatAgent(agentKey);
     const controller = await getOrCreateChatController(agent, { modelIdOverride: chatModelIdFromSearch(req) });
-    const session = await getChatSession(controller, agent, {
+    const session = await openChatRouteSession(controller, agent, {
       resourceId,
       scope: sessionScope,
       tags: {
+        ...(body.tags ?? {}),
         kind: 'chat',
         agentId: agent.id,
-        ...(body.tags ?? {}),
       },
     });
 
@@ -135,10 +134,11 @@ export async function POST(
     });
 
     // Ensure tags are on metadata even if the session was created earlier without them.
+    // Ownership keys come last so request tags cannot reassign the thread to another agent.
     const metadata: Record<string, string> = {
+      ...(body.tags ?? {}),
       kind: 'chat',
       agentId: agent.id,
-      ...(body.tags ?? {}),
     };
     for (const [key, value] of Object.entries(metadata)) {
       await session.thread.setSetting({ key, value });

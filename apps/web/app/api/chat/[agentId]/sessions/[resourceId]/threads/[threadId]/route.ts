@@ -2,10 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import {
   getOrCreateChatController,
-  getChatSession,
   resolveChatAgent,
 } from '@/lib/chat';
-import { chatErrorResponse, decodeResourceId } from '@/lib/chat/route-helpers';
+import { chatErrorResponse, decodeResourceId, openChatRouteSession, requireChatThread } from '@/lib/chat/route-helpers';
 import { chatModelIdFromSearch } from '@/lib/chat/model-query';
 
 const renameBodySchema = z.object({
@@ -33,10 +32,12 @@ export async function PATCH(
     const controller = await getOrCreateChatController(agent, {
       modelIdOverride: chatModelIdFromSearch(req),
     });
-    const session = await getChatSession(controller, agent, {
+    const session = await openChatRouteSession(controller, agent, {
       resourceId,
       scope: sessionScope,
     });
+
+    await requireChatThread(session, agent, resourceId, threadId);
 
     const previousThreadId = session.thread.getId();
     if (previousThreadId !== threadId) {
@@ -78,10 +79,12 @@ export async function DELETE(
     const controller = await getOrCreateChatController(agent, {
       modelIdOverride: chatModelIdFromSearch(req),
     });
-    const session = await getChatSession(controller, agent, {
+    const session = await openChatRouteSession(controller, agent, {
       resourceId,
       scope: sessionScope,
     });
+
+    await requireChatThread(session, agent, resourceId, threadId);
 
     const deletedCurrent = session.thread.getId() === threadId;
     await session.thread.delete({ threadId });
