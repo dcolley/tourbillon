@@ -6,6 +6,8 @@
  */
 import {
   ASSISTANT_MAX_PINS_PER_AGENT,
+  ASSISTANT_THREAD_LIST_LIMIT,
+  checkAssistantThreadTitle,
   filterThreadsByTitle,
   groupSidebarAgents,
   recentThreads,
@@ -53,15 +55,8 @@ export const initialSidebarState: AssistantSidebarState = {
   pending: {},
 };
 
-/** Same rules as the API's title schema: trimmed, 1–200 characters, no control characters. */
-const CONTROL_CHARS = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/;
-export function validateThreadTitle(raw: string): { ok: true; title: string } | { ok: false; error: string } {
-  const title = raw.trim();
-  if (!title) return { ok: false, error: 'Title cannot be empty' };
-  if (title.length > 200) return { ok: false, error: 'Title is too long (200 characters max)' };
-  if (CONTROL_CHARS.test(title)) return { ok: false, error: 'Title must not contain control characters' };
-  return { ok: true, title };
-}
+/** The API's own title rule (shared with the server; see `checkAssistantThreadTitle`). */
+export const validateThreadTitle = checkAssistantThreadTitle;
 
 export const pinLimitMessage = () => `Pin limit reached (${ASSISTANT_MAX_PINS_PER_AGENT} threads per agent)`;
 
@@ -110,6 +105,24 @@ export function searchResults(state: AssistantSidebarState): AgentThreadRef[] {
 
 export function pinnedCount(state: AssistantSidebarState, agentId: string): number {
   return (state.threads[agentId]?.threads ?? []).filter((t) => t.pinned).length;
+}
+
+/**
+ * Whether the URL's selection (`?agent=&thread=`) is missing from the active company: an unknown
+ * agent, or a thread absent from the agent's complete list. Lists that hit the page size may
+ * hold more threads, so those never report a missing thread.
+ */
+export function selectionProblem(
+  state: AssistantSidebarState,
+  agentKey: string | null,
+  threadId: string | null,
+): 'agent-not-found' | 'thread-not-found' | null {
+  if (!agentKey || state.phase !== 'ready') return null;
+  const agent = state.agents.find((a) => a.urlKey === agentKey || a.id === agentKey);
+  if (!agent) return 'agent-not-found';
+  const list = state.threads[agent.id];
+  if (!threadId || list?.status !== 'ready' || list.threads.length >= ASSISTANT_THREAD_LIST_LIMIT) return null;
+  return list.threads.some((t) => t.id === threadId) ? null : 'thread-not-found';
 }
 
 // ---- store ----

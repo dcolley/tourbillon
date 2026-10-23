@@ -13,6 +13,7 @@ import {
   pinnedThreads,
   recentThreadRefs,
   searchResults,
+  selectionProblem,
   sidebarSections,
   validateThreadTitle,
 } from './sidebar-store';
@@ -97,6 +98,8 @@ async function loaded(o: FakeApiOpts, concurrency?: number) {
   return { store, ...fake, fake };
 }
 
+const c0 = () => '\u200B\u200B';
+
 describe('UI-2b assistant sidebar store', () => {
   describe('loading', () => {
     it("loads the company's agents, then each agent's threads (bounded parallelism)", async () => {
@@ -137,6 +140,58 @@ describe('UI-2b assistant sidebar store', () => {
       o.threads!.a = [thread('a1', 'a')];
       await store.loadThreads('a');
       assert.equal(store.getState().threads.a.status, 'ready');
+    });
+
+    it('a store disposed mid-load (company switch) never applies the late responses', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const fake = fakeApi({ agents: ['a', 'b', 'c', 'd'].map((id) => agent(id)), threads: { a: [thread('a1', 'a')] } });
+      const listAgents = fake.api.listAgents;
+      fake.api.listAgents = async () => {
+        await gate;
+        return listAgents();
+      };
+      const store = new AssistantSidebarStore({ api: fake.api, concurrency: 1 });
+      const before = store.getState();
+      const p = store.load();
+      const loading = store.getState();
+      store.dispose();
+      release();
+      await p;
+      assert.notEqual(loading, before);
+      assert.equal(store.getState(), loading, 'no state change after dispose');
+      assert.deepEqual(store.getState().agents, []);
+      assert.equal(fake.calls.filter((c) => c.startsWith('threads:')).length, 0, 'no thread lists requested after dispose');
+    });
+
+    it('disposing while thread lists load stops the remaining requests', async () => {
+      const fake = fakeApi({ agents: ['a', 'b', 'c', 'd'].map((id) => agent(id)) });
+      const store = new AssistantSidebarStore({ api: fake.api, concurrency: 1 });
+      const p = store.load();
+      await new Promise((r) => setTimeout(r, 1)); // agents loaded, first thread list in flight
+      store.dispose();
+      await p;
+      assert.ok(fake.calls.filter((c) => c.startsWith('threads:')).length <= 1, fake.calls.join());
+      assert.ok(!store.getState().threads.b, 'later agents untouched');
+    });
+
+    it('reloading drops the previous threads (no stale lists while the new ones load)', async () => {
+      const o: FakeApiOpts = { agents: [agent('a'), agent('gone')], threads: { a: [thread('a1', 'a')], gone: [thread('g1', 'gone')] } };
+      const fake = fakeApi(o);
+      const store = new AssistantSidebarStore({ api: fake.api });
+      await store.load();
+      o.agents = [agent('a')];
+      o.threads = { a: [thread('a2', 'a')] };
+      let sawStale = false;
+      const off = store.subscribe(() => {
+        const s = store.getState();
+        if (s.agents.length === 1 && (s.threads.a?.threads.some((t) => t.id === 'a1') || s.threads.gone)) sawStale = true;
+      });
+      await store.load();
+      off();
+      assert.equal(sawStale, false);
+      assert.deepEqual(Object.keys(store.getState().threads), ['a']);
+      assert.deepEqual(store.getState().threads.a.threads.map((t) => t.id), ['a2']);
     });
 
     it('dispose stops further updates', async () => {
@@ -236,6 +291,16 @@ describe('UI-2b assistant sidebar store', () => {
       assert.equal(await store.selectAgent('a'), '/assistant?agent=a-key&thread=a1');
     });
 
+    it('repeated New thread clicks while one is being created send one request', async () => {
+      const { store, calls } = await loaded({ agents: [agent('a')], threads: { a: [] } });
+      const [first, second, viaSelect] = await Promise.all([store.newThread('a'), store.newThread('a'), store.selectAgent('a')]);
+      assert.equal(first, '/assistant?agent=a-key&thread=new-1');
+      assert.equal(second, null);
+      assert.equal(viaSelect, null, 'select while creating does not create a second thread');
+      assert.equal(calls.filter((c) => c.startsWith('create')).length, 1);
+      assert.equal(store.getState().threads.a.threads.length, 1);
+    });
+
     it('new thread button adds a thread and opens it', async () => {
       const { store } = await loaded({ agents: [agent('a')], threads: { a: [thread('a1', 'a')] } });
       assert.equal(await store.newThread('a'), '/assistant?agent=a-key&thread=new-1');
@@ -264,6 +329,28 @@ describe('UI-2b assistant sidebar store', () => {
       }
       assert.ok(!calls.some((c) => c.startsWith('update')));
       assert.deepEqual(validateThreadTitle(' ok '), { ok: true, title: 'ok' });
+    });
+
+    it('bidi controls are refused locally (no request): U+202A–202E, U+2066–2069, U+200E, U+200F, U+061C', async () => {
+      const { store, calls } = await loaded({ agents: [agent('a')], threads: { a: [thread('a1', 'a')] } });
+      for (const c of ['\u202A', '\u202B', '\u202C', '\u202D', '\u202E', '\u2066', '\u2067', '\u2068', '\u2069', '\u200E', '\u200F', '\u061C']) {
+        assert.equal(await store.rename('a', 'a1', `abc${c}def`), false, c.codePointAt(0)!.toString(16));
+        assert.equal(store.getState().notice?.message, 'Title must not contain bidirectional text controls');
+        assert.equal(await store.rename('a', 'a1', `${c}abc`), false, 'at the start too');
+      }
+      assert.ok(!calls.some((c) => c.startsWith('update')));
+      assert.equal(store.getState().threads.a.threads[0].title, 'Thread a1');
+    });
+
+    it('zero-width characters are refused locally (no request): U+200B–200D, U+2060, U+FEFF', async () => {
+      const { store, calls } = await loaded({ agents: [agent('a')], threads: { a: [thread('a1', 'a')] } });
+      for (const c of ['\u200B', '\u200C', '\u200D', '\u2060', '\uFEFF']) {
+        assert.equal(await store.rename('a', 'a1', `abc${c}def`), false, c.codePointAt(0)!.toString(16));
+        assert.equal(store.getState().notice?.message, 'Title must not contain zero-width characters');
+        assert.equal(await store.rename('a', 'a1', `abc${c}`), false, 'at the end too (trim would drop U+FEFF)');
+      }
+      assert.equal(await store.rename('a', 'a1', c0()), false, 'a title of only zero-width characters');
+      assert.ok(!calls.some((c) => c.startsWith('update')));
     });
 
     it('API refusal (archived agent) → notice, title unchanged', async () => {
@@ -342,6 +429,23 @@ describe('UI-2b assistant sidebar store', () => {
       fail = true;
       assert.equal(await store.setPinned('a', 'p1', false), false);
       assert.equal(store.getState().threads.a.threads.find((t) => t.id === 'p1')!.pinned, true);
+    });
+  });
+
+  describe('selection not found', () => {
+    it('unknown agent; thread missing from a complete list; never for a full (paged) list', async () => {
+      const full = Array.from({ length: 50 }, (_, i) => thread(`f${i}`, 'b'));
+      const { store } = await loaded({ agents: [agent('a'), agent('b')], threads: { a: [thread('a1', 'a')], b: full } });
+      const s = store.getState();
+      assert.equal(selectionProblem(s, null, null), null);
+      assert.equal(selectionProblem(s, 'other-company-agent', 'x'), 'agent-not-found');
+      assert.equal(selectionProblem(s, 'a-key', null), null);
+      assert.equal(selectionProblem(s, 'a-key', 'a1'), null);
+      assert.equal(selectionProblem(s, 'a', 'a1'), null, 'agent id also accepted');
+      assert.equal(selectionProblem(s, 'a-key', 'foreign-thread'), 'thread-not-found');
+      assert.equal(selectionProblem(s, 'b-key', 'older-thread'), null, 'list may continue beyond the page');
+      assert.equal(selectionProblem({ ...s, phase: 'loading' }, 'nope', null), null, 'nothing reported while loading');
+      assert.equal(selectionProblem({ ...s, threads: { ...s.threads, a: { ...s.threads.a, status: 'loading' } } }, 'a-key', 'x'), null);
     });
   });
 

@@ -255,6 +255,26 @@ describe('UI-2b assistant sidebar view', () => {
     assert.deepEqual(calls, [['select', 'eng'], ['toggle', 'ceo'], ['new', 'eng'], ['open', 'eng', 't3', '/assistant?agent=eng-key&thread=t3']]);
   });
 
+  it('titles render as text, never as markup', () => {
+    const hostile = '<img src=x onerror="alert(1)"><script>alert(2)</script>';
+    const state = baseState({ threads: { ...baseState().threads, eng: ready([thread('t3', 'eng', { title: hostile })]) } });
+    for (const out of [html(viewProps(state, { expanded: new Set(['eng']) }).props), html(viewProps({ ...state, search: 'img' }).props)]) {
+      assert.ok(out.includes('&lt;img src=x onerror=&quot;alert(1)&quot;&gt;&lt;script&gt;'), out);
+      assert.doesNotMatch(out, /<img|<script/);
+    }
+    const agentState = baseState({ agents: [agent('x', { name: '<b>bold</b>' })], threads: {} });
+    assert.match(html(viewProps(agentState).props), /&lt;b&gt;bold&lt;\/b&gt;/);
+  });
+
+  it('selection not found: unknown agent or a thread missing from the list', () => {
+    const agentMissing = html(viewProps(baseState(), { currentAgentKey: 'someone-else', currentThreadId: 'x' }).props);
+    assert.match(agentMissing, /data-selection-problem="agent-not-found"[^>]*>That agent is not in this company/);
+    const threadMissing = html(viewProps(baseState(), { currentAgentKey: 'eng-key', currentThreadId: 'nope' }).props);
+    assert.match(threadMissing, /data-selection-problem="thread-not-found"[^>]*>That thread was not found for this agent/);
+    const fine = html(viewProps(baseState(), { currentAgentKey: 'eng-key', currentThreadId: 't3' }).props);
+    assert.doesNotMatch(fine, /data-selection-problem/);
+  });
+
   it('loading, load error with Retry, and no agents', () => {
     assert.match(html(viewProps({ ...initialSidebarState }).props), /Loading agents…/);
     const err = viewProps({ ...initialSidebarState, phase: 'error', loadError: 'No active company selected' });

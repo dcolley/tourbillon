@@ -14,6 +14,7 @@ import {
   pinnedThreads,
   recentThreadRefs,
   searchResults,
+  selectionProblem,
   sidebarSections,
   type AgentThreadRef,
   type AssistantSidebarState,
@@ -148,6 +149,7 @@ function ThreadRefList({ refs, props }: { refs: AgentThreadRef[]; props: Assista
 /** Stateless sidebar (tested with react-dom/server). */
 export function AssistantSidebarView(props: AssistantSidebarViewProps) {
   const { state } = props;
+  const problem = selectionProblem(state, props.currentAgentKey, props.currentThreadId);
   let body: React.ReactNode;
   if (state.phase === 'loading' && state.agents.length === 0) {
     body = <p className="px-2 text-sm text-muted-foreground">Loading agents…</p>;
@@ -225,6 +227,13 @@ export function AssistantSidebarView(props: AssistantSidebarViewProps) {
         value={state.search}
         onChange={(e) => props.onSearch(e.target.value)}
       />
+      {problem && (
+        <p role="status" className="rounded-md border p-2 text-xs text-muted-foreground" data-selection-problem={problem}>
+          {problem === 'agent-not-found'
+            ? 'That agent is not in this company. Pick an agent from the list.'
+            : 'That thread was not found for this agent. Pick a thread from the list.'}
+        </p>
+      )}
       {state.notice && (
         <div role="alert" className="flex items-start justify-between gap-2 rounded-md border border-destructive/40 p-2 text-xs" data-notice>
           <span>{state.notice.message}</span>
@@ -262,6 +271,17 @@ export function AssistantSidebar() {
   React.useEffect(() => {
     if (currentAgentId && current.thread && currentThreadLoaded) void store.markRead(currentAgentId, current.thread);
   }, [store, currentAgentId, current.thread, currentThreadLoaded]);
+  // A thread missing from the loaded list may be newer than the list (e.g. created by the chat
+  // view): reload that agent's threads once before reporting it as not found.
+  const problem = selectionProblem(state, current.agent, current.thread);
+  const recheckedRef = React.useRef(new Set<string>());
+  React.useEffect(() => {
+    if (problem !== 'thread-not-found' || !currentAgentId || !current.thread) return;
+    const key = `${currentAgentId}\u0000${current.thread}`;
+    if (recheckedRef.current.has(key)) return;
+    recheckedRef.current.add(key);
+    void store.loadThreads(currentAgentId);
+  }, [store, problem, currentAgentId, current.thread]);
   const shown = React.useMemo(() => {
     if (!currentAgentId || expanded.has(currentAgentId)) return expanded;
     return new Set([...expanded, currentAgentId]);

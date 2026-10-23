@@ -3,6 +3,29 @@
  * Pure helpers shared by the assistant API routes and the sidebar client (UI-2b).
  */
 
+import { BIDI_CONTROL_CHARS, findUnsafeChars, UNSAFE_CHAR_MESSAGES, ZERO_WIDTH_CHARS } from '@/lib/text/unsafe-chars';
+
+/** Threads returned per agent when no limit is given (newest activity first, pinned first). */
+export const ASSISTANT_THREAD_LIST_LIMIT = 50;
+
+/** Longest thread title (after trimming). */
+export const ASSISTANT_THREAD_TITLE_MAX = 200;
+
+/**
+ * Thread title rule shared by the assistant API (#155) and the sidebar (UI-2b): trimmed,
+ * 1–200 characters, no control characters, no bidi controls and no zero-width characters.
+ * Bidi and zero-width characters are refused even at the ends (trimming would drop U+FEFF only).
+ */
+export function checkAssistantThreadTitle(raw: string): { ok: true; title: string } | { ok: false; error: string } {
+  const title = raw.trim();
+  if (!title) return { ok: false, error: 'Title cannot be empty' };
+  if (title.length > ASSISTANT_THREAD_TITLE_MAX) return { ok: false, error: `Title is too long (${ASSISTANT_THREAD_TITLE_MAX} characters max)` };
+  const unsafe =
+    findUnsafeChars(title) ?? (BIDI_CONTROL_CHARS.test(raw) ? 'bidi' : ZERO_WIDTH_CHARS.test(raw) ? 'zero-width' : null);
+  if (unsafe) return { ok: false, error: `Title ${UNSAFE_CHAR_MESSAGES[unsafe]}` };
+  return { ok: true, title };
+}
+
 /** Most threads one user may pin per agent (pinned threads are loaded one by one). */
 export const ASSISTANT_MAX_PINS_PER_AGENT = 50;
 
