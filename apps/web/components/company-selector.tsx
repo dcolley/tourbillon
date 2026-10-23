@@ -8,13 +8,8 @@ import { CreateCompanyDialog } from '@/components/create-company-dialog';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { StatusBadge } from '@/lib/status-badges';
-import { homeRedirectPath } from '@/lib/view-preference';
+import { resolveReturnTo } from '@/lib/company-return-to';
 import type { Company } from '@tourbillon/db';
-
-/** UI-1: without an explicit returnTo, open the user's stored view (assistant by default). */
-function resolveReturnTo(returnToParam: string | null): string {
-  return returnToParam || homeRedirectPath();
-}
 
 export function CompanySelector({ companies }: { companies: Company[] }) {
   const router = useRouter();
