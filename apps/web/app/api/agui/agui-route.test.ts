@@ -460,9 +460,18 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
         toolCallIds: ['c1'],
         results: [{ toolCallId: 'c1', accepted: true }],
       });
+      // A dismissal for a call that is neither a pending approval nor a widget call is refused (400).
+      const unknown = await request('alice', input('agui-thread-approve', { resume: [{ interruptId: 'c3', status: 'cancelled' }] }, ''));
+      assert.equal(unknown.status, 400);
+      assert.equal((await unknown.json()).error, 'Unknown widget call');
+      // A decline for an approval the session lists as pending goes to Mastra (here it has just settled).
+      const approval = session.approval as { getToolCallIds: () => string[] };
+      const listed = approval.getToolCallIds;
+      approval.getToolCallIds = () => ['c2'];
       const b = await readSse(
         await request('alice', input('agui-thread-approve', { resume: [{ interruptId: 'c2', status: 'cancelled' }] }, '')),
       );
+      approval.getToolCallIds = listed;
       // The Mastra result is passed through: nothing was pending for c2.
       assert.deepEqual(b[1].value, {
         action: 'toolApproval',
