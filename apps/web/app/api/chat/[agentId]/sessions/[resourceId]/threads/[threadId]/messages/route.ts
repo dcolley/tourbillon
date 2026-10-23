@@ -1,10 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
   getOrCreateChatController,
-  getChatSession,
   resolveChatAgent,
 } from '@/lib/chat';
-import { chatErrorResponse, decodeResourceId } from '@/lib/chat/route-helpers';
+import { chatErrorResponse, decodeResourceId, openChatRouteSession, requireChatThread } from '@/lib/chat/route-helpers';
 import { chatModelIdFromSearch } from '@/lib/chat/model-query';
 
 /** List persisted messages for catch-up / hydrate. */
@@ -27,10 +26,12 @@ export async function GET(
 
     const agent = await resolveChatAgent(agentKey);
     const controller = await getOrCreateChatController(agent, { modelIdOverride: chatModelIdFromSearch(req) });
-    const session = await getChatSession(controller, agent, {
+    const session = await openChatRouteSession(controller, agent, {
       resourceId,
       scope: sessionScope,
     });
+
+    await requireChatThread(session, agent, resourceId, threadId);
 
     const messages = await session.thread.listMessages({
       threadId,

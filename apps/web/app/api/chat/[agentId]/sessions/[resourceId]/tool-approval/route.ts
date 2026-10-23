@@ -2,11 +2,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import {
   getOrCreateChatController,
-  getChatSession,
   createChatRequestContext,
   resolveChatAgent,
 } from '@/lib/chat';
-import { chatErrorResponse, decodeResourceId } from '@/lib/chat/route-helpers';
+import { chatErrorResponse, decodeResourceId, openChatRouteSession } from '@/lib/chat/route-helpers';
 import { chatModelIdFromSearch } from '@/lib/chat/model-query';
 
 const bodySchema = z.object({
@@ -27,7 +26,7 @@ export async function POST(
 
     const agent = await resolveChatAgent(agentKey);
     const controller = await getOrCreateChatController(agent, { modelIdOverride: chatModelIdFromSearch(req) });
-    const session = await getChatSession(controller, agent, {
+    const session = await openChatRouteSession(controller, agent, {
       resourceId,
       scope: sessionScope,
     });
