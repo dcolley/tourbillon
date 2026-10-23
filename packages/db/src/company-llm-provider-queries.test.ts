@@ -16,6 +16,13 @@ process.env.DATABASE_URL ??= 'postgres://user:pass@127.0.0.1:5432/unused';
 
 const MIGRATIONS = path.join(__dirname, 'migrations');
 const DOWN_0018 = path.join(__dirname, '..', 'rollback', '0018_slippery_justin_hammer.down.sql');
+// The rollback test runs against a database migrated only up to 0018: the migrator skips anything
+// at or before the newest recorded migration, so 0018 can only be re-applied while it is the latest.
+const WHEN_0018 = (
+  JSON.parse(readFileSync(path.join(MIGRATIONS, 'meta', '_journal.json'), 'utf8')) as {
+    entries: { tag: string; when: number }[];
+  }
+).entries.find((e) => e.tag === '0018_slippery_justin_hammer')!.when;
 
 type Queries = typeof import('./company-llm-provider-queries');
 type Schema = typeof import('./schema/index');
@@ -27,7 +34,7 @@ type Schema = typeof import('./schema/index');
  * extended protocol used by drizzle's PGlite migrator rejects; the postgres-js pool used in the
  * app runs unprepared, so it is unaffected.
  */
-async function migrateUp(client: PGlite): Promise<void> {
+async function migrateUp(client: PGlite, throughMillis = Infinity): Promise<void> {
   await client.exec(`
     create schema if not exists drizzle;
     create table if not exists drizzle.__drizzle_migrations (id serial primary key, hash text not null, created_at bigint);
@@ -38,6 +45,7 @@ async function migrateUp(client: PGlite): Promise<void> {
   const lastAt = last.rows[0]?.created_at ? Number(last.rows[0].created_at) : 0;
   for (const m of readMigrationFiles({ migrationsFolder: MIGRATIONS })) {
     if (m.folderMillis <= lastAt) continue;
+    if (m.folderMillis > throughMillis) break;
     for (const chunk of m.sql) {
       if (chunk.trim()) await client.exec(chunk);
     }
@@ -48,10 +56,10 @@ async function migrateUp(client: PGlite): Promise<void> {
   }
 }
 
-async function freshDb(schema: Schema) {
+async function freshDb(schema: Schema, throughMillis = Infinity) {
   const client = new PGlite();
   const database = drizzle(client, { schema });
-  await migrateUp(client);
+  await migrateUp(client, throughMillis);
   return { client, database };
 }
 
@@ -354,7 +362,7 @@ describe('migration 0018 (company_llm_providers)', () => {
 
   it('up, down, up again; existing data untouched', async () => {
     const schema = await import('./schema/index');
-    const { client, database } = await freshDb(schema);
+    const { client, database } = await freshDb(schema, WHEN_0018);
     try {
       assert.equal(await tableExists(client, 'company_llm_providers'), true);
       await database.insert(schema.companies).values({ id: 'c1', name: 'C', slug: 'c', issuePrefix: 'C' });
@@ -377,7 +385,7 @@ describe('migration 0018 (company_llm_providers)', () => {
       assert.equal(companies.rows.length, 1);
 
       // Up again through the normal migrator.
-      await migrateUp(client);
+      await migrateUp(client, WHEN_0018);
       assert.equal(await tableExists(client, 'company_llm_providers'), true);
       const rows = await client.query('select * from company_llm_providers');
       assert.equal(rows.rows.length, 0);
