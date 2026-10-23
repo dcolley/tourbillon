@@ -3,6 +3,9 @@
  * Pure helpers shared by the assistant API routes and the sidebar client (UI-2b).
  */
 
+/** Most threads one user may pin per agent (pinned threads are loaded one by one). */
+export const ASSISTANT_MAX_PINS_PER_AGENT = 50;
+
 export type AssistantAgentStatus = 'idle' | 'running' | 'waiting';
 
 export interface AssistantAgent {
