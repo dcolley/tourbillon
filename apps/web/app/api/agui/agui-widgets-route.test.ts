@@ -179,7 +179,11 @@ describe('WID-1 widgets over AG-UI (round trip)', () => {
       }
       if (id === '@/lib/company' || id.endsWith('/lib/company')) return { ActiveCompanyError };
       if (id === '@tourbillon/mastra') {
-        return { runWithHeartbeatContext: async (_ctx: unknown, fn: () => Promise<unknown>) => fn() };
+        return {
+          runWithHeartbeatContext: async (_ctx: unknown, fn: () => Promise<unknown>) => fn(),
+          // OBS-1: tracing off here (trace ids per run are covered in agui-route.test.ts).
+          buildAssistantTracingOptions: () => undefined,
+        };
       }
       if (id.endsWith('/components/assistant/widgets/specs')) {
         return { assistantWidgetSpecs: [picker, internal], assistantWidgetSpecIndex: specIndex };
