@@ -19,6 +19,11 @@ export interface AguiEventMapperOptions {
   runId: string;
   /** When set, tool events tagged with a different Mastra thread id are ignored. */
   mastraThreadId?: string;
+  /**
+   * Tool calls already announced to the client by an earlier run (a resumed widget call): only their
+   * TOOL_CALL_RESULT is sent, no second TOOL_CALL_START / ARGS / END.
+   */
+  resumedToolCallIds?: readonly string[];
 }
 
 export interface AguiPendingInterrupt {
@@ -73,7 +78,7 @@ export function createAguiEventMapper(options: AguiEventMapperOptions) {
   /** Mastra message id → number of text / reasoning segments started (tool calls split text). */
   const segments = new Map<string, number>();
   /** Tool call ids with TOOL_CALL_START sent. */
-  const startedTools = new Set<string>();
+  const startedTools = new Set<string>(options.resumedToolCallIds ?? []);
   /** Tool call ids started but without TOOL_CALL_END yet. */
   const openTools = new Set<string>();
   const resultsSent = new Set<string>();

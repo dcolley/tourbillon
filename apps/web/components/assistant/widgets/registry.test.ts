@@ -6,6 +6,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { z } from 'zod';
 import { createWidgetRegistry, assistantWidgetRegistry, WidgetRegistryError } from './registry';
+import { assistantWidgetSpecs } from './specs';
 import type { WidgetDefinition } from './widget-types';
 
 const Noop = () => null;
@@ -14,22 +15,22 @@ const pickV1: WidgetDefinition = {
   name: 'pickOne',
   version: 1,
   description: 'Ask the user to pick one option.',
-  propsSchema: z.object({ question: z.string().min(1), options: z.array(z.string()).min(2) }),
-  answerSchema: z.object({ choice: z.string() }),
+  propsSchema: z.strictObject({ question: z.string().min(1), options: z.array(z.string()).min(2) }),
+  answerSchema: z.strictObject({ choice: z.string() }),
   component: Noop,
   frontendTool: true,
 };
 const pickV2: WidgetDefinition = {
   ...pickV1,
   version: 2,
-  propsSchema: z.object({ question: z.string().min(1), options: z.array(z.string()).min(2), multiple: z.boolean().default(false) }),
-  answerSchema: z.object({ choices: z.array(z.string()).min(1) }),
+  propsSchema: z.strictObject({ question: z.string().min(1), options: z.array(z.string()).min(2), multiple: z.boolean().default(false) }),
+  answerSchema: z.strictObject({ choices: z.array(z.string()).min(1) }),
 };
 const status: WidgetDefinition = {
   name: 'statusNote',
   version: 1,
   description: 'Display-only note.',
-  propsSchema: z.object({ text: z.string() }),
+  propsSchema: z.strictObject({ text: z.string() }),
   component: Noop,
 };
 
@@ -62,6 +63,59 @@ describe('WID-1 registry lookup', () => {
   it('the assistant registry starts empty, so every tool call falls back', () => {
     assert.deepEqual(assistantWidgetRegistry.list(), []);
     assert.deepEqual(assistantWidgetRegistry.frontendTools(), []);
+  });
+
+  it('versions above the call-side cap (1000) are refused at registration, so every version can resolve', () => {
+    assert.throws(() => createWidgetRegistry([{ ...pickV1, version: 1001 }]), /Invalid version/);
+    const reg = createWidgetRegistry([{ ...pickV1, version: 1000 }], { warn: () => {} });
+    assert.ok(reg.resolve(call('pickOne', { question: 'q', options: ['a', 'b'], widgetVersion: 1000 })).ok);
+  });
+
+  it('the client registry and the server specs list the same widgets (name, version, frontend tool)', () => {
+    const key = (d: { name: string; version: number; frontendTool?: boolean }) => `${d.name}@${d.version}:${Boolean(d.frontendTool)}`;
+    assert.deepEqual(assistantWidgetRegistry.list().map(key), [...assistantWidgetSpecs].map(key).sort());
+  });
+});
+
+describe('WID-1 strict widget schemas (rule)', () => {
+  it('props must be a z.strictObject; loose or non-object props are refused at registration', () => {
+    assert.throws(() => createWidgetRegistry([{ ...pickV1, propsSchema: z.object({ q: z.string() }) }]), /props \(root\): object must be strict/);
+    assert.throws(() => createWidgetRegistry([{ ...pickV1, propsSchema: z.looseObject({ q: z.string() }) }]), /must be strict/);
+    assert.throws(() => createWidgetRegistry([{ ...pickV1, propsSchema: z.string() as never }]), /must be a z\.strictObject/);
+  });
+
+  it('nested objects in props and answers must be strict too; records are allowed', () => {
+    assert.throws(
+      () => createWidgetRegistry([{ ...pickV1, propsSchema: z.strictObject({ meta: z.object({ a: z.string() }) }) }]),
+      /props meta: object must be strict/,
+    );
+    assert.throws(
+      () => createWidgetRegistry([{ ...pickV1, answerSchema: z.object({ choice: z.string() }) }]),
+      /answer \(root\): object must be strict/,
+    );
+    assert.throws(
+      () => createWidgetRegistry([{ ...pickV1, answerSchema: z.strictObject({ rows: z.array(z.object({ a: z.number() })) }) }]),
+      /answer rows\[?.*must be strict/,
+    );
+    const ok = createWidgetRegistry(
+      [{ ...pickV1, propsSchema: z.strictObject({ labels: z.record(z.string(), z.string()) }), answerSchema: z.enum(['a', 'b']) }],
+      { warn: () => {} },
+    );
+    assert.equal(ok.list().length, 1);
+  });
+
+  it('props may not use the reserved widgetVersion key', () => {
+    assert.throws(
+      () => createWidgetRegistry([{ ...pickV1, propsSchema: z.strictObject({ widgetVersion: z.number() }) }]),
+      /reserved key widgetVersion/,
+    );
+  });
+
+  it('strict props refuse unknown keys instead of stripping them', () => {
+    const { reg } = registry();
+    const r = reg.resolve(call('pickOne', { question: 'q', options: ['a', 'b'], injected: '<b>x</b>' }));
+    assert.equal(r.ok, false);
+    assert.equal(!r.ok && r.reason, 'invalid_props');
   });
 });
 
@@ -137,6 +191,15 @@ describe('WID-1 answers', () => {
       toolResult: JSON.stringify({ widget: 'pickOne', version: 1, answer: { choice: 'b' } }),
     });
     assert.deepEqual(reg.acceptAnswer(r, { choice: 3 }), { ok: false, issues: ['choice: invalid_type'] });
+  });
+
+  it('answers with unknown fields or over the size cap are refused (paths only, no values)', () => {
+    const { reg } = registry();
+    const r = reg.resolve(call('pickOne', { question: 'q', options: ['a', 'b'] }, 'call-8'));
+    assert.ok(r.ok);
+    assert.deepEqual(reg.acceptAnswer(r, { choice: 'b', extra: 'secret-extra' }), { ok: false, issues: ['(root): unrecognized_keys'] });
+    const big = reg.acceptAnswer(r, { choice: 'x'.repeat(17 * 1024) });
+    assert.deepEqual(big, { ok: false, issues: ['(root): too_big'] });
   });
 
   it('display-only widgets take no answers', () => {

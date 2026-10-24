@@ -8,7 +8,8 @@
     ".": "./src/index.ts",
     "./chat": "./src/chat.ts",
     "./mcp-tools": "./src/tools/mcp-tools.ts",
-    "./first-frame-capture": "./src/first-frame-capture.ts"
+    "./first-frame-capture": "./src/first-frame-capture.ts",
+    "./widget-tools": "./src/tools/widget-tools.ts"
   },
   "scripts": {
     "test": "node --import tsx --test src/*.test.ts src/**/*.test.ts"
