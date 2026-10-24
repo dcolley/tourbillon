@@ -1,0 +1,10 @@
+{
+  "spec": "hitl/response/v0",
+  "requestId": "req_01JB7CONTRACT",
+  "status": "answered",
+  "answer": "approve",
+  "decidedBy": { "kind": "human", "id": "usr_01JB7ALEX" },
+  "decidedAt": "2026-10-24T14:32:10Z",
+  "signature": null,
+  "activity": { "presentedAt": "2026-10-24T14:20:03Z", "items": [] }
+}

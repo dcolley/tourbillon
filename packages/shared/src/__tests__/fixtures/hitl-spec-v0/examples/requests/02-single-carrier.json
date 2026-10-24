@@ -1,0 +1,29 @@
+{
+  "spec": "hitl/request/v0",
+  "question": "Which carrier should ship the 14 kg replacement unit?",
+  "answerType": "single",
+  "options": [
+    {
+      "value": "dpd",
+      "label": "DPD next day",
+      "description": "£18.40, tracked, signature"
+    },
+    {
+      "value": "rm_tracked48",
+      "label": "Royal Mail Tracked 48",
+      "description": "£11.95, 2-3 days"
+    },
+    {
+      "value": "evri",
+      "label": "Evri",
+      "description": "£8.10, 3-5 days"
+    }
+  ],
+  "recommended": {
+    "value": "dpd",
+    "reason": "Customer has waited 9 days already."
+  },
+  "requester": {
+    "agentId": "agent_support_01"
+  }
+}

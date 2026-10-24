@@ -1,0 +1,34 @@
+{
+  "spec": "hitl/request/v0",
+  "question": "Which environments should release 2.14.0 go to?",
+  "answerType": "multi",
+  "options": [
+    {
+      "value": "staging",
+      "label": "Staging"
+    },
+    {
+      "value": "eu-prod",
+      "label": "EU production"
+    },
+    {
+      "value": "us-prod",
+      "label": "US production"
+    }
+  ],
+  "bounds": {
+    "minItems": 1,
+    "maxItems": 3
+  },
+  "default": [
+    "staging"
+  ],
+  "risk": {
+    "level": "high",
+    "reversible": true
+  },
+  "requester": {
+    "agentId": "agent_release_01",
+    "runId": "run_01JB7D9P"
+  }
+}

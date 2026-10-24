@@ -1,0 +1,41 @@
+{
+  "spec": "hitl/request/v0",
+  "idempotencyKey": "idem_01JB7REFUND48213",
+  "question": "Issue a £240 refund for order 48213?",
+  "answerType": "binary",
+  "options": [
+    {
+      "value": "approve",
+      "label": "Approve refund"
+    },
+    {
+      "value": "reject",
+      "label": "Reject"
+    }
+  ],
+  "recommended": {
+    "value": "approve",
+    "reason": "Courier confirmed the parcel lost. First claim on this account."
+  },
+  "reasonRequired": [
+    "reject"
+  ],
+  "deadline": "2026-10-26T17:00:00Z",
+  "onExpiry": "expire",
+  "risk": {
+    "level": "medium",
+    "reversible": false
+  },
+  "context": {
+    "markdown": "Order 48213, £240.00, paid by card on 12 Oct. Courier case closed as lost on 22 Oct."
+  },
+  "action": {
+    "name": "payments.refund",
+    "argsHash": "3JpyPhLigM57uuDvKQHsqHzjptRU2fzGjk0VW-MemH8"
+  },
+  "requester": {
+    "agentId": "agent_support_01",
+    "runId": "run_01JB7R2K",
+    "onBehalfOf": "support@example.com"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "spec": "hitl/request/v0",
+  "question": "What is your dog's name?",
+  "answerType": "text",
+  "bounds": {
+    "minLength": 1,
+    "maxLength": 40
+  },
+  "requester": {
+    "agentId": "agent_onboarding_01"
+  }
+}

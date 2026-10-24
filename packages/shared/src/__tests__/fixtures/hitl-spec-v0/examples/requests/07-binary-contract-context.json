@@ -1,0 +1,48 @@
+{
+  "spec": "hitl/request/v0",
+  "question": "Sign off the Q4 supplier contract renewal?",
+  "answerType": "binary",
+  "options": [
+    {
+      "value": "approve",
+      "label": "Sign off"
+    },
+    {
+      "value": "reject",
+      "label": "Send back"
+    }
+  ],
+  "reasonRequired": [
+    "reject"
+  ],
+  "context": {
+    "markdown": "Renewal at £42,000/yr, up 6%. Termination notice moves from 90 to 60 days.",
+    "links": [
+      {
+        "ref": "lnk_terms",
+        "url": "https://suppliers.example.com/terms/2027",
+        "label": "Supplier standard terms 2027",
+        "mustOpen": true
+      }
+    ],
+    "attachments": [
+      {
+        "ref": "att_contract",
+        "name": "renewal-v3.pdf",
+        "mediaType": "application/pdf",
+        "size": 184320,
+        "sha256": "lkH6Og8R5z-4ABWu2k4_KVQi3cHpBzbaq4jqJsDBhLk",
+        "url": "https://files.example.com/att/renewal-v3.pdf",
+        "mustOpen": true
+      }
+    ]
+  },
+  "action": {
+    "name": "contracts.sign",
+    "argsHash": "_LI_K0IVFwOAMoMkXaEGoMuMcXmTY88L1tYg1k6AXvo"
+  },
+  "requester": {
+    "agentId": "agent_procurement_01",
+    "runId": "run_01JB7C3T"
+  }
+}

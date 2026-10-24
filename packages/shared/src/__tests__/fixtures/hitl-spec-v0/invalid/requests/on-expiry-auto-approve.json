@@ -1,0 +1,12 @@
+{
+  "spec": "hitl/request/v0",
+  "question": "Issue a £240 refund for order 48213?",
+  "answerType": "binary",
+  "options": [
+    { "value": "approve", "label": "Approve" },
+    { "value": "reject", "label": "Reject" }
+  ],
+  "deadline": "2026-10-26T17:00:00Z",
+  "onExpiry": "approve",
+  "requester": { "agentId": "agent_support_01" }
+}
