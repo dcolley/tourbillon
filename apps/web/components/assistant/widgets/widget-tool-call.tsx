@@ -22,6 +22,8 @@ export interface WidgetToolCallProps {
 /** WID-1: render a tool call as its registered widget, or the fallback card — never blank. */
 export function WidgetToolCall({ registry, toolCall, toolStatus, answer, onAnswer, onInvalidAnswer }: WidgetToolCallProps) {
   const resolution = React.useMemo(() => registry.resolve(toolCall), [registry, toolCall]);
+  /** One accepted answer per mounted card, even if the widget fires again before the stored answer arrives. */
+  const answeredRef = React.useRef(false);
 
   if (!resolution.ok) {
     return (
@@ -41,9 +43,12 @@ export function WidgetToolCall({ registry, toolCall, toolStatus, answer, onAnswe
   const handleAnswer =
     status === 'pending' && definition.answerSchema
       ? (value: unknown) => {
+          if (answeredRef.current) return;
           const accepted = registry.acceptAnswer(resolution, value);
-          if (accepted.ok) onAnswer?.({ toolResult: accepted.toolResult, record: accepted.record });
-          else onInvalidAnswer?.(accepted.issues);
+          if (accepted.ok) {
+            answeredRef.current = true;
+            onAnswer?.({ toolResult: accepted.toolResult, record: accepted.record });
+          } else onInvalidAnswer?.(accepted.issues);
         }
       : undefined;
 

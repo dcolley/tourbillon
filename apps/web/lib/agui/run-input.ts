@@ -37,6 +37,13 @@ export interface AguiToolDecision {
   approved: boolean;
 }
 
+/** An AG-UI `resume` entry, as sent (widget answers carry `payload: { answer }`). */
+export interface AguiResumeEntry {
+  toolCallId: string;
+  status: 'resolved' | 'cancelled';
+  payload?: unknown;
+}
+
 export interface ParsedAguiRequest {
   input: RunAgentInput;
   action: AguiAction;
@@ -47,6 +54,8 @@ export interface ParsedAguiRequest {
   context: ChatDashboardContext;
   /** From `forwardedProps.tourbillon` (toolApproval) or AG-UI `resume` entries. */
   toolDecisions: AguiToolDecision[];
+  /** AG-UI `resume` entries as sent; the route routes widget answers (suspended widget tools) from these. */
+  resume: AguiResumeEntry[];
 }
 
 /**
@@ -110,7 +119,13 @@ export function parseAguiRequest(body: unknown): ParsedAguiRequest {
   const props = propsResult.data;
 
   const toolDecisions: AguiToolDecision[] = [];
+  const resume: AguiResumeEntry[] = [];
   for (const entry of input.resume ?? []) {
+    resume.push({
+      toolCallId: entry.interruptId,
+      status: entry.status,
+      ...(entry.payload !== undefined ? { payload: entry.payload } : {}),
+    });
     const payload = entry.payload as { approved?: unknown } | undefined;
     toolDecisions.push({
       toolCallId: entry.interruptId,
@@ -130,5 +145,5 @@ export function parseAguiRequest(body: unknown): ParsedAguiRequest {
     throw new AguiInputError('The last message must be a non-empty user message');
   }
 
-  return { input, action, props, message, files, context: props.context, toolDecisions };
+  return { input, action, props, message, files, context: props.context, toolDecisions, resume };
 }

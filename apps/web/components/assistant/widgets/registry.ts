@@ -3,12 +3,11 @@
  * zod props schema. Anything that does not resolve (unknown name, unknown version, invalid props,
  * malformed call) resolves to a fallback reason so the caller renders the fallback tool card.
  */
-import { z } from 'zod';
 import {
-  WIDGET_NAME_PATTERN,
-  WIDGET_VERSION_ARG,
+  acceptWidgetAnswer,
+  createWidgetSpecIndex,
   parseWidgetToolCall,
-  widgetAnswerToolResult,
+  widgetFrontendTool,
   type WidgetAnswer,
 } from '@tourbillon/shared/widgets';
 import type { FrontendToolDefinition, WidgetDefinition, WidgetResolution, WidgetWarn } from './widget-types';
@@ -40,32 +39,20 @@ export interface WidgetRegistry {
 
 const defaultWarn: WidgetWarn = (message, details) => console.warn(`[widgets] ${message}`, details);
 
-const issuePaths = (error: z.ZodError) =>
+const issuePaths = (error: { issues: Array<{ path: PropertyKey[]; code: string }> }) =>
   error.issues.map((i) => (i.path.length ? i.path.map(String).join('.') : '(root)') + `: ${i.code}`);
 
+/**
+ * Definitions are checked at registration (name, version 1..1000, duplicates) and must follow the
+ * strict-schema rule (see `WidgetSpec` in @tourbillon/shared/widgets): props are a `z.strictObject`
+ * and every object in the props and answer schemas is strict, so unknown keys are refused.
+ */
 export function createWidgetRegistry(
   definitions: readonly WidgetDefinition[],
   opts: { warn?: WidgetWarn } = {},
 ): WidgetRegistry {
   const warn = opts.warn ?? defaultWarn;
-  const byName = new Map<string, Map<number, WidgetDefinition>>();
-
-  for (const def of definitions) {
-    if (!WIDGET_NAME_PATTERN.test(def.name)) throw new WidgetRegistryError(`Invalid widget name: ${def.name}`);
-    if (!Number.isInteger(def.version) || def.version < 1) {
-      throw new WidgetRegistryError(`Invalid version for ${def.name}: ${def.version}`);
-    }
-    const versions = byName.get(def.name) ?? new Map<number, WidgetDefinition>();
-    if (versions.has(def.version)) throw new WidgetRegistryError(`Duplicate widget: ${def.name} v${def.version}`);
-    versions.set(def.version, def);
-    byName.set(def.name, versions);
-  }
-
-  const latest = (name: string) => {
-    const versions = byName.get(name);
-    if (!versions) return undefined;
-    return versions.get(Math.max(...versions.keys()));
-  };
+  const index = createWidgetSpecIndex(definitions, (m) => new WidgetRegistryError(m));
 
   const fallback = (
     resolution: Extract<WidgetResolution, { ok: false }>,
@@ -80,18 +67,17 @@ export function createWidgetRegistry(
   };
 
   return {
-    get: (name, version) => byName.get(name)?.get(version),
-    latest,
-    list: () => [...byName.values()].flatMap((v) => [...v.values()]).sort((a, b) => a.name.localeCompare(b.name) || a.version - b.version),
+    get: index.get,
+    latest: index.latest,
+    list: index.list,
 
     resolve(toolCall) {
       const parsed = parseWidgetToolCall(toolCall);
       if (!parsed.ok) return fallback({ ok: false, reason: parsed.reason, toolCallId: parsed.toolCallId, toolName: parsed.toolName });
       const { call } = parsed;
       const ids = { toolCallId: call.toolCallId, toolName: call.name };
-      const versions = byName.get(call.name);
-      if (!versions) return fallback({ ok: false, reason: 'unknown_widget', ...ids });
-      const definition = versions.get(call.version);
+      if (!index.has(call.name)) return fallback({ ok: false, reason: 'unknown_widget', ...ids });
+      const definition = index.get(call.name, call.version);
       if (!definition) return fallback({ ok: false, reason: 'unknown_version', ...ids });
       const props = definition.propsSchema.safeParse(call.props);
       if (!props.success) return fallback({ ok: false, reason: 'invalid_props', ...ids, issues: issuePaths(props.error) });
@@ -99,39 +85,11 @@ export function createWidgetRegistry(
     },
 
     frontendTools() {
-      return [...byName.keys()]
-        .sort()
-        .map((name) => latest(name)!)
-        .filter((def) => def.frontendTool)
-        .map((def) => {
-          const parameters = {
-            ...(z.toJSONSchema(def.propsSchema, { io: 'input', unrepresentable: 'any' }) as Record<string, unknown>),
-          };
-          delete parameters.$schema;
-          // The model must send the version it was offered.
-          const properties = { ...((parameters.properties as Record<string, unknown>) ?? {}) };
-          properties[WIDGET_VERSION_ARG] = { type: 'integer', const: def.version };
-          return {
-            name: def.name,
-            description: def.description,
-            parameters: { ...parameters, type: 'object', properties },
-          };
-        });
+      return index.frontendSpecs().map(widgetFrontendTool);
     },
 
     acceptAnswer(resolution, answer, now = new Date()) {
-      const { definition, call } = resolution;
-      if (!definition.answerSchema) return { ok: false, issues: ['(root): widget does not take answers'] };
-      const parsed = definition.answerSchema.safeParse(answer);
-      if (!parsed.success) return { ok: false, issues: issuePaths(parsed.error) };
-      const record: WidgetAnswer = {
-        toolCallId: call.toolCallId,
-        widget: definition.name,
-        version: definition.version,
-        answer: parsed.data,
-        answeredAt: now.toISOString(),
-      };
-      return { ok: true, record, toolResult: widgetAnswerToolResult(record) };
+      return acceptWidgetAnswer(resolution.definition, resolution.call.toolCallId, answer, now);
     },
   };
 }
@@ -139,5 +97,9 @@ export function createWidgetRegistry(
 /**
  * The assistant's widget registry. Empty until the first widgets land (WID-2 approval card,
  * WID-3 question/form/confirm cards); every tool call therefore renders the fallback card.
+ *
+ * Each definition is `{ ...spec, component }` for a spec in `assistantWidgetSpecs` (./specs), the
+ * component-free list the AG-UI route uses to offer widget tools and validate answers. The two
+ * lists must match (registry test).
  */
 export const assistantWidgetRegistry: WidgetRegistry = createWidgetRegistry([]);

@@ -40,6 +40,13 @@ export interface StubControllerOptions {
   chunkDelayMs?: number;
   /** Server tools registered on the agent: id → execute. */
   tools?: Record<string, (input: any) => Promise<unknown> | unknown>;
+  /**
+   * AgentController `tools` resolver (request-scoped tools), as the chat controller sets it — e.g.
+   * `requestScopedTools` from @tourbillon/mastra/widget-tools.
+   */
+  controllerTools?: (args: { requestContext?: unknown }) => Record<string, unknown> | Promise<Record<string, unknown>>;
+  /** Reuse another stub's storage (a rebuilt controller over the same threads). */
+  storage?: unknown;
   /** OBS-1: Mastra Observability instance (e.g. with a capturing exporter), as the chat controller passes when tracing is on. */
   observability?: unknown;
 }
@@ -85,10 +92,16 @@ export async function createStubAgentController(options: StubControllerOptions) 
 
   let calls = 0;
   const prompts: Array<Array<{ role: string; content: unknown }>> = [];
+  /** Tools offered to the model on each call (name + description). */
+  const offeredTools: Array<Array<{ name: string; description?: string; inputSchema?: unknown }>> = [];
   const model = new MastraLanguageModelV2Mock({
-    doStream: async (opts: { prompt: Array<{ role: string; content: unknown }> }) => {
+    doStream: async (opts: {
+      prompt: Array<{ role: string; content: unknown }>;
+      tools?: Array<{ name: string; description?: string; inputSchema?: unknown }>;
+    }) => {
       calls += 1;
       prompts.push(opts.prompt);
+      offeredTools.push((opts.tools ?? []).map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })));
       const turn = options.script(calls, opts.prompt);
       const hasToolCall = turn.some((c) => c.type === 'tool-call');
       const chunks = [
@@ -114,7 +127,7 @@ export async function createStubAgentController(options: StubControllerOptions) 
   }
 
   const agent = new Agent({ id: 'stub-agent', name: 'Stub', instructions: 'Test agent.', model, tools });
-  const storage = new InMemoryStore();
+  const storage = options.storage ?? new InMemoryStore();
   const controller = new AgentController({
     id: 'stub-controller',
     storage,
@@ -123,16 +136,19 @@ export async function createStubAgentController(options: StubControllerOptions) 
     agent,
     modes: [{ id: 'default', name: 'Default', default: true, defaultModelId: 'stub/stub' }],
     initialState: { yolo: true },
+    ...(options.controllerTools ? { tools: options.controllerTools } : {}),
     ...(options.observability ? { observability: options.observability } : {}),
   });
   await controller.init();
   return {
     controller,
     agent,
+    storage,
     get modelCalls() {
       return calls;
     },
     prompts,
+    offeredTools,
     /** Same shape as registry.getChatSession → controller.createSession. */
     createSession: (resourceId: string, scope?: string) =>
       controller.createSession({

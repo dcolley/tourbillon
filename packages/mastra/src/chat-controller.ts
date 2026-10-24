@@ -40,6 +40,7 @@ import { buildHeartbeatInputProcessors } from './heartbeat-processors';
 import { getMastraInstance } from './mastra-instance';
 import { buildChatWorkspace } from './execution-workspace';
 import { getInternalApiUrl } from './tools/api-client';
+import { requestScopedTools } from './tools/widget-tools';
 import { requireDatabaseUrl } from '@tourbillon/db/database-url';
 
 const CHAT_IDENTITY_CHAR_LIMIT = 2000;
@@ -326,6 +327,8 @@ export async function createChatController(
         }
       : {}),
     disableBuiltinTools: ['ask_user', 'submit_plan', 'subagent'],
+    // WID-1: request-scoped widget frontend tools (only when the AG-UI route offers them for a run).
+    tools: requestScopedTools as never,
   });
 }
 
