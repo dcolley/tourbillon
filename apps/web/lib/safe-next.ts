@@ -10,10 +10,11 @@
  *   4. re-check the normalised path: dot segments (including `%2e`) can collapse to a
  *      leading `//`, so the result must still start with exactly one `/` and must not
  *      start with a backslash or an encoded slash/backslash, even once percent-decoded.
- * Anything else falls back to `/dashboard`.
+ * Anything else (including a missing `next`) falls back to `/`, which sends a signed-in
+ * user to the landing page of their stored view (UI-1), so unlock never picks a view itself.
  * Pure module: used by the /unlock server page and re-checked in the client form.
  */
-export const SAFE_NEXT_FALLBACK = '/dashboard';
+export const SAFE_NEXT_FALLBACK = '/';
 
 /** Placeholder origin for the server-side check (the page doesn't need the real host). */
 const CHECK_ORIGIN = 'http://tourbillon.invalid';
