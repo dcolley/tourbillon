@@ -1,5 +1,5 @@
 /**
- * AGUI-1b: assistant chat view (stateless part) and the /assistant page's agent selection.
+ * AGUI-1b: assistant chat view (stateless part) and what the assistant path pages render.
  * No DOM test library in the repo: markup via react-dom/server, and controls found by walking the
  * element tree (plain function components are expanded; Button and WidgetToolCall are leaves).
  */
@@ -20,7 +20,7 @@ let AgentChat: View['AgentChat'];
 let agentChatHref: View['agentChatHref'];
 let Button: unknown;
 let WidgetToolCall: unknown;
-let AssistantPage: (p: { searchParams: Promise<Record<string, string | string[] | undefined>> }) => Promise<React.ReactElement>;
+let assistantRouteView: typeof import('./assistant-route-view').assistantRouteView;
 let AssistantEmptyState: unknown;
 
 const noop = () => {};
@@ -77,7 +77,7 @@ describe('AGUI-1b assistant chat view', () => {
     ({ Button } = await import('@/components/ui/button'));
     ({ WidgetToolCall } = await import('./widgets/widget-tool-call'));
     ({ AssistantEmptyState } = await import('./assistant-shell'));
-    AssistantPage = (await import('../../app/(assistant)/assistant/page')).default as never;
+    ({ assistantRouteView } = await import('./assistant-route-view'));
   });
 
   it('idle: transcript, Send only, disabled until there is text', () => {
@@ -213,42 +213,62 @@ describe('AGUI-1b assistant chat view', () => {
     assert.match(html, /role="alert"[^>]*>Agent not found/);
   });
 
-  describe('/assistant page', () => {
-    it('?agent=<key> opens the chat for that agent (and thread)', async () => {
-      const el = await AssistantPage({ searchParams: Promise.resolve({ agent: 'alice', thread: 't-1' }) });
+  describe('assistant path pages', () => {
+    const agent = { id: '00000000-0000-4000-8000-000000000001', urlKey: 'alice' };
+
+    it('a resolved /assistant/<key>/<thread> renders the chat: API by agent id, link by url key', () => {
+      const el = assistantRouteView({ kind: 'render', agent, threadId: 't-1' });
       assert.equal(el.type, AgentChat);
-      assert.deepEqual(el.props, { agentId: 'alice', threadId: 't-1' });
-      const el2 = await AssistantPage({ searchParams: Promise.resolve({ agent: ['bob', 'x'] }) });
-      assert.deepEqual(el2.props, { agentId: 'bob', threadId: undefined });
+      assert.deepEqual(el.props, { agentId: agent.id, agentKey: 'alice', threadId: 't-1' });
+      assert.equal(el.key, `${agent.id}:t-1`);
     });
 
-    it('no agent, or an invalid key, shows the empty state', async () => {
-      for (const agent of [undefined, '', '../etc', 'a b', 'x'.repeat(201)]) {
-        const el = await AssistantPage({ searchParams: Promise.resolve({ agent }) });
-        assert.equal(el.type, AssistantEmptyState, String(agent));
-      }
+    it('a resolved /assistant/<key> renders the chat without a thread (latest thread opens)', () => {
+      const el = assistantRouteView({ kind: 'render', agent, threadId: null });
+      assert.equal(el.type, AgentChat);
+      assert.deepEqual(el.props, { agentId: agent.id, agentKey: 'alice', threadId: undefined });
+      assert.equal(el.key, `${agent.id}:`);
     });
 
-    it('dot-only agent values (which would change the API path) show the empty state', async () => {
-      for (const agent of ['.', '..', '...', ['..', 'alice']]) {
-        const el = await AssistantPage({ searchParams: Promise.resolve({ agent }) });
-        assert.equal(el.type, AssistantEmptyState, String(agent));
-      }
-      const dotted = await AssistantPage({ searchParams: Promise.resolve({ agent: 'a.b' }) });
-      assert.equal(dotted.type, AgentChat);
+    it('another agent or thread gets a different key (the chat remounts, no state carried over)', () => {
+      const keys = new Set(
+        [
+          assistantRouteView({ kind: 'render', agent, threadId: 't-1' }),
+          assistantRouteView({ kind: 'render', agent, threadId: 't-2' }),
+          assistantRouteView({ kind: 'render', agent, threadId: null }),
+          assistantRouteView({ kind: 'render', agent: { id: 'other', urlKey: 'bob' }, threadId: 't-1' }),
+        ].map((el) => el.key),
+      );
+      assert.equal(keys.size, 4);
     });
 
-    it('an invalid thread id is reported as not found, not swapped for another thread', async () => {
-      for (const thread of ['no/slash', '.', '..', '', 'x'.repeat(201)]) {
-        const el = await AssistantPage({ searchParams: Promise.resolve({ agent: 'alice', thread }) });
-        assert.notEqual(el.type, AgentChat, thread);
-        assert.match(renderToStaticMarkup(el), /role="alert"[^>]*>Thread not found/, thread);
-      }
+    it('no company selected (null) shows the empty state, never the chat', () => {
+      assert.equal(assistantRouteView(null).type, AssistantEmptyState);
+    });
+
+    it('both path pages render through assistantRouteView after resolving the route; /assistant does not render the chat', async () => {
+      const { readFile } = await import('node:fs/promises');
+      const { fileURLToPath } = await import('node:url');
+      const read = (rel: string) => readFile(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
+      const agentPage = await read('../../app/(assistant)/assistant/[agent]/page.tsx');
+      const threadPage = await read('../../app/(assistant)/assistant/[agent]/[threadId]/page.tsx');
+      assert.match(agentPage, /assistantRouteView\(applyAssistantRoute\(await resolveAssistantRoute\(\{ agentKey: agent, via: 'path' \}\)\)\)/);
+      assert.match(threadPage, /assistantRouteView\(applyAssistantRoute\(await resolveAssistantRoute\(\{ agentKey: agent, threadId, via: 'path' \}\)\)\)/);
+      const queryPage = await read('../../app/(assistant)/assistant/page.tsx');
+      assert.doesNotMatch(queryPage, /AgentChat|assistantRouteView/);
     });
   });
 
   it('agentChatHref: the assistant path form /assistant/<agent>/<thread>', () => {
     assert.equal(agentChatHref('alice', 't-1'), '/assistant/alice/t-1');
     assert.equal(agentChatHref('alice', 't 2/x'), '/assistant/alice/t%202%2Fx');
+  });
+
+  it('AgentChat links by url key when given (agentKey), else by agentId', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { fileURLToPath } = await import('node:url');
+    const src = await readFile(fileURLToPath(new URL('./agent-chat.tsx', import.meta.url)), 'utf8');
+    assert.match(src, /const linkKey = agentKey \?\? agentId;/);
+    assert.match(src, /agentChatHref\(linkKey, ref\.threadId\)/);
   });
 });

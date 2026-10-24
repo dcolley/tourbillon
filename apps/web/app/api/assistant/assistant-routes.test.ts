@@ -638,6 +638,31 @@ describe('UI-2 assistant sidebar API', () => {
       assert.equal((await patch('alice', 'own', { title: '\n Fine \n' })).body.thread.title, 'Fine');
     });
 
+    it('bidi controls in titles (U+202A–202E, U+2066–2069, U+200E, U+200F, U+061C) → 400 without touching storage', async () => {
+      const chars = ['\u202A', '\u202B', '\u202C', '\u202D', '\u202E', '\u2066', '\u2067', '\u2068', '\u2069', '\u200E', '\u200F', '\u061C'];
+      for (const title of chars.flatMap((c) => [`evil${c}txt.exe`, `${c}lead`])) {
+        assert.equal((await post('alice', { title })).status, 400, JSON.stringify(title));
+        const r = await patch('alice', 'own', { title });
+        assert.equal(r.status, 400, JSON.stringify(title));
+        assert.deepEqual(r.body, { error: 'Invalid request body' });
+      }
+      assert.deepEqual(storeCalls, []);
+      assert.deepEqual((await list('alice')).body.threads.map((t: Json) => t.title), ['Own']);
+    });
+
+    it('zero-width characters in titles (U+200B–200D, U+2060, U+FEFF) → 400 without touching storage', async () => {
+      const chars = ['\u200B', '\u200C', '\u200D', '\u2060', '\uFEFF'];
+      for (const title of [...chars.flatMap((c) => [`zero${c}width`, `trail${c}`, `${c}lead`]), '\u200B\u200B']) {
+        assert.equal((await post('alice', { title })).status, 400, JSON.stringify(title));
+        const r = await patch('alice', 'own', { title });
+        assert.equal(r.status, 400, JSON.stringify(title));
+        assert.deepEqual(r.body, { error: 'Invalid request body' });
+      }
+      assert.deepEqual(storeCalls, []);
+      // Ordinary non-Latin and right-to-left titles are fine.
+      assert.equal((await patch('alice', 'own', { title: 'مرحبا שלום 日本 🚀' })).body.thread.title, 'مرحبا שלום 日本 🚀');
+    });
+
     it('unexpected storage errors → 500 without the error text', async () => {
       const original = memoryThreadStore.renameAssistantThreadRow;
       memoryThreadStore.renameAssistantThreadRow = async () => {
