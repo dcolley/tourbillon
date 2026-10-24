@@ -18,3 +18,8 @@ export function responseSummary(approval: Pick<Approval, 'hitlRequest' | 'hitlRe
   if (r.decidedBy) parts.push(`by ${r.decidedBy.display ?? r.decidedBy.id}`);
   return parts.join(' · ');
 }
+
+/** Has this deadline passed? (Kept out of the component body: it reads the clock.) */
+export function deadlineHasPassed(deadline: Date | null | undefined): boolean {
+  return deadline ? deadline.getTime() <= Date.now() : false;
+}

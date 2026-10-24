@@ -158,7 +158,6 @@ const comments: Array<{ issueId: string; companyId: string; body: string }> = []
 
 type Handler = (req: NextRequest, c: { params: Promise<any> }) => Promise<Response>;
 const routes: Record<string, Record<string, Handler>> = {};
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const libs: Record<string, any> = {};
 const ctx = <T>(params: T) => ({ params: Promise.resolve(params) });
 

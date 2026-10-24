@@ -5,6 +5,7 @@
  * controls for the question's answer type. Posts to `/api/approvals/:id/decide`.
  */
 import Link from 'next/link';
+import { deadlineHasPassed } from './response-summary';
 import type { HitlRequest } from '@tourbillon/shared/hitl';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -82,7 +83,7 @@ export function ApprovalQuestionCard({
   const hasItems = links.length + attachments.length > 0;
   const formId = `approval-form-${approval.id}`;
   const bounds = (req?.bounds ?? {}) as Record<string, number | string | undefined>;
-  const deadlinePassed = approval.deadline ? approval.deadline.getTime() <= Date.now() : false;
+  const deadlinePassed = deadlineHasPassed(approval.deadline);
 
   return (
     <Card data-approval-id={approval.id}>
