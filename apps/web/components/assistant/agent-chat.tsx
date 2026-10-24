@@ -5,10 +5,6 @@
  * calls, run status, stop / steer / follow-up while a run is open, tool approval, and the delivery of
  * each message (queued, dropped, failed). Rendered by the /assistant/<agent>[/<threadId>] pages
  * (assistant-route-view.tsx).
- *
- * CHAT-2: assistant text renders as markdown (message-markdown.tsx: code blocks and tables with
- * copy controls, no raw HTML); plain tool calls render as tool-state cards (tool-state-card.tsx),
- * tool calls with a registered widget still go through the widget registry.
  */
 import * as React from 'react';
 import { Button } from '@/components/ui/button';
@@ -48,6 +44,11 @@ function toolCardStatus(status: ToolCallStatus): ToolCardStatus {
   return 'running';
 }
 
+/**
+ * CHAT-2: assistant text renders as markdown (message-markdown.tsx: code blocks and tables with copy
+ * controls, no raw HTML). Plain tool calls render as tool-state cards (tool-state-card.tsx); tool
+ * calls with a registered widget still go through the widget registry.
+ */
 function ItemView({ item }: { item: AgentChatItem }) {
   switch (item.kind) {
     case 'user':
