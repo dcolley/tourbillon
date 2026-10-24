@@ -5,9 +5,15 @@
  * calls, run status, stop / steer / follow-up while a run is open, tool approval, and the delivery of
  * each message (queued, dropped, failed). Rendered by the /assistant/<agent>[/<threadId>] pages
  * (assistant-route-view.tsx).
+ *
+ * CHAT-2: assistant text renders as markdown (message-markdown.tsx: code blocks and tables with
+ * copy controls, no raw HTML); plain tool calls render as tool-state cards (tool-state-card.tsx),
+ * tool calls with a registered widget still go through the widget registry.
  */
 import * as React from 'react';
 import { Button } from '@/components/ui/button';
+import { ChatMarkdown } from '@/components/assistant/message-markdown';
+import { ToolStateCard } from '@/components/assistant/tool-state-card';
 import { WidgetToolCall } from '@/components/assistant/widgets/widget-tool-call';
 import { assistantWidgetRegistry } from '@/components/assistant/widgets/registry';
 import type { ToolCardStatus } from '@/components/assistant/widgets/fallback-card';
@@ -58,8 +64,8 @@ function ItemView({ item }: { item: AgentChatItem }) {
       );
     case 'assistant':
       return (
-        <div className="whitespace-pre-wrap text-sm" data-item="assistant" data-streaming={item.streaming ? 'true' : 'false'}>
-          {item.text}
+        <div className="text-sm" data-item="assistant" data-streaming={item.streaming ? 'true' : 'false'}>
+          <ChatMarkdown text={item.text} />
         </div>
       );
     case 'reasoning':
@@ -72,11 +78,21 @@ function ItemView({ item }: { item: AgentChatItem }) {
     case 'tool':
       return (
         <div data-item="tool" data-tool-status={item.status}>
-          <WidgetToolCall
-            registry={assistantWidgetRegistry}
-            toolCall={{ toolCallId: item.id, toolName: item.name, args: item.argsText || undefined }}
-            toolStatus={toolCardStatus(item.status)}
-          />
+          {assistantWidgetRegistry.latest(item.name) ? (
+            <WidgetToolCall
+              registry={assistantWidgetRegistry}
+              toolCall={{ toolCallId: item.id, toolName: item.name, args: item.argsText || undefined }}
+              toolStatus={toolCardStatus(item.status)}
+            />
+          ) : (
+            <ToolStateCard
+              toolCallId={item.id}
+              toolName={item.name}
+              status={item.status}
+              argsText={item.argsText}
+              result={item.result}
+            />
+          )}
         </div>
       );
   }
