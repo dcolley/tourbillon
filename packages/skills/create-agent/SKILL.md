@@ -13,7 +13,7 @@ Create a new agent when:
 
 **Always request board approval before creating an agent** unless you are the CEO and the company policy allows autonomous hires.
 
-Call `createApproval` with type `hire_agent`. Link any planning issue via `issueIds` so it is halted (`blocked`) until the board decides. Agent-to-agent `in_review` handoff is a different path — do not use it for board governance.
+Call `createApproval` with type `hire_agent`. Link any planning issue via `issueIds` so it is halted (`blocked`) until the board decides. Set `question.idempotencyKey` (e.g. `hire-<role>-<issue>`) so a re-run returns the same approval instead of filing a duplicate, and read the outcome from the `approval_resolved` wake: only `approved` means hire; `rejected`, `declined` and `expired` mean do not hire (control-plane §6a). Agent-to-agent `in_review` handoff is a different path — do not use it for board governance.
 
 ---
 

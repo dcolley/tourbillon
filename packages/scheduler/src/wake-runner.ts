@@ -478,6 +478,7 @@ async function runWake(
       approvalId: wake.approvalId,
       approvalStatus: wake.approvalStatus,
       approvalNote: wake.approvalNote,
+      ...(wake.approvalResponse ? { approvalResponse: wake.approvalResponse } : {}),
       linkedIssueIds: wake.linkedIssueIds,
       ...(wake.resumeOfRunId ? { resumeOfRunId: wake.resumeOfRunId } : {}),
       providerId: providerRow?.id ?? agentRecord.providerId ?? null,

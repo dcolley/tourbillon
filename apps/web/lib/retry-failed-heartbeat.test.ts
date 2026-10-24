@@ -51,6 +51,20 @@ describe('buildRetryHeartbeatJobData', () => {
     assert.equal(job.resumeOfRunId, 'run-failed-1');
   });
 
+  it('preserves an APR-2 response and non-binary outcome; drops an unknown status', () => {
+    const response = { status: 'answered', value: 3, answerType: 'number', decidedBy: { kind: 'group', id: 'board' } };
+    const job = buildRetryHeartbeatJobData(
+      failedRun({ wakeReason: 'approval_resolved', approvalId: 'approval-2', approvalStatus: 'answered', approvalResponse: response }),
+    );
+    assert.equal(job.approvalStatus, 'answered');
+    assert.deepEqual(job.approvalResponse, response);
+    const junk = buildRetryHeartbeatJobData(
+      failedRun({ wakeReason: 'approval_resolved', approvalId: 'approval-2', approvalStatus: 'weird', approvalResponse: { status: 'weird' } }),
+    );
+    assert.equal(junk.approvalStatus, undefined);
+    assert.equal(junk.approvalResponse, undefined);
+  });
+
   it('falls back to on_demand for an empty snapshot', () => {
     const job = buildRetryHeartbeatJobData(failedRun({}));
 

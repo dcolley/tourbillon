@@ -1,0 +1,14 @@
+{
+  "spec": "hitl/response/v0",
+  "requestId": "req_01JB7REFUND",
+  "status": "expired",
+  "signature": {
+    "alg": "Ed25519",
+    "kid": "example-2026-10",
+    "sig": "5FJrs2n731JlRFxBUYqrWVf_j9QMQTzpGCZTtj2-dm4KG1wpposPP7MFmB1agVJeMLjRgLPmqoIBlyQLCHK-BQ"
+  },
+  "activity": {
+    "presentedAt": "2026-10-24T09:02:11Z",
+    "items": []
+  }
+}

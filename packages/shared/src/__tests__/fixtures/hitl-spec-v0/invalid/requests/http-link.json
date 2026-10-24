@@ -1,0 +1,15 @@
+{
+  "spec": "hitl/request/v0",
+  "question": "Sign off the Q4 supplier contract renewal?",
+  "answerType": "binary",
+  "options": [
+    { "value": "approve", "label": "Sign off" },
+    { "value": "reject", "label": "Send back" }
+  ],
+  "context": {
+    "links": [
+      { "ref": "lnk_terms", "url": "http://suppliers.example.com/terms/2027", "label": "Terms" }
+    ]
+  },
+  "requester": { "agentId": "agent_procurement_01" }
+}

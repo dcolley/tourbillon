@@ -3,6 +3,8 @@ import { db, approvals } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
 import { applyApprovalDecision } from '@/lib/approval-decide';
 import type { HitlyResumePayload } from '@/lib/hitly/client';
+import { HITLY_DECIDER } from '@/lib/hitl-host';
+import { expireApprovalIfDue } from '@/lib/approval-expiry';
 
 type ApprovalPayload = Record<string, unknown> & {
   hitlyResumeToken?: string;
@@ -93,12 +95,20 @@ export async function POST(
     decision: tourbillonStatus,
     note,
     decidedByUserId: 'hitly',
+    // APR-2: only binary questions reach HITLy; accept / reject → approve / reject.
+    hitl: {
+      value: tourbillonStatus === 'approved' ? 'approve' : 'reject',
+      reason: metadata?.note ? String(metadata.note) : undefined,
+      decidedBy: HITLY_DECIDER,
+    },
     actor: { actorId: 'hitly', actorName: 'HITLy' },
     commentAuthor: { type: 'user', id: 'hitly', name: 'HITLy' },
     source: 'HITLy',
     logPrefix: '[hitly-resume]',
   });
   if (!result.applied) {
+    // Past the deadline: the expiry sweep closes it (same claim, one winner).
+    await expireApprovalIfDue(approval.companyId, approvalId);
     // Already decided — idempotent success (same as the check above)
     return NextResponse.json({ status: 'ok', alreadyDecided: true });
   }

@@ -182,6 +182,7 @@ Return to: [agent name / id] after completion
 ```
 🛑 Awaiting board decision: [question]
 Context: [relevant background]
+Answer by: [deadline, if set]
 ```
 
 ---
@@ -291,8 +292,8 @@ The `approvals` toolset provides three tools for board governance decisions:
 
 1. **Use targeted filters** to find relevant prior decisions:
    - `type` — exact approval type (e.g., `"hire_agent"`, `"request_board_approval"`)
-   - `q` — free-text search in title/summary/note (e.g., `"CFO"`, `"marketing spend"`)
-   - `status` — default `"all"` (checks both approved and pending); narrow to `"approved"` when only recent decisions matter
+   - `q` — free-text search in title/summary/question/note (e.g., `"CFO"`, `"marketing spend"`)
+   - `status` — default `"all"` (every status: `pending`, `approved`, `rejected`, `answered`, `declined`, `cancelled`, `expired`); narrow to `"approved"` when only recent decisions matter
    - `limit` — default `20` is sufficient for targeted queries
 
 2. **Evaluate equivalence**:
@@ -307,7 +308,7 @@ The `approvals` toolset provides three tools for board governance decisions:
 
 4. **OK to file** if:
    - No equivalent found (targeted list returned zero matches)
-   - All prior similar requests were `rejected` (board said no — reapply with changes)
+   - All prior similar requests were `rejected`, `declined` or `expired` (reapply with changes)
 
 ### Example: CEO Hiring a CFO
 
@@ -342,6 +343,65 @@ listApprovals({
 The single enhanced `listApprovals` tool replaces the need for separate "list" and "search" tools. Targeted server-side filters (`type + q`) narrow the result set **before** it reaches you — no need to page through raw last-50 lists or filter client-side.
 
 **Efficient**: `listApprovals(type: "hire_agent", q: "CFO")` returns ~1–3 relevant hires, not 50 mixed approvals.
+
+### Asking a typed question (`question`, hitl/request/v0)
+
+`createApproval` takes an optional `question` when the Board must answer something other than
+yes/no. The same validator runs in the tool and on the server; on `invalid_question` (or HTTP 422)
+fix each `fields[].field` it names and try again.
+
+| Field | Rule |
+|---|---|
+| `question` | Ends with `?`, at most 160 characters. Put detail in `context.markdown`. |
+| `answerType` | `binary` (options `approve` / `reject`), `single`, `multi`, `number`, `text` or `secret` |
+| `options` | `[{ value, label, description? }]`, required for binary, single and multi |
+| `bounds` | number: `min` / `max` / `step` / `unit`; text: `maxLength` / `pattern`; multi: `minItems` / `maxItems` |
+| `recommended` | `{ value, reason }`: highlighted for the Board, never pre-selected |
+| `default` | May be pre-selected in the form |
+| `reasonRequired` | Values that need a reason. Binary defaults to `["reject"]`. A secret question has no default, recommended or reasonRequired. |
+| `deadline` | RFC 3339, in the future. Unanswered by then: the approval **expires** (no answer). `onExpiry` is absent or `"expire"`. |
+| `idempotencyKey` | Your own handle; a repeat returns the existing approval instead of filing twice |
+| `context` | `markdown`, `links [{ ref, url (https), label, mustOpen? }]`, `attachments`. `mustOpen` items must be opened before the Board can answer. Opens are recorded and shown to the Board. |
+| `risk` | `{ level: low \| medium \| high \| critical, reversible }` |
+| `action` | `{ name, argsHash }` when the answer authorises one exact tool call |
+
+`text` `bounds.pattern` is an I-Regexp (RFC 9485, at most 256 characters) matched against the whole
+answer (no `^`/`$` needed). Never send `id` or `requester` — the host sets them.
+
+```javascript
+createApproval({
+  type: "request_board_approval",
+  issueIds: [issueId],
+  payload: { title: "Carrier for replacement unit", summary: "14 kg unit, customer waited 9 days" },
+  question: {
+    question: "Which carrier should ship the 14 kg replacement unit?",
+    answerType: "single",
+    options: [
+      { value: "dpd", label: "DPD next day", description: "£18.40, tracked" },
+      { value: "evri", label: "Evri", description: "£8.10, 3-5 days" }
+    ],
+    recommended: { value: "dpd", reason: "Customer has waited 9 days already." },
+    deadline: "2026-10-26T17:00:00Z",
+    idempotencyKey: "carrier-TB-123"
+  }
+})
+```
+
+### Reading the outcome
+
+The `approval_resolved` wake states it, and `getApproval` returns it as `hitlResponse`:
+
+| Status | Meaning | Linked issues |
+|---|---|---|
+| `approved` / `rejected` | Binary answer `approve` / `reject` (stored response status `answered`) | approved: restored; rejected: stay `blocked` |
+| `answered` | Non-binary answer; the value is in `Answer (type): …` | restored |
+| `declined` | The Board would not answer; read `Reason` | stay `blocked` |
+| `expired` | Deadline passed with no answer (no value, no decider) | stay `blocked` |
+| `cancelled` | Withdrawn; no answer | stay `blocked` |
+
+Act only on the answer you were given. For a `secret` question the value is never in the wake.
+After `declined` or `expired`, comment on the linked issue with your next step (ask differently,
+escalate, or close) instead of re-filing the same question unchanged.
 
 ### Approval Types
 

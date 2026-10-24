@@ -11,7 +11,14 @@ import { NextRequest } from 'next/server';
 
 // ---- in-memory db ---------------------------------------------------------------------------
 type Row = Record<string, unknown>;
-type Cond = { op: 'eq'; c: string; val: unknown } | { op: 'and'; xs: Cond[] } | { op: 'in'; c: string; vals: unknown[] } | { op: 'any' };
+type Cond =
+  | { op: 'eq'; c: string; val: unknown }
+  | { op: 'and'; xs: Array<Cond | undefined> }
+  | { op: 'or'; xs: Array<Cond | undefined> }
+  | { op: 'in'; c: string; vals: unknown[] }
+  | { op: 'fn'; f: (row: Row) => boolean }
+  | { op: 'any' };
+type Order = { op: 'order'; c: string; dir: 1 | -1 };
 const store: Record<string, Row[]> = {};
 let nextId = 1;
 function table(name: string) {
@@ -23,16 +30,25 @@ function match(row: Row, cond?: Cond): boolean {
   if (!cond || cond.op === 'any') return true;
   if (cond.op === 'eq') return row[cond.c] === cond.val;
   if (cond.op === 'in') return cond.vals.includes(row[cond.c]);
-  return cond.xs.every((x) => match(row, x));
+  if (cond.op === 'fn') return cond.f(row);
+  if (cond.op === 'or') return cond.xs.some((x) => x !== undefined && match(row, x));
+  return cond.xs.every((x) => x === undefined || match(row, x));
 }
 const tables = Object.fromEntries(
-  ['approvals', 'agents', 'companies', 'issues', 'activityLog'].map((n) => [n, table(n)]),
+  ['approvals', 'agents', 'companies', 'issues', 'activityLog', 'hitlEvents', 'hitlLinkTokens'].map((n) => [n, table(n)]),
 );
 const nameOf = (t: unknown) => (t as { __table: string }).__table;
 /** A query result that is awaitable and also offers `.returning()`. */
 function result<T>(run: () => T) {
   return { then: (res: (v: T) => unknown, rej: (e: unknown) => unknown) => Promise.resolve().then(run).then(res, rej), returning: async () => run() };
 }
+/** Unique keys the real schema enforces (a key with a null part is not checked, like Postgres). */
+const UNIQUE: Record<string, string[][]> = {
+  approvals: [['id'], ['companyId', 'requestedByAgentId', 'idempotencyKey']],
+  hitlEvents: [['approvalId', 'seq']],
+  hitlLinkTokens: [['token'], ['approvalId', 'itemRef', 'reviewerId']],
+};
+const DEFAULTS: Record<string, Row> = { hitlLinkTokens: { itemRef: '' } };
 /** Every `where` used on an issues update, to check company scoping. */
 const issueUpdateConds: Cond[] = [];
 /** When `n > 0`, approval reads are held until `n` callers are waiting (forces a check-then-act race). */
@@ -48,11 +64,41 @@ function holdForRace(): Promise<void> {
     }
   });
 }
-const flatConds = (c: Cond): Cond[] => (c.op === 'and' ? c.xs.flatMap(flatConds) : [c]);
+const flatConds = (c: Cond): Cond[] => (c.op === 'and' ? c.xs.flatMap((x) => (x ? flatConds(x) : [])) : [c]);
+function selectChain(name: string, fields?: Record<string, unknown>) {
+  let join: { name: string; cond: Cond } | undefined;
+  let cond: Cond | undefined;
+  let order: Order | undefined;
+  let lim: number | undefined;
+  const run = () => {
+    let rows = (store[name] ?? []).filter((r) => match(r, cond)).map((r) => ({ ...r }));
+    if (order) {
+      const { c, dir } = order;
+      rows.sort((a, b) => ((a[c] as number) > (b[c] as number) ? dir : (a[c] as number) < (b[c] as number) ? -dir : 0));
+    }
+    if (lim !== undefined) rows = rows.slice(0, lim);
+    if (!join) return rows;
+    // leftJoin on eq(base.col, joined.col), shaped like select({ a: baseTable, b: joinedTable }).
+    const j = join;
+    const on = j.cond as { c: string; val: { c: string } };
+    const keys = Object.entries(fields ?? {});
+    return rows.map((r) => {
+      const other = (store[j.name] ?? []).find((o) => o[on.val.c] === r[on.c]);
+      return Object.fromEntries(keys.map(([k, t]) => [k, nameOf(t) === name ? r : other ? { ...other } : null]));
+    });
+  };
+  const chain = {
+    leftJoin: (t: unknown, c: Cond) => ((join = { name: nameOf(t), cond: c }), chain),
+    where: (c: Cond) => ((cond = c), chain),
+    orderBy: (o: Order) => ((order = o && o.op === 'order' ? o : undefined), chain),
+    limit: (n: number) => ((lim = n), chain),
+    for: () => chain,
+    then: (res: (v: Row[]) => unknown, rej: (e: unknown) => unknown) => Promise.resolve().then(run).then(res, rej),
+  };
+  return chain;
+}
 const ops = {
-  select: () => ({
-    from: (t: unknown) => ({ where: async (cond: Cond) => (store[nameOf(t)] ?? []).filter((r) => match(r, cond)).map((r) => ({ ...r })) }),
-  }),
+  select: (fields?: Record<string, unknown>) => ({ from: (t: unknown) => selectChain(nameOf(t), fields) }),
   update: (t: unknown) => ({
     set: (v: Row) => ({
       where: (cond: Cond) =>
@@ -65,12 +111,28 @@ const ops = {
     }),
   }),
   insert: (t: unknown) => ({
-    values: (v: Row) =>
-      result(() => {
-        const row = { id: `row-${nextId++}`, createdAt: new Date(), ...v };
-        (store[nameOf(t)] ??= []).push(row);
+    values: (v: Row) => {
+      let doNothing = false;
+      const run = () => {
+        const name = nameOf(t);
+        const row: Row = { id: `row-${nextId++}`, createdAt: new Date(), ...(DEFAULTS[name] ?? {}), ...v };
+        for (const key of UNIQUE[name] ?? []) {
+          if (key.some((k) => row[k] === null || row[k] === undefined)) continue;
+          if ((store[name] ?? []).some((r) => key.every((k) => r[k] === row[k]))) {
+            if (doNothing) return [];
+            throw new Error(`duplicate key value violates unique constraint (${name})`);
+          }
+        }
+        (store[name] ??= []).push(row);
         return [{ ...row }];
-      }),
+      };
+      const r = {
+        then: (res: (v: Row[]) => unknown, rej: (e: unknown) => unknown) => Promise.resolve().then(run).then(res, rej),
+        returning: async () => run(),
+        onConflictDoNothing: () => ((doNothing = true), r),
+      };
+      return r;
+    },
   }),
 };
 const fakeDb = {
@@ -96,6 +158,7 @@ const comments: Array<{ issueId: string; companyId: string; body: string }> = []
 
 type Handler = (req: NextRequest, c: { params: Promise<any> }) => Promise<Response>;
 const routes: Record<string, Record<string, Handler>> = {};
+const libs: Record<string, any> = {};
 const ctx = <T>(params: T) => ({ params: Promise.resolve(params) });
 
 function jsonRequest(url: string, body: unknown, headers: Record<string, string> = {}) {
@@ -121,7 +184,14 @@ describe('APR-FIX approval decision restore (routes)', () => {
         eq: (col: { c: string }, val: unknown) => ({ op: 'eq', c: col.c, val }),
         and: (...xs: Cond[]) => ({ op: 'and', xs }),
         inArray: (col: { c: string }, vals: unknown[]) => ({ op: 'in', c: col.c, vals }),
-        or: noop, desc: noop, gte: noop, ilike: noop, sql: noop,
+        or: (...xs: Cond[]) => ({ op: 'or', xs }),
+        isNull: (col: { c: string }) => ({ op: 'fn', f: (r: Row) => r[col.c] === null || r[col.c] === undefined }),
+        isNotNull: (col: { c: string }) => ({ op: 'fn', f: (r: Row) => r[col.c] !== null && r[col.c] !== undefined }),
+        lte: (col: { c: string }, val: Date) => ({ op: 'fn', f: (r: Row) => r[col.c] != null && (r[col.c] as Date) <= val }),
+        gt: (col: { c: string }, val: Date) => ({ op: 'fn', f: (r: Row) => r[col.c] != null && (r[col.c] as Date) > val }),
+        asc: (col: { c: string }) => ({ op: 'order', c: col.c, dir: 1 }),
+        desc: (col: { c: string }) => ({ op: 'order', c: col.c, dir: -1 }),
+        gte: noop, ilike: noop, sql: noop,
       },
     };
     Module.prototype.require = function (id: string) {
@@ -161,6 +231,10 @@ describe('APR-FIX approval decision restore (routes)', () => {
     routes.decide = await import('./[approvalId]/decide/route');
     routes.hitly = await import('./[approvalId]/hitly-resume/route');
     routes.mcp = await import('../mcp/route');
+    routes.get = await import('../companies/[companyId]/approvals/[approvalId]/route');
+    routes.open = await import('../../o/[token]/route');
+    libs.expiry = await import('../../../lib/approval-expiry');
+    libs.host = await import('../../../lib/hitl-host');
   });
 
   beforeEach(() => {
@@ -181,6 +255,8 @@ describe('APR-FIX approval decision restore (routes)', () => {
     store.issues = [];
     store.approvals = [];
     store.activityLog = [];
+    store.hitlEvents = [];
+    store.hitlLinkTokens = [];
   });
 
   function addIssue(over: Row): Row {
@@ -553,6 +629,335 @@ describe('APR-FIX approval decision restore (routes)', () => {
       assert.match(src, /eq\(approvals\.status, 'pending'\)/);
       assert.match(src, /eq\(approvals\.companyId, input\.companyId\)/);
       assert.match(src, /if \(!row\) return null;/);
+    });
+  });
+  // ---- APR-2: hitl v0 questions ----------------------------------------------------------------
+  describe('APR-2 hitl v0 questions', () => {
+    const inAnHour = () => new Date(Date.now() + 3600_000).toISOString();
+    const binary = (over: Row = {}) => ({
+      spec: 'hitl/request/v0',
+      question: 'Issue a £240 refund for order 48213?',
+      answerType: 'binary',
+      options: [
+        { value: 'approve', label: 'Approve' },
+        { value: 'reject', label: 'Reject' },
+      ],
+      requester: { agentId: 'agent-req', runId: 'run-1' },
+      ...over,
+    });
+    const single = (over: Row = {}) => ({
+      spec: 'hitl/request/v0',
+      question: 'Which carrier should ship the replacement?',
+      answerType: 'single',
+      options: [
+        { value: 'dpd', label: 'DPD next day' },
+        { value: 'evri', label: 'Evri' },
+      ],
+      recommended: { value: 'dpd', reason: 'Fastest.' },
+      requester: { agentId: 'agent-req' },
+      ...over,
+    });
+    const withLink = (over: Row = {}) =>
+      binary({
+        question: 'Renew the supplier contract?',
+        context: {
+          markdown: 'Renewal is up 6%.',
+          links: [{ ref: 'lnk_terms', url: 'https://suppliers.example.com/terms/2027', label: 'Terms', mustOpen: true }],
+        },
+        ...over,
+      });
+
+    async function postHitl(hitl: unknown, issueIds: string[] = []) {
+      const res = await routes.create.POST(
+        jsonRequest('/api/companies/company-a/approvals', { type: 'request_board_approval', issueIds, hitl }, { authorization: 'Bearer test' }),
+        ctx({ companyId: 'company-a' }),
+      );
+      return { res, body: (await res.json()) as Record<string, any> };
+    }
+    async function createHitl(hitl: unknown, issueIds: string[] = []): Promise<string> {
+      const { res, body } = await postHitl(hitl, issueIds);
+      assert.equal(res.status, 201, JSON.stringify(body));
+      return body.id as string;
+    }
+    const decideJson = (approvalId: string, body: Row) =>
+      routes.decide.POST(jsonRequest(`/api/approvals/${approvalId}/decide`, body), ctx({ approvalId }));
+    const mcpCall = (name: string, args: Row) =>
+      routes.mcp.POST(jsonRequest('/api/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }), ctx({}));
+    const openReq = (token: string, method = 'GET') =>
+      new NextRequest(`http://localhost/o/${token}`, { method, headers: { host: 'localhost:3001' } });
+    const approvalRow = (id: string) => store.approvals.find((a) => a.id === id)!;
+
+    describe('ingest (shared validation)', () => {
+      it('stores the request with a host id and returns it', async () => {
+        const { res, body } = await postHitl(binary({ deadline: inAnHour(), idempotencyKey: 'idem-1' }));
+        assert.equal(res.status, 201);
+        assert.equal(body.hitlRequest.id, body.id);
+        assert.equal(body.hitlRequest.question, 'Issue a £240 refund for order 48213?');
+        assert.equal(body.idempotencyKey, 'idem-1');
+        assert.ok(approvalRow(body.id).deadline instanceof Date);
+      });
+
+      it('refuses an agent-sent id, unknown keys and a past deadline with field errors', async () => {
+        for (const [hitl, field] of [
+          [binary({ id: 'mine' }), '/id'],
+          [binary({ colour: 'blue' }), ''],
+          [binary({ deadline: '2020-01-01T00:00:00Z' }), '/deadline'],
+          [binary({ requester: { agentId: 'agent-dev' } }), '/requester/agentId'],
+        ] as const) {
+          const { res, body } = await postHitl(hitl);
+          assert.equal(res.status, 422, JSON.stringify(body));
+          assert.equal(body.error, 'Invalid hitl request');
+          assert.ok(Array.isArray(body.fields) && body.fields.length > 0);
+          if (field) assert.ok(body.fields.some((f: { field: string }) => f.field === field), JSON.stringify(body.fields));
+        }
+        assert.equal(store.approvals.length, 0, 'nothing stored');
+      });
+
+      it('a repeat idempotencyKey returns the existing approval (200), one row', async () => {
+        const first = await createHitl(binary({ idempotencyKey: 'idem-7' }));
+        const { res, body } = await postHitl(binary({ idempotencyKey: 'idem-7' }));
+        assert.equal(res.status, 200);
+        assert.equal(body.id, first);
+        assert.equal(store.approvals.length, 1);
+      });
+    });
+
+    describe('answers', () => {
+      it('binary approve: stored as approved, response answered/approve, wake carries it', async () => {
+        addIssue({ id: 'i1', identifier: 'TB-1', status: 'todo' });
+        const id = await createHitl(binary(), ['i1']);
+        const res = await decideJson(id, { decision: 'approved' });
+        assert.equal(res.status, 200);
+        const row = approvalRow(id);
+        assert.equal(row.status, 'approved');
+        const r = row.hitlResponse as Row;
+        assert.equal(r.status, 'answered');
+        assert.equal(r.value, 'approve');
+        assert.equal(r.signature, null);
+        assert.deepEqual(r.decidedBy, { kind: 'group', id: 'board', display: 'Board' });
+        assert.equal(issueById('i1').status, 'todo');
+        const wake = wakes[0] as Row;
+        assert.equal(wake.status, 'approved');
+        assert.deepEqual((wake.response as Row).value, 'approve');
+        assert.equal((wake.response as Row).status, 'answered');
+      });
+
+      it('binary reject needs a reason by default (422), then succeeds with one', async () => {
+        const id = await createHitl(binary());
+        const bad = await decideJson(id, { decision: 'rejected' });
+        assert.equal(bad.status, 422);
+        const body = (await bad.json()) as Row;
+        assert.ok((body.fields as Array<{ field: string }>).some((f) => f.field === '/reason'));
+        assert.equal(approvalRow(id).status, 'pending');
+        assert.equal((await decideJson(id, { decision: 'rejected', reason: 'Not this quarter' })).status, 200);
+        assert.equal((approvalRow(id).hitlResponse as Row).reason, 'Not this quarter');
+      });
+
+      it('single choice: answered with the value; issues restored; a bad value is refused', async () => {
+        addIssue({ id: 'i1', identifier: 'TB-1', status: 'todo' });
+        const id = await createHitl(single(), ['i1']);
+        const bad = await decideJson(id, { status: 'answered', value: 'ups' });
+        assert.equal(bad.status, 422);
+        const legacy = await decideJson(id, { decision: 'approved' });
+        assert.equal(legacy.status, 422, 'approve/reject only fits binary questions');
+        const ok = await decideJson(id, { status: 'answered', value: 'evri' });
+        assert.equal(ok.status, 200);
+        assert.equal(approvalRow(id).status, 'answered');
+        assert.equal((approvalRow(id).hitlResponse as Row).value, 'evri');
+        assert.equal(issueById('i1').status, 'todo');
+        assert.equal((wakes[0] as Row).status, 'answered');
+        assert.equal(((wakes[0] as Row).response as Row).value, 'evri');
+        assert.match(commentFor('i1'), /evri|Evri/);
+      });
+
+      it('declined keeps issues blocked and passes the reason on', async () => {
+        addIssue({ id: 'i1', identifier: 'TB-1', status: 'todo' });
+        const id = await createHitl(single(), ['i1']);
+        assert.equal((await decideJson(id, { status: 'declined', reason: 'Ask the customer first' })).status, 200);
+        const r = approvalRow(id).hitlResponse as Row;
+        assert.equal(r.status, 'declined');
+        assert.equal(r.value, undefined);
+        assert.equal(r.reason, 'Ask the customer first');
+        assert.equal(issueById('i1').status, 'blocked');
+        assert.equal(((wakes[0] as Row).response as Row).reason, 'Ask the customer first');
+      });
+
+      it('secret: an answer is refused (no device encryption yet); declining works', async () => {
+        const id = await createHitl({
+          spec: 'hitl/request/v0',
+          question: 'What is the API key for the billing sandbox?',
+          answerType: 'secret',
+          encryption: { publicKey: 'aUe06yud5-sO8Pp2F300oD5PJQpZE_muFRiArmDNsi8', alg: 'HPKE-X25519-SHA256-AES128GCM' },
+          requester: { agentId: 'agent-req' },
+        });
+        assert.equal((await decideJson(id, { status: 'answered', value: 'k' })).status, 422);
+        assert.equal((await decideJson(id, { status: 'declined' })).status, 200);
+      });
+
+      it('MCP decide_approval takes status + value and returns the response', async () => {
+        const id = await createHitl(single());
+        const res = await mcpCall('decide_approval', { company_id: 'company-a', approval_id: id, status: 'answered', value: 'dpd' });
+        const body = JSON.stringify(await res.json());
+        assert.doesNotMatch(body, /"error"/);
+        assert.equal(approvalRow(id).status, 'answered');
+        assert.deepEqual((approvalRow(id).hitlResponse as Row).decidedBy, { kind: 'service', id: 'mcp', display: 'MCP' });
+      });
+
+      it('dashboard form errors redirect back to the approval page with a message', async () => {
+        const id = await createHitl(single());
+        const form = new FormData();
+        form.set('status', 'answered');
+        form.set('value', 'nope');
+        form.set('returnTo', `/approval/${id}`);
+        const res = await routes.decide.POST(
+          new NextRequest(`http://localhost/api/approvals/${id}/decide`, { method: 'POST', headers: { accept: 'text/html', host: 'localhost:3001' }, body: form }),
+          ctx({ approvalId: id }),
+        );
+        assert.equal(res.status, 303);
+        const loc = new URL(res.headers.get('location')!);
+        assert.equal(loc.pathname, `/approval/${id}`);
+        assert.equal(loc.searchParams.get('for'), id);
+        assert.ok(loc.searchParams.get('decideError'));
+      });
+    });
+
+    describe('expiry', () => {
+      it('past deadline: lazy expiry on decide; response has no value, decidedBy or decidedAt; agent told', async () => {
+        addIssue({ id: 'i1', identifier: 'TB-1', status: 'todo' });
+        const id = await createHitl(binary({ deadline: inAnHour() }), ['i1']);
+        approvalRow(id).deadline = new Date(Date.now() - 1000);
+        const res = await decideJson(id, { decision: 'approved' });
+        assert.equal(res.status, 409);
+        assert.deepEqual(await res.json(), { error: 'Expired', status: 'expired' });
+        const row = approvalRow(id);
+        assert.equal(row.status, 'expired');
+        const r = row.hitlResponse as Row;
+        assert.equal(r.status, 'expired');
+        for (const k of ['value', 'decidedBy', 'decidedAt', 'reason']) assert.ok(!(k in r), k);
+        assert.equal(issueById('i1').status, 'blocked');
+        assert.deepEqual(wakes.map((w) => [w.agentId, w.status]), [['agent-req', 'expired']]);
+      });
+
+      for (const order of ['decide first', 'expiry first'] as const) {
+        it(`race: decide vs expiry sweep (${order}): exactly one wins, one comment, one wake`, async () => {
+          addIssue({ id: 'i1', identifier: 'TB-1', status: 'blocked' });
+          const id = await createHitl(binary({ deadline: inAnHour() }), ['i1']);
+          const later = new Date(Date.now() + 2 * 3600_000);
+          const decide = () => decideJson(id, { decision: 'approved' });
+          const expire = () => libs.expiry.expireApprovalIfDue('company-a', id, later) as Promise<boolean>;
+          const [a, b] = order === 'decide first' ? await Promise.all([decide(), expire()]) : (await Promise.all([expire(), decide()])).reverse() as [Response, boolean];
+          const decided = (a as Response).status === 200;
+          const expired = b as boolean;
+          assert.equal(Number(decided) + Number(expired), 1, `exactly one winner (decide ${a.status}, expired ${b})`);
+          assert.equal(approvalRow(id).status, decided ? 'approved' : 'expired');
+          assert.equal(comments.length, 1);
+          assert.equal(wakes.length, 1);
+          assert.equal(store.hitlEvents.filter((e) => e.type === 'decided').length, decided ? 1 : 0);
+        });
+      }
+
+      it('sweep expires only due approvals in its own company', async () => {
+        const due = await createHitl(binary({ deadline: inAnHour() }));
+        const notDue = await createHitl(binary({ deadline: inAnHour(), question: 'Second?' }));
+        approvalRow(due).deadline = new Date(Date.now() - 1000);
+        store.approvals.push({ id: 'b-due', companyId: 'company-b', status: 'pending', type: 'request_board_approval', requestedByAgentId: 'agent-other', issueIds: [], payload: {}, deadline: new Date(0) });
+        const ids = await libs.expiry.expireDueApprovals('company-a');
+        assert.deepEqual(ids, [due]);
+        assert.equal(approvalRow(notDue).status, 'pending');
+        assert.equal(approvalRow('b-due').status, 'pending');
+      });
+    });
+
+    describe('company scoping', () => {
+      it('another company approval: Board decide 404, MCP decide refused, nothing changes', async () => {
+        store.approvals.push({ id: 'b-1', companyId: 'company-b', status: 'pending', type: 'request_board_approval', requestedByAgentId: 'agent-other', issueIds: [], payload: {}, hitlRequest: null });
+        assert.equal((await decideJson('b-1', { decision: 'approved' })).status, 404);
+        const mcp = (await (await mcpCall('decide_approval', { company_id: 'company-a', approval_id: 'b-1', decision: 'approved' })).json()) as Row;
+        assert.ok(mcp.error, JSON.stringify(mcp));
+        assert.equal(approvalRow('b-1').status, 'pending');
+        assert.equal(store.hitlEvents.length, 0);
+        assert.equal(wakes.length, 0);
+      });
+
+      it('/o: unknown, malformed and other-company tokens are 404 and record nothing', async () => {
+        const id = await createHitl(withLink());
+        store.hitlLinkTokens.push({ token: 'B'.repeat(43), companyId: 'company-b', approvalId: id, itemRef: 'lnk_terms', reviewerKind: 'group', reviewerId: 'board' });
+        for (const token of ['B'.repeat(43), 'U'.repeat(43), 'bad token!']) {
+          const res = await routes.open.GET(openReq(encodeURIComponent(token)), ctx({ token }));
+          assert.equal(res.status, 404, token);
+        }
+        assert.equal(store.hitlEvents.length, 0);
+      });
+    });
+
+    describe('/o/<token> links and mustOpen', () => {
+      it('mustOpen blocks the answer until opened; HEAD does not count; GET redirects without a referrer', async () => {
+        const id = await createHitl(withLink());
+        const token = (await libs.host.linkTokenFor({ companyId: 'company-a', approvalId: id, itemRef: 'lnk_terms' })) as string;
+        assert.equal(await libs.host.linkTokenFor({ companyId: 'company-a', approvalId: id, itemRef: 'lnk_terms' }), token, 'stable per reviewer');
+
+        assert.equal((await decideJson(id, { decision: 'approved' })).status, 422, 'not opened yet');
+        const head = await routes.open.HEAD(openReq(token, 'HEAD'), ctx({ token }));
+        assert.equal(head.status, 303);
+        assert.equal((await decideJson(id, { decision: 'approved' })).status, 422, 'HEAD is not an open');
+
+        const res = await routes.open.GET(openReq(token), ctx({ token }));
+        assert.equal(res.status, 303);
+        assert.equal(res.headers.get('location'), 'https://suppliers.example.com/terms/2027');
+        assert.equal(res.headers.get('referrer-policy'), 'no-referrer');
+        assert.equal((await decideJson(id, { decision: 'approved' })).status, 200);
+        const r = approvalRow(id).hitlResponse as { activity: { items: Array<{ ref: string; openedAt: string[] }>; events: Array<{ type: string }> } };
+        assert.equal(r.activity.items[0].ref, 'lnk_terms');
+        assert.equal(r.activity.items[0].openedAt.length, 1);
+        assert.deepEqual(r.activity.events.map((e) => e.type), ['opened', 'decided']);
+      });
+
+      it('events are hash-chained with increasing seq', async () => {
+        const id = await createHitl(withLink());
+        await libs.host.recordReviewerEvent({ companyId: 'company-a', approvalId: id, type: 'presented' });
+        await libs.host.recordReviewerEvent({ companyId: 'company-a', approvalId: id, type: 'presented' });
+        await libs.host.recordReviewerEvent({ companyId: 'company-a', approvalId: id, type: 'opened', itemRef: 'lnk_terms' });
+        const evs = store.hitlEvents.filter((e) => e.approvalId === id);
+        assert.deepEqual(evs.map((e) => e.type), ['presented', 'opened'], 'presented once');
+        assert.deepEqual(evs.map((e) => e.seq), [1, 2]);
+        assert.equal(evs[1].prevHash, evs[0].hash);
+      });
+    });
+
+    describe('redaction', () => {
+      it('no link token or HITLy resume token in API/MCP responses or logs', async () => {
+        const logged: string[] = [];
+        const saved = { log: console.log, info: console.info, warn: console.warn, error: console.error, debug: console.debug };
+        for (const k of Object.keys(saved) as Array<keyof typeof saved>) {
+          console[k] = (...args: unknown[]) => logged.push(args.map((a) => (a instanceof Error ? `${a.message} ${a.stack}` : typeof a === 'string' ? a : JSON.stringify(a))).join(' '));
+        }
+        try {
+          const id = await createHitl(withLink());
+          approvalRow(id).payload = { ...(approvalRow(id).payload as Row), hitlyResumeToken: 'RESUME-SECRET-123' };
+          const token = (await libs.host.linkTokenFor({ companyId: 'company-a', approvalId: id, itemRef: 'lnk_terms' })) as string;
+          await routes.open.GET(openReq(token), ctx({ token }));
+          await routes.open.GET(openReq(token.slice(0, -2) + 'zz'), ctx({ token: token.slice(0, -2) + 'zz' }));
+          const responses = [
+            await routes.get.GET(
+              new NextRequest(`http://localhost/api/companies/company-a/approvals/${id}`, { headers: { authorization: 'Bearer test' } }),
+              ctx({ companyId: 'company-a', approvalId: id }),
+            ),
+            await mcpCall('list_approvals', { company_id: 'company-a' }),
+            await decideJson(id, { decision: 'approved' }),
+          ];
+          const bodies = await Promise.all(responses.map((r) => r.text()));
+          assert.match(bodies[0], new RegExp(id));
+          for (const b of bodies) {
+            assert.doesNotMatch(b, /RESUME-SECRET-123/);
+            assert.ok(!b.includes(token), 'link token never in a response');
+          }
+          const all = logged.join('\n');
+          assert.ok(!all.includes(token), 'link token never logged');
+          assert.doesNotMatch(all, /RESUME-SECRET-123/);
+        } finally {
+          Object.assign(console, saved);
+        }
+      });
     });
   });
 });

@@ -141,6 +141,13 @@
       "when": 1792776456879,
       "tag": "0019_assistant_thread_pins",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1792861730365,
+      "tag": "0020_apr2_hitl",
+      "breakpoints": true
     }
   ]
 }

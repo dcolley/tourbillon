@@ -40,7 +40,11 @@
     "./knowledge-graph-config": "./src/knowledge-graph-config.ts",
     "./browser-config": "./src/browser-config.ts",
     "./agent-token": "./src/agent-token.ts",
-    "./widgets": "./src/widgets.ts"
+    "./widgets": "./src/widgets.ts",
+    "./hitl": "./src/hitl.ts",
+    "./hitl-hash": "./src/hitl-hash.ts",
+    "./jcs": "./src/jcs.ts",
+    "./iregexp": "./src/iregexp.ts"
   },
   "dependencies": {
     "croner": "^10.0.1",

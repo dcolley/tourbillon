@@ -36,16 +36,52 @@ function parsePayload(json: string | undefined): WakePayload | null {
   }
 }
 
+const cap500 = (text: string) => (text.length > 500 ? `${text.slice(0, 500)}…` : text);
+
+/** APR-2: the response lines of an approval_resolved wake (status, answer, reason, decided by). */
+function approvalResponseParts(data: HeartbeatJobData): string[] {
+  const r = data.approvalResponse;
+  if (!r || typeof r !== 'object') return [];
+  const parts = [`Response status: ${r.status}`];
+  if (r.status === 'answered') {
+    if (r.encrypted) parts.push('Answer: (encrypted secret; not included in this message)');
+    else if (r.value !== undefined) {
+      let text: string;
+      try {
+        text = JSON.stringify(r.value) ?? String(r.value);
+      } catch {
+        text = String(r.value);
+      }
+      parts.push(`Answer${r.answerType ? ` (${r.answerType})` : ''}: ${cap500(text)}`);
+    }
+  } else if (r.status === 'expired') {
+    parts.push('No answer: the request expired before anyone decided it.');
+  } else if (r.status === 'cancelled') {
+    parts.push('No answer: the request was cancelled.');
+  }
+  if (typeof r.reason === 'string' && r.reason.trim()) parts.push(`Reason: ${cap500(r.reason.trim())}`);
+  if (r.decidedBy && typeof r.decidedBy.id === 'string') {
+    const who = r.decidedBy.display ? `${r.decidedBy.display} (${r.decidedBy.kind}:${r.decidedBy.id})` : `${r.decidedBy.kind}:${r.decidedBy.id}`;
+    parts.push(`Decided by: ${who}`);
+  }
+  return parts;
+}
+
 function leadParts(data: HeartbeatJobData): string[] {
   const parts = [`Wake reason: ${data.wakeReason}`];
   if (data.taskId) parts.push(`Assigned task ID: ${data.taskId}`);
   if (data.wakeReason === 'approval_resolved') {
     if (data.approvalId) parts.push(`Approval ID: ${data.approvalId}`);
-    if (data.approvalStatus) parts.push(`Board decision: ${data.approvalStatus}`);
+    if (data.approvalStatus === 'approved' || data.approvalStatus === 'rejected') {
+      parts.push(`Board decision: ${data.approvalStatus}`);
+    } else if (data.approvalStatus) {
+      parts.push(`Approval outcome: ${data.approvalStatus}`);
+    }
     if (data.approvalNote?.trim()) {
       const note = data.approvalNote.trim();
-      parts.push(`Board note: ${note.length > 500 ? `${note.slice(0, 500)}…` : note}`);
+      parts.push(`Board note: ${cap500(note)}`);
     }
+    parts.push(...approvalResponseParts(data));
     if (data.linkedIssueIds?.length) {
       parts.push(`Linked issue IDs: ${data.linkedIssueIds.join(', ')}`);
     }

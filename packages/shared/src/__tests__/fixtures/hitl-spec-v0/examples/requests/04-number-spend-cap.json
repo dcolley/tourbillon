@@ -1,0 +1,18 @@
+{
+  "spec": "hitl/request/v0",
+  "question": "What should this week's ad spend cap be?",
+  "answerType": "number",
+  "bounds": {
+    "min": 0,
+    "max": 500,
+    "step": 10,
+    "unit": "GBP"
+  },
+  "recommended": {
+    "value": 150,
+    "reason": "Last 4 weeks averaged £138 at target CPA."
+  },
+  "requester": {
+    "agentId": "agent_marketing_01"
+  }
+}

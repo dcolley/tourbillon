@@ -21,7 +21,12 @@ const env = process.env as Record<string, string | undefined>;
 
 // ---- in-memory db ---------------------------------------------------------------------------
 type Row = Record<string, unknown>;
-type Cond = { op: 'eq'; c: string; val: unknown } | { op: 'and'; xs: Cond[] } | { op: 'in'; c: string; vals: unknown[] };
+type Cond =
+  | { op: 'eq'; c: string; val: unknown }
+  | { op: 'and'; xs: Array<Cond | undefined> }
+  | { op: 'or'; xs: Array<Cond | undefined> }
+  | { op: 'in'; c: string; vals: unknown[] }
+  | { op: 'fn'; f: (row: Row) => boolean };
 const store: Record<string, Row[]> = {};
 function table(name: string) {
   return new Proxy({ __table: name } as Record<string, unknown>, {
@@ -32,10 +37,24 @@ function match(row: Row, cond?: Cond): boolean {
   if (!cond) return true;
   if (cond.op === 'eq') return row[cond.c] === cond.val;
   if (cond.op === 'in') return cond.vals.includes(row[cond.c]);
-  return cond.xs.every((x) => match(row, x));
+  if (cond.op === 'fn') return cond.f(row);
+  if (cond.op === 'or') return cond.xs.some((x) => x !== undefined && match(row, x));
+  return cond.xs.every((x) => x === undefined || match(row, x));
+}
+/** Awaitable query result that also offers `.returning()` (and the chain methods APR-2 uses). */
+function chain(run: () => Row[]) {
+  const c = {
+    then: (res: (v: Row[]) => unknown, rej: (e: unknown) => unknown) => Promise.resolve().then(run).then(res, rej),
+    returning: async () => run(),
+    orderBy: () => c,
+    limit: () => c,
+    for: () => c,
+    onConflictDoNothing: () => c,
+  };
+  return c;
 }
 const tables = Object.fromEntries(
-  ['approvals', 'agents', 'companies', 'issues', 'activityLog', 'heartbeatRuns'].map((n) => [n, table(n)]),
+  ['approvals', 'agents', 'companies', 'issues', 'activityLog', 'heartbeatRuns', 'hitlEvents', 'hitlLinkTokens'].map((n) => [n, table(n)]),
 );
 const nameOf = (t: unknown) => (t as { __table: string }).__table;
 const fakeDb = {
@@ -48,17 +67,24 @@ const fakeDb = {
     fn({
       update: (t: unknown) => ({
         set: (v: Row) => ({
-          where: (cond: Cond) => ({
-            returning: async () => {
+          where: (cond: Cond) =>
+            chain(() => {
               const rows = (store[nameOf(t)] ?? []).filter((r) => match(r, cond));
               rows.forEach((r) => Object.assign(r, v));
               return rows;
-            },
-          }),
+            }),
         }),
       }),
-      select: () => ({ from: (t: unknown) => ({ where: async (cond: Cond) => (store[nameOf(t)] ?? []).filter((r) => match(r, cond)) }) }),
-      insert: (t: unknown) => ({ values: async (v: Row) => { (store[nameOf(t)] ??= []).push(v); } }),
+      select: () => ({
+        from: (t: unknown) => ({ where: (cond: Cond) => chain(() => (store[nameOf(t)] ?? []).filter((r) => match(r, cond))) }),
+      }),
+      insert: (t: unknown) => ({
+        values: (v: Row) =>
+          chain(() => {
+            (store[nameOf(t)] ??= []).push(v);
+            return [v];
+          }),
+      }),
     }),
 };
 
@@ -156,6 +182,11 @@ describe('#106 board-guarded routes', () => {
         and: (...xs: Cond[]) => ({ op: 'and', xs }),
         inArray: (col: { c: string }, vals: unknown[]) => ({ op: 'in', c: col.c, vals }),
         ne: () => ({ op: 'and', xs: [] }),
+        or: (...xs: Cond[]) => ({ op: 'or', xs }),
+        isNull: (col: { c: string }) => ({ op: 'fn', f: (r: Row) => r[col.c] == null }),
+        isNotNull: (col: { c: string }) => ({ op: 'fn', f: (r: Row) => r[col.c] != null }),
+        lte: (col: { c: string }, val: Date) => ({ op: 'fn', f: (r: Row) => r[col.c] != null && (r[col.c] as Date) <= val }),
+        gt: (col: { c: string }, val: Date) => ({ op: 'fn', f: (r: Row) => r[col.c] != null && (r[col.c] as Date) > val }),
         asc: (c: unknown) => c,
         desc: (c: unknown) => c,
       },
