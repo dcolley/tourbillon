@@ -39,6 +39,12 @@
  * `accepted:false`. A steer is refused with 409 while this session has a widget waiting (answer or
  * dismiss it first); a follow-up is queued and runs after the answer. Run errors on a resumed widget
  * run carry a generic message; details are logged server-side.
+ *
+ * OBS-1: when Mastra tracing is on, each AG-UI run gets one trace id (attributes companyId, agentId,
+ * threadId, view=assistant, provider, model; see buildAssistantTracingOptions). It is passed to the
+ * turn and to follow-ups queued on the run, sent to the client as a `tourbillon.trace` CUSTOM event
+ * and in the RUN_FINISHED result, and Mastra stamps it on the saved assistant message
+ * (`content.metadata.traceId`). `traceUrl` is added only when PHOENIX_UI_BASE_URL is set.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { EventType, type BaseEvent } from '@ag-ui/core';
@@ -68,7 +74,9 @@ import {
   aguiRunStream,
   expectRunContinuation,
 } from '@/lib/agui/session-stream';
-import { runWithHeartbeatContext } from '@tourbillon/mastra';
+import { buildAssistantTracingOptions, runWithHeartbeatContext } from '@tourbillon/mastra';
+import { phoenixUiBaseUrl } from '@tourbillon/shared';
+import { buildTraceUrl } from '@/lib/assistant/trace-link';
 import { setRequestWidgetSpecs } from '@tourbillon/mastra/widget-tools';
 import { assistantWidgetSpecIndex } from '@/components/assistant/widgets/specs';
 import { isWidgetAnswerEntry, selectWidgetSpecs, suspendedWidgetSpec, widgetResumeFromEntry } from '@/lib/agui/widgets';
@@ -148,6 +156,23 @@ function toToolApprovalResult(result: unknown): ToolApprovalResult {
   return { accepted: false, reason: typeof r?.reason === 'string' ? r.reason : 'not_pending' };
 }
 
+/** OBS-1: tracing options for one assistant run (undefined when Mastra tracing is off). */
+function assistantTracing(agent: Agent, threadId: string, aguiRunId: string, modelIdOverride: string | undefined) {
+  return buildAssistantTracingOptions({
+    companyId: agent.companyId,
+    agentId: agent.id,
+    agentUrlKey: agent.urlKey,
+    threadId,
+    provider: agent.providerId,
+    model: modelIdOverride ?? agent.modelId,
+    aguiRunId,
+  });
+}
+
+function traceUrlField(traceUrl: string | undefined): { traceUrl?: string } {
+  return traceUrl ? { traceUrl } : {};
+}
+
 export async function POST(req: NextRequest, { params }: { params: Promise<{ agentId: string }> }) {
   try {
     const { agentId: agentKey } = await params;
@@ -166,7 +191,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
     const resourceId = props.resourceId ?? chatResourceId(agent.companyId);
     assertCompanyResource(agent, resourceId);
 
-    const controller = await getOrCreateChatController(agent, { modelIdOverride: chatModelIdFromSearch(req) });
+    const modelIdOverride = chatModelIdFromSearch(req);
+    const controller = await getOrCreateChatController(agent, { modelIdOverride });
     const session = await getChatSession(controller, agent, {
       resourceId,
       scope: aguiSessionScope(agent, props.sessionScope),
@@ -199,6 +225,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
     if (action === 'steer' && onThread && pendingOwnedWidgetCalls(session, resourceId, input.threadId).length > 0) {
       throw new ChatAgentError('A widget is waiting for an answer; answer or dismiss it first', 409);
     }
+
+    // One trace per AG-UI run; a follow-up queued on an open run joins that run's trace.
+    const tracingOptions = active?.tracingOptions ?? assistantTracing(agent, input.threadId, input.runId, modelIdOverride);
+
     const queueOnOpenRun = action === 'followUp' && Boolean(active) && onThread;
     const isControl =
       action === 'abort' ||
@@ -326,7 +356,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
         // Started by the open AG-UI stream once the current turn completes; dropped if it closes first.
         const queued = active.queueTurn(() =>
           runWithHeartbeatContext(heartbeat, () =>
-            session.sendMessage({ content, requestContext: requestContext as never }),
+            session.sendMessage({
+              content,
+              requestContext: requestContext as never,
+              ...(tracingOptions ? { tracingOptions } : {}),
+            }),
           ),
         );
         return controlResponse(input.threadId, input.runId, action, { accepted: true, queued });
@@ -340,7 +374,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
     if (running) {
       throw new ChatAgentError('A run is already in progress; send steer or followUp instead', 409);
     }
-    const claim = claimAguiRun(session, resourceId, input.threadId);
+    const claim = claimAguiRun(session, resourceId, input.threadId, { tracingOptions });
     if (!claim) {
       throw new ChatAgentError('A run is already in progress; send steer or followUp instead', 409);
     }
@@ -368,6 +402,14 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
       },
       takeQueuedTurn: claim.takeQueuedTurn,
       droppedQueuedTurns: () => claim.droppedTurns() + claim.queuedTurns(),
+      ...(tracingOptions
+        ? {
+            trace: {
+              traceId: tracingOptions.traceId,
+              ...traceUrlField(buildTraceUrl(phoenixUiBaseUrl(), tracingOptions.traceId)),
+            },
+          }
+        : {}),
       start: () =>
         runWithHeartbeatContext(
           heartbeat,
@@ -376,6 +418,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
               content,
               files: request.files.length > 0 ? request.files : undefined,
               requestContext: requestContext as never,
+              ...(tracingOptions ? { tracingOptions } : {}),
             });
           },
         ),

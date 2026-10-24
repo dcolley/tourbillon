@@ -11,7 +11,9 @@ import assert from 'node:assert/strict';
 import { NextRequest } from 'next/server';
 import { HttpAgent } from '@ag-ui/client';
 import type { BaseEvent } from '@ag-ui/core';
+import { buildAssistantTracingOptions } from '../../../../../packages/mastra/src/observability/assistant-tracing';
 import {
+  createCapturingObservability,
   createStubAgentController,
   createStubRequestContext,
   promptText,
@@ -23,7 +25,7 @@ import {
 type Ev = BaseEvent & Record<string, any>;
 type Handler = (req: NextRequest, ctx: { params: Promise<{ agentId: string }> }) => Promise<Response>;
 
-const AGENT = { id: 'agent-a', urlKey: 'alice', name: 'Alice', companyId: 'company-a', modelId: 'm' };
+const AGENT = { id: 'agent-a', urlKey: 'alice', name: 'Alice', companyId: 'company-a', modelId: 'm', providerId: 'provider-a' };
 const DEFAULT_RESOURCE = 'company-company-a:chat:free';
 /** Server-pinned AG-UI session scope for agent-a. */
 const SCOPE = 'agui:agent-a';
@@ -35,6 +37,9 @@ let sessions: Map<string, any>;
 const controllerCalls: Array<{ agent: unknown; opts: unknown }> = [];
 const sessionCalls: Array<{ resourceId?: string; scope?: string }> = [];
 const heartbeatCalls: unknown[] = [];
+/** OBS-1: tracing on/off for the route's buildAssistantTracingOptions (the real builder, env check overridden). */
+let tracingOn = false;
+const tracingCalls: Array<Record<string, unknown>> = [];
 let POST: Handler;
 const requestContext = createStubRequestContext({ chatRequestContext: true });
 
@@ -181,6 +186,10 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
             heartbeatCalls.push(ctx);
             return fn();
           },
+          buildAssistantTracingOptions: (i: Parameters<typeof buildAssistantTracingOptions>[0]) => {
+            tracingCalls.push(i as never);
+            return buildAssistantTracingOptions(i, { enabled: tracingOn });
+          },
         };
       }
       return originalRequire.apply(this, arguments as unknown as [string]);
@@ -198,6 +207,8 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
     controllerCalls.length = 0;
     sessionCalls.length = 0;
     heartbeatCalls.length = 0;
+    tracingOn = false;
+    tracingCalls.length = 0;
     chunkDelayMs = 0;
     script = (_call, prompt) =>
       prompt.some((m) => m.role === 'tool') ? stubText('t', ['Hello ', 'there']) : stubToolCall('call-1', 'echo', { text: 'hi' });
@@ -773,6 +784,131 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
       assert.deepEqual(events.at(-1)!.outcome, { type: 'cancelled' });
       await sleep(200);
       assert.equal(stub.modelCalls, 1);
+    });
+  });
+
+  describe('OBS-1 trace id per run', () => {
+    let capture: ReturnType<typeof createCapturingObservability>;
+    const savedBase = process.env.PHOENIX_UI_BASE_URL;
+    const BASE = 'https://phoenix.example.com';
+
+    beforeEach(async () => {
+      tracingOn = true;
+      process.env.PHOENIX_UI_BASE_URL = BASE;
+      capture = createCapturingObservability();
+      stub = await createStubAgentController({
+        script: (call, prompt) => script(call, prompt),
+        get chunkDelayMs() {
+          return chunkDelayMs;
+        },
+        tools: { echo: (i: { text: string }) => ({ echoed: i.text }) },
+        observability: capture.observability,
+      } as Parameters<typeof createStubAgentController>[0]);
+    });
+
+    after(() => {
+      if (savedBase === undefined) delete process.env.PHOENIX_UI_BASE_URL;
+      else process.env.PHOENIX_UI_BASE_URL = savedBase;
+    });
+
+    const traceEvents = (events: Ev[]) => events.filter((e) => e.type === 'CUSTOM' && e.name === 'tourbillon.trace');
+
+    it('one trace per run: trace event after RUN_STARTED, trace on RUN_FINISHED, spans and saved message carry it', async () => {
+      const { events, failure } = await clientRun('obs1-thread-1', { query: '?modelId=provider/model-x' });
+      assert.equal(failure, undefined);
+      assert.equal(events[0].type, 'RUN_STARTED');
+      assert.equal(events[1].type, 'CUSTOM');
+      assert.equal(events[1].name, 'tourbillon.trace');
+      const traceId = events[1].value.traceId as string;
+      assert.match(traceId, /^[0-9a-f]{32}$/);
+      assert.deepEqual(events[1].value, { traceId, traceUrl: `${BASE}/redirects/traces/${traceId}` });
+      assert.equal(traceEvents(events).length, 1);
+      const finished = events.at(-1)!;
+      assert.equal(finished.type, 'RUN_FINISHED');
+      assert.deepEqual(finished.result, { reason: 'complete', traceId, traceUrl: `${BASE}/redirects/traces/${traceId}` });
+
+      // Trace attributes for this run.
+      assert.equal(tracingCalls.length, 1);
+      assert.deepEqual(tracingCalls[0], {
+        companyId: 'company-a',
+        agentId: 'agent-a',
+        agentUrlKey: 'alice',
+        threadId: 'obs1-thread-1',
+        provider: 'provider-a',
+        model: 'provider/model-x',
+        aguiRunId: finished.runId,
+      });
+
+      // The turn's model and tool spans are in that trace; the root carries view=assistant.
+      await capture.flush();
+      const inTrace = capture.ended.filter((sp) => sp.traceId === traceId);
+      const spanTypes = new Set(inTrace.map((sp) => String(sp.type)));
+      assert.ok(spanTypes.has('model_generation'), [...spanTypes].join(','));
+      assert.ok(spanTypes.has('tool_call'), [...spanTypes].join(','));
+      const root = inTrace.find((sp) => sp.isRootSpan)!;
+      assert.equal(root.metadata?.view, 'assistant');
+      assert.equal(root.metadata?.threadId, 'obs1-thread-1');
+
+      // Saved assistant message carries the trace id (what the thread messages API returns on reload).
+      const session = sessions.get(SESSION_KEY);
+      const saved = (await session.thread.listMessages({ threadId: 'obs1-thread-1' })) as Array<{ role: string; content: any }>;
+      const assistant = saved.filter((m) => m.role === 'assistant');
+      assert.ok(assistant.length > 0);
+      for (const m of assistant) assert.equal(m.content.metadata?.traceId, traceId);
+    });
+
+    it('a new run gets a new trace id', async () => {
+      const first = await clientRun('obs1-thread-2');
+      const second = await clientRun('obs1-thread-2');
+      const a = traceEvents(first.events)[0].value.traceId;
+      const b = traceEvents(second.events)[0].value.traceId;
+      assert.ok(a && b && a !== b);
+    });
+
+    it('no traceUrl when PHOENIX_UI_BASE_URL is unset (trace id still sent)', async () => {
+      delete process.env.PHOENIX_UI_BASE_URL;
+      const { events } = await clientRun('obs1-thread-3');
+      const [trace] = traceEvents(events);
+      assert.deepEqual(Object.keys(trace.value), ['traceId']);
+      assert.deepEqual(Object.keys(events.at(-1)!.result).sort(), ['reason', 'traceId']);
+    });
+
+    it('tracing off: no trace event, no trace on RUN_FINISHED', async () => {
+      tracingOn = false;
+      const { events } = await clientRun('obs1-thread-4');
+      assert.equal(traceEvents(events).length, 0);
+      assert.deepEqual(events.at(-1)!.result, { reason: 'complete' });
+    });
+
+    it('a follow-up queued on the open run joins the run trace', async () => {
+      chunkDelayMs = 40;
+      script = (call) => (call === 1 ? stubText('t1', ['a ', 'b ', 'c ']) : stubText('t2', ['second-turn']));
+      let control: Promise<Ev[]> | undefined;
+      const { events, failure } = await clientRun('obs1-thread-5', {
+        onEvent: (e) => {
+          if (e.type === 'TEXT_MESSAGE_CONTENT' && !control) {
+            control = request(
+              'alice',
+              input('obs1-thread-5', { forwardedProps: { tourbillon: { action: 'followUp' } } }, 'follow-up message'),
+            ).then(readSse);
+          }
+        },
+      });
+      assert.equal(failure, undefined);
+      const ctl = await control!;
+      assert.deepEqual(ctl[1].value, { action: 'followUp', accepted: true, queued: 1 });
+      assert.ok(text(events).endsWith('second-turn'));
+      const traceId = traceEvents(events)[0].value.traceId;
+      assert.equal(tracingCalls.length, 1, 'the control request reuses the open run trace');
+      await capture.flush();
+      const roots = capture.ended.filter((sp) => sp.isRootSpan);
+      assert.ok(roots.length >= 2, `two turns traced (got ${roots.length})`);
+      for (const r of roots) assert.equal(r.traceId, traceId);
+      const session = sessions.get(SESSION_KEY);
+      const saved = (await session.thread.listMessages({ threadId: 'obs1-thread-5' })) as Array<{ role: string; content: any }>;
+      const assistant = saved.filter((m) => m.role === 'assistant');
+      assert.ok(assistant.length >= 1);
+      for (const m of assistant) assert.equal(m.content.metadata?.traceId, traceId);
     });
   });
 });

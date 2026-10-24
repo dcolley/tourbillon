@@ -3,7 +3,8 @@
 /**
  * AGUI-1b: minimal assistant-view chat over the AG-UI endpoint: streamed text, reasoning and tool
  * calls, run status, stop / steer / follow-up while a run is open, tool approval, and the delivery of
- * each message (queued, dropped, failed). UI-2 adds the agent/thread sidebar; CHAT-1 the composer.
+ * each message (queued, dropped, failed). Rendered by the /assistant/<agent>[/<threadId>] pages
+ * (assistant-route-view.tsx).
  */
 import * as React from 'react';
 import { Button } from '@/components/ui/button';
@@ -191,15 +192,20 @@ export function agentChatHref(agentKey: string, threadId: string): string {
   return assistantAgentPath(agentKey, threadId);
 }
 
-export function AgentChat({ agentId, threadId }: { agentId: string; threadId?: string }) {
+/**
+ * Chat with one agent. `agentId` is used for the API calls; `agentKey` (the agent's url key, default
+ * `agentId`) for the page link, so the address bar keeps the canonical `/assistant/<url key>/<thread>`.
+ */
+export function AgentChat({ agentId, agentKey, threadId }: { agentId: string; agentKey?: string; threadId?: string }) {
+  const linkKey = agentKey ?? agentId;
   // Once the thread is open, show its link in the address bar so a reload reopens it.
   const onThreadOpened = React.useCallback(
     (ref: AguiThreadRef) => {
       if (typeof window === 'undefined') return;
-      const href = agentChatHref(agentId, ref.threadId);
+      const href = agentChatHref(linkKey, ref.threadId);
       if (window.location.pathname + window.location.search !== href) window.history.replaceState(null, '', href);
     },
-    [agentId],
+    [linkKey],
   );
   const chat = useAgentChat({ agentId, threadId, onThreadOpened });
   const [draft, setDraft] = React.useState('');

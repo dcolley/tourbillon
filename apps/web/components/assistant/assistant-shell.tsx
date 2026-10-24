@@ -1,14 +1,16 @@
 'use client';
 
-import type { ReactNode } from 'react';
+import { Suspense, type ReactNode } from 'react';
 import { Logo } from '@/components/logo';
 import { CompanySwitcher, type CompanyOption } from '@/components/company-switcher';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { ViewSwitcher } from '@/components/view-switcher';
+import { AssistantSidebar } from './sidebar';
 
 /**
  * UI-1: shell for the assistant view (`/assistant`). Top bar with the view switcher and
- * company switcher; the left column is a placeholder until UI-2 adds the agent/thread sidebar.
+ * company switcher. UI-2b: the left column is the agent/thread sidebar (remounted when the
+ * active company changes); pages render the main area.
  */
 export function AssistantShell({
   children,
@@ -37,30 +39,26 @@ export function AssistantShell({
         </div>
         <ThemeToggle />
       </header>
-      <div className="flex min-h-0 flex-1 overflow-hidden">{children}</div>
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        {activeCompanyId && (
+          <Suspense fallback={null}>
+            <AssistantSidebar key={activeCompanyId} />
+          </Suspense>
+        )}
+        {children}
+      </div>
     </div>
   );
 }
 
-/** Placeholder agent list (UI-2 replaces it with the agent/thread sidebar). */
+/** Main area when no thread is open (the sidebar lists agents and threads). */
 export function AssistantEmptyState() {
   return (
-    <>
-      <aside
-        aria-label="Agents"
-        className="hidden w-64 shrink-0 flex-col gap-2 border-r p-4 md:flex"
-      >
-        <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          Agents
-        </h2>
-        <p className="text-sm text-muted-foreground">Your agents and their threads will appear here.</p>
-      </aside>
-      <main className="flex flex-1 flex-col items-center justify-center gap-2 p-8 text-center">
-        <h1 className="text-xl font-semibold tracking-tight">Assistant</h1>
-        <p className="max-w-md text-sm text-muted-foreground">
-          Chat with your agents here. Pick an agent from the list to start a thread.
-        </p>
-      </main>
-    </>
+    <main className="flex flex-1 flex-col items-center justify-center gap-2 p-8 text-center">
+      <h1 className="text-xl font-semibold tracking-tight">Assistant</h1>
+      <p className="max-w-md text-sm text-muted-foreground">
+        Chat with your agents here. Pick an agent or a thread from the list to start.
+      </p>
+    </main>
   );
 }

@@ -1,6 +1,6 @@
 import { db } from '@tourbillon/db';
 import { sql } from 'drizzle-orm';
-import { ASSISTANT_THREAD_READ_MESSAGE_KEY } from './sidebar';
+import { ASSISTANT_MAX_PINS_PER_AGENT, ASSISTANT_THREAD_READ_MESSAGE_KEY } from './sidebar';
 
 /**
  * UI-2: single-statement writes for assistant threads.
@@ -16,8 +16,8 @@ import { ASSISTANT_THREAD_READ_MESSAGE_KEY } from './sidebar';
  * database as `@tourbillon/db`.
  */
 export const MASTRA_THREADS_TABLE = 'mastra_threads';
-/** Most threads one user may pin per agent (pinned threads are loaded one by one). */
-export const ASSISTANT_MAX_PINS_PER_AGENT = 50;
+/** Defined in ./sidebar (pure) so the sidebar client can show the cap without importing the db. */
+export { ASSISTANT_MAX_PINS_PER_AGENT };
 
 export interface ThreadScope {
   threadId: string;

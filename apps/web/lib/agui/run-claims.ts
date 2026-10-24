@@ -14,6 +14,8 @@
  * the session it guards.
  */
 
+import type { AssistantTracingOptions } from '@tourbillon/mastra';
+
 export type AguiQueuedTurn = () => Promise<void>;
 
 export interface AguiRunClaim {
@@ -28,6 +30,8 @@ export interface AguiRunClaim {
   droppedTurns(): number;
   release(): void;
   readonly released: boolean;
+  /** OBS-1: tracing options of the open run, so follow-ups queued on it join the same trace. */
+  readonly tracingOptions?: AssistantTracingOptions;
 }
 
 const g = globalThis as unknown as {
@@ -70,7 +74,12 @@ export function activeAguiRun(session: object, resourceId: string, threadId: str
 }
 
 /** Claims the run for this session and thread, or returns null when either is already claimed. */
-export function claimAguiRun(session: object, resourceId: string, threadId: string): AguiRunClaim | null {
+export function claimAguiRun(
+  session: object,
+  resourceId: string,
+  threadId: string,
+  options: { tracingOptions?: AssistantTracingOptions } = {},
+): AguiRunClaim | null {
   if (isAguiRunClaimed(session, resourceId, threadId)) return null;
   const key = threadKey(resourceId, threadId);
   const queue: AguiQueuedTurn[] = [];
@@ -106,6 +115,7 @@ export function claimAguiRun(session: object, resourceId: string, threadId: stri
     get released() {
       return released;
     },
+    ...(options.tracingOptions ? { tracingOptions: options.tracingOptions } : {}),
   };
   threadClaims().set(key, claim);
   sessionClaims().set(session, claim);

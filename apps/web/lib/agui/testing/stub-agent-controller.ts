@@ -47,6 +47,38 @@ export interface StubControllerOptions {
   controllerTools?: (args: { requestContext?: unknown }) => Record<string, unknown> | Promise<Record<string, unknown>>;
   /** Reuse another stub's storage (a rebuilt controller over the same threads). */
   storage?: unknown;
+  /** OBS-1: Mastra Observability instance (e.g. with a capturing exporter), as the chat controller passes when tracing is on. */
+  observability?: unknown;
+}
+
+/** A captured (ended) tracing span: the fields the OBS-1 tests read. */
+export interface CapturedSpan {
+  traceId: string;
+  type: string;
+  isRootSpan: boolean;
+  metadata?: Record<string, unknown>;
+  input?: unknown;
+  output?: unknown;
+}
+
+/**
+ * OBS-1 test support: a Mastra Observability instance whose only exporter records ended spans,
+ * loaded from the same @mastra copy as the controller. Pass `observability` to createStubAgentController.
+ */
+export function createCapturingObservability() {
+  const { BaseExporter, Observability } = mastraRequire('@mastra/observability');
+  const { TracingEventType } = mastraRequire('@mastra/core/observability');
+  const ended: CapturedSpan[] = [];
+  class CapturingExporter extends BaseExporter {
+    name = 'stub-capturing-exporter';
+    async _exportTracingEvent(event: { type: string; exportedSpan: CapturedSpan }) {
+      if (event.type === TracingEventType.SPAN_ENDED) ended.push(event.exportedSpan);
+    }
+  }
+  const observability = new Observability({
+    configs: { default: { serviceName: 'tourbillon-test', exporters: [new CapturingExporter()] } },
+  });
+  return { observability, ended, flush: (): Promise<void> => observability.flush() };
 }
 
 export async function createStubAgentController(options: StubControllerOptions) {
@@ -105,6 +137,7 @@ export async function createStubAgentController(options: StubControllerOptions) 
     modes: [{ id: 'default', name: 'Default', default: true, defaultModelId: 'stub/stub' }],
     initialState: { yolo: true },
     ...(options.controllerTools ? { tools: options.controllerTools } : {}),
+    ...(options.observability ? { observability: options.observability } : {}),
   });
   await controller.init();
   return {

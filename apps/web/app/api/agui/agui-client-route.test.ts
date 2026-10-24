@@ -135,7 +135,11 @@ describe('AGUI-1b client ↔ POST /api/agui/[agentId]', () => {
         return { ASSISTANT_MAX_PINS_PER_AGENT: 50, listPinnedAssistantThreadIds: async () => [] };
       }
       if (id === '@tourbillon/mastra') {
-        return { runWithHeartbeatContext: async (_ctx: unknown, fn: () => Promise<unknown>) => fn() };
+        return {
+          runWithHeartbeatContext: async (_ctx: unknown, fn: () => Promise<unknown>) => fn(),
+          // OBS-1: tracing off here (trace ids per run are covered in agui-route.test.ts).
+          buildAssistantTracingOptions: () => undefined,
+        };
       }
       return originalRequire.apply(this, arguments as unknown as [string]);
     };
