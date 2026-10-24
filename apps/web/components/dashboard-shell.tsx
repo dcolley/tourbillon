@@ -2,7 +2,7 @@
 
 import type { CSSProperties, ReactNode } from 'react';
 import { DashboardSidebar } from '@/components/dashboard-sidebar';
-import type { CompanyOption } from '@/components/company-switcher';
+import { CONTROL_PANE_SIDEBAR_WIDTH, type CompanyOption } from '@/components/company-switcher';
 import type { BuildInfo } from '@/lib/build-info';
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar';
 import { Separator } from '@/components/ui/separator';
@@ -29,7 +29,8 @@ export function DashboardShell({
         className="h-svh overflow-hidden"
         style={
           {
-            '--sidebar-width': '10rem',
+            // UI-4: sized from the company picker so it fits the header exactly.
+            '--sidebar-width': CONTROL_PANE_SIDEBAR_WIDTH,
             '--sidebar-width-icon': '2.75rem',
           } as CSSProperties
         }

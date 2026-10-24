@@ -34,7 +34,8 @@ export function AssistantShell({
         </div>
         <ViewSwitcher current="assistant" />
         <div className="flex-1" />
-        <div className="hidden w-48 sm:block">
+        {/* UI-4: same picker as the Control Pane sidebar header; it sets its own width. */}
+        <div className="hidden shrink-0 sm:block" data-assistant-company-picker>
           <CompanySwitcher companies={companies} activeCompanyId={activeCompanyId} />
         </div>
         <ThemeToggle />
