@@ -6,7 +6,7 @@ import {
   chatResourceId,
   chatContextFromTags,
 } from '@/lib/chat';
-import { chatErrorResponse, openChatRouteSession } from '@/lib/chat/route-helpers';
+import { chatErrorResponse, openChatRouteSession, controlChatDisabledResponse } from '@/lib/chat/route-helpers';
 
 const bodySchema = z.object({
   /** Accepted for older clients but ignored: the resource is derived on the server. */
@@ -22,6 +22,8 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ agentId: string }> },
 ) {
+  const disabled = controlChatDisabledResponse();
+  if (disabled) return disabled;
   try {
     const { agentId: agentKey } = await params;
     const agent = await resolveChatAgent(agentKey);

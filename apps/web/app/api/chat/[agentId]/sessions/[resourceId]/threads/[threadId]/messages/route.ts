@@ -3,7 +3,7 @@ import {
   getOrCreateChatController,
   resolveChatAgent,
 } from '@/lib/chat';
-import { chatErrorResponse, decodeResourceId, openChatRouteSession, requireChatThread } from '@/lib/chat/route-helpers';
+import { chatErrorResponse, decodeResourceId, openChatRouteSession, requireChatThread, controlChatDisabledResponse } from '@/lib/chat/route-helpers';
 import { chatModelIdFromSearch } from '@/lib/chat/model-query';
 
 /** List persisted messages for catch-up / hydrate. */
@@ -13,6 +13,8 @@ export async function GET(
     params,
   }: { params: Promise<{ agentId: string; resourceId: string; threadId: string }> },
 ) {
+  const disabled = controlChatDisabledResponse();
+  if (disabled) return disabled;
   try {
     const {
       agentId: agentKey,

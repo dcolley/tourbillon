@@ -3,7 +3,7 @@ import {
   getOrCreateChatController,
   resolveChatAgent,
 } from '@/lib/chat';
-import { chatErrorResponse, decodeResourceId, openChatRouteSession } from '@/lib/chat/route-helpers';
+import { chatErrorResponse, decodeResourceId, openChatRouteSession, controlChatDisabledResponse } from '@/lib/chat/route-helpers';
 import { chatModelIdFromSearch } from '@/lib/chat/model-query';
 
 function toWireEvent(event: unknown): unknown {
@@ -24,6 +24,8 @@ export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ agentId: string; resourceId: string }> },
 ) {
+  const disabled = controlChatDisabledResponse();
+  if (disabled) return disabled;
   try {
     const { agentId: agentKey, resourceId: rawResourceId } = await params;
     const resourceId = decodeResourceId(rawResourceId);

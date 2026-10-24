@@ -13,9 +13,9 @@
  *
  * Thread ownership is checked on every request, for runs and for control actions alike: the thread
  * must exist, belong to the requested resource and be tagged to this agent (`metadata.agentId`).
- * AG-UI clients must create threads through the REST chat thread API
- * (POST /api/chat/[agentId]/sessions/[resourceId]/threads), which tags the thread to the agent, and
- * then pass that id as the AG-UI threadId. This route never creates a thread: a client-chosen
+ * AG-UI clients create threads through the assistant threads API
+ * (POST /api/assistant/agents/[agentId]/threads), which tags the thread to the agent, and then pass
+ * that id as the AG-UI threadId. This route never creates a thread: a client-chosen
  * threadId that does not exist is a 404, and an existing thread that is not tagged to this agent
  * (including untagged threads) is refused with 404.
  *
@@ -27,6 +27,9 @@
  * client as a `tourbillon.follow_up_dropped` CUSTOM event on the open run, and the abort control
  * response carries `droppedFollowUps`. See lib/agui/run-claims.ts.
  *
+ * The endpoint answers 404 when the assistant is turned off (ASSISTANT_ENABLED=false, see
+ * lib/feature-flags.ts), checked before anything else.
+ *
  * OBS-1: when Mastra tracing is on, each AG-UI run gets one trace id (attributes companyId, agentId,
  * threadId, view=assistant, provider, model; see buildAssistantTracingOptions). It is passed to the
  * turn and to follow-ups queued on the run, sent to the client as a `tourbillon.trace` CUSTOM event
@@ -34,6 +37,7 @@
  * (`content.metadata.traceId`). `traceUrl` is added only when PHOENIX_UI_BASE_URL is set.
  */
 import { NextRequest, NextResponse } from 'next/server';
+import { isAssistantAvailable } from '@/lib/feature-flags';
 import { EventType, type BaseEvent } from '@ag-ui/core';
 import {
   ChatAgentError,
@@ -134,6 +138,7 @@ function traceUrlField(traceUrl: string | undefined): { traceUrl?: string } {
 }
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ agentId: string }> }) {
+  if (!isAssistantAvailable()) return NextResponse.json({ error: 'Not found' }, { status: 404 });
   try {
     const { agentId: agentKey } = await params;
     // Auth + company scope first, before reading the body (same order as the chat routes' lookups).
