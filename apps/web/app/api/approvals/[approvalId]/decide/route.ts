@@ -1,17 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db, approvals, type IssueStatus } from '@tourbillon/db';
+import { db, approvals } from '@tourbillon/db';
 import { and, eq } from 'drizzle-orm';
-import { addIssueComment } from '@/lib/issue-comments';
-import { formatApprovalDecisionComment } from '@/lib/approval-restore';
-import { restoreLinkedIssuesForDecision, wakeAgentsForDecision } from '@/lib/approval-restore-db';
+import { applyApprovalDecision } from '@/lib/approval-decide';
 import { publicOriginFromRequest } from '@tourbillon/shared';
 import { requireBoardCompany } from '@/lib/board-route-auth';
-
-type ApprovalPayload = Record<string, unknown> & {
-  title?: string;
-  summary?: string;
-  priorStatuses?: Record<string, IssueStatus>;
-};
 
 async function parseDecisionBody(req: NextRequest): Promise<Record<string, string>> {
   const contentType = req.headers.get('content-type') ?? '';
@@ -57,64 +49,18 @@ export async function POST(
   if (!approval) return NextResponse.json({ error: 'Not found' }, { status: 404 });
   if (approval.status !== 'pending') return NextResponse.json({ error: 'Already decided' }, { status: 409 });
 
-  const payload = (approval.payload ?? {}) as ApprovalPayload;
-  const priorStatuses = payload.priorStatuses ?? {};
-  const issueIds = approval.issueIds ?? [];
-
-  const actor = { actorId: 'board', actorName: 'Board' };
-
-  const { updated, outcomes } = await db.transaction(async (tx) => {
-    const [row] = await tx
-      .update(approvals)
-      .set({ status: decision, note, decidedAt: new Date(), updatedAt: new Date() })
-      .where(and(eq(approvals.id, approvalId), eq(approvals.companyId, company.id)))
-      .returning();
-
-    const restored = await restoreLinkedIssuesForDecision(tx, {
-      companyId: approval.companyId,
-      approvalId,
-      decision,
-      priorStatuses,
-      issueIds,
-      note,
-      activityActor: actor,
-    });
-
-    return { updated: row, outcomes: restored };
-  });
-
-  const title = typeof payload.title === 'string' ? payload.title : approval.type;
-  for (const issueId of issueIds) {
-    try {
-      await addIssueComment(
-        issueId,
-        approval.companyId,
-        { type: 'user', id: 'board', name: 'Board' },
-        formatApprovalDecisionComment({
-          source: 'Board',
-          decision,
-          title,
-          note,
-          outcome: outcomes.find((o) => o.issueId === issueId),
-        }),
-      );
-    } catch (err) {
-      console.error('[approval-decide] failed to comment on issue', issueId, err);
-    }
-  }
-
-  // Wake the requester and the assignees of unblocked issues (non-fatal if the scheduler is down).
-  await wakeAgentsForDecision({
+  // Claimed with a conditional update: only one concurrent decision applies its side effects.
+  const result = await applyApprovalDecision({
     companyId: approval.companyId,
     approvalId,
     decision,
     note,
-    issueIds,
-    requesterAgentId: approval.requestedByAgentId,
-    outcomes,
-    actor,
+    actor: { actorId: 'board', actorName: 'Board' },
+    commentAuthor: { type: 'user', id: 'board', name: 'Board' },
+    source: 'Board',
     logPrefix: '[approval-decide]',
   });
+  if (!result.applied) return NextResponse.json({ error: 'Already decided' }, { status: 409 });
 
   // If dashboard form POST, redirect back
   const accept = req.headers.get('accept') ?? '';
@@ -123,5 +69,5 @@ export async function POST(
     return NextResponse.redirect(new URL('/approval', publicOriginFromRequest(req)), 303);
   }
 
-  return NextResponse.json(updated);
+  return NextResponse.json(result.approval);
 }

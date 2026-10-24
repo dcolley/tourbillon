@@ -7,6 +7,7 @@ import { and, eq, inArray } from 'drizzle-orm';
 import { enqueueApprovalWake } from '@/lib/wake-client';
 import {
   dependencyIdsOf,
+  formatWakeFailedComment,
   formatWakeSkippedComment,
   planApprovalRestore,
   planApprovalWakes,
@@ -30,7 +31,7 @@ export interface DecisionActor {
 /**
  * Restore every issue linked to a decided approval, inside the caller's transaction.
  * Company-scoped reads and writes. When `activityActor` is set, one `issue.updated` entry is
- * written per restored issue (the Board and HITLy paths do this; MCP never has).
+ * written per restored issue (`applyApprovalDecision` always sets it, for every path).
  */
 export async function restoreLinkedIssuesForDecision(
   tx: DbTransaction,
@@ -112,7 +113,10 @@ export async function restoreLinkedIssuesForDecision(
 
 export interface ApprovalWakeResult {
   target: ApprovalWakeTarget;
-  /** 'sent' when the scheduler took the wake; 'failed' on an error (logged, nothing written). */
+  /**
+   * 'sent' when the scheduler took the wake; 'skipped' when the agent cannot run; 'failed' on an
+   * error (a value-free log line plus an `issue.wake_failed` entry on each affected issue).
+   */
   result: 'sent' | 'skipped' | 'failed';
   skipReason?: WakeSkipReason;
 }
@@ -142,6 +146,27 @@ export async function wakeAgentsForDecision(input: {
 
   // Only write activity on issues we loaded for this company.
   const knownIssueIds = new Set(input.outcomes.map((o) => o.issueId));
+
+  async function recordOnIssues(target: ApprovalWakeTarget, action: string, details: Record<string, unknown>) {
+    for (const issueId of target.issueIds) {
+      if (!knownIssueIds.has(issueId)) continue;
+      try {
+        await db.insert(activityLog).values({
+          companyId: input.companyId,
+          actorType: 'system',
+          actorId: input.actor.actorId,
+          actorName: input.actor.actorName,
+          action,
+          entityType: 'issue',
+          entityId: issueId,
+          details,
+        });
+      } catch (err) {
+        console.error(`${input.logPrefix} failed to record ${action} on issue`, issueId, err);
+      }
+    }
+  }
+
   const results: ApprovalWakeResult[] = [];
   for (const target of targets) {
     let agentName: string | null = null;
@@ -168,35 +193,31 @@ export async function wakeAgentsForDecision(input: {
       }
     } catch (err) {
       console.error(`${input.logPrefix} failed to trigger approval wake:`, err);
+      // Value-free trace: ids and role only, no scheduler text.
+      console.warn(`${input.logPrefix} approval wake not delivered`, {
+        approvalId: input.approvalId,
+        agentId: target.agentId,
+        role: target.role,
+      });
       result = 'failed';
+      await recordOnIssues(target, 'issue.wake_failed', {
+        approvalId: input.approvalId,
+        agentId: target.agentId,
+        role: target.role,
+        reason: 'wake_failed',
+        comment: formatWakeFailedComment({ role: target.role, agentName }),
+      });
     }
 
     if (skipReason) {
       result = 'skipped';
-      const comment = formatWakeSkippedComment({ role: target.role, agentName, reason: skipReason });
-      for (const issueId of target.issueIds) {
-        if (!knownIssueIds.has(issueId)) continue;
-        try {
-          await db.insert(activityLog).values({
-            companyId: input.companyId,
-            actorType: 'system',
-            actorId: input.actor.actorId,
-            actorName: input.actor.actorName,
-            action: 'issue.wake_skipped',
-            entityType: 'issue',
-            entityId: issueId,
-            details: {
-              approvalId: input.approvalId,
-              agentId: target.agentId,
-              role: target.role,
-              reason: skipReason,
-              comment,
-            },
-          });
-        } catch (err) {
-          console.error(`${input.logPrefix} failed to record skipped wake on issue`, issueId, err);
-        }
-      }
+      await recordOnIssues(target, 'issue.wake_skipped', {
+        approvalId: input.approvalId,
+        agentId: target.agentId,
+        role: target.role,
+        reason: skipReason,
+        comment: formatWakeSkippedComment({ role: target.role, agentName, reason: skipReason }),
+      });
     }
 
     results.push({ target, result, ...(skipReason ? { skipReason } : {}) });

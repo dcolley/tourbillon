@@ -4,6 +4,7 @@ import {
   FINISHED_ISSUE_STATUSES,
   dependencyIdsOf,
   formatApprovalDecisionComment,
+  formatWakeFailedComment,
   formatWakeSkippedComment,
   isUnfinishedIssueStatus,
   planApprovalRestore,
@@ -40,9 +41,33 @@ describe('APR-FIX resolveRestoreStatus', () => {
   it('saved non-blocked status comes back as-is', () => {
     for (const prior of ['backlog', 'todo', 'in_progress', 'in_review'] as const) {
       assert.equal(
-        resolveRestoreStatus({ decision: 'approved', priorStatus: prior, currentStatus: 'blocked', unfinishedBlockerCount: 3 }),
+        resolveRestoreStatus({ decision: 'approved', priorStatus: prior, currentStatus: 'blocked', unfinishedBlockerCount: 0 }),
         prior,
       );
+    }
+  });
+  it('unfinished dependencies keep it blocked whatever was saved (including in_progress)', () => {
+    for (const prior of ['backlog', 'todo', 'in_progress', 'in_review', 'blocked', undefined] as const) {
+      assert.equal(
+        resolveRestoreStatus({ decision: 'approved', priorStatus: prior, currentStatus: 'blocked', unfinishedBlockerCount: 1 }),
+        'blocked',
+        String(prior),
+      );
+    }
+  });
+  it('an issue already done or cancelled keeps its status on either decision', () => {
+    for (const current of ['done', 'cancelled'] as const) {
+      for (const decision of ['approved', 'rejected'] as const) {
+        for (const prior of ['blocked', 'todo', 'in_progress', undefined]) {
+          for (const n of [0, 2]) {
+            assert.equal(
+              resolveRestoreStatus({ decision, priorStatus: prior, currentStatus: current, unfinishedBlockerCount: n }),
+              current,
+              `${current}/${decision}/${prior}/${n}`,
+            );
+          }
+        }
+      }
     }
   });
   it('nothing saved: current blocked → todo (or blocked with dependencies); other current kept', () => {
@@ -107,6 +132,21 @@ describe('APR-FIX planApprovalRestore', () => {
     assert.equal(o.restored, false);
     assert.equal(o.status, 'blocked');
   });
+  it('saved in_progress with an unfinished dependency stays blocked and names it', () => {
+    const [o] = plan([issue({ blockedByIssueIds: ['d1'] })], [{ id: 'd1', identifier: 'TB-7', status: 'todo' }], { i1: 'in_progress' });
+    assert.equal(o.status, 'blocked');
+    assert.deepEqual(o.remainingBlockers, [{ id: 'd1', identifier: 'TB-7' }]);
+    assert.equal(o.alreadyClosed, false);
+  });
+  it('already done/cancelled: halt cleared, status kept, no blockers reported', () => {
+    for (const status of ['done', 'cancelled'] as const) {
+      const [o] = plan([issue({ status, blockedByIssueIds: ['d1'] })], [{ id: 'd1', identifier: 'TB-7', status: 'todo' }], { i1: 'blocked' });
+      assert.equal(o.restored, true);
+      assert.equal(o.status, status);
+      assert.equal(o.alreadyClosed, true);
+      assert.deepEqual(o.remainingBlockers, [], 'a closed issue never cites blockers');
+    }
+  });
   it('rejected keeps blocked and reports no blockers', () => {
     const [o] = plan([issue({ blockedByIssueIds: ['d1'] })], [{ id: 'd1', identifier: 'TB-7', status: 'todo' }], { i1: 'todo' }, 'rejected');
     assert.equal(o.status, 'blocked');
@@ -137,6 +177,28 @@ describe('APR-FIX formatApprovalDecisionComment', () => {
     });
     assert.match(body, /Still blocked by TB-7, d2 \(unfinished dependencies\)/);
   });
+  it('restored to a non-blocked status: no blocker wording', () => {
+    for (const status of ['todo', 'in_progress', 'in_review', 'backlog'] as const) {
+      const body = formatApprovalDecisionComment({
+        ...base,
+        decision: 'approved',
+        outcome: { issueId: 'i1', identifier: 'TB-1', restored: true, status, remainingBlockers: [], assigneeAgentId: null },
+      });
+      assert.ok(body.endsWith(`Status restored to ${status}. Continue work if still assigned.`), body);
+      assert.doesNotMatch(body, /Still blocked/);
+    }
+  });
+  it('already closed: says the status is unchanged, on either decision', () => {
+    for (const decision of ['approved', 'rejected'] as const) {
+      const body = formatApprovalDecisionComment({
+        ...base,
+        decision,
+        outcome: { issueId: 'i1', identifier: 'TB-1', restored: true, status: 'done', remainingBlockers: [], assigneeAgentId: null, alreadyClosed: true },
+      });
+      assert.match(body, /Status unchanged \(done\): this issue was already closed\./);
+      assert.doesNotMatch(body, /remains blocked|restored to/);
+    }
+  });
   it('held by another approval / rejected wording', () => {
     assert.match(
       formatApprovalDecisionComment({ ...base, decision: 'approved', outcome: { issueId: 'i1', identifier: 'TB-1', restored: false, status: 'blocked', remainingBlockers: [], assigneeAgentId: null } }),
@@ -166,6 +228,10 @@ describe('APR-FIX planApprovalWakes', () => {
       [{ agentId: 'req', role: 'requester', issueIds: ['i1'] }],
     );
   });
+  it('no assignee wake for an issue that was already closed', () => {
+    const closed = { ...o('i1', 'a1', 'done'), alreadyClosed: true };
+    assert.deepEqual(planApprovalWakes({ decision: 'approved', requesterAgentId: null, issueIds: ['i1'], outcomes: [closed] }), []);
+  });
   it('no assignee wake for still-blocked, untouched, or rejected issues', () => {
     const outcomes = [o('i1', 'a1', 'blocked'), o('i2', 'a2', 'todo', false)];
     assert.deepEqual(planApprovalWakes({ decision: 'approved', requesterAgentId: null, issueIds: ['i1', 'i2'], outcomes }), []);
@@ -190,5 +256,9 @@ describe('APR-FIX wake skip reasons', () => {
   it('skip text says nobody will pick the issue up', () => {
     assert.match(formatWakeSkippedComment({ role: 'assignee', agentName: 'CEO', reason: 'paused' }), /assignee agent CEO is paused, so nobody will pick this issue up/);
     assert.match(formatWakeSkippedComment({ role: 'requester', agentName: null, reason: 'archived' }), /requesting agent is archived/);
+  });
+  it('failed wake text names the role and carries no scheduler detail', () => {
+    assert.match(formatWakeFailedComment({ role: 'assignee', agentName: 'Dev' }), /^Wake not delivered: .*assignee agent Dev, so nobody will pick this issue up/);
+    assert.match(formatWakeFailedComment({ role: 'requester', agentName: null }), /requesting agent, so it was not told about this decision/);
   });
 });

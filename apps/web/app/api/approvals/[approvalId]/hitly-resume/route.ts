@@ -1,15 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db, approvals, type IssueStatus } from '@tourbillon/db';
+import { db, approvals } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
-import { addIssueComment } from '@/lib/issue-comments';
-import { formatApprovalDecisionComment } from '@/lib/approval-restore';
-import { restoreLinkedIssuesForDecision, wakeAgentsForDecision } from '@/lib/approval-restore-db';
+import { applyApprovalDecision } from '@/lib/approval-decide';
 import type { HitlyResumePayload } from '@/lib/hitly/client';
 
 type ApprovalPayload = Record<string, unknown> & {
-  title?: string;
-  summary?: string;
-  priorStatuses?: Record<string, IssueStatus>;
   hitlyResumeToken?: string;
 };
 
@@ -90,71 +85,23 @@ export async function POST(
     return NextResponse.json({ error: errorMsg }, { status: 400 });
   }
 
-  // Apply decision with same side effects as in-app decide
-  const priorStatuses = payload.priorStatuses ?? {};
-  const issueIds = approval.issueIds ?? [];
-
-  const decided = tourbillonStatus;
-  const actor = { actorId: 'hitly', actorName: 'HITLy' };
-
-  const { outcomes } = await db.transaction(async (tx) => {
-    await tx
-      .update(approvals)
-      .set({
-        status: decided,
-        note,
-        decidedAt: new Date(),
-        decidedByUserId: 'hitly',
-        updatedAt: new Date(),
-      })
-      .where(eq(approvals.id, approvalId))
-      .returning();
-
-    const restored = await restoreLinkedIssuesForDecision(tx, {
-      companyId: approval.companyId,
-      approvalId,
-      decision: decided,
-      priorStatuses,
-      issueIds,
-      note,
-      activityActor: actor,
-    });
-
-    return { outcomes: restored };
-  });
-
-  const title = typeof payload.title === 'string' ? payload.title : approval.type;
-  for (const issueId of issueIds) {
-    try {
-      await addIssueComment(
-        issueId,
-        approval.companyId,
-        { type: 'user', id: 'hitly', name: 'HITLy' },
-        formatApprovalDecisionComment({
-          source: 'HITLy',
-          decision: decided,
-          title,
-          note,
-          outcome: outcomes.find((o) => o.issueId === issueId),
-        }),
-      );
-    } catch (err) {
-      console.error('[hitly-resume] failed to comment on issue', issueId, err);
-    }
-  }
-
-  // Wake the requester and the assignees of unblocked issues (non-fatal if the scheduler is down).
-  await wakeAgentsForDecision({
+  // Apply decision with same side effects as in-app decide. Claimed with a conditional update:
+  // a concurrent callback or Board decision that got there first wins, and this call is a no-op.
+  const result = await applyApprovalDecision({
     companyId: approval.companyId,
     approvalId,
-    decision: decided,
+    decision: tourbillonStatus,
     note,
-    issueIds,
-    requesterAgentId: approval.requestedByAgentId,
-    outcomes,
-    actor,
+    decidedByUserId: 'hitly',
+    actor: { actorId: 'hitly', actorName: 'HITLy' },
+    commentAuthor: { type: 'user', id: 'hitly', name: 'HITLy' },
+    source: 'HITLy',
     logPrefix: '[hitly-resume]',
   });
+  if (!result.applied) {
+    // Already decided — idempotent success (same as the check above)
+    return NextResponse.json({ status: 'ok', alreadyDecided: true });
+  }
 
   return NextResponse.json({ status: 'ok', decision: tourbillonStatus });
 }

@@ -19,7 +19,7 @@ import { createGoal, updateGoal, listGoalsForCompany, type CreateGoalInput, type
 import { createProject, updateProject, listProjectsForAgent, type CreateProjectInput, type UpdateProjectInput } from '@/lib/projects';
 import { addIssueComment } from '@/lib/issue-comments';
 import { triggerAgentHeartbeat } from '@/lib/heartbeat';
-import { restoreLinkedIssuesForDecision, wakeAgentsForDecision } from '@/lib/approval-restore-db';
+import { applyApprovalDecision } from '@/lib/approval-decide';
 
 interface McpRequest {
   jsonrpc: '2.0';
@@ -1504,48 +1504,23 @@ async function handleDecideApproval(tokenCompanyId: string, params: any) {
     throw new Error('Approval already decided');
   }
 
-  const payload = (approval.payload ?? {}) as any;
-  const priorStatuses = payload.priorStatuses ?? {};
-  const issueIds = approval.issueIds ?? [];
-
-  const { updated, outcomes } = await db.transaction(async (tx) => {
-    const [row] = await tx
-      .update(approvals)
-      .set({
-        status: decision,
-        note: reason,
-        decidedAt: new Date(),
-        decidedByUserId: 'mcp',
-        updatedAt: new Date(),
-      })
-      .where(eq(approvals.id, approval_id))
-      .returning();
-
-    const restored = await restoreLinkedIssuesForDecision(tx, {
-      companyId: company_id,
-      approvalId: approval_id,
-      decision,
-      priorStatuses,
-      issueIds,
-      note: reason,
-    });
-
-    return { updated: row, outcomes: restored };
-  });
-
-  // Wake the requester and the assignees of unblocked issues (non-fatal if the scheduler is down).
-  await wakeAgentsForDecision({
+  // Claimed with a conditional update: only one concurrent decision applies its side effects.
+  const result = await applyApprovalDecision({
     companyId: company_id,
     approvalId: approval_id,
     decision,
     note: reason,
-    issueIds,
-    requesterAgentId: approval.requestedByAgentId,
-    outcomes,
+    decidedByUserId: 'mcp',
     actor: { actorId: 'mcp', actorName: 'MCP' },
+    commentAuthor: { type: 'user', id: 'mcp', name: 'MCP' },
+    source: 'MCP',
     logPrefix: '[mcp decide_approval]',
   });
+  if (!result.applied) {
+    throw new Error('Approval already decided');
+  }
 
+  const updated = result.approval;
   return {
     id: updated.id,
     status: updated.status,

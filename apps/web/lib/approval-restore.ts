@@ -42,10 +42,11 @@ function asIssueStatus(value: unknown): IssueStatus | undefined {
 
 /**
  * Status an issue gets when its approval is decided.
- * - rejected: stays `blocked`.
- * - approved: the status saved when the approval was created (or the current one if none was
- *   saved). A saved/current `blocked` becomes `todo`, unless the issue still has unfinished
- *   dependencies, in which case it stays `blocked`.
+ * - already `done` / `cancelled`: kept as-is (the issue was closed while the approval was pending).
+ * - rejected: `blocked`.
+ * - approved with unfinished dependencies: `blocked`, whatever status was saved.
+ * - approved otherwise: the status saved when the approval was created (or the current one if none
+ *   was saved); a saved/current `blocked` becomes `todo`.
  */
 export function resolveRestoreStatus(input: {
   decision: ApprovalDecision;
@@ -53,10 +54,11 @@ export function resolveRestoreStatus(input: {
   currentStatus: IssueStatus;
   unfinishedBlockerCount: number;
 }): IssueStatus {
+  if (!isUnfinishedIssueStatus(input.currentStatus)) return input.currentStatus;
   if (input.decision !== 'approved') return 'blocked';
+  if (input.unfinishedBlockerCount > 0) return 'blocked';
   const candidate = asIssueStatus(input.priorStatus) ?? input.currentStatus;
-  if (candidate !== 'blocked') return candidate;
-  return input.unfinishedBlockerCount > 0 ? 'blocked' : 'todo';
+  return candidate === 'blocked' ? 'todo' : candidate;
 }
 
 export interface LinkedIssueForRestore {
@@ -88,6 +90,8 @@ export interface IssueRestoreOutcome {
   /** Unfinished dependencies that keep the issue blocked (approved decisions only). */
   remainingBlockers: IssueRef[];
   assigneeAgentId: string | null;
+  /** true when the issue was already done/cancelled: halt cleared, status left alone. */
+  alreadyClosed?: boolean;
 }
 
 /** Ids of every dependency referenced by the linked issues (deduped, self-references dropped). */
@@ -152,6 +156,7 @@ export function planApprovalRestore(input: {
       status,
       remainingBlockers: status === 'blocked' ? unfinished : [],
       assigneeAgentId: issue.assigneeAgentId,
+      alreadyClosed: !isUnfinishedIssueStatus(issue.status),
     };
   });
 }
@@ -173,7 +178,9 @@ export function formatApprovalDecisionComment(input: {
   ];
   const outcome = input.outcome;
 
-  if (input.decision === 'rejected') {
+  if (outcome?.restored && outcome.alreadyClosed) {
+    lines.push(`Status unchanged (${outcome.status}): this issue was already closed.`);
+  } else if (input.decision === 'rejected') {
     lines.push('This issue remains blocked. Triage, revise the request, or cancel as appropriate.');
   } else if (!outcome) {
     lines.push('Status unchanged.');
@@ -201,7 +208,7 @@ export interface ApprovalWakeTarget {
 
 /**
  * Who to wake after a decision: the requesting agent (all linked issues), plus, for approvals, the
- * assignee of every issue that is free to move again (restored and not still blocked). One wake
+ * assignee of every issue that is free to move again (restored, still open and not blocked). One wake
  * per agent: an assignee who is also the requester is woken once, as requester.
  */
 export function planApprovalWakes(input: {
@@ -218,7 +225,7 @@ export function planApprovalWakes(input: {
 
   const byAssignee = new Map<string, string[]>();
   for (const o of input.outcomes) {
-    if (!o.restored || o.status === 'blocked' || !o.assigneeAgentId) continue;
+    if (!o.restored || o.alreadyClosed || o.status === 'blocked' || !o.assigneeAgentId) continue;
     if (o.assigneeAgentId === input.requesterAgentId) continue;
     const list = byAssignee.get(o.assigneeAgentId) ?? [];
     list.push(o.issueId);
@@ -275,4 +282,15 @@ export function formatWakeSkippedComment(input: {
   return input.role === 'assignee'
     ? `Wake skipped: assignee ${who} is ${why}, so nobody will pick this issue up until the agent is resumed or the issue is reassigned.`
     : `Wake skipped: requesting ${who} is ${why} and was not told about this decision.`;
+}
+
+/** Issue activity text when a post-decision wake could not be delivered (scheduler error). */
+export function formatWakeFailedComment(input: {
+  role: ApprovalWakeTarget['role'];
+  agentName: string | null | undefined;
+}): string {
+  const who = input.agentName ? `agent ${input.agentName}` : 'agent';
+  return input.role === 'assignee'
+    ? `Wake not delivered: the scheduler did not take the wake for assignee ${who}, so nobody will pick this issue up until the agent is woken again.`
+    : `Wake not delivered: the scheduler did not take the wake for requesting ${who}, so it was not told about this decision.`;
 }
