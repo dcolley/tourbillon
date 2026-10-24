@@ -11,6 +11,11 @@ export {
   type ChatControllerState,
   type ChatResourceContext,
 } from './chat-controller';
+export {
+  ChatProviderUnavailableError,
+  chatModelOverrideKey,
+  type ChatModelOverrideOptions,
+} from './chat-model-override';
 export { createHeartbeatRuntimeContext } from './tools/api-client';
 export type { AgentController, Session } from './controller-config';
 export {

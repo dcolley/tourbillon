@@ -34,6 +34,8 @@ export interface ComposerProps {
   disabled?: boolean;
   placeholder?: string;
   className?: string;
+  /** CHAT-5: extra controls in the footer row, e.g. the thread's model picker. */
+  toolbar?: React.ReactNode;
   /** Overrides for tests / other hosts. */
   upload?: UploadAttachment;
   drafts?: DraftStore;
@@ -52,6 +54,7 @@ function ComposerForThread({
   disabled,
   placeholder,
   className,
+  toolbar,
   upload,
   drafts,
 }: ComposerProps) {
@@ -77,13 +80,21 @@ function ComposerForThread({
   // Cancel uploads still in flight when the composer goes away.
   React.useEffect(() => () => controller.cancelUploads(), [controller]);
 
-  return <ConnectedComposer controller={controller} disabled={disabled} placeholder={placeholder} className={className} />;
+  return (
+    <ConnectedComposer
+      controller={controller}
+      disabled={disabled}
+      placeholder={placeholder}
+      className={className}
+      toolbar={toolbar}
+    />
+  );
 }
 
 function ConnectedComposer({
   controller,
   ...rest
-}: { controller: ComposerController } & Pick<ComposerProps, 'disabled' | 'placeholder' | 'className'>) {
+}: { controller: ComposerController } & Pick<ComposerProps, 'disabled' | 'placeholder' | 'className' | 'toolbar'>) {
   const state = React.useSyncExternalStore(controller.subscribe, controller.getState, controller.getState);
   return <ComposerView state={state} controller={controller} {...rest} />;
 }
@@ -108,10 +119,12 @@ export interface ComposerViewProps {
   disabled?: boolean;
   placeholder?: string;
   className?: string;
+  /** CHAT-5: extra controls in the footer row (e.g. the model picker). */
+  toolbar?: React.ReactNode;
 }
 
 /** Stateless view (no hooks): everything comes from `state`, every action goes to `controller`. */
-export function ComposerView({ state, controller, disabled, placeholder, className }: ComposerViewProps) {
+export function ComposerView({ state, controller, disabled, placeholder, className, toolbar }: ComposerViewProps) {
   const off = disabled || !controller;
   const running = state.runStatus !== 'idle';
   const stopping = state.runStatus === 'stopping';
@@ -251,6 +264,7 @@ export function ComposerView({ state, controller, disabled, placeholder, classNa
             }}
           />
         </label>
+        {toolbar ? <div data-slot="composer-toolbar">{toolbar}</div> : null}
         <span className="flex-1 text-xs text-muted-foreground">
           {running ? (stopping ? 'Stopping…' : 'Agent is working — Enter queues, Ctrl+Enter steers') : 'Enter to send, Shift+Enter for a new line'}
         </span>
