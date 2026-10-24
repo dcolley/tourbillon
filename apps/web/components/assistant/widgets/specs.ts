@@ -4,11 +4,12 @@
  * `RunAgentInput.tools` and it is listed here, and it validates answers against these schemas, never
  * against schemas sent by the client.
  *
- * Empty until WID-2 / WID-3 add widgets; add the spec here and the `{ ...spec, component }`
- * definition to `assistantWidgetRegistry` together.
+ * Add the spec here and the `{ ...spec, component }` definition to `assistantWidgetRegistry` together.
  */
 import { createWidgetSpecIndex, type WidgetSpec } from '@tourbillon/shared/widgets';
+import { chatCardSpecs } from './chat-card-specs';
 
-export const assistantWidgetSpecs: readonly WidgetSpec[] = [];
+/** WID-3: question, choice, form and confirm cards (suspending frontend tools). */
+export const assistantWidgetSpecs: readonly WidgetSpec[] = [...chatCardSpecs] as readonly WidgetSpec[];
 
 export const assistantWidgetSpecIndex = createWidgetSpecIndex(assistantWidgetSpecs);

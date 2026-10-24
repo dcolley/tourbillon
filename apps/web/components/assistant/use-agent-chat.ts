@@ -105,7 +105,12 @@ export function useAgentChat({ agentId, threadId, tools, onRunEvent, onThreadOpe
     (toolCallId: string, approved: boolean) => client?.respondToTool(toolCallId, approved),
     [client],
   );
+  const answerWidget = useCallback(
+    (toolCallId: string, answer: unknown) => client?.answerWidget(toolCallId, answer),
+    [client],
+  );
+  const dismissWidget = useCallback((toolCallId: string) => client?.dismissWidget(toolCallId), [client]);
   const clearError = useCallback(() => client?.clearError(), [client]);
 
-  return { phase, setupError, thread, state, send, steer, abort, respondToTool, clearError };
+  return { phase, setupError, thread, state, send, steer, abort, respondToTool, answerWidget, dismissWidget, clearError };
 }

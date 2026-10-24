@@ -137,6 +137,13 @@ export interface WidgetSpec<P = any, A = any> {
   answerSchema?: z.ZodType<A>;
   /** Declared to the agent as an AG-UI frontend tool (latest version only). */
   frontendTool?: boolean;
+  /**
+   * WID-3: checks an answer against the props the card was shown with (e.g. a choice must be one of
+   * the offered options). Runs after the answer schema, with the parsed props and answer, and returns
+   * issues as `path: code` (never values); empty when the answer fits. When set, answers are refused
+   * unless the call's props are known and valid (see acceptWidgetAnswer).
+   */
+  checkAnswer?: (props: P, answer: A) => string[];
 }
 
 /** AG-UI `Tool` shape (name, description, JSON Schema parameters). */
@@ -317,20 +324,45 @@ const issuePaths = (error: z.ZodError) =>
 
 export type WidgetAnswerResult = { ok: true; record: WidgetAnswer; toolResult: string } | { ok: false; issues: string[] };
 
+/** The widget props of a call's args: the args without the reserved `widgetVersion` key. */
+export function widgetPropsFromArgs(args: unknown): Record<string, unknown> | undefined {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return undefined;
+  const props = { ...(args as Record<string, unknown>) };
+  delete props[WIDGET_VERSION_ARG];
+  return props;
+}
+
 /**
- * Validate a user's answer against the spec (size cap, then the strict answer schema) and build the
- * stored record plus the tool result for the run. Issues name paths and codes only, never values.
+ * Validate a user's answer against the spec (size cap, then the strict answer schema, then the
+ * spec's `checkAnswer` against the call's `props` when the spec has one) and build the stored record
+ * plus the tool result for the run. Issues name paths and codes only, never values.
  */
 export function acceptWidgetAnswer(
   spec: WidgetSpec,
   toolCallId: string,
   answer: unknown,
   now: Date = new Date(),
+  props?: unknown,
 ): WidgetAnswerResult {
   if (!spec.answerSchema) return { ok: false, issues: ['(root): widget does not take answers'] };
   if (widgetJsonBytes(answer) > WIDGET_MAX_ANSWER_BYTES) return { ok: false, issues: ['(root): too_big'] };
   const parsed = spec.answerSchema.safeParse(answer);
   if (!parsed.success) return { ok: false, issues: issuePaths(parsed.error) };
+  if (spec.checkAnswer) {
+    // Fail closed: an answer that must fit the card's props is refused when they are not known.
+    if (props === undefined || widgetJsonBytes(props) > WIDGET_MAX_ARGS_BYTES) {
+      return { ok: false, issues: ['(props): unavailable'] };
+    }
+    const shown = spec.propsSchema.safeParse(props);
+    if (!shown.success) return { ok: false, issues: ['(props): invalid'] };
+    let problems: string[];
+    try {
+      problems = spec.checkAnswer(shown.data, parsed.data);
+    } catch {
+      problems = ['(root): check_failed'];
+    }
+    if (problems.length > 0) return { ok: false, issues: problems };
+  }
   const record = widgetAnswerSchema.safeParse({
     toolCallId,
     widget: spec.name,

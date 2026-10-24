@@ -5,11 +5,15 @@
  * calls, run status, stop / steer / follow-up while a run is open, tool approval, and the delivery of
  * each message (queued, dropped, failed). Rendered by the /assistant/<agent>[/<threadId>] pages
  * (assistant-route-view.tsx).
+ *
+ * WID-3: the registered chat cards (question, choice, form, confirm) are declared to every run as
+ * frontend tools; a card the run waits on is answered or dismissed in place (no Approve / Decline row).
  */
 import * as React from 'react';
 import { Button } from '@/components/ui/button';
 import { WidgetToolCall } from '@/components/assistant/widgets/widget-tool-call';
-import { assistantWidgetRegistry } from '@/components/assistant/widgets/registry';
+import { assistantWidgetRegistry, type WidgetRegistry } from '@/components/assistant/widgets/registry';
+import { parseStoredWidgetAnswer } from '@tourbillon/shared/widgets';
 import type { ToolCardStatus } from '@/components/assistant/widgets/fallback-card';
 import type {
   AgentChatItem,
@@ -42,7 +46,29 @@ function toolCardStatus(status: ToolCallStatus): ToolCardStatus {
   return 'running';
 }
 
-function ItemView({ item }: { item: AgentChatItem }) {
+/** WID-3: how a widget call ended, read from its tool result: answered (with the answer) or dismissed. */
+export function widgetOutcome(item: Extract<AgentChatItem, { kind: 'tool' }>): { answer?: unknown; dismissed: boolean } {
+  if (item.result === undefined || item.status === 'error') return { dismissed: false };
+  const stored = parseStoredWidgetAnswer(item.id, item.name, item.result);
+  if (stored) return { answer: stored.answer, dismissed: false };
+  try {
+    const value = JSON.parse(item.result) as { widget?: unknown; dismissed?: unknown };
+    return { dismissed: value?.widget === item.name && value?.dismissed === true };
+  } catch {
+    return { dismissed: false };
+  }
+}
+
+/** Whether a tool name is a registered widget the user answers in place (no approve / decline row). */
+const isAnsweredInPlace = (registry: WidgetRegistry, toolName: string) => Boolean(registry.latest(toolName)?.frontendTool);
+
+interface WidgetHandlers {
+  registry: WidgetRegistry;
+  onWidgetAnswer?: (toolCallId: string, answer: unknown) => void;
+  onWidgetDismiss?: (toolCallId: string) => void;
+}
+
+function ItemView({ item, widgets }: { item: AgentChatItem; widgets: WidgetHandlers }) {
   switch (item.kind) {
     case 'user':
       return (
@@ -69,16 +95,32 @@ function ItemView({ item }: { item: AgentChatItem }) {
           <div className="whitespace-pre-wrap">{item.text}</div>
         </details>
       );
-    case 'tool':
+    case 'tool': {
+      const outcome = widgetOutcome(item);
+      const send = item.widgetSend;
+      const busy = send?.phase === 'sending' || send?.phase === 'sent';
       return (
         <div data-item="tool" data-tool-status={item.status}>
           <WidgetToolCall
-            registry={assistantWidgetRegistry}
+            registry={widgets.registry}
             toolCall={{ toolCallId: item.id, toolName: item.name, args: item.argsText || undefined }}
             toolStatus={toolCardStatus(item.status)}
+            answer={outcome.answer}
+            dismissed={outcome.dismissed}
+            // Only a call the run is waiting on takes an answer.
+            answerable={item.status === 'suspended' && Boolean(widgets.onWidgetAnswer)}
+            busy={busy && outcome.answer === undefined && !outcome.dismissed}
+            attempt={send?.attempts ?? 0}
+            onAnswer={
+              widgets.onWidgetAnswer
+                ? ({ record }) => widgets.onWidgetAnswer?.(item.id, (record as { answer: unknown }).answer)
+                : undefined
+            }
+            onDismiss={widgets.onWidgetDismiss ? () => widgets.onWidgetDismiss?.(item.id) : undefined}
           />
         </div>
       );
+    }
   }
 }
 
@@ -93,6 +135,11 @@ export interface AgentChatViewProps {
   onStop: () => void;
   onToolDecision: (toolCallId: string, approved: boolean) => void;
   onDismissError: () => void;
+  /** WID-3: answer / dismiss a card the run waits on (cards are read-only without these). */
+  onWidgetAnswer?: (toolCallId: string, answer: unknown) => void;
+  onWidgetDismiss?: (toolCallId: string) => void;
+  /** Widget registry (default: the assistant registry). */
+  registry?: WidgetRegistry;
 }
 
 function PendingTool({ tool, onDecision }: { tool: PendingToolDecision; onDecision: AgentChatViewProps['onToolDecision'] }) {
@@ -126,17 +173,24 @@ export function AgentChatView(props: AgentChatViewProps) {
       </p>
     );
   }
+  const widgets: WidgetHandlers = {
+    registry: props.registry ?? assistantWidgetRegistry,
+    onWidgetAnswer: props.onWidgetAnswer,
+    onWidgetDismiss: props.onWidgetDismiss,
+  };
   const runOpen = state.status !== 'idle';
   const canSend = draft.trim().length > 0 && state.status !== 'stopping';
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-agent-chat data-status={state.status}>
       <div className="flex-1 space-y-3 overflow-y-auto p-4" aria-live="polite">
         {state.items.map((item) => (
-          <ItemView key={`${item.kind}:${item.id}`} item={item} />
+          <ItemView key={`${item.kind}:${item.id}`} item={item} widgets={widgets} />
         ))}
-        {state.pendingTools.map((tool) => (
-          <PendingTool key={tool.toolCallId} tool={tool} onDecision={props.onToolDecision} />
-        ))}
+        {state.pendingTools
+          .filter((tool) => !(tool.reason === 'tool_suspended' && isAnsweredInPlace(widgets.registry, tool.toolName)))
+          .map((tool) => (
+            <PendingTool key={tool.toolCallId} tool={tool} onDecision={props.onToolDecision} />
+          ))}
       </div>
       {state.error && (
         <div role="alert" className="mx-4 flex items-center justify-between gap-2 rounded-md border border-destructive/40 p-2 text-sm" data-error={state.error.kind}>
@@ -192,6 +246,9 @@ export function agentChatHref(agentKey: string, threadId: string): string {
   return assistantAgentPath(agentKey, threadId);
 }
 
+/** WID-3: the chat cards, declared to every run as frontend tools (the server offers only those it knows). */
+const CHAT_CARD_TOOLS = assistantWidgetRegistry.frontendTools();
+
 /**
  * Chat with one agent. `agentId` is used for the API calls; `agentKey` (the agent's url key, default
  * `agentId`) for the page link, so the address bar keeps the canonical `/assistant/<url key>/<thread>`.
@@ -207,7 +264,7 @@ export function AgentChat({ agentId, agentKey, threadId }: { agentId: string; ag
     },
     [linkKey],
   );
-  const chat = useAgentChat({ agentId, threadId, onThreadOpened });
+  const chat = useAgentChat({ agentId, threadId, tools: CHAT_CARD_TOOLS, onThreadOpened });
   const [draft, setDraft] = React.useState('');
   const submit = (fn: ((text: string) => Promise<{ ok: boolean }> | undefined) | undefined) => {
     const text = draft;
@@ -229,6 +286,8 @@ export function AgentChat({ agentId, agentKey, threadId }: { agentId: string; ag
       onSteer={() => submit(chat.steer)}
       onStop={() => void chat.abort()}
       onToolDecision={(id, approved) => void chat.respondToTool(id, approved)}
+      onWidgetAnswer={(id, answer) => void chat.answerWidget(id, answer)}
+      onWidgetDismiss={(id) => void chat.dismissWidget(id)}
       onDismissError={chat.clearError}
     />
   );

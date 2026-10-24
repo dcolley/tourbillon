@@ -56,6 +56,13 @@ export type AgentChatItem =
       status: ToolCallStatus;
       result?: string;
       parentMessageId?: string;
+      /**
+       * WID-3: a widget answer or dismissal sent from this client for this call: `sending` while the
+       * request is out, `sent` once the endpoint resumed the run (the card stays locked until the tool
+       * result arrives), `failed` when it was refused (the card can be answered again; `attempts`
+       * counts the failures so the card resets).
+       */
+      widgetSend?: { phase: WidgetSendPhase; attempts: number };
     };
 
 export interface PendingToolDecision {
@@ -333,4 +340,14 @@ function applyCustom(state: AgentChatState, event: AguiClientEvent): AgentChatSt
     default:
       return state;
   }
+}
+
+export type WidgetSendPhase = 'sending' | 'sent' | 'failed';
+
+/** WID-3: records the send state of a widget answer / dismissal on its tool item. */
+export function setWidgetSend(state: AgentChatState, toolCallId: string, phase: WidgetSendPhase): AgentChatState {
+  return updateItem(state, toolCallId, 'tool', (it) => ({
+    ...it,
+    widgetSend: { phase, attempts: (it.widgetSend?.attempts ?? 0) + (phase === 'failed' ? 1 : 0) },
+  }));
 }

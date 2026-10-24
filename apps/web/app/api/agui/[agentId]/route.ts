@@ -88,6 +88,7 @@ import {
   hasOtherSessionPendingWidget,
   pendingOwnedWidgetCalls,
   trackWidgetOwners,
+  widgetCallArgs,
   widgetOwnership,
 } from '@/lib/agui/widget-owners';
 
@@ -295,7 +296,13 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
             results: [{ toolCallId: entry.toolCallId, accepted: false, reason: 'not_pending' }],
           });
         }
-        const decision = widgetResumeFromEntry(spec, entry);
+        // WID-3: answers are checked against the args the card was asked with (recorded with the owner).
+        const decision = widgetResumeFromEntry(
+          spec,
+          entry,
+          new Date(),
+          widgetCallArgs(resourceId, input.threadId, entry.toolCallId),
+        );
         if (!decision.ok) {
           return NextResponse.json({ error: 'Invalid widget answer', issues: decision.issues }, { status: 400 });
         }
