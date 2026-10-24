@@ -128,6 +128,12 @@ export interface AguiRunStreamOptions {
    * RUN_FINISHED / RUN_ERROR so the client knows its follow-up was not processed.
    */
   droppedQueuedTurns?: () => number;
+  /**
+   * OBS-1: trace of this run (the trace id passed to Mastra in `tracingOptions`). Sent as a
+   * `tourbillon.trace` CUSTOM event right after RUN_STARTED and added to the RUN_FINISHED `result`
+   * (`{ reason, traceId, traceUrl? }`). Omitted when tracing is off.
+   */
+  trace?: { traceId: string; traceUrl?: string };
 }
 
 export const AGUI_SSE_HEADERS = {
@@ -168,6 +174,10 @@ export function aguiControlStream(opts: {
       ctrl.close();
     },
   });
+}
+
+function traceValue(trace: { traceId: string; traceUrl?: string }): { traceId: string; traceUrl?: string } {
+  return trace.traceUrl ? { traceId: trace.traceId, traceUrl: trace.traceUrl } : { traceId: trace.traceId };
 }
 
 export function aguiRunStream(opts: AguiRunStreamOptions): ReadableStream<Uint8Array> {
@@ -257,6 +267,14 @@ export function aguiRunStream(opts: AguiRunStreamOptions): ReadableStream<Uint8A
             value: { count: dropped },
           } as BaseEvent);
         }
+        if (opts.trace) {
+          for (let i = 0; i < events.length; i++) {
+            const e = events[i] as BaseEvent & { result?: unknown };
+            if (e.type !== EventType.RUN_FINISHED) continue;
+            const result = e.result && typeof e.result === 'object' ? (e.result as Record<string, unknown>) : {};
+            events[i] = { ...e, result: { ...result, ...traceValue(opts.trace) } } as BaseEvent;
+          }
+        }
         write(events);
         teardown();
       };
@@ -269,7 +287,12 @@ export function aguiRunStream(opts: AguiRunStreamOptions): ReadableStream<Uint8A
         }, delayMs);
       };
 
-      write([{ type: EventType.RUN_STARTED, threadId: opts.threadId, runId: opts.runId } as BaseEvent]);
+      write([
+        { type: EventType.RUN_STARTED, threadId: opts.threadId, runId: opts.runId } as BaseEvent,
+        ...(opts.trace
+          ? [{ type: EventType.CUSTOM, name: AGUI_CUSTOM.trace, value: traceValue(opts.trace) } as BaseEvent]
+          : []),
+      ]);
 
       unsubscribe = session.subscribe((event) => {
         if (closed) return;
