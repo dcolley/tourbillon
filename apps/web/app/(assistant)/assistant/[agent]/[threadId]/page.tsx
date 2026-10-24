@@ -1,9 +1,8 @@
-import { AssistantEmptyState } from '@/components/assistant/assistant-shell';
+import { assistantRouteView } from '@/components/assistant/assistant-route-view';
 import { applyAssistantRoute, resolveAssistantRoute } from '@/lib/assistant/route-server';
 
-/** `/assistant/<agent-url-key>/<threadId>`: thread open (an agent id in the URL redirects to the url key). */
+/** `/assistant/<agent-url-key>/<threadId>`: agent chat on that thread (an agent id in the URL redirects to the url key). */
 export default async function AssistantThreadPage({ params }: { params: Promise<{ agent: string; threadId: string }> }) {
   const { agent, threadId } = await params;
-  applyAssistantRoute(await resolveAssistantRoute({ agentKey: agent, threadId, via: 'path' }));
-  return <AssistantEmptyState />;
+  return assistantRouteView(applyAssistantRoute(await resolveAssistantRoute({ agentKey: agent, threadId, via: 'path' })));
 }

@@ -1,9 +1,8 @@
-import { AssistantEmptyState } from '@/components/assistant/assistant-shell';
+import { assistantRouteView } from '@/components/assistant/assistant-route-view';
 import { applyAssistantRoute, resolveAssistantRoute } from '@/lib/assistant/route-server';
 
-/** `/assistant/<agent-url-key>`: agent selected (an agent id in the URL redirects to the url key). */
+/** `/assistant/<agent-url-key>`: agent chat, latest thread (an agent id in the URL redirects to the url key). */
 export default async function AssistantAgentPage({ params }: { params: Promise<{ agent: string }> }) {
   const { agent } = await params;
-  applyAssistantRoute(await resolveAssistantRoute({ agentKey: agent, via: 'path' }));
-  return <AssistantEmptyState />;
+  return assistantRouteView(applyAssistantRoute(await resolveAssistantRoute({ agentKey: agent, via: 'path' })));
 }

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   chatResourceId,
   getChatSession,
@@ -220,17 +221,49 @@ export async function updateAssistantThread(
   return toAssistantThread(session, await requireAssistantThread(session, agent, threadId), pinned);
 }
 
-/** New thread tagged to the agent (`kind: 'chat'`, `contextType: 'free'`, `agentId`). */
+/** Session scope prefix for the one-off sessions that create assistant threads (see createAssistantThread). */
+export const ASSISTANT_CREATE_SCOPE_PREFIX = 'assistant-create:';
+
+/**
+ * New thread tagged to the agent (`kind: 'chat'`, `contextType: 'free'`, `agentId`).
+ *
+ * The thread is created through a one-off session that starts on the new thread and is removed
+ * afterwards, so creating a thread never moves an existing session (such as the shared assistant
+ * session) off the thread it is on.
+ */
 export async function createAssistantThread(
   session: TourbillonChatSession,
   agent: AgentLike,
   opts: { title?: string } = {},
 ): Promise<AssistantThread> {
   assertAgentWritable(agent);
-  const thread = await session.thread.create({ title: opts.title });
   const tags: Record<string, string> = { ...ASSISTANT_THREAD_TAGS, agentId: agent.id };
-  for (const [key, value] of Object.entries(tags)) {
-    await session.thread.setSettingOn({ threadId: thread.id, key, value });
+  const resourceId = assistantResourceId(agent.companyId);
+  const threadId = randomUUID();
+  const scope = `${ASSISTANT_CREATE_SCOPE_PREFIX}${threadId}`;
+  const controller = await getOrCreateChatController(agent as never);
+  try {
+    // A session opened with a thread id that does not exist yet creates that thread and binds to it.
+    const creator = await getChatSession(controller, agent as never, { resourceId, threadId, scope, tags });
+    if (creator.thread.getId() !== threadId) throw new AssistantThreadError('Could not create the thread', 500);
+    if (opts.title) await creator.thread.rename({ title: opts.title, pin: false });
+    for (const [key, value] of Object.entries(tags)) {
+      await creator.thread.setSettingOn({ threadId, key, value });
+    }
+  } finally {
+    await controller.deleteSession({ resourceId, scope }).catch(() => false);
   }
-  return toAssistantThread(session, await requireAssistantThread(session, agent, thread.id), false);
+  return toAssistantThread(session, await requireAssistantThread(session, agent, threadId), false);
+}
+
+/** One of the agent's assistant threads (for opening a thread by id); 404 when out of scope. */
+export async function getAssistantThread(
+  session: TourbillonChatSession,
+  agent: AgentLike,
+  threadId: string,
+  viewerKey: string,
+): Promise<AssistantThread> {
+  const thread = await requireAssistantThread(session, agent, threadId);
+  const pinned = (await listPinnedAssistantThreadIds(pinScope(agent, viewerKey))).includes(threadId);
+  return toAssistantThread(session, thread, pinned);
 }
