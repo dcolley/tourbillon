@@ -136,8 +136,8 @@ export async function enqueueApprovalWake(data: {
   status: 'approved' | 'rejected';
   note?: string;
   linkedIssueIds?: string[];
-}): Promise<void> {
-  await enqueueHeartbeat(
+}): Promise<EnqueueHeartbeatResult> {
+  return enqueueHeartbeat(
     {
       agentId: data.agentId,
       companyId: data.companyId,

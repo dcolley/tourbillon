@@ -19,7 +19,7 @@ import { createGoal, updateGoal, listGoalsForCompany, type CreateGoalInput, type
 import { createProject, updateProject, listProjectsForAgent, type CreateProjectInput, type UpdateProjectInput } from '@/lib/projects';
 import { addIssueComment } from '@/lib/issue-comments';
 import { triggerAgentHeartbeat } from '@/lib/heartbeat';
-import { enqueueApprovalWake } from '@/lib/wake-client';
+import { restoreLinkedIssuesForDecision, wakeAgentsForDecision } from '@/lib/approval-restore-db';
 
 interface McpRequest {
   jsonrpc: '2.0';
@@ -1508,7 +1508,7 @@ async function handleDecideApproval(tokenCompanyId: string, params: any) {
   const priorStatuses = payload.priorStatuses ?? {};
   const issueIds = approval.issueIds ?? [];
 
-  const updated = await db.transaction(async (tx) => {
+  const { updated, outcomes } = await db.transaction(async (tx) => {
     const [row] = await tx
       .update(approvals)
       .set({
@@ -1521,54 +1521,30 @@ async function handleDecideApproval(tokenCompanyId: string, params: any) {
       .where(eq(approvals.id, approval_id))
       .returning();
 
-    if (issueIds.length > 0) {
-      const linked = await tx
-        .select({
-          id: issues.id,
-          status: issues.status,
-          boardApprovalId: issues.boardApprovalId,
-        })
-        .from(issues)
-        .where(and(eq(issues.companyId, company_id), inArray(issues.id, issueIds)));
+    const restored = await restoreLinkedIssuesForDecision(tx, {
+      companyId: company_id,
+      approvalId: approval_id,
+      decision,
+      priorStatuses,
+      issueIds,
+      note: reason,
+    });
 
-      const now = new Date();
-      for (const issue of linked) {
-        if (issue.boardApprovalId && issue.boardApprovalId !== approval_id) continue;
-
-        const restoreStatus =
-          decision === 'approved'
-            ? (priorStatuses[issue.id] ?? (issue.status === 'blocked' ? 'todo' : issue.status))
-            : 'blocked';
-
-        await tx
-          .update(issues)
-          .set({
-            status: restoreStatus,
-            boardApprovalId: null,
-            updatedAt: now,
-          })
-          .where(eq(issues.id, issue.id));
-      }
-    }
-
-    return row;
+    return { updated: row, outcomes: restored };
   });
 
-  // Trigger approval wake
-  if (approval.requestedByAgentId) {
-    try {
-      await enqueueApprovalWake({
-        approvalId: approval_id,
-        agentId: approval.requestedByAgentId,
-        companyId: company_id,
-        status: decision,
-        note: reason,
-        linkedIssueIds: approval.issueIds,
-      });
-    } catch (err) {
-      console.error('[mcp decide_approval] failed to trigger approval wake:', err);
-    }
-  }
+  // Wake the requester and the assignees of unblocked issues (non-fatal if the scheduler is down).
+  await wakeAgentsForDecision({
+    companyId: company_id,
+    approvalId: approval_id,
+    decision,
+    note: reason,
+    issueIds,
+    requesterAgentId: approval.requestedByAgentId,
+    outcomes,
+    actor: { actorId: 'mcp', actorName: 'MCP' },
+    logPrefix: '[mcp decide_approval]',
+  });
 
   return {
     id: updated.id,
