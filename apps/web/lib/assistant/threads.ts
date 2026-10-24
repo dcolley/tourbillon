@@ -18,7 +18,9 @@ import {
   type ThreadScope,
 } from '@/lib/assistant/thread-store';
 import {
+  ASSISTANT_THREAD_LIST_LIMIT,
   ASSISTANT_THREAD_READ_MESSAGE_KEY,
+  checkAssistantThreadTitle,
   filterThreadsByTitle,
   isThreadUnread,
   sortAssistantThreads,
@@ -37,20 +39,20 @@ import {
 export const ASSISTANT_SESSION_SCOPE = 'assistant';
 /** Upper bound on threads examined per listing (newest by update time). Pinned threads are loaded separately. */
 export const ASSISTANT_THREAD_SCAN_LIMIT = 200;
-export const ASSISTANT_THREAD_DEFAULT_LIMIT = 50;
+export const ASSISTANT_THREAD_DEFAULT_LIMIT = ASSISTANT_THREAD_LIST_LIMIT;
 /** Tags written on every thread the assistant API creates (plus `agentId`); `contextType: 'free'` keeps it in the chat pane's free-chat list. */
 export const ASSISTANT_THREAD_TAGS = { kind: 'chat', contextType: 'free' } as const;
 
-/** C0/C1 control characters and Unicode line/paragraph separators. */
-const CONTROL_CHARS = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/;
-
-/** Thread title as accepted by the assistant API: trimmed, 1–200 characters, no control characters. */
-export const assistantThreadTitleSchema = z
-  .string()
-  .trim()
-  .min(1)
-  .max(200)
-  .refine((s) => !CONTROL_CHARS.test(s), { message: 'Title must not contain control characters' });
+/**
+ * Thread title as accepted by the assistant API, using the rule shared with the sidebar
+ * (`checkAssistantThreadTitle`): trimmed, 1–200 characters, no control, bidi or zero-width characters.
+ */
+export const assistantThreadTitleSchema = z.string().transform((raw, ctx) => {
+  const checked = checkAssistantThreadTitle(raw);
+  if (checked.ok) return checked.title;
+  ctx.addIssue({ code: 'custom', message: checked.error });
+  return z.NEVER;
+});
 
 export class AssistantThreadError extends Error {
   constructor(

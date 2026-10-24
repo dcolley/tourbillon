@@ -59,6 +59,27 @@ export function phoenixProjectName(): string {
   return process.env.PHOENIX_PROJECT_NAME?.trim() || 'tourbillon';
 }
 
+/**
+ * OBS-1: Phoenix UI base URL for "Trace" links on assistant messages (e.g. `http://localhost:6006`).
+ * Separate from the collector endpoint, which may be an internal address the browser cannot reach.
+ * Unset, not http(s), or carrying credentials → undefined, and trace links are hidden.
+ */
+export function phoenixUiBaseUrl(): string | undefined {
+  const raw = process.env.PHOENIX_UI_BASE_URL?.trim();
+  if (!raw) return undefined;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined;
+  if (url.username || url.password) return undefined;
+  url.search = '';
+  url.hash = '';
+  return url.toString().replace(/\/+$/, '');
+}
+
 export function shouldStoreModelChunks(): boolean {
   return process.env.OBSERVABILITY_STORE_MODEL_CHUNKS === 'true';
 }
