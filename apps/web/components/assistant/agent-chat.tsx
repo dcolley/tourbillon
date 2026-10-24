@@ -10,6 +10,7 @@ import * as React from 'react';
 import { Button } from '@/components/ui/button';
 import { WidgetToolCall } from '@/components/assistant/widgets/widget-tool-call';
 import { assistantWidgetRegistry } from '@/components/assistant/widgets/registry';
+import { approvalCardCallFor } from '@/components/assistant/widgets/approval-card-binding';
 import type { ToolCardStatus } from '@/components/assistant/widgets/fallback-card';
 import type {
   AgentChatItem,
@@ -74,7 +75,8 @@ function ItemView({ item }: { item: AgentChatItem }) {
         <div data-item="tool" data-tool-status={item.status}>
           <WidgetToolCall
             registry={assistantWidgetRegistry}
-            toolCall={{ toolCallId: item.id, toolName: item.name, args: item.argsText || undefined }}
+            // WID-2: a finished createApproval / getApproval call shows the Board approval card.
+            toolCall={approvalCardCallFor(item) ?? { toolCallId: item.id, toolName: item.name, args: item.argsText || undefined }}
             toolStatus={toolCardStatus(item.status)}
           />
         </div>
