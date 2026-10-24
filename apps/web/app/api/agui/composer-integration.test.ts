@@ -123,7 +123,8 @@ let uploadRequests = 0;
 /** fetch → the route handler (what the browser would hit). */
 const routeFetch: typeof fetch = async (input, init) => {
   const url = String(input);
-  assert.equal(url, attachmentUploadUrl('alice'));
+  assert.equal(url, attachmentUploadUrl('alice', 'thread-1'));
+  assert.equal(url, '/api/agui/alice/attachments?threadId=thread-1');
   uploadRequests++;
   const req = new NextRequest(`http://localhost${url}`, init as ConstructorParameters<typeof NextRequest>[1]);
   return POST(req, { params: Promise.resolve({ agentId: 'alice' }) });
@@ -160,6 +161,12 @@ describe('CHAT-1 composer ↔ upload route ↔ stub AG-UI client', () => {
             if (key === AGENT.id || key === AGENT.urlKey) return AGENT;
             throw new ChatAgentError('Agent not found', 404);
           },
+          getOrCreateChatController: async () => ({
+            queryThreadById: async ({ threadId }: { threadId: string }) =>
+              threadId === 'thread-1'
+                ? { resourceId: `company-${AGENT.companyId}:chat:user-1`, metadata: { agentId: AGENT.id } }
+                : null,
+          }),
         };
       }
       if (id === '@/lib/company' || id.endsWith('/lib/company')) return { ActiveCompanyError };
