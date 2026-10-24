@@ -10,12 +10,28 @@
  * in the meantime) gets `{ applied: false }` and has no side effects; each route maps that onto its
  * existing "already decided" response.
  *
+ * APR-2: the same claim writes the `hitl/response/v0` (status, value, reason, decidedBy, activity)
+ * and appends the hash-chained `decided` event, so the response and its side effects belong to the
+ * one call that won. A decision other than expiry also requires the deadline not to have passed;
+ * the expiry sweep (`approval-expiry.ts`) uses this same function with `outcome: 'expired'`, so a
+ * decide racing an expiry has exactly one winner.
+ *
  * Extension points for path-specific checks (keep them here so every path shares one claim):
  * - `approvalWhere`: extra conditions ANDed into the claim (e.g. a resume-token check).
  * - `approvalSet`: extra columns written by the claim (e.g. clearing a one-time token).
  */
 import { db, approvals, type Approval, type NewApproval } from '@tourbillon/db';
-import { and, eq, type SQL } from 'drizzle-orm';
+import { and, eq, gt, isNull, or, type SQL } from 'drizzle-orm';
+import type { ApprovalOutcomeStatus } from '@tourbillon/shared';
+import type { HitlDecidedBy, HitlResponse } from '@tourbillon/shared/hitl';
+import {
+  answerTypeOf,
+  appendHitlEvent,
+  buildHitlResponse,
+  loadHitlEvents,
+  restoreEffectOf,
+  wakeResponseOf,
+} from './hitl-host';
 import { addIssueComment } from '@/lib/issue-comments';
 import { formatApprovalDecisionComment, type ApprovalDecision, type IssueRestoreOutcome } from './approval-restore';
 import {
@@ -28,8 +44,16 @@ import {
 export interface ApplyApprovalDecisionInput {
   companyId: string;
   approvalId: string;
-  decision: ApprovalDecision;
+  /**
+   * Stored status to write (APR-2). Defaults to `decision`. `answered` restores issues like an
+   * approval; `declined`, `cancelled` and `expired` keep them blocked like a rejection.
+   */
+  outcome?: ApprovalOutcomeStatus;
+  /** Issue-restore effect. Optional when `outcome` is set (derived from it). */
+  decision?: ApprovalDecision;
   note?: string;
+  /** APR-2 response fields. `value` defaults to approve / reject for binary outcomes. */
+  hitl?: { value?: unknown; reason?: string; decidedBy?: HitlDecidedBy };
   /** approvals.decided_by_user_id, when the path records one (e.g. 'hitly', 'mcp'). */
   decidedByUserId?: string;
   /** Actor on the `issue.updated` / wake activity rows. */
@@ -46,7 +70,13 @@ export interface ApplyApprovalDecisionInput {
 }
 
 export type ApplyApprovalDecisionResult =
-  | { applied: true; approval: Approval; outcomes: IssueRestoreOutcome[]; wakes: ApprovalWakeResult[] }
+  | {
+      applied: true;
+      approval: Approval;
+      response: HitlResponse;
+      outcomes: IssueRestoreOutcome[];
+      wakes: ApprovalWakeResult[];
+    }
   | { applied: false };
 
 type ApprovalPayload = Record<string, unknown> & {
@@ -54,14 +84,26 @@ type ApprovalPayload = Record<string, unknown> & {
   priorStatuses?: Record<string, unknown>;
 };
 
+const OUTCOME_LABEL: Record<ApprovalOutcomeStatus, string> = {
+  approved: 'Approved',
+  rejected: 'Rejected',
+  answered: 'Answered',
+  declined: 'Declined',
+  cancelled: 'Cancelled',
+  expired: 'Expired',
+};
+
 export async function applyApprovalDecision(input: ApplyApprovalDecisionInput): Promise<ApplyApprovalDecisionResult> {
+  const outcome: ApprovalOutcomeStatus = input.outcome ?? input.decision ?? 'rejected';
+  const decision: ApprovalDecision = input.decision ?? restoreEffectOf(outcome);
+  const closesOnDeadline = outcome === 'expired' || outcome === 'cancelled';
   const claimed = await db.transaction(async (tx) => {
     const now = new Date();
     const [row] = await tx
       .update(approvals)
       .set({
         ...(input.approvalSet ?? {}),
-        status: input.decision,
+        status: outcome,
         note: input.note,
         decidedAt: now,
         updatedAt: now,
@@ -72,6 +114,8 @@ export async function applyApprovalDecision(input: ApplyApprovalDecisionInput): 
           eq(approvals.id, input.approvalId),
           eq(approvals.companyId, input.companyId),
           eq(approvals.status, 'pending'),
+          // A decision after the deadline loses to the expiry sweep (APR-2).
+          ...(closesOnDeadline ? [] : [or(isNull(approvals.deadline), gt(approvals.deadline, now)) as SQL]),
           ...(input.approvalWhere ?? []),
         ),
       )
@@ -80,23 +124,55 @@ export async function applyApprovalDecision(input: ApplyApprovalDecisionInput): 
     // Lost the claim: someone else decided it first (or an extra condition failed).
     if (!row) return null;
 
+    // APR-2: response + `decided` event, written by the winner inside the same transaction.
+    if (outcome !== 'expired') {
+      await appendHitlEvent(tx, {
+        companyId: input.companyId,
+        approvalId: input.approvalId,
+        type: 'decided',
+        actor: input.hitl?.decidedBy
+          ? { kind: input.hitl.decidedBy.kind, id: input.hitl.decidedBy.id }
+          : { kind: 'service', id: input.actor.actorId },
+        at: now,
+      });
+    }
+    const events = await loadHitlEvents(tx, input.companyId, input.approvalId);
+    const response = buildHitlResponse({
+      approval: row,
+      outcome,
+      value: input.hitl?.value,
+      reason: input.hitl ? input.hitl.reason : input.note,
+      decidedBy: input.hitl?.decidedBy,
+      decidedAt: now,
+      events,
+    });
+    await tx
+      .update(approvals)
+      .set({ hitlResponse: response })
+      .where(and(eq(approvals.id, input.approvalId), eq(approvals.companyId, input.companyId)));
+
     const payload = (row.payload ?? {}) as ApprovalPayload;
     const outcomes = await restoreLinkedIssuesForDecision(tx, {
       companyId: input.companyId,
       approvalId: input.approvalId,
-      decision: input.decision,
+      decision,
       priorStatuses: payload.priorStatuses,
       issueIds: row.issueIds ?? [],
       note: input.note,
       activityActor: input.actor,
     });
-    return { row: row as Approval, outcomes };
+    return { row: { ...(row as Approval), hitlResponse: response } as Approval, outcomes, response };
   });
 
   if (!claimed) return { applied: false };
-  const { row, outcomes } = claimed;
+  const { row, outcomes, response } = claimed;
+  const answerType = answerTypeOf(row);
+  const label = OUTCOME_LABEL[outcome];
+  const answer = answerTextForComment(response, answerType);
   const payload = (row.payload ?? {}) as ApprovalPayload;
-  const title = typeof payload.title === 'string' ? payload.title : row.type;
+  const question = (row.hitlRequest as { question?: unknown } | null)?.question;
+  const title =
+    typeof payload.title === 'string' ? payload.title : typeof question === 'string' ? question : row.type;
   const issueIds = row.issueIds ?? [];
 
   // Comment only on linked issues loaded for this company (outcomes are company-scoped).
@@ -108,7 +184,9 @@ export async function applyApprovalDecision(input: ApplyApprovalDecisionInput): 
         input.commentAuthor,
         formatApprovalDecisionComment({
           source: input.source,
-          decision: input.decision,
+          decision,
+          label,
+          answer,
           title,
           note: input.note,
           outcome,
@@ -123,7 +201,9 @@ export async function applyApprovalDecision(input: ApplyApprovalDecisionInput): 
   const wakes = await wakeAgentsForDecision({
     companyId: input.companyId,
     approvalId: input.approvalId,
-    decision: input.decision,
+    decision,
+    outcome,
+    response: wakeResponseOf(response, answerType),
     note: input.note,
     issueIds,
     requesterAgentId: row.requestedByAgentId,
@@ -132,5 +212,13 @@ export async function applyApprovalDecision(input: ApplyApprovalDecisionInput): 
     logPrefix: input.logPrefix,
   });
 
-  return { applied: true, approval: row, outcomes, wakes };
+  return { applied: true, approval: row, response, outcomes, wakes };
+}
+
+/** Short answer text for issue comments (non-binary answers only; never a secret). */
+function answerTextForComment(response: HitlResponse, answerType: string): string | undefined {
+  if (response.status !== 'answered' || answerType === 'binary') return undefined;
+  if (answerType === 'secret') return '(encrypted secret)';
+  const text = JSON.stringify(response.value) ?? '';
+  return text.length > 300 ? `${text.slice(0, 300)}…` : text;
 }

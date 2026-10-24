@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db, approvals, agents, issues } from '@tourbillon/db';
 import { and, eq, inArray } from 'drizzle-orm';
 import { authenticateAgentToken } from '@/lib/auth/agent-token-auth';
+import { expireApprovalIfDue } from '@/lib/approval-expiry';
+import { approvalForApi } from '@/lib/approval-api';
 
 export async function GET(
   req: NextRequest,
@@ -15,6 +17,8 @@ export async function GET(
   if (runCtx.companyId !== companyId) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
 
   try {
+    // APR-2: lazy expiry, so a past-deadline approval reads as expired.
+    await expireApprovalIfDue(companyId, approvalId);
     // Direct DB lookup by id and companyId
     const rows = await db
       .select({ approval: approvals, agent: agents })
@@ -41,26 +45,13 @@ export async function GET(
               boardApprovalId: issues.boardApprovalId,
             })
             .from(issues)
-            .where(inArray(issues.id, approval.issueIds))
+            .where(and(eq(issues.companyId, companyId), inArray(issues.id, approval.issueIds)))
         : [];
     const issuesById = new Map(linkedIssues.map((row) => [row.id, row]));
 
     // Build response with full detail
     const result = {
-      id: approval.id,
-      companyId: approval.companyId,
-      type: approval.type,
-      status: approval.status,
-      requestedByAgentId: approval.requestedByAgentId,
-      decidedByUserId: approval.decidedByUserId,
-      issueIds: approval.issueIds,
-      payload: approval.payload,
-      note: approval.note,
-      decidedAt: approval.decidedAt,
-      hitlyApprovalId: approval.hitlyApprovalId,
-      hitlyError: approval.hitlyError,
-      createdAt: approval.createdAt,
-      updatedAt: approval.updatedAt,
+      ...approvalForApi(approval),
       requester: agent ? { id: agent.id, name: agent.name, urlKey: agent.urlKey } : null,
       linkedIssues: approval.issueIds
         .map((id) => issuesById.get(id))

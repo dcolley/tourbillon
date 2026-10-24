@@ -167,13 +167,18 @@ const issueKey = (ref: IssueRef) => ref.identifier || ref.id;
 export function formatApprovalDecisionComment(input: {
   source: string;
   decision: ApprovalDecision;
+  /** APR-2: label for the stored outcome (e.g. Answered, Declined, Expired). Defaults from decision. */
+  label?: string;
+  /** APR-2: answer text for non-binary answers. */
+  answer?: string;
   title: string;
   note?: string | null;
   outcome: IssueRestoreOutcome | undefined;
 }): string {
-  const label = input.decision === 'approved' ? 'Approved' : 'Rejected';
+  const label = input.label ?? (input.decision === 'approved' ? 'Approved' : 'Rejected');
   const lines: Array<string | null> = [
     `**${input.source} ${label}:** ${input.title}`,
+    input.answer ? `Answer: ${input.answer}` : null,
     input.note ? `Note: ${input.note}` : null,
   ];
   const outcome = input.outcome;

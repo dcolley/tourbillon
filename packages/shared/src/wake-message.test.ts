@@ -88,6 +88,38 @@ describe('wake message modes', () => {
     assert.ok(m.indexOf('LIVE STATE') < m.indexOf('RECENT COMMENTS'));
   });
 
+  it('approval_resolved carries the response: status, answer, reason, decided by (APR-2)', () => {
+    const m = buildWakeMessage(
+      job([], {
+        wakeReason: 'approval_resolved',
+        approvalId: 'appr-2',
+        approvalStatus: 'answered',
+        approvalResponse: {
+          status: 'answered',
+          value: ['eu', 'us'],
+          answerType: 'multi',
+          reason: 'Both regions.',
+          decidedBy: { kind: 'group', id: 'board', display: 'Board' },
+        },
+      }),
+    );
+    assert.ok(m.includes('Approval ID: appr-2\nApproval outcome: answered\nResponse status: answered\nAnswer (multi): ["eu","us"]\nReason: Both regions.\nDecided by: Board (group:board)'), m);
+  });
+
+  it('approval_resolved: binary keeps the Board decision line; expired says there is no answer', () => {
+    const bin = buildWakeMessage(
+      job([], { wakeReason: 'approval_resolved', approvalStatus: 'approved', approvalResponse: { status: 'answered', value: 'approve', answerType: 'binary' } }),
+    );
+    assert.ok(bin.includes('Board decision: approved\nResponse status: answered\nAnswer (binary): "approve"'));
+    const exp = buildWakeMessage(job([], { wakeReason: 'approval_resolved', approvalStatus: 'expired', approvalResponse: { status: 'expired' } }));
+    assert.ok(exp.includes('Approval outcome: expired\nResponse status: expired\nNo answer: the request expired'));
+    assert.ok(!exp.includes('Decided by'));
+    const secret = buildWakeMessage(
+      job([], { wakeReason: 'approval_resolved', approvalStatus: 'answered', approvalResponse: { status: 'answered', encrypted: true } }),
+    );
+    assert.ok(secret.includes('Answer: (encrypted secret; not included in this message)'));
+  });
+
   it('agent_mail ignores the context and is unchanged (no heartbeat line)', () => {
     const data: HeartbeatJobData = {
       agentId: 'a', companyId: 'c', invocationSource: 'agent_mail', wakeReason: 'agent_mail', mailId: 'm1', mailFromAgentName: 'CEO', mailBody: ' hi ',

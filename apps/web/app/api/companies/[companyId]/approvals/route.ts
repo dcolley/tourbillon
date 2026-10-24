@@ -4,7 +4,10 @@ import { and, eq, inArray, desc, gte, or, ilike, sql } from 'drizzle-orm';
 import { authenticateAgentToken } from '@/lib/auth/agent-token-auth';
 import { parseCompanySettings, resolveHitlyGate, publicOriginFromRequest } from '@tourbillon/shared';
 import { ingestHitlyApproval, type HitlyIngestPayload } from '@/lib/hitly/client';
-import { randomBytes } from 'crypto';
+import { randomBytes, randomUUID } from 'crypto';
+import { isHitlyForwardable, parseHitlRequestForIngest, type HitlRequest } from '@tourbillon/shared/hitl';
+import { expireDueApprovals } from '@/lib/approval-expiry';
+import { approvalForApi } from '@/lib/approval-api';
 
 type ApprovalPayload = Record<string, unknown> & {
   title?: string;
@@ -32,7 +35,33 @@ export async function POST(
     issueIds?: string[];
     payload: ApprovalPayload;
     requestedByAgentId?: string;
+    /** APR-2: a `hitl/request/v0` question. The host assigns `id`; `requester.agentId` must be the caller. */
+    hitl?: unknown;
   };
+
+  // APR-2: one shared validator for every entry point; field errors are JSON Pointers.
+  let hitl: HitlRequest | null = null;
+  if (body.hitl !== undefined && body.hitl !== null) {
+    const parsed = parseHitlRequestForIngest(body.hitl, { agentId: runCtx.agentId });
+    if (!parsed.ok) {
+      return NextResponse.json({ error: 'Invalid hitl request', fields: parsed.errors }, { status: 422 });
+    }
+    hitl = parsed.value;
+    if (hitl.deadline && Date.parse(hitl.deadline) <= Date.now()) {
+      return NextResponse.json(
+        { error: 'Invalid hitl request', fields: [{ field: '/deadline', message: 'deadline must be in the future' }] },
+        { status: 422 },
+      );
+    }
+    if (body.requestedByAgentId && body.requestedByAgentId !== runCtx.agentId) {
+      return NextResponse.json(
+        { error: 'Invalid hitl request', fields: [{ field: '/requester/agentId', message: 'requester.agentId must be the calling agent' }] },
+        { status: 422 },
+      );
+    }
+  }
+  const requesterAgentId = hitl ? runCtx.agentId : (body.requestedByAgentId ?? runCtx.agentId);
+  const idempotencyKey = hitl?.idempotencyKey ?? null;
 
   const issueIds = [...new Set((body.issueIds ?? []).filter(Boolean))];
   const basePayload: ApprovalPayload =
@@ -59,6 +88,13 @@ export async function POST(
       hitlyGate.enabled &&
       (!hitlyGate.types || hitlyGate.types.length === 0 || hitlyGate.types.includes(body.type));
 
+    // APR-2: a repeat idempotencyKey from the same agent returns the existing approval.
+    if (idempotencyKey) {
+      const existing = await findByIdempotencyKey(companyId, requesterAgentId, idempotencyKey);
+      if (existing) return NextResponse.json(approvalForApi(existing), { status: 200 });
+    }
+
+    const approvalId = randomUUID();
     const approval = await db.transaction(async (tx) => {
       const priorStatuses: Record<string, IssueStatus> = {};
 
@@ -102,14 +138,25 @@ export async function POST(
       const [created] = await tx
         .insert(approvals)
         .values({
+          id: approvalId,
           companyId,
-          type: body.type,
+          type: body.type || 'request_board_approval',
           status: 'pending',
-          requestedByAgentId: body.requestedByAgentId ?? runCtx.agentId,
+          requestedByAgentId: requesterAgentId,
           issueIds,
           payload,
+          ...(hitl
+            ? {
+                hitlRequest: { ...hitl, id: approvalId },
+                idempotencyKey,
+                deadline: hitl.deadline ? new Date(hitl.deadline) : null,
+              }
+            : {}),
         })
+        .onConflictDoNothing()
         .returning();
+      // Lost an idempotency race to a concurrent create: nothing written; return the winner below.
+      if (!created) throw Object.assign(new Error('idempotent repeat'), { idempotentRepeat: true });
 
       if (issueIds.length > 0) {
         const now = new Date();
@@ -147,8 +194,8 @@ export async function POST(
       return created;
     });
 
-    // Forward to HITLy if gate is enabled
-    if (shouldForwardToHitly && hitlyGate) {
+    // Forward to HITLy if gate is enabled. APR-2: only binary questions go to HITLy.
+    if (shouldForwardToHitly && hitlyGate && isHitlyForwardable(hitl)) {
       try {
         const resumeToken = generateResumeToken();
         const resumeUrl = new URL(
@@ -158,10 +205,11 @@ export async function POST(
         resumeUrl.searchParams.set('token', resumeToken);
         const resumeUrlString = resumeUrl.toString();
 
-        const approvalUrl = new URL(`/approval`, publicOriginFromRequest(req)).toString();
-        
-        const title = typeof basePayload.title === 'string' ? basePayload.title : approval.type;
-        const summary = typeof basePayload.summary === 'string' ? basePayload.summary : '';
+        // APR-2: the details page (board session required). Never an /o/ token: those stay in Tourbillon.
+        const approvalUrl = new URL(`/approval/${approval.id}`, publicOriginFromRequest(req)).toString();
+
+        const title = hitl?.question ?? (typeof basePayload.title === 'string' ? basePayload.title : approval.type);
+        const summary = hitl?.context?.markdown ?? (typeof basePayload.summary === 'string' ? basePayload.summary : '');
         
         const contextMarkdown = [
           `# ${title}`,
@@ -224,15 +272,31 @@ export async function POST(
       }
     }
 
-    return NextResponse.json(approval, { status: 201 });
+    return NextResponse.json(approvalForApi(approval), { status: 201 });
   } catch (err: unknown) {
-    const e = err as { status?: number; message?: string };
+    const e = err as { status?: number; message?: string; idempotentRepeat?: boolean };
+    if (e.idempotentRepeat && idempotencyKey) {
+      const existing = await findByIdempotencyKey(companyId, requesterAgentId, idempotencyKey);
+      if (existing) return NextResponse.json(approvalForApi(existing), { status: 200 });
+    }
     if (e.status) {
       return NextResponse.json({ error: e.message }, { status: e.status });
     }
     throw err;
   }
 }
+
+async function findByIdempotencyKey(companyId: string, agentId: string, key: string) {
+  return db.query.approvals.findFirst({
+    where: and(
+      eq(approvals.companyId, companyId),
+      eq(approvals.requestedByAgentId, agentId),
+      eq(approvals.idempotencyKey, key),
+    ),
+  });
+}
+
+const STATUS_FILTERS = new Set(['pending', 'approved', 'rejected', 'answered', 'declined', 'cancelled', 'expired']);
 
 export async function GET(
   req: NextRequest,
@@ -246,8 +310,10 @@ export async function GET(
   if (runCtx.companyId !== companyId) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
 
   try {
+    // APR-2: lazy expiry sweep for this company before listing.
+    await expireDueApprovals(companyId);
     const url = new URL(req.url);
-    
+
     // Parse query parameters
     const statusParam = url.searchParams.get('status') || 'all';
     const typeParam = url.searchParams.get('type');
@@ -264,8 +330,8 @@ export async function GET(
 
     // Status filter
     if (statusParam !== 'all') {
-      if (statusParam === 'pending' || statusParam === 'approved' || statusParam === 'rejected') {
-        conditions.push(eq(approvals.status, statusParam));
+      if (STATUS_FILTERS.has(statusParam)) {
+        conditions.push(eq(approvals.status, statusParam as typeof approvals.$inferSelect.status));
       }
     }
 
@@ -281,6 +347,7 @@ export async function GET(
         or(
           ilike(sql`${approvals.payload}->>'title'`, searchPattern),
           ilike(sql`${approvals.payload}->>'summary'`, searchPattern),
+          ilike(sql`${approvals.hitlRequest}->>'question'`, searchPattern),
           ilike(approvals.note, searchPattern)
         )!
       );
@@ -329,20 +396,7 @@ export async function GET(
 
     // Build response
     const result = rows.map(({ approval, agent }) => ({
-      id: approval.id,
-      companyId: approval.companyId,
-      type: approval.type,
-      status: approval.status,
-      requestedByAgentId: approval.requestedByAgentId,
-      decidedByUserId: approval.decidedByUserId,
-      issueIds: approval.issueIds,
-      payload: approval.payload,
-      note: approval.note,
-      decidedAt: approval.decidedAt,
-      hitlyApprovalId: approval.hitlyApprovalId,
-      hitlyError: approval.hitlyError,
-      createdAt: approval.createdAt,
-      updatedAt: approval.updatedAt,
+      ...approvalForApi(approval),
       requester: agent ? { id: agent.id, name: agent.name, urlKey: agent.urlKey } : null,
       linkedIssues: (approval.issueIds ?? [])
         .map((id) => issuesById.get(id))

@@ -20,6 +20,10 @@ import { createProject, updateProject, listProjectsForAgent, type CreateProjectI
 import { addIssueComment } from '@/lib/issue-comments';
 import { triggerAgentHeartbeat } from '@/lib/heartbeat';
 import { applyApprovalDecision } from '@/lib/approval-decide';
+import { resolveDecision } from '@/lib/approval-answer';
+import { expireApprovalIfDue, expireDueApprovals } from '@/lib/approval-expiry';
+import { MCP_DECIDER, loadHitlEvents, openedRefsOf } from '@/lib/hitl-host';
+import { publicApprovalPayload } from '@/lib/approval-api';
 
 interface McpRequest {
   jsonrpc: '2.0';
@@ -597,7 +601,7 @@ const MCP_TOOLS: McpTool[] = [
         },
         status: {
           type: 'string',
-          enum: ['pending', 'approved', 'rejected', 'all'],
+          enum: ['pending', 'approved', 'rejected', 'answered', 'declined', 'cancelled', 'expired', 'all'],
           description: 'Filter by status (default: pending)',
         },
         limit: {
@@ -610,7 +614,11 @@ const MCP_TOOLS: McpTool[] = [
   },
   {
     name: 'decide_approval',
-    description: 'Decide a pending board approval (approve or reject). Reject restores blocked status; issues must be manually cancelled via set_issue_status if needed.',
+    description:
+      'Decide a pending board approval. Binary: decision approved or rejected (or status answered + value approve/reject). ' +
+      'Other questions: status answered with value (option value, array of option values, number or text), or status declined. ' +
+      'The answer is checked against the question rules (options, bounds, pattern, required reason, items that must be opened). ' +
+      'Reject / decline keep linked issues blocked; issues must be manually cancelled via set_issue_status if needed.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -625,14 +633,22 @@ const MCP_TOOLS: McpTool[] = [
         decision: {
           type: 'string',
           enum: ['approved', 'rejected'],
-          description: 'Decision (approved or rejected)',
+          description: 'Binary decision (approved or rejected). Use status + value for other questions.',
+        },
+        status: {
+          type: 'string',
+          enum: ['answered', 'declined'],
+          description: 'Response status (APR-2). answered needs value; declined has no value.',
+        },
+        value: {
+          description: 'Answer value for status answered: string, array of strings (multi) or number.',
         },
         reason: {
           type: 'string',
           description: 'Decision reason/note',
         },
       },
-      required: ['company_id', 'approval_id', 'decision'],
+      required: ['company_id', 'approval_id'],
     },
   },
   {
@@ -1449,6 +1465,7 @@ async function handleListApprovals(tokenCompanyId: string, params: any) {
   }
   validateCompanyAccess(tokenCompanyId, company_id);
 
+  await expireDueApprovals(company_id);
   const conditions = [eq(approvals.companyId, company_id)];
   if (status && status !== 'all') {
     conditions.push(eq(approvals.status, status));
@@ -1469,26 +1486,30 @@ async function handleListApprovals(tokenCompanyId: string, params: any) {
       requestedByAgentId: a.requestedByAgentId,
       decidedByUserId: a.decidedByUserId,
       issueIds: a.issueIds,
-      payload: a.payload,
+      payload: publicApprovalPayload(a.payload),
       note: a.note,
       decidedAt: a.decidedAt?.toISOString() ?? null,
       createdAt: a.createdAt.toISOString(),
+      hitlRequest: a.hitlRequest ?? null,
+      hitlResponse: a.hitlResponse ?? null,
+      deadline: a.deadline?.toISOString() ?? null,
     })),
   };
 }
 
 async function handleDecideApproval(tokenCompanyId: string, params: any) {
-  const { company_id, approval_id, decision, reason } = params;
+  const { company_id, approval_id, decision, reason, status, value } = params;
   if (!company_id) {
     throw new Error('company_id is required');
   }
-  if (!approval_id || !decision) {
-    throw new Error('approval_id and decision are required');
+  if (!approval_id || (!decision && !status)) {
+    throw new Error('approval_id and decision (or status) are required');
   }
-  if (!['approved', 'rejected'].includes(decision)) {
+  if (decision !== undefined && !['approved', 'rejected'].includes(decision)) {
     throw new Error('decision must be approved or rejected');
   }
   validateCompanyAccess(tokenCompanyId, company_id);
+  await expireApprovalIfDue(company_id, approval_id);
 
   const approval = await db.query.approvals.findFirst({
     where: eq(approvals.id, approval_id),
@@ -1500,16 +1521,27 @@ async function handleDecideApproval(tokenCompanyId: string, params: any) {
   if (approval.companyId !== company_id) {
     throw new Error('Approval not found');
   }
+  if (approval.status === 'expired') {
+    throw new Error('Approval expired');
+  }
   if (approval.status !== 'pending') {
     throw new Error('Approval already decided');
+  }
+
+  const events = approval.hitlRequest ? await loadHitlEvents(db, company_id, approval_id) : [];
+  const resolved = resolveDecision(approval, { decision, status, value, reason }, { openedRefs: openedRefsOf(events) });
+  if (!resolved.ok) {
+    const detail = resolved.fields?.map((f) => `${f.field}: ${f.message}`).join('; ');
+    throw new Error(detail ? `${resolved.error}: ${detail}` : resolved.error);
   }
 
   // Claimed with a conditional update: only one concurrent decision applies its side effects.
   const result = await applyApprovalDecision({
     companyId: company_id,
     approvalId: approval_id,
-    decision,
-    note: reason,
+    outcome: resolved.outcome,
+    note: resolved.note,
+    hitl: { value: resolved.value, reason: resolved.reason, decidedBy: MCP_DECIDER },
     decidedByUserId: 'mcp',
     actor: { actorId: 'mcp', actorName: 'MCP' },
     commentAuthor: { type: 'user', id: 'mcp', name: 'MCP' },
@@ -1524,8 +1556,9 @@ async function handleDecideApproval(tokenCompanyId: string, params: any) {
   return {
     id: updated.id,
     status: updated.status,
-    decision,
+    decision: decision ?? updated.status,
     decidedAt: updated.decidedAt?.toISOString() ?? null,
+    response: result.response,
   };
 }
 
