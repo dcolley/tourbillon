@@ -510,6 +510,62 @@ describe('APR-FIX approval decision restore (routes)', () => {
         assert.ok(!('remainingBlockerIds' in details), 'no blocker ids when nothing blocks');
       });
 
+      it('ACT-1: approval.created and approval.decided rows, one correlation id per action, decidedBy set', async () => {
+        addIssue({ id: 'i1', identifier: 'TB-1', status: 'in_progress', assigneeAgentId: 'agent-dev' });
+        const approvalId = await createApproval(['i1']);
+        const [created] = activity('approval.created');
+        assert.ok(created, 'approval.created written');
+        assert.equal(created.companyId, 'company-a');
+        assert.equal(created.actorType, 'agent');
+        assert.equal(created.entityType, 'approval');
+        assert.equal(created.entityId, approvalId);
+        assert.equal((created.details as Row).title, 'Ship it');
+        assert.ok(typeof created.correlationId === 'string' && created.correlationId);
+        const halt = activity('issue.updated').filter((a) => a.correlationId === created.correlationId);
+        assert.equal(halt.length, 1, 'the blocking row shares the request correlation id');
+        assert.deepEqual(((halt[0].details as Row).changes as Row).status, { from: 'in_progress', to: 'blocked' });
+
+        assert.ok(await applied(path, await decideVia(path, approvalId, 'approved')));
+        const decided = activity('approval.decided');
+        assert.equal(decided.length, 1, 'one approval.decided row');
+        const [d] = decided;
+        assert.equal(d.companyId, 'company-a');
+        assert.equal(d.actorId, ACTOR[path]);
+        assert.equal(d.actorType, path === 'board' ? 'user' : 'system');
+        assert.equal(d.entityId, approvalId);
+        const details = d.details as Row;
+        assert.equal(details.status, 'approved');
+        assert.equal(details.title, 'Ship it');
+        assert.deepEqual(details.issueIds, ['i1']);
+        assert.deepEqual(details.changes, { status: { from: 'pending', to: 'approved' } });
+        assert.ok(d.correlationId && d.correlationId !== created.correlationId, 'the decision is its own action');
+        const [restore] = decisionUpdates();
+        assert.equal(restore.correlationId, d.correlationId, 'the restore row shares the decision correlation id');
+        assert.equal(store.approvals.find((a) => a.id === approvalId)!.decidedByUserId, ACTOR[path]);
+        const text = JSON.stringify(store.activityLog);
+        assert.ok(!text.includes('hitlyResumeToken') && !text.includes('"tok"'), 'no tokens in activity');
+      });
+
+      it('ACT-1: a lost race writes no second approval.decided row', async () => {
+        addIssue({ id: 'i1', identifier: 'TB-1', status: 'blocked' });
+        const approvalId = await createApproval(['i1']);
+        raceGate.n = 2;
+        await Promise.all([decideVia(path, approvalId, 'approved'), decideVia(path, approvalId, 'approved')]);
+        assert.equal(activity('approval.decided').length, 1);
+      });
+
+      it('ACT-1: another company issue is not named on the approval.decided row', async () => {
+        addIssue({ id: 'i1', identifier: 'TB-1', status: 'blocked' });
+        addIssue({ id: 'xb', companyId: 'company-b', identifier: 'OB-1', status: 'blocked', boardApprovalId: 'ap-x' });
+        store.approvals.push({
+          id: 'ap-x', companyId: 'company-a', type: 'request_board_approval', status: 'pending',
+          requestedByAgentId: 'agent-req', issueIds: ['i1', 'xb'], payload: { title: 'Ship it', priorStatuses: { i1: 'blocked' } },
+        });
+        assert.ok(await applied(path, await decideVia(path, 'ap-x', 'approved')));
+        const [d] = activity('approval.decided');
+        assert.deepEqual((d.details as Row).issueIds, ['i1']);
+      });
+
       it('issue.updated row lists remainingBlockerIds when it stays blocked', async () => {
         addIssue({ id: 'dep', identifier: 'TB-7', status: 'todo' });
         addIssue({ id: 'i1', identifier: 'TB-1', status: 'blocked', blockedByIssueIds: ['dep'] });

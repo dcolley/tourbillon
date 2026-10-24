@@ -27,6 +27,11 @@ export interface DecisionActor {
   /** activity_log.actor_id, e.g. 'board', 'hitly', 'mcp'. */
   actorId: string;
   actorName: string;
+  /**
+   * ACT-1: actor type on the `approval.decided` row ('user' for an in-app Board decision).
+   * Rows written as a consequence (issue restores, wakes) stay 'system'. Defaults to 'system'.
+   */
+  actorType?: 'user' | 'system';
 }
 
 /**
@@ -44,6 +49,8 @@ export async function restoreLinkedIssuesForDecision(
     issueIds: string[];
     note?: string;
     activityActor?: DecisionActor;
+    /** ACT-1: shared with the decision's other activity rows. */
+    correlationId?: string;
   },
 ): Promise<IssueRestoreOutcome[]> {
   if (input.issueIds.length === 0) return [];
@@ -77,6 +84,7 @@ export async function restoreLinkedIssuesForDecision(
     dependencies,
   });
 
+  const priorStatusById = new Map(linked.map((row) => [row.id, row.status]));
   const now = new Date();
   for (const outcome of outcomes) {
     if (!outcome.restored) continue;
@@ -104,7 +112,13 @@ export async function restoreLinkedIssuesForDecision(
           ...(outcome.remainingBlockers.length > 0
             ? { remainingBlockerIds: outcome.remainingBlockers.map((b) => b.id) }
             : {}),
+          // ACT-1: the change in words.
+          changes: {
+            status: { from: priorStatusById.get(outcome.issueId) ?? null, to: outcome.status },
+            boardApprovalId: { from: input.approvalId, to: null },
+          },
         },
+        ...(input.correlationId ? { correlationId: input.correlationId } : {}),
       });
     }
   }
@@ -141,6 +155,8 @@ export async function wakeAgentsForDecision(input: {
   outcomes: IssueRestoreOutcome[];
   actor: DecisionActor;
   logPrefix: string;
+  /** ACT-1: shared with the decision's other activity rows. */
+  correlationId?: string;
 }): Promise<ApprovalWakeResult[]> {
   const targets = planApprovalWakes({
     decision: input.decision,
@@ -165,6 +181,7 @@ export async function wakeAgentsForDecision(input: {
           entityType: 'issue',
           entityId: issueId,
           details,
+          ...(input.correlationId ? { correlationId: input.correlationId } : {}),
         });
       } catch (err) {
         console.error(`${input.logPrefix} failed to record ${action} on issue`, issueId, err);

@@ -9,6 +9,7 @@ import {
   type Project,
   type Issue,
 } from '@tourbillon/db';
+import { changesBetween, TRACKED_CHANGE_FIELDS } from './activity-correlation';
 import { and, desc, eq } from 'drizzle-orm';
 import { assertCompanyAccess, getActiveCompany, getCompanyById } from './company';
 import { validateGoalId } from './goals';
@@ -259,7 +260,7 @@ export async function updateProject(
     action: 'project.updated',
     entityType: 'project',
     entityId: projectId,
-    details: changed,
+    details: { ...changed, changes: changesBetween(project as unknown as Record<string, unknown>, changed, TRACKED_CHANGE_FIELDS) },
   });
 
   return updated;

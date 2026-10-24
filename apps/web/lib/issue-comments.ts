@@ -166,7 +166,9 @@ export async function addIssueComment(
   companyId: string,
   actor: { type: 'agent' | 'user'; id: string; name?: string },
   body: string,
-  runId?: string
+  runId?: string,
+  /** ACT-1: correlation id of the action this comment belongs to (e.g. an approval decision). */
+  opts: { correlationId?: string } = {}
 ): Promise<IssueComment> {
   const trimmed = body.trim();
   if (!trimmed) throw new Error('Comment body is required');
@@ -182,6 +184,7 @@ export async function addIssueComment(
       entityType: 'issue',
       entityId: issueId,
       details: { body: trimmed, comment: trimmed, runId },
+      ...(opts.correlationId ? { correlationId: opts.correlationId } : {}),
     })
     .returning();
 
