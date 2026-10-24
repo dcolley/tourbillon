@@ -23,13 +23,22 @@ export interface CompanyOption {
 
 /**
  * UI-4: one company picker for both views (Control Pane sidebar header and the Assistant top
- * bar). The picker owns its own padding and truncation so it looks the same wherever it sits.
+ * bar). The picker owns its width and truncation so it looks the same wherever it sits.
  *
- * Width: in the Control Pane the picker fills the sidebar header (sidebar 16rem minus the
- * header's 0.5rem padding on each side = 15rem). Containers outside the sidebar wrap it in
- * `COMPANY_SWITCHER_WIDTH_CLASS` so the trigger ends up the same width there too.
+ * Width: the trigger is always `COMPANY_SWITCHER_WIDTH` (14rem = 224px). The Control Pane
+ * sidebar is sized from the same value (`CONTROL_PANE_SIDEBAR_WIDTH`), so the trigger fits the
+ * sidebar header exactly and cannot drift from the Assistant one.
  */
-export const COMPANY_SWITCHER_WIDTH_CLASS = 'w-60';
+export const COMPANY_SWITCHER_WIDTH = '14rem';
+
+/**
+ * Horizontal space the Control Pane sidebar uses around the picker: SidebarHeader `p-2`
+ * (0.5rem each side) plus the sidebar container's 1px `border-r`.
+ */
+export const SIDEBAR_HEADER_INSET = '1rem + 1px';
+
+/** `--sidebar-width` for the Control Pane: picker width plus the header inset. */
+export const CONTROL_PANE_SIDEBAR_WIDTH = `calc(${COMPANY_SWITCHER_WIDTH} + ${SIDEBAR_HEADER_INSET})`;
 
 /** Select value for the "New company" entry; never a real company id (ids are UUIDs). */
 export const NEW_COMPANY_VALUE = '__new_company__';
@@ -74,10 +83,7 @@ export function CompanySwitcherView({
   }
 
   return (
-    <div
-      className="min-w-0 px-2 py-1 group-data-[collapsible=icon]:px-0"
-      data-company-switcher
-    >
+    <div className="py-1 group-data-[collapsible=icon]:hidden" data-company-switcher>
       <Select
         value={activeCompanyId ?? undefined}
         onValueChange={handleValueChange}
@@ -86,9 +92,11 @@ export function CompanySwitcherView({
         <SelectTrigger
           aria-label="Company"
           title={label}
-          className="h-8 w-full min-w-0 text-xs group-data-[collapsible=icon]:hidden"
+          className="h-8 shrink-0 text-xs"
+          style={{ width: COMPANY_SWITCHER_WIDTH }}
+          data-company-switcher-trigger
         >
-          <span className="min-w-0 flex-1 truncate text-left font-medium" title={label}>
+          <span dir="auto" className="min-w-0 flex-1 truncate text-start font-medium" title={label}>
             {label}
           </span>
         </SelectTrigger>
@@ -101,10 +109,13 @@ export function CompanySwitcherView({
               title={company.name}
               className="[&>*:first-child]:min-w-0 [&>*:first-child]:shrink"
             >
-              <span className="min-w-0 truncate font-medium" title={company.name}>
+              <span dir="auto" className="min-w-0 flex-1 truncate text-start font-medium" title={company.name}>
                 {company.name}
               </span>
-              <span className="shrink-0 font-mono text-xs text-muted-foreground">
+              <span
+                className="ml-auto shrink-0 text-right font-mono text-xs text-muted-foreground"
+                data-company-switcher-prefix
+              >
                 {company.issuePrefix}
               </span>
             </SelectItem>
@@ -124,6 +135,48 @@ export function CompanySwitcherView({
   );
 }
 
+export interface CompanySwitchDeps {
+  setStoredCompanyId: (companyId: string) => void;
+  syncActiveCompany: (companyId: string) => Promise<unknown>;
+  refresh: () => void;
+  setSwitching: (switching: boolean) => void;
+}
+
+/**
+ * Switch the active company. Returns false when nothing to do (same company or a switch is
+ * already running). The picker is always re-enabled, even when the sync fails.
+ */
+export async function switchActiveCompany(
+  companyId: string,
+  state: { activeCompanyId: string | null; switching: boolean },
+  deps: CompanySwitchDeps,
+): Promise<boolean> {
+  if (companyId === state.activeCompanyId || state.switching) return false;
+  deps.setSwitching(true);
+  try {
+    deps.setStoredCompanyId(companyId);
+    await deps.syncActiveCompany(companyId);
+    deps.refresh();
+  } finally {
+    deps.setSwitching(false);
+  }
+  return true;
+}
+
+/** The view callbacks CompanySwitcher passes to CompanySwitcherView. */
+export function companySwitcherHandlers(
+  state: { activeCompanyId: string | null; switching: boolean },
+  deps: CompanySwitchDeps & { openCreate: () => void; onError?: (error: unknown) => void },
+): { onSelect: (companyId: string) => void; onCreate: () => void } {
+  const onError = deps.onError ?? ((error: unknown) => console.error('Company switch failed', error));
+  return {
+    onSelect: (companyId) => {
+      void switchActiveCompany(companyId, state, deps).catch(onError);
+    },
+    onCreate: () => deps.openCreate(),
+  };
+}
+
 export function CompanySwitcher({
   companies,
   activeCompanyId,
@@ -135,14 +188,16 @@ export function CompanySwitcher({
   const [createOpen, setCreateOpen] = useState(false);
   const [switching, setSwitching] = useState(false);
 
-  async function handleChange(companyId: string) {
-    if (companyId === activeCompanyId || switching) return;
-    setSwitching(true);
-    setStoredCompanyId(companyId);
-    await syncActiveCompanyAction(companyId);
-    router.refresh();
-    setSwitching(false);
-  }
+  const handlers = companySwitcherHandlers(
+    { activeCompanyId, switching },
+    {
+      setStoredCompanyId,
+      syncActiveCompany: syncActiveCompanyAction,
+      refresh: () => router.refresh(),
+      setSwitching,
+      openCreate: () => setCreateOpen(true),
+    },
+  );
 
   async function handleCreated(companyId: string) {
     setStoredCompanyId(companyId);
@@ -168,8 +223,8 @@ export function CompanySwitcher({
         companies={companies}
         activeCompanyId={activeCompanyId}
         disabled={switching}
-        onSelect={(companyId) => void handleChange(companyId)}
-        onCreate={() => setCreateOpen(true)}
+        onSelect={handlers.onSelect}
+        onCreate={handlers.onCreate}
       />
       <CreateCompanyDialog open={createOpen} onOpenChange={setCreateOpen} onCreated={handleCreated} />
     </>

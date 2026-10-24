@@ -2,12 +2,7 @@
 
 import { Suspense, type ReactNode } from 'react';
 import { Logo } from '@/components/logo';
-import {
-  COMPANY_SWITCHER_WIDTH_CLASS,
-  CompanySwitcher,
-  type CompanyOption,
-} from '@/components/company-switcher';
-import { cn } from '@/lib/utils';
+import { CompanySwitcher, type CompanyOption } from '@/components/company-switcher';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { ViewSwitcher } from '@/components/view-switcher';
 import { AssistantSidebar } from './sidebar';
@@ -39,8 +34,8 @@ export function AssistantShell({
         </div>
         <ViewSwitcher current="assistant" />
         <div className="flex-1" />
-        {/* UI-4: same picker and width as the Control Pane sidebar header. */}
-        <div className={cn('hidden shrink-0 sm:block', COMPANY_SWITCHER_WIDTH_CLASS)}>
+        {/* UI-4: same picker as the Control Pane sidebar header; it sets its own width. */}
+        <div className="hidden shrink-0 sm:block" data-assistant-company-picker>
           <CompanySwitcher companies={companies} activeCompanyId={activeCompanyId} />
         </div>
         <ThemeToggle />
