@@ -18,8 +18,12 @@ const WHEN_0019 = (
   }
 ).entries.find((e) => e.tag === TAG)!.when;
 
-/** Same rule as drizzle's migrator; simple protocol because early migrations hold several statements per chunk. */
-async function migrateUp(client: PGlite): Promise<void> {
+/**
+ * Same rule as drizzle's migrator; simple protocol because early migrations hold several statements per chunk.
+ * Stops at 0019: the migrator skips anything at or before the newest recorded migration, so 0019 can only be
+ * re-applied while it is the latest (later migrations have their own rollback tests).
+ */
+async function migrateUp(client: PGlite, throughMillis = WHEN_0019): Promise<void> {
   await client.exec(`
     create schema if not exists drizzle;
     create table if not exists drizzle.__drizzle_migrations (id serial primary key, hash text not null, created_at bigint);
@@ -30,6 +34,7 @@ async function migrateUp(client: PGlite): Promise<void> {
   const lastAt = last.rows[0]?.created_at ? Number(last.rows[0].created_at) : 0;
   for (const m of readMigrationFiles({ migrationsFolder: MIGRATIONS })) {
     if (m.folderMillis <= lastAt) continue;
+    if (m.folderMillis > throughMillis) break;
     for (const chunk of m.sql) {
       if (chunk.trim()) await client.exec(chunk);
     }

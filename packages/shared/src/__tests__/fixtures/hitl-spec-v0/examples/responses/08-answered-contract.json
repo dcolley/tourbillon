@@ -1,0 +1,39 @@
+{
+  "spec": "hitl/response/v0",
+  "requestId": "req_01JB7CONTRACT",
+  "status": "answered",
+  "value": "approve",
+  "reason": "6% is under the cap agreed with finance.",
+  "decidedBy": {
+    "kind": "human",
+    "id": "usr_01JB7ALEX",
+    "display": "Alex Reviewer"
+  },
+  "decidedAt": "2026-10-24T14:32:10Z",
+  "argsHash": "_LI_K0IVFwOAMoMkXaEGoMuMcXmTY88L1tYg1k6AXvo",
+  "signature": {
+    "alg": "Ed25519",
+    "kid": "example-2026-10",
+    "sig": "rOrym5D6-O_jpfokWL6Ajeukpik1oDUm0NAyum_c45J5KHBZNn8ZcTMuxjWS6ZyRW6fQLE3xgauPPcdcLtzhBg"
+  },
+  "activity": {
+    "presentedAt": "2026-10-24T14:20:03Z",
+    "items": [
+      {
+        "ref": "att_contract",
+        "sha256": "lkH6Og8R5z-4ABWu2k4_KVQi3cHpBzbaq4jqJsDBhLk",
+        "openedAt": [
+          "2026-10-24T14:21:40Z",
+          "2026-10-24T14:30:12Z"
+        ]
+      },
+      {
+        "ref": "lnk_terms",
+        "sha256": null,
+        "openedAt": [
+          "2026-10-24T14:26:55Z"
+        ]
+      }
+    ]
+  }
+}

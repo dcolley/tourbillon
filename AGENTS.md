@@ -121,7 +121,7 @@ Each agent row in the `agents` table has:
 
 **Tier 2 boolean toolsets:**
 - `comments` — `addComment`
-- `approvals` — `createApproval`
+- `approvals` — `createApproval` (optional typed `question`), `listApprovals`, `getApproval`
 - `roster` — `listAgents`
 - `code-execution` — Mastra workspace sandbox (`mastra_workspace_execute_command`, `mastra_workspace_get_process_output`, `mastra_workspace_kill_process`, file tools). Gated via `buildCodeExecutionWorkspace()` in `execution-workspace.ts`, not `role-tools.ts`. Per-issue CWD under `EXECUTION_WORKSPACE_ROOT`. Toolset skill: `code-execution-skills.md`.
 - `web-search` — `searxngSearch`, `searxngNewsSearch` via SearXNG JSON API (`SEARXNG_URL` or company settings)
@@ -430,12 +430,23 @@ Tourbillon has three distinct approval paths — do not conflate them:
 | Kind | Mechanism | Behavior |
 |---|---|---|
 | **Issue review** | Comment + reassign (`status: in_review`, `assigneeAgentId` = reviewer) | Agent-to-agent or agent-to-human review handoff. Control-plane §2a. |
-| **Board approval** | `createApproval` → `/approval` UI → decide | Linked issues are **halted** (`blocked` + `boardApprovalId`). Checkout and non-`blocked` status updates return 409 until decided. Approve restores prior status; reject clears the halt id but leaves `blocked`. Decide triggers WakeRunner `approval_resolved` (not Mastra ToolApprovals / Signals). |
+| **Board approval** | `createApproval` → `/approval` UI → decide | Linked issues are **halted** (`blocked` + `boardApprovalId`). Checkout and non-`blocked` status updates return 409 until decided. Approve (or a non-binary answer) restores prior status; reject, decline and expiry clear the halt id but leave `blocked`. Decide triggers WakeRunner `approval_resolved` with the response (not Mastra ToolApprovals / Signals). |
 | **Tool access** | Agent config (`assignedToolsets`, `assignedTools`, MCP) | Tools are granted at hire/settings time. Per-tool HITL is intentionally out of scope. |
 
 Agents that need irreversible or high-cost actions (hiring a new agent, large spend, external integrations) must call `createApproval` with linked `issueIds`. Prefer a comment on those issues explaining why. Do **not** use `in_review` for board governance — that status is for agent review handoff.
 
 Approval types: `request_board_approval`, `hire_agent` (extensible — add new types as needed).
+
+**Typed questions (APR-2, hitl v0).** `createApproval` may carry a `question` (`hitl/request/v0`:
+binary, single, multi, number, text or secret, with options, bounds, recommended, deadline,
+idempotencyKey, context links/attachments, risk). One zod schema set in
+`@tourbillon/shared/hitl` validates it in the agent tool, the REST route and MCP. Statuses:
+`pending`, `approved`, `rejected`, `answered`, `declined`, `cancelled`, `expired`. Every decision
+(Board form, HITLy resume, MCP `decide_approval`, deadline expiry) goes through
+`applyApprovalDecision` (one conditional claim), which stores the `hitl/response/v0`
+(`approvals.hitl_response`, `signature: null`, hash-chained `hitl_events`) and passes it to the
+wake (`HeartbeatJobData.approvalResponse`). Review links go through `/o/<token>` (Board session,
+same company, recorded as `opened`). Only binary questions are sent to HITLy.
 
 ---
 

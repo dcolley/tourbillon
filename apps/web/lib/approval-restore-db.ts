@@ -5,6 +5,7 @@
 import { db, issues, agents, activityLog } from '@tourbillon/db';
 import { and, eq, inArray } from 'drizzle-orm';
 import { enqueueApprovalWake } from '@/lib/wake-client';
+import type { ApprovalOutcomeStatus, ApprovalWakeResponse } from '@tourbillon/shared';
 import {
   dependencyIdsOf,
   formatWakeFailedComment,
@@ -130,6 +131,10 @@ export async function wakeAgentsForDecision(input: {
   companyId: string;
   approvalId: string;
   decision: ApprovalDecision;
+  /** APR-2: stored status sent in the wake (defaults to `decision`). */
+  outcome?: ApprovalOutcomeStatus;
+  /** APR-2: response fields the requester reads in its wake. */
+  response?: ApprovalWakeResponse;
   note?: string;
   issueIds: string[];
   requesterAgentId: string | null | undefined;
@@ -185,8 +190,9 @@ export async function wakeAgentsForDecision(input: {
           approvalId: input.approvalId,
           agentId: target.agentId,
           companyId: input.companyId,
-          status: input.decision,
+          status: input.outcome ?? input.decision,
           note: input.note,
+          ...(input.response ? { response: input.response } : {}),
           linkedIssueIds: target.issueIds,
         });
         if (wake && wake.outcome === 'skipped') skipReason = wakeSkipReasonFromScheduler(wake.skipReason);

@@ -14,6 +14,24 @@ export type WakeReason =
   | 'automation'
   | 'agent_mail';
 
+/**
+ * Stored approval status after a decision (APR-2). `approved` / `rejected` are binary answers;
+ * `answered` is any other answer; `declined`, `cancelled` and `expired` carry no answer value.
+ */
+export type ApprovalOutcomeStatus = 'approved' | 'rejected' | 'answered' | 'declined' | 'cancelled' | 'expired';
+
+/** The `hitl/response/v0` fields an approval_resolved wake carries to the requester (APR-2). */
+export interface ApprovalWakeResponse {
+  status: 'answered' | 'declined' | 'cancelled' | 'expired';
+  /** Answer value (answered only). Absent for secret answers; see `encrypted`. */
+  value?: unknown;
+  /** True when the answer is an encrypted secret; the value is never put in a wake. */
+  encrypted?: boolean;
+  reason?: string;
+  decidedBy?: { kind: 'human' | 'group' | 'service'; id: string; display?: string };
+  answerType?: string;
+}
+
 export interface HeartbeatJobData {
   agentId: string;
   agentName?: string;
@@ -23,9 +41,11 @@ export interface HeartbeatJobData {
   taskId?: string;
   wakeCommentId?: string;
   approvalId?: string;
-  approvalStatus?: 'approved' | 'rejected';
+  approvalStatus?: ApprovalOutcomeStatus;
   /** Board decision note (approval_resolved wakes). */
   approvalNote?: string;
+  /** Response to the approval's question (approval_resolved wakes, APR-2). */
+  approvalResponse?: ApprovalWakeResponse;
   linkedIssueIds?: string[];
   wakePayloadJson?: string;
   /** Lineage: runId of the failed run this retry re-attempts (retry-in-new-heartbeat). */

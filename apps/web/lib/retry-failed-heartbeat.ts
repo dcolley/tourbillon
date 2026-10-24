@@ -1,4 +1,18 @@
-import type { HeartbeatJobData, WakeReason } from '@tourbillon/shared';
+import type { ApprovalOutcomeStatus, ApprovalWakeResponse, HeartbeatJobData, WakeReason } from '@tourbillon/shared';
+
+const APPROVAL_OUTCOMES: ReadonlySet<string> = new Set(['approved', 'rejected', 'answered', 'declined', 'cancelled', 'expired']);
+const RESPONSE_STATUSES: ReadonlySet<string> = new Set(['answered', 'declined', 'cancelled', 'expired']);
+
+function isApprovalOutcomeStatus(value: unknown): value is ApprovalOutcomeStatus {
+  return typeof value === 'string' && APPROVAL_OUTCOMES.has(value);
+}
+
+/** APR-2: keep the response a retry wake carries, only when it has a known status. */
+function approvalResponseOf(value: unknown): ApprovalWakeResponse | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const r = value as ApprovalWakeResponse;
+  return RESPONSE_STATUSES.has(r.status) ? r : undefined;
+}
 
 /**
  * Rebuild a HeartbeatJobData for a *retry* wake from a failed run's
@@ -92,10 +106,13 @@ export function buildRetryHeartbeatJobData(
         invocationSource: 'approval_resolved',
         wakeReason: 'approval_resolved',
         approvalId,
-        ...(approvalStatus === 'approved' || approvalStatus === 'rejected'
+        ...(isApprovalOutcomeStatus(approvalStatus)
           ? {
               approvalStatus: approvalStatus,
               approvalNote: nonEmptyString(snapshot.approvalNote) ?? undefined,
+              ...(approvalResponseOf(snapshot.approvalResponse)
+                ? { approvalResponse: approvalResponseOf(snapshot.approvalResponse) }
+                : {}),
             }
           : {}),
         ...(taskId ? { taskId } : {}),

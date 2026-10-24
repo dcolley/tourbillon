@@ -1,7 +1,7 @@
 /**
  * HTTP helpers for the web app → scheduler process (WakeRunner + schedule sync).
  */
-import type { HeartbeatJobData } from '@tourbillon/shared';
+import type { ApprovalOutcomeStatus, ApprovalWakeResponse, HeartbeatJobData } from '@tourbillon/shared';
 import { formatTrace } from '@tourbillon/shared';
 import { enrichHeartbeatJob } from './wake-payload';
 
@@ -133,8 +133,10 @@ export async function enqueueApprovalWake(data: {
   approvalId: string;
   agentId: string;
   companyId: string;
-  status: 'approved' | 'rejected';
+  status: ApprovalOutcomeStatus;
   note?: string;
+  /** APR-2: the response (status, value, reason, decidedBy) the requester reads in its wake. */
+  response?: ApprovalWakeResponse;
   linkedIssueIds?: string[];
 }): Promise<EnqueueHeartbeatResult> {
   return enqueueHeartbeat(
@@ -146,6 +148,7 @@ export async function enqueueApprovalWake(data: {
       approvalId: data.approvalId,
       approvalStatus: data.status,
       approvalNote: data.note,
+      ...(data.response ? { approvalResponse: data.response } : {}),
       linkedIssueIds: data.linkedIssueIds,
       taskId: data.linkedIssueIds?.[0],
     },

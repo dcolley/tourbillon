@@ -1,5 +1,6 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
+import { HITL_REQUEST_SPEC, hitlRequestFields, parseHitlRequestForIngest } from '@tourbillon/shared/hitl';
 import { extractToolRuntimeContext, tracedAgentFetch } from './api-client';
 import { NITTER_TOOLS } from './nitter-tools';
 import { SEARXNG_TOOLS } from './searxng-tools';
@@ -23,12 +24,21 @@ const addCommentTool = createTool({
   },
 });
 
+// APR-2: the question fields of a `hitl/request/v0`. spec, id (host-assigned) and requester (filled
+// from the run) are not agent input.
+const { spec: _spec, id: _id, requester: _requester, ...questionFields } = hitlRequestFields;
+
 const createApprovalTool = createTool({
   id: 'createApproval',
   description:
     'Submit a board governance approval (hires, large spend, irreversible actions). ' +
     'Before filing, call listApprovals with targeted filters (e.g., type: "hire_agent", q: "CFO") to check for an equivalent approved or pending request. Do not re-file if an equivalent exists. ' +
     'Linked issues in issueIds are halted (status blocked) until the board decides at /approval. ' +
+    'Optional `question` asks a typed question (hitl/request/v0): question (ends with "?", max 160 chars), answerType ' +
+    '(binary | single | multi | number | text | secret), options for single/multi, bounds, recommended {value, reason}, reasonRequired, ' +
+    'deadline (RFC 3339), context {markdown, links[{ref,url(https),label,mustOpen?}], attachments}, risk {level: low|medium|high|critical, reversible}, ' +
+    'idempotencyKey (a repeat returns the existing approval). Do not send id. text bounds.pattern is an I-Regexp (max 256 chars) matched against the whole answer. ' +
+    'The answer arrives in your approval_resolved wake (Response status / Answer / Reason). ' +
     'Post a comment on linked issues explaining why. This is not agent-to-agent review — use in_review + reassign for that.',
   inputSchema: z.object({
     type: z.string().default('request_board_approval'),
@@ -39,15 +49,28 @@ const createApprovalTool = createTool({
       recommendedAction: z.string().optional(),
       risks: z.array(z.string()).optional(),
     }),
+    question: z.object(questionFields).optional().describe('Typed question (hitl/request/v0 without spec, id and requester)'),
   }),
   execute: async (inputData, { requestContext }) => {
-    const { companyId, agentId } = extractToolRuntimeContext(requestContext);
+    const { companyId, agentId, runId } = extractToolRuntimeContext(requestContext);
     if (!companyId || !agentId) {
       return { error: 'missing_context', message: 'companyId/agentId not present in tool runtime context' };
     }
+    const { question, ...rest } = inputData;
+    let hitl: unknown;
+    if (question) {
+      hitl = {
+        ...question,
+        spec: HITL_REQUEST_SPEC,
+        requester: { agentId, ...(runId ? { runId } : {}) },
+      };
+      // Same validator as the server: fix field errors before filing.
+      const checked = parseHitlRequestForIngest(hitl, { agentId });
+      if (!checked.ok) return { error: 'invalid_question', fields: checked.errors };
+    }
     const res = await tracedAgentFetch('createApproval', requestContext, `/api/companies/${companyId}/approvals`, {
       method: 'POST',
-      body: JSON.stringify({ ...inputData, requestedByAgentId: agentId }),
+      body: JSON.stringify({ ...rest, requestedByAgentId: agentId, ...(hitl ? { hitl } : {}) }),
     });
     if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
     return res.json();
@@ -60,9 +83,12 @@ const listApprovalsTool = createTool({
     'Search and filter board approvals by status, type, or free-text query. Use targeted filters (type + q) to find prior decisions before filing a new request. ' +
     'Server-side filtering ensures efficient queries without paging through raw lists.',
   inputSchema: z.object({
-    status: z.enum(['pending', 'approved', 'rejected', 'all']).default('all').describe('Filter by approval status'),
+    status: z
+      .enum(['pending', 'approved', 'rejected', 'answered', 'declined', 'cancelled', 'expired', 'all'])
+      .default('all')
+      .describe('Filter by approval status'),
     type: z.string().optional().describe('Filter by approval type (e.g., "hire_agent", "request_board_approval")'),
-    q: z.string().optional().describe('Free-text search in title, summary, and note (case-insensitive)'),
+    q: z.string().optional().describe('Free-text search in title, summary, question, and note (case-insensitive)'),
     createdAfter: z.string().optional().describe('ISO 8601 date - filter approvals created after this date'),
     decidedAfter: z.string().optional().describe('ISO 8601 date - filter approvals decided after this date'),
     limit: z.number().int().min(1).max(50).default(20).describe('Maximum number of results'),

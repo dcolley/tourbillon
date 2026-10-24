@@ -1,0 +1,10 @@
+{
+  "spec": "hitl/request/v0",
+  "question": "Please approve the refund.",
+  "answerType": "binary",
+  "options": [
+    { "value": "approve", "label": "Approve" },
+    { "value": "reject", "label": "Reject" }
+  ],
+  "requester": { "agentId": "agent_support_01" }
+}

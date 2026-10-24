@@ -1,0 +1,13 @@
+{
+  "spec": "hitl/event/v0",
+  "id": "evt_01JB7C0002",
+  "requestId": "req_01JB7CONTRACT",
+  "type": "scroll",
+  "itemRef": "context",
+  "at": "2026-10-24T14:22:31Z",
+  "actor": { "kind": "human", "id": "usr_01JB7ALEX" },
+  "source": "host",
+  "data": { "maxFraction": 0.85, "reachedEnd": false },
+  "prevHash": null,
+  "hash": "w2Ci3N80LyEB5CYUbCQ1n79SnFN3uNYL7ykVviuXDDE"
+}

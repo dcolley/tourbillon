@@ -1,0 +1,28 @@
+[
+  {
+    "name": "refund",
+    "args": {
+      "orderId": "48213",
+      "amount": {
+        "value": 24000,
+        "currency": "GBP"
+      },
+      "reason": "lost_in_transit"
+    },
+    "jcs": "{\"amount\":{\"currency\":\"GBP\",\"value\":24000},\"orderId\":\"48213\",\"reason\":\"lost_in_transit\"}",
+    "argsHash": "3JpyPhLigM57uuDvKQHsqHzjptRU2fzGjk0VW-MemH8"
+  },
+  {
+    "name": "contract",
+    "args": {
+      "contractId": "ctr_2027_supplier_q4",
+      "version": 3,
+      "annualValue": {
+        "value": 4200000,
+        "currency": "GBP"
+      }
+    },
+    "jcs": "{\"annualValue\":{\"currency\":\"GBP\",\"value\":4200000},\"contractId\":\"ctr_2027_supplier_q4\",\"version\":3}",
+    "argsHash": "_LI_K0IVFwOAMoMkXaEGoMuMcXmTY88L1tYg1k6AXvo"
+  }
+]
