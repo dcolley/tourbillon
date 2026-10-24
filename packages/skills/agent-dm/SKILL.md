@@ -40,7 +40,7 @@ Use DMs for:
 - Escalations ("This blocker needs your approval")
 
 **Do not use DMs for:**
-- Formal approvals → use `createApproval` for board governance
+- Formal approvals → use `createApproval` for board governance (a typed `question` when the Board must choose or give a value; control-plane §6a)
 - Task delegation → use `createSubtask` with `assigneeAgentId`
 - Long-form collaboration → create or comment on an issue
 
