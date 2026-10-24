@@ -76,6 +76,39 @@ describe('#105 safeNext (open redirect)', () => {
     }
   });
 
+  // Double-encoded and upper-case forms: one decode turns these into `/%2f`, `/%5c`, `//` or `/\`.
+  const encodedSlashVariants = [
+    '/%252f/example.com',
+    '/%252F/example.com',
+    '/%255c/example.com',
+    '/%255C/example.com',
+    '/%255C%255Cexample.com',
+    '/%252f%252fexample.com',
+    '/%2F/example.com',
+    '/%2F%2Fexample.com',
+    '/%5C/example.com',
+    '/.%2F/example.com',
+  ];
+  for (const v of encodedSlashVariants) {
+    it(`rejects double-encoded / upper-case slash forms: ${JSON.stringify(v)}`, () => {
+      assert.equal(safeNext(v), SAFE_NEXT_FALLBACK);
+      assert.equal(sameOriginPath(v, 'https://tb.example'), null);
+    });
+  }
+
+  it('keeps encoded slashes that are not at the start of the path', () => {
+    assert.equal(safeNext('/docs/a%2Fb'), '/docs/a%2Fb');
+    assert.equal(safeNext('/docs/a%252fb'), '/docs/a%252fb');
+    assert.equal(safeNext('/docs/a%5Cb'), '/docs/a%5Cb');
+  });
+
+  it('UI-1: a missing or rejected next goes to `/`, which redirects to the stored view', () => {
+    assert.equal(SAFE_NEXT_FALLBACK, '/');
+    assert.equal(safeNext(undefined), '/');
+    assert.equal(safeNext('//evil.com'), '/');
+    assert.equal(safeNext('/'), '/');
+  });
+
   it('client re-check uses the real origin', () => {
     assert.equal(sameOriginPath('/agent/x', 'https://tb.example'), '/agent/x');
     assert.equal(sameOriginPath('/\t/evil.com', 'https://tb.example'), null);

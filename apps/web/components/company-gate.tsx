@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { isDeepLinkPath } from '@/lib/company-link';
 import { getStoredCompanyId } from '@/lib/company-storage';
+import { selectCompanyHref } from '@/lib/company-return-to';
 import { syncActiveCompanyAction } from '@/app/(dashboard)/company/actions';
 
 /**
@@ -27,7 +28,8 @@ export function CompanyGate({ children }: { children: ReactNode }) {
           if (!cancelled) setReady(true);
           return;
         }
-        router.replace('/select-company');
+        // Keep the page the user asked for (e.g. /dashboard) as the selector's returnTo.
+        router.replace(selectCompanyHref(pathname, window.location.search));
         return;
       }
 
