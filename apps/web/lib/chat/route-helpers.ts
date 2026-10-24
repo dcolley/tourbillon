@@ -7,6 +7,7 @@ import {
   type TourbillonChatSession,
 } from '@/lib/chat';
 import { agentTokenConfigErrorResponse, isAgentTokenConfigError } from '@/lib/auth/agent-token-config';
+import { isControlChatServerEnabled } from '@/lib/feature-flags';
 
 export function chatErrorResponse(err: unknown): NextResponse {
   if (err instanceof ChatAgentError) {
@@ -124,3 +125,14 @@ export async function openChatRouteSession(
   }
   return session;
 }
+
+/**
+ * The legacy Control Pane chat session routes are off unless isControlChatServerEnabled().
+ * Returns the 404 to send when they are off (checked before anything else in the handler), or
+ * null when the route may run.
+ */
+export function controlChatDisabledResponse(): NextResponse | null {
+  if (isControlChatServerEnabled()) return null;
+  return NextResponse.json({ error: 'Not found' }, { status: 404 });
+}
+

@@ -6,7 +6,7 @@
  * outcomes (no active company / agent token → ActiveCompanyError, other company's agent → 404), and the
  * controller is a real Mastra AgentController on in-memory storage with a stub model.
  */
-import { describe, it, before, after, beforeEach } from 'node:test';
+import { describe, it, before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { NextRequest } from 'next/server';
 import { HttpAgent } from '@ag-ui/client';
@@ -220,6 +220,23 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
       },
       tools: { echo: (i: { text: string }) => ({ echoed: i.text }) },
     } as Parameters<typeof createStubAgentController>[0]);
+  });
+
+  describe('assistant switch', () => {
+    const saved = process.env.ASSISTANT_ENABLED;
+    afterEach(() => {
+      if (saved === undefined) delete process.env.ASSISTANT_ENABLED;
+      else process.env.ASSISTANT_ENABLED = saved;
+    });
+
+    it('ASSISTANT_ENABLED=false → 404 before the agent or any session is touched', async () => {
+      process.env.ASSISTANT_ENABLED = 'false';
+      const res = await request('alice', input('t1'));
+      assert.equal(res.status, 404);
+      assert.deepEqual(await res.json(), { error: 'Not found' });
+      assert.equal(controllerCalls.length, 0);
+      assert.equal(sessionCalls.length, 0);
+    });
   });
 
   describe('auth and company scope (parity with /api/chat/*)', () => {

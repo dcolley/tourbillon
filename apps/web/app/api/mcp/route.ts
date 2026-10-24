@@ -19,7 +19,7 @@ import { createGoal, updateGoal, listGoalsForCompany, type CreateGoalInput, type
 import { createProject, updateProject, listProjectsForAgent, type CreateProjectInput, type UpdateProjectInput } from '@/lib/projects';
 import { addIssueComment } from '@/lib/issue-comments';
 import { triggerAgentHeartbeat } from '@/lib/heartbeat';
-import { enqueueApprovalWake } from '@/lib/wake-client';
+import { applyApprovalDecision } from '@/lib/approval-decide';
 
 interface McpRequest {
   jsonrpc: '2.0';
@@ -1504,72 +1504,23 @@ async function handleDecideApproval(tokenCompanyId: string, params: any) {
     throw new Error('Approval already decided');
   }
 
-  const payload = (approval.payload ?? {}) as any;
-  const priorStatuses = payload.priorStatuses ?? {};
-  const issueIds = approval.issueIds ?? [];
-
-  const updated = await db.transaction(async (tx) => {
-    const [row] = await tx
-      .update(approvals)
-      .set({
-        status: decision,
-        note: reason,
-        decidedAt: new Date(),
-        decidedByUserId: 'mcp',
-        updatedAt: new Date(),
-      })
-      .where(eq(approvals.id, approval_id))
-      .returning();
-
-    if (issueIds.length > 0) {
-      const linked = await tx
-        .select({
-          id: issues.id,
-          status: issues.status,
-          boardApprovalId: issues.boardApprovalId,
-        })
-        .from(issues)
-        .where(and(eq(issues.companyId, company_id), inArray(issues.id, issueIds)));
-
-      const now = new Date();
-      for (const issue of linked) {
-        if (issue.boardApprovalId && issue.boardApprovalId !== approval_id) continue;
-
-        const restoreStatus =
-          decision === 'approved'
-            ? (priorStatuses[issue.id] ?? (issue.status === 'blocked' ? 'todo' : issue.status))
-            : 'blocked';
-
-        await tx
-          .update(issues)
-          .set({
-            status: restoreStatus,
-            boardApprovalId: null,
-            updatedAt: now,
-          })
-          .where(eq(issues.id, issue.id));
-      }
-    }
-
-    return row;
+  // Claimed with a conditional update: only one concurrent decision applies its side effects.
+  const result = await applyApprovalDecision({
+    companyId: company_id,
+    approvalId: approval_id,
+    decision,
+    note: reason,
+    decidedByUserId: 'mcp',
+    actor: { actorId: 'mcp', actorName: 'MCP' },
+    commentAuthor: { type: 'user', id: 'mcp', name: 'MCP' },
+    source: 'MCP',
+    logPrefix: '[mcp decide_approval]',
   });
-
-  // Trigger approval wake
-  if (approval.requestedByAgentId) {
-    try {
-      await enqueueApprovalWake({
-        approvalId: approval_id,
-        agentId: approval.requestedByAgentId,
-        companyId: company_id,
-        status: decision,
-        note: reason,
-        linkedIssueIds: approval.issueIds,
-      });
-    } catch (err) {
-      console.error('[mcp decide_approval] failed to trigger approval wake:', err);
-    }
+  if (!result.applied) {
+    throw new Error('Approval already decided');
   }
 
+  const updated = result.approval;
   return {
     id: updated.id,
     status: updated.status,

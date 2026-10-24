@@ -12,6 +12,8 @@ import {
   formatBytes,
   messageWithAttachments,
   storedAttachmentName,
+  tooLargeMessage,
+  verifyAttachmentBytes,
   workspaceSegment,
 } from './chat-attachments';
 
@@ -65,7 +67,7 @@ describe('CHAT-1 checkChatAttachment', () => {
     assert.equal(big.ok, false);
     if (!big.ok) {
       assert.equal(big.code, 'too_large');
-      assert.match(big.message, /big\.pdf: 10 MB is over the 10 MB limit/);
+      assert.equal(big.message, 'big.pdf: 10,485,761 bytes is over the 10 MB limit (10,485,760 bytes).');
     }
   });
 
@@ -132,5 +134,64 @@ describe('CHAT-1 attachment naming and message text', () => {
       'Summarise this\n\n[Attached files, saved in the company workspace]\n- resources/chat-uploads/alice/t/x-a.pdf (a.pdf, application/pdf, 2 KB)',
     );
     assert.match(messageWithAttachments('', [ref]), /^\[Attached files/);
+  });
+});
+
+describe('CHAT-1 hardening: attachment rule edge cases', () => {
+  it('reported media types are compared case-insensitively, ignoring parameters', () => {
+    for (const type of ['IMAGE/SVG+XML', 'Text/HTML; charset=utf-8', 'APPLICATION/X-MSDOWNLOAD']) {
+      const r = checkChatAttachment({ name: 'innocent.png', size: 10, type });
+      assert.equal(r.ok, false, type);
+      if (!r.ok) assert.equal(r.code, 'blocked_type', type);
+    }
+    assert.equal(checkChatAttachment({ name: 'a.png', size: 10, type: 'IMAGE/PNG' }).ok, true);
+  });
+
+  it('WebP needs both RIFF and WEBP markers', () => {
+    const riff = [0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0];
+    const tag = (s: string) => [...s].map((c) => c.charCodeAt(0));
+    assert.equal(attachmentContentMatches('webp', new Uint8Array([...riff, ...tag('WEBP'), 1])), true);
+    assert.equal(attachmentContentMatches('webp', new Uint8Array([...riff, ...tag('WAVE'), 1])), false, 'RIFF audio');
+    assert.equal(attachmentContentMatches('webp', new Uint8Array([...riff])), false, 'too short');
+    assert.equal(attachmentContentMatches('webp', new Uint8Array([0, 0, 0, 0, 0, 0, 0, 0, ...tag('WEBP')])), false);
+  });
+
+  it('thread and agent folders are sanitised and length-capped', () => {
+    assert.equal(chatAttachmentDir('Al!ce/..', 'thread.v2:x/../y'), 'resources/chat-uploads/Al_ce/thread.v2_x_._y');
+    assert.equal(chatAttachmentDir('../../other-company', null), 'resources/chat-uploads/other-company/new-thread');
+    assert.equal(chatAttachmentDir('...', ''), 'resources/chat-uploads/agent/new-thread');
+    const dir = chatAttachmentDir('a'.repeat(300), 't'.repeat(300));
+    const [, , agentSeg, threadSeg] = dir.split('/');
+    assert.equal(agentSeg.length, 80);
+    assert.equal(threadSeg.length, 120);
+    assert.equal(workspaceSegment('b'.repeat(81), 'x'), 'b'.repeat(80));
+    assert.equal(workspaceSegment('b'.repeat(81), 'x', 10), 'b'.repeat(10));
+    assert.equal(storedAttachmentName(`${'n'.repeat(200)}.txt`, 'txt'), `${'n'.repeat(80)}.txt`);
+  });
+
+  it('the received bytes are checked again: length and content', () => {
+    const okText = new Uint8Array(CHAT_ATTACHMENT_MAX_BYTES).fill(0x61);
+    assert.deepEqual(verifyAttachmentBytes('a.txt', 'txt', okText), { ok: true });
+    const over = verifyAttachmentBytes('a.txt', 'txt', new Uint8Array(CHAT_ATTACHMENT_MAX_BYTES + 1).fill(0x61));
+    assert.equal(over.ok, false);
+    if (!over.ok) {
+      assert.equal(over.code, 'too_large');
+      assert.match(over.message, /10,485,761 bytes is over the 10 MB limit/);
+    }
+    const mismatch = verifyAttachmentBytes('x/photo.png', 'png', new Uint8Array([0x4d, 0x5a]));
+    assert.equal(mismatch.ok, false);
+    if (!mismatch.ok) {
+      assert.equal(mismatch.code, 'content_mismatch');
+      assert.equal(mismatch.message, 'photo.png: the content does not match a .png file.');
+    }
+  });
+
+  it('size messages never read "10 MB is over the 10 MB limit"', () => {
+    assert.equal(tooLargeMessage('a.pdf', 12.5 * 1024 * 1024), 'a.pdf: 12.5 MB is over the 10 MB limit.');
+    assert.equal(
+      tooLargeMessage('a.pdf', CHAT_ATTACHMENT_MAX_BYTES + 1),
+      'a.pdf: 10,485,761 bytes is over the 10 MB limit (10,485,760 bytes).',
+    );
+    assert.equal(tooLargeMessage('a', 2048, 1000), 'a: 2 KB is over the 1000 B limit.');
   });
 });

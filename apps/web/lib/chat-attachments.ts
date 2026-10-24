@@ -89,6 +89,20 @@ export function formatBytes(bytes: number): string {
   return `${Math.round((bytes / 1048576) * 10) / 10} MB`;
 }
 
+function groupDigits(n: number): string {
+  return String(Math.trunc(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+/** "{name}: 12.5 MB is over the 10 MB limit." — with exact bytes when the rounded sizes look equal. */
+export function tooLargeMessage(name: string, size: number, max = CHAT_ATTACHMENT_MAX_BYTES): string {
+  const shown = formatBytes(size);
+  const limit = formatBytes(max);
+  if (shown === limit) {
+    return `${name}: ${groupDigits(size)} bytes is over the ${limit} limit (${groupDigits(max)} bytes).`;
+  }
+  return `${name}: ${shown} is over the ${limit} limit.`;
+}
+
 /** Display name for messages and errors: one line, bounded. */
 export function attachmentDisplayName(name: string): string {
   const base = (name.split(/[\\/]/).pop() ?? '').replace(/[\u0000-\u001f\u007f]/g, '').trim();
@@ -119,11 +133,7 @@ export function checkChatAttachment(file: { name: string; size: number; type?: s
     return { ok: false, code: 'empty', message: `${name}: the file is empty.` };
   }
   if (file.size > CHAT_ATTACHMENT_MAX_BYTES) {
-    return {
-      ok: false,
-      code: 'too_large',
-      message: `${name}: ${formatBytes(file.size)} is over the ${formatBytes(CHAT_ATTACHMENT_MAX_BYTES)} limit.`,
-    };
+    return { ok: false, code: 'too_large', message: tooLargeMessage(name, file.size) };
   }
   return { ok: true, ext, kind: allowed.kind, mediaType: allowed.mediaType };
 }
@@ -156,6 +166,22 @@ export function attachmentContentMatches(ext: string, bytes: Uint8Array): boolea
   // Text: no NUL bytes in the first 64 KiB.
   const head = bytes.subarray(0, 64 * 1024);
   return !head.includes(0);
+}
+
+export type AttachmentBytesCheck =
+  | { ok: true }
+  | { ok: false; code: 'too_large' | 'content_mismatch'; message: string };
+
+/** Server-side check of the bytes actually received (length and content). */
+export function verifyAttachmentBytes(name: string, ext: string, bytes: Uint8Array): AttachmentBytesCheck {
+  const display = attachmentDisplayName(name);
+  if (bytes.byteLength > CHAT_ATTACHMENT_MAX_BYTES) {
+    return { ok: false, code: 'too_large', message: tooLargeMessage(display, bytes.byteLength) };
+  }
+  if (!attachmentContentMatches(ext, bytes)) {
+    return { ok: false, code: 'content_mismatch', message: `${display}: the content does not match a .${ext} file.` };
+  }
+  return { ok: true };
 }
 
 /** One workspace path segment: letters, digits, `.`, `_`, `-`; starts with a letter or digit. */
