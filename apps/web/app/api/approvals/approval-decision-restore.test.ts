@@ -94,7 +94,7 @@ let wakeOutcome: Record<string, { outcome: string; skipReason?: string }> = {};
 let schedulerDown = false;
 const comments: Array<{ issueId: string; companyId: string; body: string }> = [];
 
-type Handler = (req: NextRequest, c?: { params: Promise<any> }) => Promise<Response>;
+type Handler = (req: NextRequest, c: { params: Promise<any> }) => Promise<Response>;
 const routes: Record<string, Record<string, Handler>> = {};
 const ctx = <T>(params: T) => ({ params: Promise.resolve(params) });
 
@@ -226,6 +226,7 @@ describe('APR-FIX approval decision restore (routes)', () => {
         method: 'tools/call',
         params: { name: 'decide_approval', arguments: { company_id: 'company-a', approval_id: approvalId, decision } },
       }),
+      ctx({}),
     );
 
   type Path = 'board' | 'hitly' | 'mcp';
