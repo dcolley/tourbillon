@@ -13,3 +13,12 @@ export {
 } from './chat-controller';
 export { createHeartbeatRuntimeContext } from './tools/api-client';
 export type { AgentController, Session } from './controller-config';
+export {
+  ASSISTANT_MESSAGE_TRACE_KEY,
+  ASSISTANT_TRACE_VIEW,
+  buildAssistantTracingOptions,
+  isTraceId,
+  messageTraceId,
+  type AssistantTracingInput,
+  type AssistantTracingOptions,
+} from './observability/assistant-tracing';
