@@ -119,6 +119,16 @@ describe('UI-2b assistant sidebar store', () => {
       assert.deepEqual(s.threads.b.threads, []);
     });
 
+    it('ASYNC-0: threadLists: false loads the agents only (no thread lists)', async () => {
+      const fake = fakeApi({ agents: [agent('a'), agent('b')], threads: { a: [thread('a1', 'a')] } });
+      const store = new AssistantSidebarStore({ api: fake.api, threadLists: false });
+      await store.load();
+      assert.equal(store.getState().phase, 'ready');
+      assert.deepEqual(store.getState().agents.map((x) => x.id), ['a', 'b']);
+      assert.deepEqual(fake.calls, ['agents']);
+      assert.deepEqual(store.getState().threads, {});
+    });
+
     it('agent list failure → error phase with the message; retry loads', async () => {
       const o: FakeApiOpts = { agents: new AssistantApiError('No active company selected', 401) };
       const { store } = await loaded(o);

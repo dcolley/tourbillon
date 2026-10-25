@@ -16,7 +16,7 @@ export function DmActivityStripView({ summary, onOpen }: { summary: DmStripSumma
   if (!summary) return null;
   const label = dmStripLabel(summary);
   return (
-    <div className="border-b px-4 py-1.5" data-dm-strip>
+    <div className="min-w-0" data-dm-strip>
       <button
         type="button"
         onClick={onOpen}

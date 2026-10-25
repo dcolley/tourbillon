@@ -1,9 +1,12 @@
 'use client';
 
 /**
- * UI-2b: assistant sidebar — the active company's agents by section (Pinned threads, My agents,
- * Teams by role, Recent threads) with each agent's threads: open, new, rename, pin, search, unread.
- * Links go to `/assistant/<agent-url-key>[/<threadId>]` (lib/assistant/route.ts).
+ * UI-2b: assistant sidebar — the active company's agents by section (My agents, Teams by role) with
+ * their status. Links go to `/assistant/<agent-url-key>` (lib/assistant/route.ts).
+ *
+ * ASYNC-0 (Slice A): one conversation per agent, so the sidebar is the agents rail only: no thread
+ * trees, no New chat / rename / pin, no Pinned or Recent threads, and no thread search. Selecting an
+ * agent opens its chat (its current conversation).
  *
  * Collapsible rail: shown from the `sm` breakpoint up (iPad portrait and desktop), either as the full
  * list or as an icon rail (agent initials only). The choice is kept in localStorage
@@ -14,38 +17,28 @@ import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { usePathname, useRouter } from 'next/navigation';
 import { parseAssistantPath } from '@/lib/assistant/route';
 import { Button } from '@/components/ui/button';
-import { ASSISTANT_MAX_PINS_PER_AGENT, type AssistantAgent } from '@/lib/assistant/sidebar';
-import {
-  pinnedCount,
-  pinnedThreads,
-  recentThreadRefs,
-  searchResults,
-  selectionProblem,
-  sidebarSections,
-  type AgentThreadRef,
-  type AssistantSidebarState,
-} from '@/lib/assistant/sidebar-store';
-import { AgentThreadList, ThreadRow, inAppClick, type ThreadEditState, type ThreadRowHandlers } from './agent-thread-list';
+import type { AssistantAgent } from '@/lib/assistant/sidebar';
+import { selectionProblem, sidebarSections, type AssistantSidebarState } from '@/lib/assistant/sidebar-store';
 import { useAssistantSidebar } from './use-assistant-sidebar';
 import { assistantChatHref } from '@/lib/assistant/sidebar-api';
 
-export interface AssistantSidebarViewProps extends ThreadRowHandlers {
+export interface AssistantSidebarViewProps {
   state: AssistantSidebarState;
   currentAgentKey: string | null;
-  currentThreadId: string | null;
-  expanded: ReadonlySet<string>;
-  editing: ThreadEditState | null;
-  onSearch: (q: string) => void;
   onSelectAgent: (agentId: string) => void;
-  onToggleAgent: (agentId: string) => void;
-  onNewThread: (agentId: string) => void;
-  onRetryThreads: (agentId: string) => void;
   onRetry: () => void;
   onDismissNotice: () => void;
   /** Icon rail (agent initials only) instead of the full list. */
   collapsed?: boolean;
   /** Switches between the icon rail and the full list; no toggle without it. */
   onToggleCollapsed?: () => void;
+}
+
+/** A plain left click is handled in the app; modified clicks keep the browser's link behaviour. */
+export function inAppClick(e: React.MouseEvent, go: () => void) {
+  if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  e.preventDefault();
+  go();
 }
 
 /** localStorage key for the rail / full list choice ('true' = icon rail). */
@@ -121,25 +114,14 @@ function AgentStatus({ agent }: { agent: AssistantAgent }) {
 }
 
 function AgentRow({ agent, props }: { agent: AssistantAgent; props: AssistantSidebarViewProps }) {
-  const open = props.expanded.has(agent.id);
   const current = props.currentAgentKey === agent.urlKey || props.currentAgentKey === agent.id;
   return (
     <li data-agent={agent.urlKey} data-current={current ? 'true' : undefined}>
       <div className={`flex items-center gap-1 rounded px-1 py-1 ${current ? 'bg-muted' : 'hover:bg-muted/60'}`}>
-        <Button
-          type="button"
-          size="icon-xs"
-          variant="ghost"
-          aria-label={open ? `Hide ${agent.name} threads` : `Show ${agent.name} threads`}
-          aria-expanded={open}
-          onClick={() => props.onToggleAgent(agent.id)}
-        >
-          {open ? '▾' : '▸'}
-        </Button>
         <a
           href={assistantChatHref(agent.urlKey)}
           className={`flex min-w-0 flex-1 items-center gap-2 text-sm ${agent.active ? '' : 'opacity-60'}`}
-          aria-busy={props.state.pending[`select:${agent.id}`] ? true : undefined}
+          aria-current={current ? 'page' : undefined}
           onClick={(e) => inAppClick(e, () => props.onSelectAgent(agent.id))}
         >
           <span
@@ -153,18 +135,6 @@ function AgentRow({ agent, props }: { agent: AssistantAgent; props: AssistantSid
         </a>
         <AgentStatus agent={agent} />
       </div>
-      {open && (
-        <AgentThreadList
-          agent={agent}
-          threads={props.state.threads[agent.id]}
-          currentThreadId={current ? props.currentThreadId : null}
-          editing={props.editing}
-          pending={props.state.pending}
-          handlers={props}
-          onNewThread={props.onNewThread}
-          onRetry={props.onRetryThreads}
-        />
-      )}
     </li>
   );
 }
@@ -177,26 +147,6 @@ function Section({ title, id, children }: { title: string; id: string; children:
       </h2>
       {children}
     </section>
-  );
-}
-
-function ThreadRefList({ refs, props }: { refs: AgentThreadRef[]; props: AssistantSidebarViewProps }) {
-  return (
-    <div className="flex flex-col gap-0.5">
-      {refs.map(({ agent, thread }) => (
-        <ThreadRow
-          key={`${agent.id}:${thread.id}`}
-          agent={agent}
-          thread={thread}
-          current={thread.id === props.currentThreadId}
-          editing={props.editing}
-          pending={props.state.pending}
-          pinCapReached={pinnedCount(props.state, agent.id) >= ASSISTANT_MAX_PINS_PER_AGENT}
-          showAgent
-          handlers={props}
-        />
-      ))}
-    </div>
   );
 }
 
@@ -245,7 +195,6 @@ function AgentRail({ props }: { props: AssistantSidebarViewProps }) {
               aria-label={label}
               title={label}
               aria-current={current ? 'page' : undefined}
-              aria-busy={state.pending[`select:${agent.id}`] ? true : undefined}
               className={`relative flex size-8 items-center justify-center rounded-full text-[0.65rem] font-semibold ${
                 current ? 'bg-primary text-primary-foreground' : 'bg-muted hover:bg-muted/60'
               } ${agent.active ? '' : 'opacity-60'}`}
@@ -289,7 +238,7 @@ export function AssistantSidebarView(props: AssistantSidebarViewProps) {
       </aside>
     );
   }
-  const problem = selectionProblem(state, props.currentAgentKey, props.currentThreadId);
+  const problem = selectionProblem(state, props.currentAgentKey, null);
   let body: React.ReactNode;
   if (state.phase === 'loading' && state.agents.length === 0) {
     body = <p className="px-2 text-sm text-muted-foreground">Loading agents…</p>;
@@ -304,28 +253,10 @@ export function AssistantSidebarView(props: AssistantSidebarViewProps) {
     );
   } else if (state.agents.length === 0) {
     body = <p className="px-2 text-sm text-muted-foreground">No agents in this company yet.</p>;
-  } else if (state.search.trim()) {
-    const results = searchResults(state);
-    body = (
-      <Section title="Results" id="results">
-        {results.length ? (
-          <ThreadRefList refs={results} props={props} />
-        ) : (
-          <p className="px-2 text-sm text-muted-foreground">No threads match “{state.search.trim()}”</p>
-        )}
-      </Section>
-    );
   } else {
     const sections = sidebarSections(state);
-    const pinned = pinnedThreads(state);
-    const recent = recentThreadRefs(state);
     body = (
       <>
-        {pinned.length > 0 && (
-          <Section title="Pinned" id="pinned">
-            <ThreadRefList refs={pinned} props={props} />
-          </Section>
-        )}
         {sections.myAgents.length > 0 && (
           <Section title="My agents" id="my-agents">
             <ul className="flex flex-col gap-0.5">
@@ -349,11 +280,6 @@ export function AssistantSidebarView(props: AssistantSidebarViewProps) {
             ))}
           </Section>
         )}
-        {recent.length > 0 && (
-          <Section title="Recent threads" id="recent">
-            <ThreadRefList refs={recent} props={props} />
-          </Section>
-        )}
       </>
     );
   }
@@ -365,21 +291,12 @@ export function AssistantSidebarView(props: AssistantSidebarViewProps) {
       data-collapsed="false"
     >
       <div className="flex items-center gap-1">
-        <input
-          type="search"
-          aria-label="Search threads"
-          placeholder="Search threads"
-          className="h-8 min-w-0 flex-1 rounded-md border bg-transparent px-2 text-sm"
-          value={state.search}
-          onChange={(e) => props.onSearch(e.target.value)}
-        />
+        <h2 className="min-w-0 flex-1 px-2 text-sm font-semibold">Agents</h2>
         <CollapseToggle props={props} />
       </div>
       {problem && (
         <p role="status" className="rounded-md border p-2 text-xs text-muted-foreground" data-selection-problem={problem}>
-          {problem === 'agent-not-found'
-            ? 'That agent is not in this company. Pick an agent from the list.'
-            : 'That thread was not found for this agent. Pick a thread from the list.'}
+          That agent is not in this company. Pick an agent from the list.
         </p>
       )}
       {state.notice && (
@@ -395,84 +312,29 @@ export function AssistantSidebarView(props: AssistantSidebarViewProps) {
   );
 }
 
-/** The agent / thread in the URL (`/assistant/<agent-url-key>[/<threadId>]`). */
-function useCurrentSelection(): { agent: string | null; thread: string | null } {
-  return parseAssistantPath(usePathname());
+/** The agent in the URL (`/assistant/<agent-url-key>`). */
+function useCurrentAgentKey(): string | null {
+  return parseAssistantPath(usePathname()).agent;
 }
 
 export function AssistantSidebar() {
-  const { store, state } = useAssistantSidebar();
+  // ASYNC-0: agents only (no thread lists are loaded).
+  const { store, state } = useAssistantSidebar({ threadLists: false });
   const router = useRouter();
-  const current = useCurrentSelection();
-  const [expanded, setExpanded] = React.useState<ReadonlySet<string>>(new Set());
-  const [editing, setEditing] = React.useState<ThreadEditState | null>(null);
+  const currentAgentKey = useCurrentAgentKey();
   const collapsed = useSidebarCollapsed();
-
-  // The agent in the URL is shown expanded, and its open thread is marked read.
-  const currentAgent = state.agents.find((a) => a.urlKey === current.agent || a.id === current.agent);
-  const currentAgentId = currentAgent?.id ?? null;
-  const currentThreadLoaded = Boolean(
-    currentAgentId && current.thread && state.threads[currentAgentId]?.threads.some((t) => t.id === current.thread),
-  );
-  React.useEffect(() => {
-    if (currentAgentId && current.thread && currentThreadLoaded) void store.markRead(currentAgentId, current.thread);
-  }, [store, currentAgentId, current.thread, currentThreadLoaded]);
-  // A thread missing from the loaded list may be newer than the list (e.g. created by the chat
-  // view): reload that agent's threads once before reporting it as not found.
-  const problem = selectionProblem(state, current.agent, current.thread);
-  const recheckedRef = React.useRef(new Set<string>());
-  React.useEffect(() => {
-    if (problem !== 'thread-not-found' || !currentAgentId || !current.thread) return;
-    const key = `${currentAgentId}\u0000${current.thread}`;
-    if (recheckedRef.current.has(key)) return;
-    recheckedRef.current.add(key);
-    void store.loadThreads(currentAgentId);
-  }, [store, problem, currentAgentId, current.thread]);
-  const shown = React.useMemo(() => {
-    if (!currentAgentId || expanded.has(currentAgentId)) return expanded;
-    return new Set([...expanded, currentAgentId]);
-  }, [expanded, currentAgentId]);
-
-  const go = (href: string | null) => {
-    if (href) router.push(href);
-  };
   return (
     <AssistantSidebarView
       state={state}
-      currentAgentKey={current.agent}
-      currentThreadId={current.thread}
-      expanded={shown}
-      editing={editing}
-      onSearch={(q) => store.setSearch(q)}
-      onSelectAgent={(id) => void store.selectAgent(id).then(go)}
-      onToggleAgent={(id) =>
-        setExpanded(() => {
-          const next = new Set(shown);
-          if (next.has(id)) next.delete(id);
-          else next.add(id);
-          return next;
-        })
-      }
-      onNewThread={(id) => void store.newThread(id).then(go)}
-      onRetryThreads={(id) => void store.loadThreads(id)}
+      currentAgentKey={currentAgentKey}
+      onSelectAgent={(id) => {
+        const agent = store.agent(id);
+        if (agent) router.push(assistantChatHref(agent.urlKey));
+      }}
       onRetry={() => void store.load()}
       onDismissNotice={() => store.dismissNotice()}
       collapsed={collapsed}
       onToggleCollapsed={() => writeSidebarCollapsed(!collapsed)}
-      onOpenThread={(agentId, threadId, href) => {
-        void store.markRead(agentId, threadId);
-        router.push(href);
-      }}
-      onPin={(agentId, threadId, pinned) => void store.setPinned(agentId, threadId, pinned)}
-      onStartRename={(threadId, title) => setEditing({ threadId, draft: title })}
-      onRenameDraft={(draft) => setEditing((e) => (e ? { ...e, draft } : e))}
-      onRenameSubmit={(agentId, threadId) => {
-        const draft = editing?.threadId === threadId ? editing.draft : '';
-        void store.rename(agentId, threadId, draft).then((ok) => {
-          if (ok) setEditing((e) => (e?.threadId === threadId ? null : e));
-        });
-      }}
-      onRenameCancel={() => setEditing(null)}
     />
   );
 }

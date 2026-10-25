@@ -1,10 +1,11 @@
 /**
  * UI-2b: assistant view routes. Canonical URLs use the agent's url key (its company-unique slug,
  * derived from the name at creation and unchanged when the agent is renamed):
- *   /assistant/<agent-url-key>              agent selected
- *   /assistant/<agent-url-key>/<threadId>   thread open
- * Older links — `/assistant?agent=<key|id>&thread=<id>` and `/assistant/<agent-id>[/<threadId>]` —
- * redirect to the canonical path. An agent that is missing or belongs to another company gets
+ *   /assistant/<agent-url-key>              the agent's chat
+ * ASYNC-0 (Slice A): one conversation per agent, so the agent path is the only chat URL. Thread
+ * links (`/assistant/<key>/<threadId>`, `?thread=`) redirect to the agent path, which opens the
+ * agent's current conversation; older links — `/assistant?agent=<key|id>` and
+ * `/assistant/<agent-id>` — redirect to the canonical path too. An agent that is missing or belongs to another company gets
  * the same not-found result, so links never reveal whether an agent exists elsewhere.
  * Pure: the server lookup lives in route-server.ts.
  */
@@ -48,10 +49,11 @@ export function decideAssistantRoute(input: {
   badThread?: boolean;
 }): AssistantRouteDecision {
   if (!input.agent || input.badThread) return { kind: 'not-found' };
-  if (input.via === 'query' || input.requestedKey !== input.agent.urlKey) {
-    return { kind: 'redirect', location: assistantAgentPath(input.agent.urlKey, input.threadId) };
+  // ASYNC-0: a thread in the link is not kept; the agent path opens its one conversation.
+  if (input.via === 'query' || input.requestedKey !== input.agent.urlKey || input.threadId) {
+    return { kind: 'redirect', location: assistantAgentPath(input.agent.urlKey) };
   }
-  return { kind: 'render', agent: input.agent, threadId: input.threadId };
+  return { kind: 'render', agent: input.agent, threadId: null };
 }
 
 /** Selection from an assistant pathname (client side), e.g. `/assistant/ceo/t1` → {agent: 'ceo', thread: 't1'}. */

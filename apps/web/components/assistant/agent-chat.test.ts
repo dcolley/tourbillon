@@ -289,9 +289,9 @@ describe('AGUI-1b assistant chat view', () => {
     });
   });
 
-  it('agentChatHref: the assistant path form /assistant/<agent>/<thread>', () => {
-    assert.equal(agentChatHref('alice', 't-1'), '/assistant/alice/t-1');
-    assert.equal(agentChatHref('alice', 't 2/x'), '/assistant/alice/t%202%2Fx');
+  it('ASYNC-0 agentChatHref: the agent path /assistant/<agent> (never a thread)', () => {
+    assert.equal(agentChatHref('alice'), '/assistant/alice');
+    assert.equal(agentChatHref('a b'), '/assistant/a%20b');
   });
 
   it('AgentChat links by url key when given (agentKey), else by agentId', async () => {
@@ -299,7 +299,8 @@ describe('AGUI-1b assistant chat view', () => {
     const { fileURLToPath } = await import('node:url');
     const src = await readFile(fileURLToPath(new URL('./agent-chat.tsx', import.meta.url)), 'utf8');
     assert.match(src, /const linkKey = agentKey \?\? agentId;/);
-    assert.match(src, /agentChatHref\(linkKey, ref\.threadId\)/);
+    assert.match(src, /agentChatHref\(linkKey\)/);
+    assert.doesNotMatch(src, /chatHref=/, 'no links to other chats of the agent');
   });
 });
 
