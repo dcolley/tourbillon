@@ -4,6 +4,8 @@
  * AGUI-1b: React binding for the AG-UI agent chat client (lib/agui/client). Opens a thread through
  * the assistant thread API, then runs turns over POST /api/agui/[agentId]. Unmounting closes the
  * client, which stops an open run on the endpoint (AG-UI client disconnect).
+ * P0 (agent switch): each mount loads the thread's persisted messages fresh before the chat is ready
+ * (connectAgentChat → AgentChatClient.open), so returning to an agent shows the conversation up to now.
  */
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { AgentChatClient, type AgentChatClientOptions, type AgentChatSendOptions } from '@/lib/agui/client/agent-chat-client';
@@ -35,6 +37,59 @@ function openThreadOnce(key: string, agentId: string, threadId: string | undefin
   return pending;
 }
 
+export interface ConnectAgentChatOptions {
+  /** Agent + thread key (see useAgentChat); lookups for the same key in flight are shared. */
+  key: string;
+  agentId: string;
+  threadId?: string;
+  tools?: AgentChatClientOptions['tools'];
+  onRunEvent?: AgentChatClientOptions['onRunEvent'];
+  /** The thread is open and its messages up to now are shown in `client`. */
+  onReady: (client: AgentChatClient, thread: AguiThreadRef) => void;
+  onError: (message: string) => void;
+  /** Test seams. */
+  openThread?: (key: string, agentId: string, threadId: string | undefined) => Promise<AguiThreadRef>;
+  createClient?: (opts: AgentChatClientOptions) => AgentChatClient;
+}
+
+/**
+ * One mount of the agent chat (the body of useAgentChat's effect; returns its cleanup): opens the
+ * thread, then a new client for it that loads the thread's messages fresh from the server
+ * (AgentChatClient.open → loadHistory, then restorePending) before the chat is shown as ready.
+ * P0 (agent switch): every mount (switching agents remounts the chat, see assistant-route-view.tsx)
+ * builds a new client and fetches again, so returning to an agent shows everything up to now,
+ * including turns written while the user was on another agent. Cleanup disposes the client.
+ */
+export function connectAgentChat(opts: ConnectAgentChatOptions): () => void {
+  let cancelled = false;
+  let created: AgentChatClient | null = null;
+  const open = opts.openThread ?? openThreadOnce;
+  const create = opts.createClient ?? ((o: AgentChatClientOptions) => new AgentChatClient(o));
+  open(opts.key, opts.agentId, opts.threadId).then(
+    async (ref) => {
+      if (cancelled) return;
+      const client = create({
+        agentId: opts.agentId,
+        threadId: ref.threadId,
+        tools: opts.tools,
+        onRunEvent: opts.onRunEvent,
+      });
+      created = client;
+      await client.open();
+      if (cancelled) return;
+      opts.onReady(client, ref);
+    },
+    (err: unknown) => {
+      if (cancelled) return;
+      opts.onError(err instanceof Error ? err.message : String(err));
+    },
+  );
+  return () => {
+    cancelled = true;
+    created?.dispose();
+  };
+}
+
 export interface UseAgentChatOptions {
   agentId: string;
   threadId?: string;
@@ -59,34 +114,23 @@ export function useAgentChat({ agentId, threadId, tools, onRunEvent, onThreadOpe
     seam.current = { tools, onRunEvent, onThreadOpened };
   }, [tools, onRunEvent, onThreadOpened]);
 
-  useEffect(() => {
-    let cancelled = false;
-    let created: AgentChatClient | null = null;
-    openThreadOnce(key, agentId, threadId).then(
-      (ref) => {
-        if (cancelled) return;
-        created = new AgentChatClient({
-          agentId,
-          threadId: ref.threadId,
-          tools: seam.current.tools,
-          onRunEvent: (event) => seam.current.onRunEvent?.(event),
-        });
-        setSetup({ key, client: created, thread: ref, error: null });
-        seam.current.onThreadOpened?.(ref);
-        // WID-3: show again the cards still waiting on this thread (e.g. after a reload).
-        void created.restorePending();
-      },
-      (err: unknown) => {
-        if (cancelled) return;
-        setSetup({ key, client: null, thread: null, error: err instanceof Error ? err.message : String(err) });
-      },
-    );
-    return () => {
-      cancelled = true;
-      created?.dispose();
-    };
+  useEffect(
+    () =>
+      connectAgentChat({
+        key,
+        agentId,
+        threadId,
+        tools: seam.current.tools,
+        onRunEvent: (event) => seam.current.onRunEvent?.(event),
+        onReady: (client, ref) => {
+          setSetup({ key, client, thread: ref, error: null });
+          seam.current.onThreadOpened?.(ref);
+        },
+        onError: (error) => setSetup({ key, client: null, thread: null, error }),
+      }),
     // tools are read once per thread (WID-1 seam; not reactive yet).
-  }, [key, agentId, threadId]);
+    [key, agentId, threadId],
+  );
 
   const current = setup?.key === key ? setup : null;
   const client = current?.client ?? null;

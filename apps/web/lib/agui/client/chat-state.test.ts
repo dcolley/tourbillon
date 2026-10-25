@@ -139,3 +139,19 @@ describe('AGUI-1b chat state', () => {
     assert.equal(apply(s, { type: 'STATE_SNAPSHOT' }, { type: 'CUSTOM', name: 'other' }), s);
   });
 });
+
+describe('seedHistory (P0: transcript loaded when the chat opens)', () => {
+  it('puts the stored items before what the client holds; items it already has are kept as they are', async () => {
+    const { seedHistory, initialAgentChatState: init } = await import('./chat-state');
+    const live = { kind: 'assistant' as const, id: 'a2', text: 'live', streaming: true };
+    const state = { ...init, status: 'running' as const, items: [live] };
+    const next = seedHistory(state, [
+      { kind: 'user', id: 'u1', text: 'hi', mode: 'run', delivery: 'delivered' },
+      { kind: 'assistant', id: 'a2', text: 'stored', streaming: false },
+    ]);
+    assert.deepEqual(next.items.map((i) => i.id), ['u1', 'a2']);
+    assert.equal((next.items[1] as { text: string }).text, 'live');
+    assert.equal(next.status, 'running');
+    assert.equal(seedHistory(state, []), state);
+  });
+});
