@@ -1,4 +1,5 @@
 import { db, goals, issues, agents, companies, activityLog, projects, type Goal, type Issue } from '@tourbillon/db';
+import { changesBetween, newActivityCorrelationId, TRACKED_CHANGE_FIELDS } from './activity-correlation';
 import { and, desc, eq } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 import { assertCompanyAccess, getActiveCompany } from './company';
@@ -199,6 +200,8 @@ export async function updateGoal(
   }
 
   // Execute goal update and project cascade in a transaction
+  // ACT-1: the goal row and any project cascade rows are one action.
+  const correlationId = newActivityCorrelationId();
   const result = await db.transaction(async (tx) => {
     const [updated] = await tx.update(goals).set(updates).where(eq(goals.id, goalId)).returning();
 
@@ -210,7 +213,8 @@ export async function updateGoal(
       action: 'goal.updated',
       entityType: 'goal',
       entityId: goalId,
-      details: changed,
+      details: { ...changed, changes: changesBetween(goal as unknown as Record<string, unknown>, changed, TRACKED_CHANGE_FIELDS) },
+      correlationId,
     });
 
     let projectsPaused = 0;
@@ -243,6 +247,7 @@ export async function updateGoal(
           entityType: 'project',
           entityId: project.id,
           details: { reason: 'goal_archived', goalId, goalTitle: goal.title },
+          correlationId,
         });
 
         projectsPaused++;
@@ -282,6 +287,7 @@ export async function updateGoal(
           entityType: 'project',
           entityId: project.id,
           details: { reason: 'goal_reactivated', goalId, goalTitle: goal.title },
+          correlationId,
         });
 
         projectsResumed++;
