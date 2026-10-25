@@ -206,6 +206,53 @@ describe('UI-2b assistant sidebar store', () => {
     });
   });
 
+  describe('remount (React Strict Mode)', () => {
+    it('dispose then load again on the same store still reaches ready with agents', async () => {
+      // Strict Mode in dev: effect setup (load) -> cleanup (dispose) -> setup (load) on one instance.
+      const fake = fakeApi({ agents: [agent('a'), agent('b')], threads: { a: [thread('a1', 'a')] } });
+      const store = new AssistantSidebarStore({ api: fake.api });
+      const first = store.load();
+      store.dispose();
+      let n = 0;
+      const off = store.subscribe(() => n++); // useSyncExternalStore resubscribes on remount
+      const second = store.load();
+      await Promise.all([first, second]);
+      off();
+      const s = store.getState();
+      assert.equal(s.phase, 'ready');
+      assert.deepEqual(s.agents.map((a) => a.id), ['a', 'b']);
+      assert.equal(s.threads.a.status, 'ready');
+      assert.deepEqual(s.threads.a.threads.map((t) => t.id), ['a1']);
+      assert.equal(s.threads.b.status, 'ready');
+      assert.ok(n > 0, 'the resubscribed listener is notified');
+      assert.equal(fake.calls.filter((c) => c === 'threads:a-key').length, 1, 'the abandoned load fetches no threads');
+    });
+
+    it('a load abandoned by dispose never applies its late response after the store is revived', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const o: FakeApiOpts = { agents: [agent('new')] };
+      const fake = fakeApi(o);
+      const listAgents = fake.api.listAgents;
+      let n = 0;
+      fake.api.listAgents = async () => {
+        if (n++ === 0) {
+          await gate;
+          return { companyId: 'company-1', agents: [agent('old')] };
+        }
+        return listAgents();
+      };
+      const store = new AssistantSidebarStore({ api: fake.api });
+      const first = store.load();
+      store.dispose();
+      await store.load();
+      release();
+      await first;
+      assert.equal(store.getState().phase, 'ready');
+      assert.deepEqual(store.getState().agents.map((a) => a.id), ['new']);
+    });
+  });
+
   describe('sections, recent, pinned and search (across agents)', () => {
     const agents = [
       agent('ceo', { name: 'Chief' }),
