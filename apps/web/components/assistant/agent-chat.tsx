@@ -5,17 +5,25 @@
  * calls, run status, stop / steer / follow-up while a run is open, tool approval, and the delivery of
  * each message (queued, dropped, failed). Rendered by the /assistant/<agent>[/<threadId>] pages
  * (assistant-route-view.tsx).
+ *
+ * WID-3: the registered chat cards (question, choice, form, confirm) are declared to every run as
+ * frontend tools; a card the run waits on is answered or dismissed in place (no Approve / Decline row).
+ * While the run is parked on a card (its stream has ended; a new message is refused until the card is
+ * answered or dismissed), a notice names the card and offers to dismiss it or stop the run; cards still
+ * waiting are shown again when the chat is reopened (use-agent-chat → restorePending).
  */
 import * as React from 'react';
 import { X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { WidgetToolCall } from '@/components/assistant/widgets/widget-tool-call';
-import { assistantWidgetRegistry } from '@/components/assistant/widgets/registry';
+import { assistantWidgetRegistry, type WidgetRegistry } from '@/components/assistant/widgets/registry';
+import { parseStoredWidgetAnswer } from '@tourbillon/shared/widgets';
 import { approvalCardCallFor } from '@/components/assistant/widgets/approval-card-binding';
 import type { ToolCardStatus } from '@/components/assistant/widgets/fallback-card';
 import type {
   AgentChatItem,
   AgentChatState,
+  ParkedWidget,
   PendingToolDecision,
   ToolCallStatus,
   UserMessageDelivery,
@@ -43,11 +51,33 @@ const STATUS_LABEL: Record<AgentChatState['status'], string> = {
 
 function toolCardStatus(status: ToolCallStatus): ToolCardStatus {
   if (status === 'done') return 'done';
-  if (status === 'error' || status === 'denied' || status === 'detached') return 'failed';
+  if (status === 'error' || status === 'denied' || status === 'detached' || status === 'stopped') return 'failed';
   return 'running';
 }
 
-function ItemView({ item }: { item: AgentChatItem }) {
+/** WID-3: how a widget call ended, read from its tool result: answered (with the answer) or dismissed. */
+export function widgetOutcome(item: Extract<AgentChatItem, { kind: 'tool' }>): { answer?: unknown; dismissed: boolean } {
+  if (item.result === undefined || item.status === 'error') return { dismissed: false };
+  const stored = parseStoredWidgetAnswer(item.id, item.name, item.result);
+  if (stored) return { answer: stored.answer, dismissed: false };
+  try {
+    const value = JSON.parse(item.result) as { widget?: unknown; dismissed?: unknown };
+    return { dismissed: value?.widget === item.name && value?.dismissed === true };
+  } catch {
+    return { dismissed: false };
+  }
+}
+
+/** Whether a tool name is a registered widget the user answers in place (no approve / decline row). */
+const isAnsweredInPlace = (registry: WidgetRegistry, toolName: string) => Boolean(registry.latest(toolName)?.frontendTool);
+
+interface WidgetHandlers {
+  registry: WidgetRegistry;
+  onWidgetAnswer?: (toolCallId: string, answer: unknown) => void;
+  onWidgetDismiss?: (toolCallId: string) => void;
+}
+
+function ItemView({ item, widgets }: { item: AgentChatItem; widgets: WidgetHandlers }) {
   switch (item.kind) {
     case 'user':
       return (
@@ -74,17 +104,36 @@ function ItemView({ item }: { item: AgentChatItem }) {
           <div className="whitespace-pre-wrap">{item.text}</div>
         </details>
       );
-    case 'tool':
+    case 'tool': {
+      const outcome = widgetOutcome(item);
+      const send = item.widgetSend;
+      const busy = send?.phase === 'sending' || send?.phase === 'sent';
       return (
         <div data-item="tool" data-tool-status={item.status}>
           <WidgetToolCall
-            registry={assistantWidgetRegistry}
+            registry={widgets.registry}
             // WID-2: a finished createApproval / getApproval call shows the Board approval card.
             toolCall={approvalCardCallFor(item) ?? { toolCallId: item.id, toolName: item.name, args: item.argsText || undefined }}
             toolStatus={toolCardStatus(item.status)}
+            answer={outcome.answer}
+            dismissed={outcome.dismissed}
+            // Only a call the run is waiting on takes an answer.
+            answerable={item.status === 'suspended' && Boolean(widgets.onWidgetAnswer)}
+            busy={busy && outcome.answer === undefined && !outcome.dismissed}
+            attempt={send?.attempts ?? 0}
+            onAnswer={
+              widgets.onWidgetAnswer
+                ? ({ record }) => widgets.onWidgetAnswer?.(item.id, (record as { answer: unknown }).answer)
+                : undefined
+            }
+            onDismiss={widgets.onWidgetDismiss ? () => widgets.onWidgetDismiss?.(item.id) : undefined}
           />
+          {item.status === 'stopped' && (
+            <p className="mt-1 text-xs text-muted-foreground">Run stopped — this card no longer takes an answer.</p>
+          )}
         </div>
       );
+    }
   }
 }
 
@@ -104,6 +153,96 @@ export interface AgentChatViewProps {
   /** UI-3: page context to send with the next message, shown as a removable chip. */
   contextChip?: OpenInChatContext | null;
   onRemoveContext?: () => void;
+  /** WID-3: answer / dismiss a card the run waits on (cards are read-only without these). */
+  onWidgetAnswer?: (toolCallId: string, answer: unknown) => void;
+  onWidgetDismiss?: (toolCallId: string) => void;
+  /** Widget registry (default: the assistant registry). */
+  registry?: WidgetRegistry;
+  /** WID-3: link to another chat of this agent (a card waiting there); no link without it. */
+  chatHref?: (threadId: string) => string;
+}
+
+const CARD_KIND: Record<string, string> = {
+  askQuestion: 'question',
+  askChoice: 'choice',
+  askForm: 'form',
+  askConfirm: 'confirmation',
+};
+
+function cardLabel(argsText: string | undefined, args?: unknown): string | undefined {
+  let value = args;
+  if (value === undefined && argsText) {
+    try {
+      value = JSON.parse(argsText);
+    } catch {
+      return undefined;
+    }
+  }
+  const a = value as { question?: unknown; title?: unknown } | null;
+  const raw = typeof a?.question === 'string' ? a.question : typeof a?.title === 'string' ? a.title : undefined;
+  const text = raw?.replace(/\s+/g, ' ').trim();
+  if (!text) return undefined;
+  return text.length > 120 ? `${text.slice(0, 119)}…` : text;
+}
+
+/**
+ * WID-3: the card the run is parked on: as reported by the endpoint, else (no run open) the first card
+ * of this chat still waiting for an answer.
+ */
+export function parkedCard(state: AgentChatState, registry: WidgetRegistry): ParkedWidget | null {
+  if (state.parked) return state.parked;
+  if (state.status !== 'idle') return null;
+  const tool = state.pendingTools.find((t) => t.reason === 'tool_suspended' && isAnsweredInPlace(registry, t.toolName));
+  if (!tool) return null;
+  const item = state.items.find((it) => it.kind === 'tool' && it.id === tool.toolCallId) as
+    | Extract<AgentChatItem, { kind: 'tool' }>
+    | undefined;
+  const label = cardLabel(item?.argsText, item ? undefined : tool.args);
+  return { threadId: '', toolCallId: tool.toolCallId, toolName: tool.toolName, ...(label ? { label } : {}), elsewhere: false };
+}
+
+function ParkedNotice({
+  parked,
+  state,
+  props,
+}: {
+  parked: ParkedWidget;
+  state: AgentChatState;
+  props: AgentChatViewProps;
+}) {
+  const kind = `${CARD_KIND[parked.toolName] ?? 'widget'} card`;
+  const item = state.items.find((it) => it.kind === 'tool' && it.id === parked.toolCallId);
+  const dismissable = !parked.elsewhere && item?.kind === 'tool' && item.status === 'suspended' && Boolean(props.onWidgetDismiss);
+  const href = parked.elsewhere && props.chatHref ? props.chatHref(parked.threadId) : undefined;
+  return (
+    <div
+      role="status"
+      className="mx-4 flex flex-wrap items-center justify-between gap-2 rounded-md border p-2 text-sm"
+      data-parked-widget={parked.toolCallId}
+      data-parked-elsewhere={parked.elsewhere ? 'true' : 'false'}
+    >
+      <span>
+        {parked.elsewhere ? 'A ' + kind + ' in another chat' : 'The ' + kind}
+        {parked.label ? ` (“${parked.label}”)` : ''} is waiting for your answer. Answer or dismiss it, or stop the run, to
+        send a new message.
+      </span>
+      <div className="flex gap-2">
+        {href && (
+          <a className="text-sm underline" href={href}>
+            Open that chat
+          </a>
+        )}
+        {dismissable && (
+          <Button type="button" size="sm" variant="outline" onClick={() => props.onWidgetDismiss?.(parked.toolCallId)}>
+            Dismiss card
+          </Button>
+        )}
+        <Button type="button" size="sm" variant="outline" onClick={props.onStop}>
+          Stop
+        </Button>
+      </div>
+    </div>
+  );
 }
 
 /** UI-3: the page context (from an Open in chat link) waiting to go with the next message. */
@@ -156,18 +295,27 @@ export function AgentChatView(props: AgentChatViewProps) {
       </p>
     );
   }
+  const widgets: WidgetHandlers = {
+    registry: props.registry ?? assistantWidgetRegistry,
+    onWidgetAnswer: props.onWidgetAnswer,
+    onWidgetDismiss: props.onWidgetDismiss,
+  };
   const runOpen = state.status !== 'idle';
+  const parked = parkedCard(state, widgets.registry);
   const canSend = draft.trim().length > 0 && state.status !== 'stopping';
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-agent-chat data-status={state.status}>
       <div className="flex-1 space-y-3 overflow-y-auto p-4" aria-live="polite">
         {state.items.map((item) => (
-          <ItemView key={`${item.kind}:${item.id}`} item={item} />
+          <ItemView key={`${item.kind}:${item.id}`} item={item} widgets={widgets} />
         ))}
-        {state.pendingTools.map((tool) => (
-          <PendingTool key={tool.toolCallId} tool={tool} onDecision={props.onToolDecision} />
-        ))}
+        {state.pendingTools
+          .filter((tool) => !(tool.reason === 'tool_suspended' && isAnsweredInPlace(widgets.registry, tool.toolName)))
+          .map((tool) => (
+            <PendingTool key={tool.toolCallId} tool={tool} onDecision={props.onToolDecision} />
+          ))}
       </div>
+      {parked && <ParkedNotice parked={parked} state={state} props={props} />}
       {state.error && (
         <div role="alert" className="mx-4 flex items-center justify-between gap-2 rounded-md border border-destructive/40 p-2 text-sm" data-error={state.error.kind}>
           <span>{state.error.message}</span>
@@ -193,8 +341,8 @@ export function AgentChatView(props: AgentChatViewProps) {
         />
         <div className="flex items-center gap-2">
           {props.modelPicker ? <div data-composer-model-picker>{props.modelPicker}</div> : null}
-          <span className="text-xs text-muted-foreground" data-run-status>
-            {STATUS_LABEL[state.status]}
+          <span className="text-xs text-muted-foreground" data-run-status data-parked={parked ? 'true' : undefined}>
+            {parked && state.status === 'idle' ? 'Waiting for your answer' : STATUS_LABEL[state.status]}
           </span>
           <div className="flex-1" />
           {runOpen && (
@@ -224,6 +372,9 @@ export function agentChatHref(agentKey: string, threadId: string): string {
   return assistantAgentPath(agentKey, threadId);
 }
 
+/** WID-3: the chat cards, declared to every run as frontend tools (the server offers only those it knows). */
+const CHAT_CARD_TOOLS = assistantWidgetRegistry.frontendTools();
+
 /**
  * Chat with one agent. `agentId` is used for the API calls; `agentKey` (the agent's url key, default
  * `agentId`) for the page link, so the address bar keeps the canonical `/assistant/<url key>/<thread>`.
@@ -250,7 +401,7 @@ export function AgentChat({
     },
     [linkKey],
   );
-  const chat = useAgentChat({ agentId, threadId, onThreadOpened });
+  const chat = useAgentChat({ agentId, threadId, tools: CHAT_CARD_TOOLS, onThreadOpened });
   const [draft, setDraft] = React.useState('');
   const [context, setContext] = React.useState<OpenInChatContext | null>(initialContext ?? null);
   const submit = (
@@ -280,9 +431,12 @@ export function AgentChat({
       onSteer={() => submit(chat.steer)}
       onStop={() => void chat.abort()}
       onToolDecision={(id, approved) => void chat.respondToTool(id, approved)}
+      onWidgetAnswer={(id, answer) => void chat.answerWidget(id, answer)}
+      onWidgetDismiss={(id) => void chat.dismissWidget(id)}
       onDismissError={chat.clearError}
       contextChip={context}
       onRemoveContext={() => setContext(null)}
+      chatHref={(t) => agentChatHref(linkKey, t)}
       modelPicker={
         chat.thread ? (
           <ModelPicker agentId={agentId} threadId={chat.thread.threadId} disabled={chat.state.status !== 'idle'} />

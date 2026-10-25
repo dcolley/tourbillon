@@ -11,6 +11,7 @@ import {
   type WidgetAnswer,
 } from '@tourbillon/shared/widgets';
 import type { FrontendToolDefinition, WidgetDefinition, WidgetResolution, WidgetWarn } from './widget-types';
+import { chatCardDefinitions } from './chat-cards';
 import { approvalCardSpec } from './specs';
 import { ApprovalCardWidget } from './approval-card';
 
@@ -91,17 +92,21 @@ export function createWidgetRegistry(
     },
 
     acceptAnswer(resolution, answer, now = new Date()) {
-      return acceptWidgetAnswer(resolution.definition, resolution.call.toolCallId, answer, now);
+      // WID-3: answers are also checked against the card's own props (same check as the server).
+      return acceptWidgetAnswer(resolution.definition, resolution.call.toolCallId, answer, now, resolution.call.props);
     },
   };
 }
 
 /**
- * The assistant's widget registry: WID-2 approval card (WID-3 adds question/form/confirm cards).
- * Any other tool call renders the fallback card.
+ * The assistant's widget registry: the WID-2 approval card and the WID-3 question, choice, form and
+ * confirm cards. Any other tool call renders the fallback card.
  *
  * Each definition is `{ ...spec, component }` for a spec in `assistantWidgetSpecs` (./specs), the
  * component-free list the AG-UI route uses to offer widget tools and validate answers. The two
  * lists must match (registry test).
  */
-export const assistantWidgetRegistry: WidgetRegistry = createWidgetRegistry([{ ...approvalCardSpec, component: ApprovalCardWidget }]);
+export const assistantWidgetRegistry: WidgetRegistry = createWidgetRegistry([
+  { ...approvalCardSpec, component: ApprovalCardWidget },
+  ...chatCardDefinitions,
+]);

@@ -60,9 +60,17 @@ describe('WID-1 registry lookup', () => {
     assert.throws(() => createWidgetRegistry([{ ...pickV1, version: 1.5 }]), /Invalid version/);
   });
 
-  it('the assistant registry has the WID-2 approval card only, and it is not a frontend tool', () => {
-    assert.deepEqual(assistantWidgetRegistry.list().map((d) => `${d.name}@${d.version}`), ['approvalCard@1']);
-    assert.deepEqual(assistantWidgetRegistry.frontendTools(), []);
+  it('the assistant registry has the WID-2 approval card and the WID-3 chat cards; only the chat cards are frontend tools; other tools fall back', () => {
+    assert.deepEqual(assistantWidgetRegistry.list().map((d) => `${d.name}@${d.version}`), [
+      'approvalCard@1',
+      'askChoice@1',
+      'askConfirm@1',
+      'askForm@1',
+      'askQuestion@1',
+    ]);
+    assert.deepEqual(assistantWidgetRegistry.frontendTools().map((t) => t.name), ['askChoice', 'askConfirm', 'askForm', 'askQuestion']);
+    const fallback = createWidgetRegistry(assistantWidgetRegistry.list(), { warn: () => {} }).resolve(call('web_search', { q: 'x' }));
+    assert.equal(fallback.ok, false);
   });
 
   it('versions above the call-side cap (1000) are refused at registration, so every version can resolve', () => {
