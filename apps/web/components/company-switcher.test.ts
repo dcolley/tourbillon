@@ -164,6 +164,8 @@ describe('UI-4 CompanySwitcher', () => {
     const wrapper = els.find((e) => e.props['data-assistant-company-picker'] !== undefined);
     assert.ok(wrapper && walk(wrapper.props.children).includes(picker!));
     assert.doesNotMatch(wrapper.props.className, /(^|\s)(min-|max-)?w-/, wrapper.props.className);
+    // Shown at all widths, as in the Control Pane (no hidden / sm:block breakpoint).
+    assert.doesNotMatch(wrapper.props.className, /(^|\s)(\w+:)?(hidden|block)(\s|$)/, wrapper.props.className);
   });
 
   it('the Control Pane sidebar uses the same shared picker', () => {
