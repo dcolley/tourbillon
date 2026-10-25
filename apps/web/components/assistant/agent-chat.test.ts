@@ -144,7 +144,7 @@ describe('AGUI-1b assistant chat view', () => {
     assert.match(html, /data-delivery="failed"[\s\S]*Steer[\s\S]*Not sent/);
   });
 
-  it('tool calls render through the widget registry (fallback card, status mapped)', () => {
+  it('plain tool calls (no registered widget) render as tool-state cards', () => {
     const html = renderToStaticMarkup(
       React.createElement(
         AgentChatView,
@@ -161,10 +161,36 @@ describe('AGUI-1b assistant chat view', () => {
     assert.match(html, /data-tool-status="detached"/);
     assert.doesNotMatch(html, /Running/);
     assert.match(html, /data-tool-status="done"/);
-    assert.match(html, /data-widget="fallback"/);
+    assert.match(html, /data-tool-card="true" data-tool-state="done" data-tool-call-id="t1"/);
+    assert.match(html, /data-tool-state="declined" data-tool-call-id="t2"/);
+    assert.match(html, /data-tool-state="detached" data-tool-call-id="t3"/);
     assert.match(html, /echo/);
     assert.match(html, /Done/);
-    assert.match(html, /Failed/);
+    assert.match(html, /Declined/);
+  });
+
+  it('CHAT-2: assistant text renders as markdown; user text stays plain', () => {
+    const html = renderToStaticMarkup(
+      React.createElement(
+        AgentChatView,
+        props({
+          items: [
+            { kind: 'user', id: 'u1', text: '**not bold** <b>x</b>', mode: 'run', delivery: 'delivered' },
+            {
+              kind: 'assistant',
+              id: 'a1',
+              text: 'Here is **bold**\n\n```sh\nls -la\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n<script>x()</script>',
+              streaming: false,
+            },
+          ],
+        }),
+      ),
+    );
+    assert.match(html, /data-item="user"[\s\S]*\*\*not bold\*\* &lt;b&gt;x&lt;\/b&gt;/);
+    assert.match(html, /data-item="assistant"[\s\S]*<strong>bold<\/strong>/);
+    assert.match(html, /data-code-block="true" data-language="sh"/);
+    assert.match(html, /data-table-block="true"/);
+    assert.doesNotMatch(html, /<script/i);
   });
 
   it('pending tool approval: Approve / Decline call back with the tool call id', () => {

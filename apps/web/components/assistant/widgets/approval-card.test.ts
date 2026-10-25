@@ -136,7 +136,8 @@ describe('WID-2 approval card', () => {
       );
       assert.match(html, /data-widget="approvalCard"[^>]*data-tool-call-id="t1"/);
       assert.match(html, /data-approval-card="appr_1"[^>]*data-approval-status="loading"/);
-      assert.match(html, /data-widget="fallback"/, 'the running call keeps the fallback card');
+      // CHAT-2: a call with no widget renders the tool state card (not the WID-1 fallback card).
+      assert.match(html, /data-tool-card="true"[^>]*data-tool-state="running"[^>]*data-tool-call-id="t2"/, 'the running call keeps the tool state card');
     });
 
     it('WidgetToolCall renders the registered widget for the bound call', () => {
