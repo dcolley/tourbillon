@@ -20,6 +20,8 @@ import type {
 } from '@/lib/agui/client/chat-state';
 import type { AguiThreadRef } from '@/lib/agui/client/thread-bootstrap';
 import { assistantAgentPath } from '@/lib/assistant/sidebar';
+import { feedbackTargets } from '@/lib/assistant/feedback';
+import { MessageFeedback, useThreadFeedback } from './message-feedback';
 import { useAgentChat, type AgentChatPhase } from './use-agent-chat';
 
 const DELIVERY_LABEL: Partial<Record<UserMessageDelivery, string>> = {
@@ -93,6 +95,8 @@ export interface AgentChatViewProps {
   onStop: () => void;
   onToolDecision: (toolCallId: string, approved: boolean) => void;
   onDismissError: () => void;
+  /** OBS-2: footer under each finished assistant message (reactions), by Mastra message id. */
+  assistantFooter?: (messageId: string) => React.ReactNode;
 }
 
 function PendingTool({ tool, onDecision }: { tool: PendingToolDecision; onDecision: AgentChatViewProps['onToolDecision'] }) {
@@ -128,12 +132,19 @@ export function AgentChatView(props: AgentChatViewProps) {
   }
   const runOpen = state.status !== 'idle';
   const canSend = draft.trim().length > 0 && state.status !== 'stopping';
+  const footers = props.assistantFooter ? feedbackTargets(state.items, runOpen) : null;
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-agent-chat data-status={state.status}>
       <div className="flex-1 space-y-3 overflow-y-auto p-4" aria-live="polite">
-        {state.items.map((item) => (
-          <ItemView key={`${item.kind}:${item.id}`} item={item} />
-        ))}
+        {state.items.map((item) => {
+          const footerFor = footers?.get(item.id);
+          return (
+            <React.Fragment key={`${item.kind}:${item.id}`}>
+              <ItemView item={item} />
+              {footerFor && props.assistantFooter?.(footerFor)}
+            </React.Fragment>
+          );
+        })}
         {state.pendingTools.map((tool) => (
           <PendingTool key={tool.toolCallId} tool={tool} onDecision={props.onToolDecision} />
         ))}
@@ -208,6 +219,7 @@ export function AgentChat({ agentId, agentKey, threadId }: { agentId: string; ag
     [linkKey],
   );
   const chat = useAgentChat({ agentId, threadId, onThreadOpened });
+  const feedback = useThreadFeedback(agentId, chat.thread?.threadId ?? null);
   const [draft, setDraft] = React.useState('');
   const submit = (fn: ((text: string) => Promise<{ ok: boolean }> | undefined) | undefined) => {
     const text = draft;
@@ -230,6 +242,13 @@ export function AgentChat({ agentId, agentKey, threadId }: { agentId: string; ag
       onStop={() => void chat.abort()}
       onToolDecision={(id, approved) => void chat.respondToTool(id, approved)}
       onDismissError={chat.clearError}
+      assistantFooter={
+        chat.thread
+          ? (messageId) => (
+              <MessageFeedback key={messageId} messageId={messageId} saved={feedback.feedback[messageId] ?? null} onSave={feedback.save} />
+            )
+          : undefined
+      }
     />
   );
 }
