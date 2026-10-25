@@ -17,12 +17,14 @@ type ShellMod = typeof import('./assistant-shell');
 let AssistantSidebarView: SidebarMod['AssistantSidebarView'];
 let AssistantSidebar: SidebarMod['AssistantSidebar'];
 let initials: SidebarMod['initials'];
+let sidebarMod: SidebarMod;
 let Button: ButtonMod['Button'];
 let shell: ShellMod;
 
 before(async () => {
   (globalThis as { React?: typeof React }).React = React;
-  ({ AssistantSidebarView, AssistantSidebar, initials } = await import('./sidebar'));
+  sidebarMod = await import('./sidebar');
+  ({ AssistantSidebarView, AssistantSidebar, initials } = sidebarMod);
   ({ Button } = await import('@/components/ui/button'));
   shell = await import('./assistant-shell');
 });
@@ -326,5 +328,76 @@ describe('UI-2b assistant sidebar view', () => {
     assert.equal(one[0].key, 'c1');
     assert.equal(find(null).length, 0);
     assert.doesNotMatch(renderToStaticMarkup(React.createElement(shell.AssistantEmptyState)), /<aside/);
+  });
+  describe('collapsible rail', () => {
+    const aside = (out: string) => out.match(/<aside[^>]*>/)?.[0] ?? '';
+
+    it('the full list shows from sm up (iPad portrait), not only from md', () => {
+      const { props } = viewProps(baseState());
+      const tag = aside(html(props));
+      assert.match(tag, /data-collapsed="false"/);
+      assert.match(tag, /(^|\s)sm:flex(\s|")/);
+      assert.doesNotMatch(tag, /md:flex/);
+      assert.match(tag, /w-72/);
+    });
+
+    it('no toggle without a handler; with one it collapses the list', () => {
+      const { props } = viewProps(baseState());
+      assert.doesNotMatch(html(props), /data-sidebar-toggle/);
+      const { props: p2, calls } = viewProps(baseState(), { onToggleCollapsed: () => calls.push(['collapse']) });
+      const toggle = control(p2, byLabel('Collapse agents sidebar'));
+      assert.equal(toggle['aria-expanded'], true);
+      toggle.onClick();
+      assert.deepEqual(calls, [['collapse']]);
+    });
+
+    it('collapsed: an icon rail of agent initials (no search, sections or threads), current agent marked', () => {
+      const { props, calls } = viewProps(baseState(), {
+        collapsed: true,
+        currentAgentKey: 'eng-key',
+        onToggleCollapsed: () => calls.push(['expand']),
+      });
+      const out = html(props);
+      const tag = aside(out);
+      assert.match(tag, /data-collapsed="true"/);
+      assert.match(tag, /w-14/);
+      assert.match(tag, /(^|\s)sm:flex(\s|")/);
+      assert.doesNotMatch(out, /Search threads|data-section|Quarterly plan/);
+      assert.match(out, /data-agent-rail/);
+      for (const a of agents) assert.match(out, new RegExp(`data-agent="${a.urlKey}"`));
+      assert.match(out, /data-agent="eng-key" data-current="true"/);
+      assert.match(out, /aria-label="Chief Exec \(waiting on you\)"/);
+      assert.match(out, /aria-label="Drawer \(paused\)"/);
+      assert.match(out, new RegExp(`>${initials('Chief Exec')}<`));
+      control(props, byLabel('Builder (running)')).onClick({ preventDefault() {}, button: 0 });
+      const toggle = control(props, byLabel('Expand agents sidebar'));
+      assert.equal(toggle['aria-expanded'], false);
+      toggle.onClick();
+      assert.deepEqual(calls, [['select', 'eng'], ['expand']]);
+    });
+
+    it('the choice is kept in localStorage under tourbillon.assistant.sidebarCollapsed', () => {
+      const g = globalThis as { window?: unknown };
+      const prev = g.window;
+      const data = new Map<string, string>();
+      g.window = { localStorage: { getItem: (k: string) => data.get(k) ?? null, setItem: (k: string, v: string) => void data.set(k, v) } };
+      try {
+        assert.equal(sidebarMod.ASSISTANT_SIDEBAR_COLLAPSED_KEY, 'tourbillon.assistant.sidebarCollapsed');
+        assert.equal(sidebarMod.readSidebarCollapsed(), false);
+        sidebarMod.writeSidebarCollapsed(true);
+        assert.equal(data.get('tourbillon.assistant.sidebarCollapsed'), 'true');
+        assert.equal(sidebarMod.readSidebarCollapsed(), true);
+        sidebarMod.writeSidebarCollapsed(false);
+        assert.equal(sidebarMod.readSidebarCollapsed(), false);
+        g.window = { localStorage: { getItem: () => { throw new Error('blocked'); }, setItem: () => { throw new Error('blocked'); } } };
+        assert.equal(sidebarMod.readSidebarCollapsed(), false);
+        sidebarMod.writeSidebarCollapsed(true);
+        // Blocked storage: the choice still holds for this page.
+        assert.equal(sidebarMod.readSidebarCollapsed(), true);
+      } finally {
+        g.window = prev;
+        sidebarMod.writeSidebarCollapsed(false);
+      }
+    });
   });
 });
