@@ -10,7 +10,11 @@ import { chatDashboardContextSchema, type ChatDashboardContext } from '@/lib/cha
 /** Ids used as Mastra thread ids / session scopes: bounded, no whitespace or path characters. */
 const idSchema = z.string().regex(/^[A-Za-z0-9._:-]{1,200}$/);
 
-export const aguiActionSchema = z.enum(['run', 'steer', 'followUp', 'abort', 'toolApproval']);
+/**
+ * `pending` (WID-3): asks which widget cards this session still has waiting on the thread (to show them
+ * again after a reload) and whether a run of this session is parked on one. Read-only; claims nothing.
+ */
+export const aguiActionSchema = z.enum(['run', 'steer', 'followUp', 'abort', 'toolApproval', 'pending']);
 export type AguiAction = z.infer<typeof aguiActionSchema>;
 
 export const tourbillonPropsSchema = z

@@ -17,6 +17,7 @@ import { z } from 'zod';
 import {
   acceptWidgetAnswer,
   parseStoredWidgetAnswer,
+  widgetPropsFromArgs,
   type WidgetResume,
   type WidgetSpec,
   type WidgetSpecIndex,
@@ -80,6 +81,8 @@ export function widgetResumeFromEntry(
   spec: WidgetSpec,
   entry: { toolCallId: string; status: string; payload?: unknown },
   now: Date = new Date(),
+  /** WID-3: the call's args as asked (widget-owners), for specs that check answers against props. */
+  args?: unknown,
 ): WidgetResumeDecision {
   if (entry.status === 'cancelled') {
     return entry.payload === undefined || entry.payload === null
@@ -91,7 +94,7 @@ export function widgetResumeFromEntry(
   if (!payload.success || !('answer' in (entry.payload as object))) {
     return { ok: false, issues: ['payload: must be { answer } with no other fields'] };
   }
-  const accepted = acceptWidgetAnswer(spec, entry.toolCallId, payload.data.answer, now);
+  const accepted = acceptWidgetAnswer(spec, entry.toolCallId, payload.data.answer, now, widgetPropsFromArgs(args));
   if (!accepted.ok) return { ok: false, issues: accepted.issues.map((i) => `answer.${i}`) };
   return { ok: true, resume: { kind: 'answer', record: accepted.record } };
 }

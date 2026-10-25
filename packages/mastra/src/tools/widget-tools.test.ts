@@ -135,3 +135,37 @@ describe('WID-1 request-scoped widget tools', () => {
     }
   });
 });
+
+describe('WID-3 resumed answers are checked against the call\'s own args', () => {
+  const choice: WidgetSpec = {
+    ...spec,
+    name: 'pickChecked',
+    version: 1,
+    checkAnswer: (props: { options: string[] }, answer: { choice: string }) =>
+      props.options.includes(answer.choice) ? [] : ['choice: not_an_option'],
+  };
+  const run = (input: unknown, ctx: unknown) =>
+    (createWidgetTool(choice).execute as (i: unknown, c: unknown) => Promise<unknown>)(input, ctx);
+  const recordFor = (answer: unknown) => {
+    // Built as the route would for this call (props known there).
+    const r = acceptWidgetAnswer(choice, 'c1', answer, at, ARGS);
+    assert.ok(r.ok);
+    return r.record;
+  };
+
+  it('an answer that fits the args resumes with the tool result', async () => {
+    const { ctx } = context({ resumeData: { kind: 'answer', record: recordFor({ choice: 'No' }) } });
+    assert.deepEqual(JSON.parse((await run({ ...ARGS, widgetVersion: 1 }, ctx)) as string), {
+      widget: 'pickChecked',
+      version: 1,
+      answer: { choice: 'No' },
+    });
+  });
+
+  it('an answer outside the args (e.g. args differ from the card shown) is an error result, never an answer', async () => {
+    const { ctx, spans } = context({ resumeData: { kind: 'answer', record: recordFor({ choice: 'No' }) } });
+    const out = (await run({ question: 'Ship?', options: ['Yes', 'Later'] }, ctx)) as { isError?: boolean } | string;
+    assert.ok(typeof out === 'object' && out.isError === true, JSON.stringify(out));
+    assert.equal(spans.length, 0);
+  });
+});

@@ -73,6 +73,8 @@ export function useAgentChat({ agentId, threadId, tools, onRunEvent, onThreadOpe
         });
         setSetup({ key, client: created, thread: ref, error: null });
         seam.current.onThreadOpened?.(ref);
+        // WID-3: show again the cards still waiting on this thread (e.g. after a reload).
+        void created.restorePending();
       },
       (err: unknown) => {
         if (cancelled) return;
@@ -105,7 +107,12 @@ export function useAgentChat({ agentId, threadId, tools, onRunEvent, onThreadOpe
     (toolCallId: string, approved: boolean) => client?.respondToTool(toolCallId, approved),
     [client],
   );
+  const answerWidget = useCallback(
+    (toolCallId: string, answer: unknown) => client?.answerWidget(toolCallId, answer),
+    [client],
+  );
+  const dismissWidget = useCallback((toolCallId: string) => client?.dismissWidget(toolCallId), [client]);
   const clearError = useCallback(() => client?.clearError(), [client]);
 
-  return { phase, setupError, thread, state, send, steer, abort, respondToTool, clearError };
+  return { phase, setupError, thread, state, send, steer, abort, respondToTool, answerWidget, dismissWidget, clearError };
 }

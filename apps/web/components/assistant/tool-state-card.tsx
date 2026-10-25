@@ -22,6 +22,8 @@ export const TOOL_STATE: Record<ToolCallStatus, { variant: ToolCardVariant; labe
   error: { variant: 'error', label: 'Error' },
   denied: { variant: 'declined', label: 'Declined' },
   detached: { variant: 'detached', label: 'Result not shown' },
+  // WID-3: the parked run was stopped; the call no longer takes an answer.
+  stopped: { variant: 'detached', label: 'Stopped' },
 };
 
 /** Results longer than this are not parsed or shown. */

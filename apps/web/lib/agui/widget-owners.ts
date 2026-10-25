@@ -31,6 +31,27 @@ interface WidgetOwnerRecord {
   owner: WeakRef<object>;
   /** The chat controller the owner session belongs to (absent when not known). */
   controller?: WeakRef<object>;
+  /**
+   * WID-3: the call's args as the run asked them (from `tool_suspended`), so answers can be checked
+   * against what the card showed (e.g. one of the offered options). Absent when not sent or too large.
+   */
+  args?: Record<string, unknown>;
+}
+
+/** Largest args kept with an owner record (UTF-8 bytes of the JSON text, as the widget args cap). */
+const MAX_RECORDED_ARGS_BYTES = 16 * 1024;
+const utf8 = new TextEncoder();
+
+/** A plain-object copy of `args` within the size cap, or undefined. */
+function recordableArgs(args: unknown): Record<string, unknown> | undefined {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return undefined;
+  try {
+    const text = JSON.stringify(args);
+    if (text === undefined || utf8.encode(text).length > MAX_RECORDED_ARGS_BYTES) return undefined;
+    return JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
 }
 
 const g = globalThis as unknown as {
@@ -101,6 +122,7 @@ export function recordWidgetOwner(
   threadId: string,
   toolCallId: string,
   controller?: object,
+  args?: unknown,
 ): void {
   const map = threads();
   const key = threadKey(resourceId, threadId);
@@ -111,7 +133,12 @@ export function recordWidgetOwner(
     bucket = new Map();
     map.set(key, bucket);
   }
-  bucket.set(toolCallId, { owner: new WeakRef(session), ...(controller ? { controller: new WeakRef(controller) } : {}) });
+  const kept = recordableArgs(args);
+  bucket.set(toolCallId, {
+    owner: new WeakRef(session),
+    ...(controller ? { controller: new WeakRef(controller) } : {}),
+    ...(kept ? { args: kept } : {}),
+  });
   trimThread(bucket);
 }
 
@@ -127,6 +154,11 @@ export function widgetOwnership(session: object, resourceId: string, threadId: s
   const owner = liveOwner(record);
   if (!owner) return 'gone';
   return owner === session ? 'owner' : 'other';
+}
+
+/** WID-3: the args a widget call was asked with (as recorded with its owner), or undefined. */
+export function widgetCallArgs(resourceId: string, threadId: string, toolCallId: string): Record<string, unknown> | undefined {
+  return threads().get(threadKey(resourceId, threadId))?.get(toolCallId)?.args;
 }
 
 /** Widget calls this session asked on this thread that are still parked in it. */
@@ -168,7 +200,7 @@ export function trackWidgetOwners(
     const toolName = typeof event.toolName === 'string' ? event.toolName : undefined;
     const eventThread = typeof event.threadId === 'string' ? event.threadId : undefined;
     if (!toolCallId || !toolName || (eventThread !== undefined && eventThread !== threadId)) return;
-    if (isWidget(toolName)) recordWidgetOwner(session, resourceId, threadId, toolCallId, controller);
+    if (isWidget(toolName)) recordWidgetOwner(session, resourceId, threadId, toolCallId, controller, event.args);
   });
 }
 
