@@ -11,13 +11,14 @@ import {
 } from '@/lib/chat/dashboard-context';
 import { chatErrorResponse, decodeResourceId, openChatRouteSession, controlChatDisabledResponse } from '@/lib/chat/route-helpers';
 import { chatModelIdFromSearch } from '@/lib/chat/model-query';
+import { steerPreservingTurn } from '@/lib/chat/steer-preserving-turn';
 
 const bodySchema = z.object({
   message: z.string().min(1),
   context: chatDashboardContextSchema,
 });
 
-/** Steer mid-run: abort current generation and inject a new message. */
+/** Steer mid-run: abort current generation and inject a new message (keeping the interrupted turn, STEER-1). */
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ agentId: string; resourceId: string }> },
@@ -37,10 +38,10 @@ export async function POST(
       scope: sessionScope,
     });
     const requestContext = createChatRequestContext(agent);
-    void session.steer({
+    void steerPreservingTurn(session, {
       content: wrapMessageWithDashboardContext(body.message, body.context),
-      requestContext: requestContext as never,
-    });
+      requestContext,
+    }).catch((err) => console.error('[chat] steer failed', err));
     return NextResponse.json({ ok: true });
   } catch (err) {
     return chatErrorResponse(err);

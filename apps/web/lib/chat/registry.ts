@@ -20,6 +20,7 @@ import { buildChatScopedApiKey, validateChatToken } from '@/lib/auth/chat-token'
 import { chatSessionIdForAgent } from '@tourbillon/shared/agent-token';
 import { ASSISTANT_THREAD_METADATA_KEYS } from '@/lib/assistant/sidebar';
 import { retireWidgetOwnersOfController } from '@/lib/agui/widget-owners';
+import { trackInFlightUserTurns } from '@/lib/chat/steer-preserving-turn';
 
 /** #110: re-mint chat tokens with less than this many seconds left. */
 const CHAT_TOKEN_REFRESH_SEC = 60 * 60;
@@ -250,7 +251,7 @@ export async function getChatSession(
     chatResourceId(agentRecord.companyId, chatContextFromTags(opts?.tags));
   const requestContext = createChatRequestContext(agentRecord);
   const id = opts?.threadId ?? (opts?.scope ? `${resourceId}::${opts.scope}` : resourceId);
-  return controller.createSession({
+  const session = await controller.createSession({
     resourceId,
     id,
     ownerId: controller.id,
@@ -260,6 +261,9 @@ export async function getChatSession(
     requestContext: requestContext as never,
     ...(opts?.createInitialThread === false ? { createInitialThread: false } : {}),
   });
+  // STEER-1: a steer needs the user turn of the run it interrupts (idempotent per session).
+  trackInFlightUserTurns(session);
+  return session;
 }
 
 /** Reserved Mastra thread metadata keys — not used as UI/context tags. */

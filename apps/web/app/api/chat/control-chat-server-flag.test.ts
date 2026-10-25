@@ -63,7 +63,7 @@ const ROUTES: Route[] = [
   { name: 'thread messages', method: 'GET', path: '[agentId]/sessions/[resourceId]/threads/[threadId]/messages/route' },
   { name: 'messages', method: 'POST', path: '[agentId]/sessions/[resourceId]/messages/route', body: { message: 'hi' }, effect: 'sendMessage' },
   { name: 'follow-up', method: 'POST', path: '[agentId]/sessions/[resourceId]/follow-up/route', body: { message: 'hi' }, effect: 'followUp' },
-  { name: 'steer', method: 'POST', path: '[agentId]/sessions/[resourceId]/steer/route', body: { message: 'hi' }, effect: 'steer' },
+  { name: 'steer', method: 'POST', path: '[agentId]/sessions/[resourceId]/steer/route', body: { message: 'hi' }, effect: 'sendMessage' }, // STEER-1: abort + sendMessage (steerPreservingTurn)
   { name: 'abort', method: 'POST', path: '[agentId]/sessions/[resourceId]/abort/route', effect: 'abort' },
   { name: 'tool-approval', method: 'POST', path: '[agentId]/sessions/[resourceId]/tool-approval/route', body: { toolCallId: 'c1', approved: false }, effect: 'respondToToolApproval' },
   { name: 'thread switch', method: 'POST', path: '[agentId]/sessions/[resourceId]/thread/route', body: { threadId: 't-2' }, effect: 'thread.switch' },
