@@ -40,7 +40,7 @@ import { useAgentChat, type AgentChatPhase } from './use-agent-chat';
 import { ModelPicker } from './model-picker/model-picker';
 import { AgentDmActivity } from './dm-activity';
 import { AgentChatMenu } from './agent-chat-menu';
-import { clearAgentChat } from '@/lib/assistant/single-chat';
+import { clearAgentChat, type AssistantOmSummary } from '@/lib/assistant/single-chat';
 
 const DELIVERY_LABEL: Partial<Record<UserMessageDelivery, string>> = {
   sending: 'Sending…',
@@ -238,7 +238,7 @@ function ParkedNotice({
   state: AgentChatState;
   props: AgentChatViewProps;
 }) {
-  const kind = `${CARD_KIND[parked.toolName] ?? 'widget'} card`;
+  const kind = parkedCardKind(parked);
   const item = state.items.find((it) => it.kind === 'tool' && it.id === parked.toolCallId);
   const dismissable = !parked.elsewhere && item?.kind === 'tool' && item.status === 'suspended' && Boolean(props.onWidgetDismiss);
   const href = parked.elsewhere && props.chatHref ? props.chatHref(parked.threadId) : undefined;
@@ -249,11 +249,20 @@ function ParkedNotice({
       data-parked-widget={parked.toolCallId}
       data-parked-elsewhere={parked.elsewhere ? 'true' : 'false'}
     >
-      <span>
-        {parked.elsewhere ? 'A ' + kind + ' in another chat' : 'The ' + kind}
-        {parked.label ? ` (“${parked.label}”)` : ''} is waiting for your answer. Answer or dismiss it, or stop the run, to
-        send a new message.
-      </span>
+      {parked.elsewhere ? (
+        // ASYNC-0 (Slice B): a card left on an earlier conversation (e.g. before Clear chat) cannot be
+        // answered here; stopping its run frees the agent to continue in this conversation.
+        <span>
+          {'A ' + kind + ' from an earlier conversation'}
+          {parked.label ? ` (“${parked.label}”)` : ''} is still waiting for an answer. Stop it to continue here.
+        </span>
+      ) : (
+        <span>
+          {'The ' + kind}
+          {parked.label ? ` (“${parked.label}”)` : ''} is waiting for your answer. Answer or dismiss it, or stop the run,
+          to send a new message.
+        </span>
+      )}
       <div className="flex gap-2">
         {href && (
           <a className="text-sm underline" href={href}>
@@ -265,12 +274,23 @@ function ParkedNotice({
             Dismiss card
           </Button>
         )}
-        <Button type="button" size="sm" variant="outline" onClick={props.onStop}>
-          Stop
+        <Button type="button" size="sm" variant="outline" onClick={props.onStop} data-parked-stop>
+          {parked.elsewhere ? 'Stop it and continue here' : 'Stop'}
         </Button>
       </div>
     </div>
   );
+}
+
+/** "approval card", "choice card", … for a parked card. */
+export function parkedCardKind(parked: Pick<ParkedWidget, 'toolName'>): string {
+  return `${CARD_KIND[parked.toolName] ?? 'widget'} card`;
+}
+
+/** Slice B: the waiting card as the Clear chat confirm names it, e.g. `choice card (“Pick a plan”)`. */
+export function pendingCardDescription(parked: ParkedWidget | null): string | null {
+  if (!parked) return null;
+  return parkedCardKind(parked) + (parked.label ? ` (“${parked.label}”)` : '');
 }
 
 /** UI-3: the page context (from an Open in chat link) waiting to go with the next message. */
@@ -419,8 +439,9 @@ const CHAT_CARD_TOOLS = assistantWidgetRegistry.frontendTools();
 /**
  * Chat with one agent. `agentId` is used for the API calls; `agentKey` (the agent's url key, default
  * `agentId`) for the page link, so the address bar keeps the canonical `/assistant/<url key>`.
- * ASYNC-0 (Slice A): the agent's one conversation (its latest thread). Clear chat (⋯ menu) starts a
- * fresh one in place (lib/assistant/single-chat.ts); there is no New chat and no thread switching.
+ * ASYNC-0: the agent's one conversation (its pinned active thread, Slice B). Clear chat (⋯ menu)
+ * starts a fresh one in place (lib/assistant/single-chat.ts); there is no New chat and no thread
+ * switching. A remount (e.g. switching agents and back) reopens the pinned thread from the server.
  */
 export function AgentChat({
   agentId,
@@ -447,11 +468,15 @@ export function AgentChat({
     },
     [linkKey],
   );
-  // ASYNC-0: after Clear chat, the fresh thread (else the given one, else the agent's latest).
+  // ASYNC-0: after Clear chat, the fresh thread (else the given one, else the agent's pinned active thread).
   const [clearedThreadId, setClearedThreadId] = React.useState<string | undefined>(undefined);
   const activeThreadId = clearedThreadId ?? threadId;
   const chat = useAgentChat({ agentId, threadId: activeThreadId, tools: CHAT_CARD_TOOLS, onThreadOpened });
   const feedback = useThreadFeedback(agentId, chat.thread?.threadId ?? null);
+  // Slice B: OM mode for the ⋯ menu, from the thread open (GET …/threads) or the last Clear.
+  const [clearedOm, setClearedOm] = React.useState<AssistantOmSummary | undefined>(undefined);
+  const observationalMemory = clearedOm ?? chat.thread?.observationalMemory ?? null;
+  const parkedNow = parkedCard(chat.state, assistantWidgetRegistry);
   const [draft, setDraft] = React.useState('');
   const [context, setContext] = React.useState<OpenInChatContext | null>(initialContext ?? null);
   const submit = (
@@ -498,12 +523,22 @@ export function AgentChat({
         <AgentChatMenu
           agentUrlKey={linkKey}
           runOpen={chat.state.status !== 'idle'}
+          observationalMemory={observationalMemory}
+          pendingCard={pendingCardDescription(parkedNow)}
           onClear={async () => {
-            // Slice A: a fresh thread only; Observational Memory / resource ids are untouched (Slice B).
+            // Slice B: a run parked on a card would stay on the old thread and refuse new messages;
+            // stop it first (the confirm says so) so nothing is left waiting where it cannot be answered.
+            if (parkedNow) {
+              const stopped = await chat.abort();
+              if (stopped && !stopped.ok) return { ok: false as const, error: 'Could not stop the waiting card' };
+            }
+            // The server pins the new thread as active and moves the AgentController session (and so
+            // Observational Memory) onto it.
             const r = await clearAgentChat(agentId);
             if (r.ok) {
               setDraft('');
               setContext(null);
+              if (r.observationalMemory) setClearedOm(r.observationalMemory);
               setClearedThreadId(r.threadId);
             }
             return r;

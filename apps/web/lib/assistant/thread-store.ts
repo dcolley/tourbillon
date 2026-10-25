@@ -12,7 +12,8 @@ import { ASSISTANT_THREAD_MODEL_KEY, type ThreadModelChoice } from './thread-mod
  * - rename updates only the `title` column of Mastra's thread row;
  * - mark-read sets one metadata key in place (`jsonb_set`);
  * - CHAT-5 model choice sets or removes one metadata key in place (`jsonb_set` / `-`);
- * - pins are rows in `assistant_thread_pins` (insert / delete), not thread metadata.
+ * - pins are rows in `assistant_thread_pins` (insert / delete), not thread metadata;
+ * - ASYNC-0 (Slice B) the active thread is one row per (company, agent) in `assistant_active_threads`.
  *
  * Mastra's Postgres store keeps threads in `mastra_threads` (default schema) in the same
  * database as `@tourbillon/db`.
@@ -100,4 +101,54 @@ export async function listPinnedAssistantThreadIds(scope: PinScope): Promise<str
     sql`SELECT thread_id FROM assistant_thread_pins WHERE user_key = ${scope.userKey} AND company_id = ${scope.companyId} AND agent_id = ${scope.agentId} ORDER BY created_at DESC LIMIT ${ASSISTANT_MAX_PINS_PER_AGENT}`,
   );
   return (rows as unknown as Array<{ thread_id: string }>).map((r) => r.thread_id);
+}
+
+/**
+ * ASYNC-0 (Slice B): the agent's active Assistant thread, one row per (company, agent) in
+ * `assistant_active_threads`. Every call is one statement.
+ */
+export interface ActiveThreadScope {
+  companyId: string;
+  agentId: string;
+}
+
+/** The pinned active thread id, or null when the agent has none yet. */
+export async function getActiveAssistantThreadId(scope: ActiveThreadScope): Promise<string | null> {
+  const rows = await db.execute(
+    sql`SELECT thread_id FROM assistant_active_threads WHERE company_id = ${scope.companyId} AND agent_id = ${scope.agentId}`,
+  );
+  const row = (rows as unknown as Array<{ thread_id?: unknown }>)[0];
+  return typeof row?.thread_id === 'string' && row.thread_id ? row.thread_id : null;
+}
+
+/** Make `threadId` the active thread (Clear chat / first thread). Last write wins. */
+export async function setActiveAssistantThread(scope: ActiveThreadScope, threadId: string): Promise<void> {
+  await db.execute(
+    sql`INSERT INTO assistant_active_threads (company_id, agent_id, thread_id, updated_at)
+      VALUES (${scope.companyId}, ${scope.agentId}, ${threadId}, now())
+      ON CONFLICT (company_id, agent_id) DO UPDATE SET thread_id = EXCLUDED.thread_id, updated_at = now()`,
+  );
+}
+
+/**
+ * Backfill: pin `threadId` only when the agent has no active thread (`replacing` null) or when it is
+ * still `replacing` (a pinned thread that no longer exists). A concurrent Clear always wins.
+ * Returns true when `threadId` is now the active thread.
+ */
+export async function claimActiveAssistantThread(
+  scope: ActiveThreadScope,
+  threadId: string,
+  replacing: string | null,
+): Promise<boolean> {
+  const rows = await db.execute(
+    replacing === null
+      ? sql`INSERT INTO assistant_active_threads (company_id, agent_id, thread_id, updated_at)
+          VALUES (${scope.companyId}, ${scope.agentId}, ${threadId}, now())
+          ON CONFLICT (company_id, agent_id) DO NOTHING
+          RETURNING thread_id`
+      : sql`UPDATE assistant_active_threads SET thread_id = ${threadId}, updated_at = now()
+          WHERE company_id = ${scope.companyId} AND agent_id = ${scope.agentId} AND thread_id = ${replacing}
+          RETURNING thread_id`,
+  );
+  return (rows as unknown as unknown[]).length > 0;
 }

@@ -87,4 +87,44 @@ describe('UI-2 assistant thread store', () => {
     assert.deepEqual(executed[0].params, ['u1', 'c1', 'a1', 't1']);
     assert.match(executed[1].sql, /^SELECT thread_id FROM assistant_thread_pins WHERE user_key = \$1 AND company_id = \$2 AND agent_id = \$3 ORDER BY created_at DESC LIMIT \$4$/);
   });
+
+  describe('ASYNC-0 Slice B active thread (assistant_active_threads)', () => {
+    const active = { companyId: 'c1', agentId: 'a1' };
+
+    it('get: one SELECT by (company, agent); null when unset', async () => {
+      nextRows = [{ thread_id: 't9' }];
+      assert.equal(await store.getActiveAssistantThreadId(active), 't9');
+      assert.equal(executed.length, 1);
+      assert.match(executed[0].sql, /^SELECT thread_id FROM assistant_active_threads WHERE company_id = \$1 AND agent_id = \$2$/);
+      assert.deepEqual(executed[0].params, ['c1', 'a1']);
+      nextRows = [];
+      assert.equal(await store.getActiveAssistantThreadId(active), null);
+    });
+
+    it('set (Clear chat): one upsert; the new thread always replaces the old one', async () => {
+      await store.setActiveAssistantThread(active, 't-new');
+      assert.equal(executed.length, 1);
+      const [{ sql, params }] = executed;
+      assert.match(sql, /^INSERT INTO assistant_active_threads \(company_id, agent_id, thread_id, updated_at\) VALUES \(\$1, \$2, \$3, now\(\)\)/);
+      assert.match(sql, /ON CONFLICT \(company_id, agent_id\) DO UPDATE SET thread_id = EXCLUDED\.thread_id, updated_at = now\(\)$/);
+      assert.doesNotMatch(sql, /mastra_threads/);
+      assert.deepEqual(params, ['c1', 'a1', 't-new']);
+    });
+
+    it('claim (backfill): insert-if-unset, or replace only the stale thread; never overrides a concurrent Clear', async () => {
+      nextRows = [{ thread_id: 't1' }];
+      assert.equal(await store.claimActiveAssistantThread(active, 't1', null), true);
+      assert.match(executed[0].sql, /ON CONFLICT \(company_id, agent_id\) DO NOTHING RETURNING thread_id$/);
+      assert.deepEqual(executed[0].params, ['c1', 'a1', 't1']);
+      assert.equal(await store.claimActiveAssistantThread(active, 't1', 'gone'), true);
+      assert.match(
+        executed[1].sql,
+        /^UPDATE assistant_active_threads SET thread_id = \$1, updated_at = now\(\) WHERE company_id = \$2 AND agent_id = \$3 AND thread_id = \$4 RETURNING thread_id$/,
+      );
+      assert.deepEqual(executed[1].params, ['t1', 'c1', 'a1', 'gone']);
+      nextRows = [];
+      assert.equal(await store.claimActiveAssistantThread(active, 't1', null), false, 'already pinned → false');
+      assert.equal(executed.length, 3);
+    });
+  });
 });

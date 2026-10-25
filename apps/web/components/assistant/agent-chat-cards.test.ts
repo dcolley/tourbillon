@@ -13,6 +13,7 @@ import { initialAgentChatState, type AgentChatItem, type AgentChatState } from '
 type View = typeof import('./agent-chat');
 let AgentChatView: View['AgentChatView'];
 let widgetOutcome: View['widgetOutcome'];
+let pendingCardDescription: View['pendingCardDescription'];
 let WidgetToolCall: unknown;
 
 const noop = () => {};
@@ -70,7 +71,7 @@ function widgetElement(node: React.ReactNode): Record<string, any> | undefined {
 describe('WID-3 chat cards in the assistant chat view', () => {
   before(async () => {
     (globalThis as { React?: unknown }).React = React;
-    ({ AgentChatView, widgetOutcome } = await import('./agent-chat'));
+    ({ AgentChatView, widgetOutcome, pendingCardDescription } = await import('./agent-chat'));
     ({ WidgetToolCall } = await import('./widgets/widget-tool-call'));
   });
 
@@ -176,16 +177,30 @@ describe('WID-3 chat cards in the assistant chat view', () => {
     assert.doesNotMatch(running, /data-parked-widget/);
   });
 
-  it('a card parked in another chat links to that chat (no Dismiss card here) and still offers Stop', () => {
+  it('a card parked in another chat (e.g. before Clear chat) is named, has no Dismiss here, and offers Stop to continue', () => {
     const parked = { threadId: 'thread-0', toolCallId: 'card-0', toolName: 'askForm', label: 'Setup', elsewhere: true };
     const html = renderToStaticMarkup(
       React.createElement(AgentChatView, props({ parked }, { onWidgetDismiss: noop, chatHref: (t: string) => `/assistant/alice/${t}` })),
     );
     assert.match(html, /data-parked-elsewhere="true"/);
-    assert.match(html, /A form card in another chat \(“Setup”\) is waiting for your answer/);
+    // ASYNC-0 Slice B: not a silent strand; it says where the card is and how to continue here.
+    assert.match(html, /A form card from an earlier conversation \(“Setup”\) is still waiting for an answer\. Stop it to continue here\./);
     assert.match(html, /href="\/assistant\/alice\/thread-0"/);
     assert.doesNotMatch(html, />Dismiss card</);
-    assert.match(html, />Stop</);
+    assert.match(html, />Stop it and continue here</);
+    // Without a link (the assistant view has none for earlier threads), Stop is still offered.
+    const noLink = renderToStaticMarkup(React.createElement(AgentChatView, props({ parked }, { onWidgetDismiss: noop })));
+    assert.doesNotMatch(noLink, /Open that chat/);
+    assert.match(noLink, /data-parked-stop[^>]*>Stop it and continue here</);
+  });
+
+  it('pendingCardDescription names the waiting card for the Clear chat confirm', () => {
+    assert.equal(pendingCardDescription(null), null);
+    assert.equal(
+      pendingCardDescription({ threadId: 't', toolCallId: 'c', toolName: 'askForm', label: 'Setup', elsewhere: false }),
+      'form card (“Setup”)',
+    );
+    assert.equal(pendingCardDescription({ threadId: 't', toolCallId: 'c', toolName: 'unknownTool', elsewhere: false }), 'widget card');
   });
 
   it('a card whose parked run was stopped renders locked with a note', () => {

@@ -35,6 +35,17 @@ describe('AGUI-1b openAguiThread', () => {
     assert.deepEqual(calls[1].body, {});
   });
 
+  it('ASYNC-0 Slice B: opens the pinned active thread the server names and keeps its OM mode', async () => {
+    const om = { mode: 'off', active: false };
+    // The server's initialThreadId is the pinned thread even when another thread is newer.
+    const { f } = fakeFetch([
+      json({ agentId: 'agent-a', threads: [{ id: 'newer' }, { id: 'pinned' }], initialThreadId: 'pinned', observationalMemory: om }),
+    ]);
+    assert.deepEqual(await openAguiThread({ agentId: 'alice', fetch: f }), { threadId: 'pinned', created: false, observationalMemory: om });
+    const { f: f2 } = fakeFetch([json({ initialThreadId: null }), json({ thread: { id: 'first' }, observationalMemory: om }, 201)]);
+    assert.deepEqual(await openAguiThread({ agentId: 'alice', fetch: f2 }), { threadId: 'first', created: true, observationalMemory: om });
+  });
+
   it('a given thread id is checked against the agent before the chat opens', async () => {
     const { f, calls } = fakeFetch([json({ thread: { id: 't 1' } })]);
     assert.deepEqual(await openAguiThread({ agentId: 'a b', threadId: 't 1', fetch: f }), { threadId: 't 1', created: false });

@@ -10,6 +10,7 @@ export {
   extractThreadTags,
   isReservedThreadMetadataKey,
   invalidateChatControllerForAgent,
+  listCachedChatControllersForAgent,
   ChatAgentError,
   type TourbillonChatController,
   type TourbillonChatSession,

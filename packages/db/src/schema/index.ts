@@ -15,4 +15,5 @@ export * from './agent-mail';
 export * from './users';
 export * from './vault-secrets';
 export * from './assistant-thread-pins';
+export * from './assistant-active-threads';
 export * from './hitl';

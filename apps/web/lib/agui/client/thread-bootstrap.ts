@@ -3,9 +3,13 @@
  * come from the assistant thread API (UI-2), which tags them to the agent (metadata.agentId):
  *   - a given thread id is checked first (GET /api/assistant/agents/[agentId]/threads/[threadId]),
  *     so a thread that is not the agent's fails when the chat opens, not on the first message;
- *   - otherwise the agent's initial thread is reused (GET …/threads → `initialThreadId`, its latest
- *     thread), and a new thread is created only when the agent has none (POST …/threads).
+ *   - otherwise the agent's initial thread is reused (GET …/threads → `initialThreadId`, its pinned
+ *     active thread: ASYNC-0 Slice B), and a new thread is created only when the agent has none
+ *     (POST …/threads, which pins it).
+ * The list / create answers also carry the agent's Observational Memory mode for the chat menu.
  */
+import { isAssistantOmSummary, type AssistantOmSummary } from '@/lib/assistant/single-chat';
+
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
 
 /** Ids made only of dots would change the API path once the URL is normalised. */
@@ -19,6 +23,12 @@ export interface AguiThreadRef {
   threadId: string;
   /** True when this call created the thread (the agent had none). */
   created: boolean;
+  /** Slice B: the agent's OM mode, when the server sent it (not on a by-id reopen). */
+  observationalMemory?: AssistantOmSummary;
+}
+
+function withOm(ref: AguiThreadRef, body: Record<string, unknown>): AguiThreadRef {
+  return isAssistantOmSummary(body.observationalMemory) ? { ...ref, observationalMemory: body.observationalMemory } : ref;
 }
 
 export class AguiThreadBootstrapError extends Error {
@@ -77,12 +87,14 @@ export async function openAguiThread(opts: {
 
   const listRes = await f(base, { method: 'GET', signal: opts.signal });
   if (!listRes.ok) throw await failure(listRes, 'Could not open the chat');
-  const initial = (await readJson(listRes)).initialThreadId;
-  if (typeof initial === 'string' && isUsableAguiId(initial)) return { threadId: initial, created: false };
+  const listBody = await readJson(listRes);
+  const initial = listBody.initialThreadId;
+  if (typeof initial === 'string' && isUsableAguiId(initial)) return withOm({ threadId: initial, created: false }, listBody);
 
   const createRes = await f(base, { method: 'POST', headers: JSON_HEADERS, body: '{}', signal: opts.signal });
   if (!createRes.ok) throw await failure(createRes, 'Could not start a new chat');
-  const threadId = threadIdOf(await readJson(createRes));
+  const createBody = await readJson(createRes);
+  const threadId = threadIdOf(createBody);
   if (!threadId) throw new AguiThreadBootstrapError('Could not start a new chat');
-  return { threadId, created: true };
+  return withOm({ threadId, created: true }, createBody);
 }
