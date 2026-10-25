@@ -4,8 +4,13 @@
  * UI-2b: assistant sidebar — the active company's agents by section (Pinned threads, My agents,
  * Teams by role, Recent threads) with each agent's threads: open, new, rename, pin, search, unread.
  * Links go to `/assistant/<agent-url-key>[/<threadId>]` (lib/assistant/route.ts).
+ *
+ * Collapsible rail: shown from the `sm` breakpoint up (iPad portrait and desktop), either as the full
+ * list or as an icon rail (agent initials only). The choice is kept in localStorage
+ * (ASSISTANT_SIDEBAR_COLLAPSED_KEY). Phones still get no sidebar (agents drawer deferred).
  */
 import * as React from 'react';
+import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { usePathname, useRouter } from 'next/navigation';
 import { parseAssistantPath } from '@/lib/assistant/route';
 import { Button } from '@/components/ui/button';
@@ -37,6 +42,54 @@ export interface AssistantSidebarViewProps extends ThreadRowHandlers {
   onRetryThreads: (agentId: string) => void;
   onRetry: () => void;
   onDismissNotice: () => void;
+  /** Icon rail (agent initials only) instead of the full list. */
+  collapsed?: boolean;
+  /** Switches between the icon rail and the full list; no toggle without it. */
+  onToggleCollapsed?: () => void;
+}
+
+/** localStorage key for the rail / full list choice ('true' = icon rail). */
+export const ASSISTANT_SIDEBAR_COLLAPSED_KEY = 'tourbillon.assistant.sidebarCollapsed';
+
+/** Last choice made on this page, used when localStorage is unavailable. */
+let collapsedFallback = false;
+const collapsedListeners = new Set<() => void>();
+
+export function readSidebarCollapsed(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    const stored = window.localStorage.getItem(ASSISTANT_SIDEBAR_COLLAPSED_KEY);
+    return stored === null ? collapsedFallback : stored === 'true';
+  } catch {
+    return collapsedFallback;
+  }
+}
+
+export function writeSidebarCollapsed(collapsed: boolean): void {
+  collapsedFallback = collapsed;
+  if (typeof window !== 'undefined') {
+    try {
+      window.localStorage.setItem(ASSISTANT_SIDEBAR_COLLAPSED_KEY, String(collapsed));
+    } catch {
+      // storage unavailable: the choice lasts for this page only
+    }
+  }
+  for (const listener of collapsedListeners) listener();
+}
+
+function subscribeSidebarCollapsed(listener: () => void): () => void {
+  collapsedListeners.add(listener);
+  // Another tab changed the choice.
+  window.addEventListener('storage', listener);
+  return () => {
+    collapsedListeners.delete(listener);
+    window.removeEventListener('storage', listener);
+  };
+}
+
+/** The rail / full list choice; the server render (and first client render) is the full list. */
+function useSidebarCollapsed(): boolean {
+  return React.useSyncExternalStore(subscribeSidebarCollapsed, readSidebarCollapsed, () => false);
 }
 
 export const initials = (name: string) =>
@@ -147,9 +200,95 @@ function ThreadRefList({ refs, props }: { refs: AgentThreadRef[]; props: Assista
   );
 }
 
+function CollapseToggle({ props }: { props: AssistantSidebarViewProps }) {
+  if (!props.onToggleCollapsed) return null;
+  const label = props.collapsed ? 'Expand agents sidebar' : 'Collapse agents sidebar';
+  return (
+    <Button
+      type="button"
+      size="icon-xs"
+      variant="ghost"
+      aria-label={label}
+      title={label}
+      aria-expanded={!props.collapsed}
+      data-sidebar-toggle
+      onClick={props.onToggleCollapsed}
+    >
+      {props.collapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
+    </Button>
+  );
+}
+
+const STATUS_DOT: Partial<Record<AssistantAgent['status'], string>> = {
+  waiting: 'bg-amber-500',
+  running: 'bg-emerald-500',
+};
+
+/** Icon rail: one initials button per agent (same order as the full list), current agent marked. */
+function AgentRail({ props }: { props: AssistantSidebarViewProps }) {
+  const { state } = props;
+  if (state.agents.length === 0) return null;
+  const sections = sidebarSections(state);
+  const ordered = [...sections.myAgents, ...sections.teams.flatMap((t) => t.agents)];
+  const seen = new Set(ordered.map((a) => a.id));
+  for (const a of state.agents) if (!seen.has(a.id)) ordered.push(a);
+  return (
+    <ul className="flex flex-col items-center gap-1" data-agent-rail>
+      {ordered.map((agent) => {
+        const current = props.currentAgentKey === agent.urlKey || props.currentAgentKey === agent.id;
+        const dot = STATUS_DOT[agent.status];
+        const label = `${agent.name}${agent.status === 'waiting' ? ' (waiting on you)' : agent.status === 'running' ? ' (running)' : ''}${agent.active ? '' : ' (paused)'}`;
+        return (
+          <li key={agent.id} data-agent={agent.urlKey} data-current={current ? 'true' : undefined}>
+            <a
+              href={assistantChatHref(agent.urlKey)}
+              aria-label={label}
+              title={label}
+              aria-current={current ? 'page' : undefined}
+              aria-busy={state.pending[`select:${agent.id}`] ? true : undefined}
+              className={`relative flex size-8 items-center justify-center rounded-full text-[0.65rem] font-semibold ${
+                current ? 'bg-primary text-primary-foreground' : 'bg-muted hover:bg-muted/60'
+              } ${agent.active ? '' : 'opacity-60'}`}
+              onClick={(e) => inAppClick(e, () => props.onSelectAgent(agent.id))}
+            >
+              {initials(agent.name)}
+              {dot && (
+                <span
+                  aria-hidden
+                  className={`absolute -right-0.5 -top-0.5 size-2.5 rounded-full ring-2 ring-background ${dot}`}
+                  data-agent-status={agent.status}
+                />
+              )}
+            </a>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
 /** Stateless sidebar (tested with react-dom/server). */
 export function AssistantSidebarView(props: AssistantSidebarViewProps) {
   const { state } = props;
+  if (props.collapsed) {
+    return (
+      <aside
+        aria-label="Agents"
+        className="hidden w-14 shrink-0 flex-col items-center gap-3 overflow-y-auto border-r p-2 sm:flex"
+        data-assistant-sidebar
+        data-collapsed="true"
+      >
+        <CollapseToggle props={props} />
+        {state.phase === 'error' ? (
+          <Button type="button" size="xs" variant="outline" title={state.loadError ?? 'Could not load agents'} onClick={props.onRetry}>
+            Retry
+          </Button>
+        ) : (
+          <AgentRail props={props} />
+        )}
+      </aside>
+    );
+  }
   const problem = selectionProblem(state, props.currentAgentKey, props.currentThreadId);
   let body: React.ReactNode;
   if (state.phase === 'loading' && state.agents.length === 0) {
@@ -219,15 +358,23 @@ export function AssistantSidebarView(props: AssistantSidebarViewProps) {
     );
   }
   return (
-    <aside aria-label="Agents" className="hidden w-72 shrink-0 flex-col gap-3 overflow-y-auto border-r p-3 md:flex" data-assistant-sidebar>
-      <input
-        type="search"
-        aria-label="Search threads"
-        placeholder="Search threads"
-        className="h-8 rounded-md border bg-transparent px-2 text-sm"
-        value={state.search}
-        onChange={(e) => props.onSearch(e.target.value)}
-      />
+    <aside
+      aria-label="Agents"
+      className="hidden w-72 shrink-0 flex-col gap-3 overflow-y-auto border-r p-3 sm:flex"
+      data-assistant-sidebar
+      data-collapsed="false"
+    >
+      <div className="flex items-center gap-1">
+        <input
+          type="search"
+          aria-label="Search threads"
+          placeholder="Search threads"
+          className="h-8 min-w-0 flex-1 rounded-md border bg-transparent px-2 text-sm"
+          value={state.search}
+          onChange={(e) => props.onSearch(e.target.value)}
+        />
+        <CollapseToggle props={props} />
+      </div>
       {problem && (
         <p role="status" className="rounded-md border p-2 text-xs text-muted-foreground" data-selection-problem={problem}>
           {problem === 'agent-not-found'
@@ -259,6 +406,7 @@ export function AssistantSidebar() {
   const current = useCurrentSelection();
   const [expanded, setExpanded] = React.useState<ReadonlySet<string>>(new Set());
   const [editing, setEditing] = React.useState<ThreadEditState | null>(null);
+  const collapsed = useSidebarCollapsed();
 
   // The agent in the URL is shown expanded, and its open thread is marked read.
   const currentAgent = state.agents.find((a) => a.urlKey === current.agent || a.id === current.agent);
@@ -309,6 +457,8 @@ export function AssistantSidebar() {
       onRetryThreads={(id) => void store.loadThreads(id)}
       onRetry={() => void store.load()}
       onDismissNotice={() => store.dismissNotice()}
+      collapsed={collapsed}
+      onToggleCollapsed={() => writeSidebarCollapsed(!collapsed)}
       onOpenThread={(agentId, threadId, href) => {
         void store.markRead(agentId, threadId);
         router.push(href);

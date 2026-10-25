@@ -1,8 +1,8 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useState } from 'react';
-import { Plus } from 'lucide-react';
+import { useState, type CSSProperties } from 'react';
+import { Building2, Plus } from 'lucide-react';
 import { setStoredCompanyId } from '@/lib/company-storage';
 import { syncActiveCompanyAction } from '@/app/(dashboard)/company/actions';
 import { CreateCompanyDialog } from '@/components/create-company-dialog';
@@ -40,6 +40,13 @@ export const SIDEBAR_HEADER_INSET = '1rem + 1px';
 /** `--sidebar-width` for the Control Pane: picker width plus the header inset. */
 export const CONTROL_PANE_SIDEBAR_WIDTH = `calc(${COMPANY_SWITCHER_WIDTH} + ${SIDEBAR_HEADER_INSET})`;
 
+/**
+ * H1: below this viewport width the Assistant top bar has no room for the full 14rem picker
+ * next to the view switcher and ThemeToggle, so the picker shrinks to an icon-only trigger.
+ * The Tailwind classes below spell it out literally (`min-[528px]:`) so the scanner sees them.
+ */
+export const COMPANY_SWITCHER_COMPACT_BELOW = '528px';
+
 /** Select value for the "New company" entry; never a real company id (ids are UUIDs). */
 export const NEW_COMPANY_VALUE = '__new_company__';
 
@@ -64,12 +71,18 @@ export function CompanySwitcherView({
   companies,
   activeCompanyId,
   disabled = false,
+  compactOnNarrow = false,
   onSelect,
   onCreate,
 }: {
   companies: CompanyOption[];
   activeCompanyId: string | null;
   disabled?: boolean;
+  /**
+   * H1 (Assistant top bar): below `COMPANY_SWITCHER_COMPACT_BELOW` show an icon-only trigger
+   * (same dropdown) so ThemeToggle stays on-screen; at and above it, the full 14rem trigger.
+   */
+  compactOnNarrow?: boolean;
   onSelect: (companyId: string) => void;
   onCreate: () => void;
 }) {
@@ -89,17 +102,37 @@ export function CompanySwitcherView({
         onValueChange={handleValueChange}
         disabled={disabled}
       >
-        <SelectTrigger
-          aria-label="Company"
-          title={label}
-          className="h-8 shrink-0 text-xs"
-          style={{ width: COMPANY_SWITCHER_WIDTH }}
-          data-company-switcher-trigger
-        >
-          <span dir="auto" className="min-w-0 flex-1 truncate text-start font-medium" title={label}>
-            {label}
-          </span>
-        </SelectTrigger>
+        {compactOnNarrow ? (
+          <SelectTrigger
+            aria-label={`Company: ${label}`}
+            title={label}
+            className="h-8 shrink-0 text-xs max-[528px]:size-8 max-[528px]:justify-center max-[528px]:p-0 max-[528px]:[&>svg:last-child]:hidden min-[528px]:w-(--company-switcher-width)"
+            style={{ '--company-switcher-width': COMPANY_SWITCHER_WIDTH } as CSSProperties}
+            data-company-switcher-trigger
+            data-company-switcher-compact
+          >
+            <Building2 className="size-4 min-[528px]:hidden" aria-hidden data-company-switcher-icon />
+            <span
+              dir="auto"
+              className="hidden min-w-0 flex-1 truncate text-start font-medium min-[528px]:block"
+              title={label}
+            >
+              {label}
+            </span>
+          </SelectTrigger>
+        ) : (
+          <SelectTrigger
+            aria-label="Company"
+            title={label}
+            className="h-8 shrink-0 text-xs"
+            style={{ width: COMPANY_SWITCHER_WIDTH }}
+            data-company-switcher-trigger
+          >
+            <span dir="auto" className="min-w-0 flex-1 truncate text-start font-medium" title={label}>
+              {label}
+            </span>
+          </SelectTrigger>
+        )}
         <SelectContent>
           {companies.map((company) => (
             <SelectItem
@@ -180,9 +213,11 @@ export function companySwitcherHandlers(
 export function CompanySwitcher({
   companies,
   activeCompanyId,
+  compactOnNarrow = false,
 }: {
   companies: CompanyOption[];
   activeCompanyId: string | null;
+  compactOnNarrow?: boolean;
 }) {
   const router = useRouter();
   const [createOpen, setCreateOpen] = useState(false);
@@ -223,6 +258,7 @@ export function CompanySwitcher({
         companies={companies}
         activeCompanyId={activeCompanyId}
         disabled={switching}
+        compactOnNarrow={compactOnNarrow}
         onSelect={handlers.onSelect}
         onCreate={handlers.onCreate}
       />
