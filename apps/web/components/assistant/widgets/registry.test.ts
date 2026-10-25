@@ -60,8 +60,9 @@ describe('WID-1 registry lookup', () => {
     assert.throws(() => createWidgetRegistry([{ ...pickV1, version: 1.5 }]), /Invalid version/);
   });
 
-  it('the assistant registry has the WID-3 chat cards, each declared as a frontend tool; other tools fall back', () => {
+  it('the assistant registry has the WID-2 approval card and the WID-3 chat cards; only the chat cards are frontend tools; other tools fall back', () => {
     assert.deepEqual(assistantWidgetRegistry.list().map((d) => `${d.name}@${d.version}`), [
+      'approvalCard@1',
       'askChoice@1',
       'askConfirm@1',
       'askForm@1',

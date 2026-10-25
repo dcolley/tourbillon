@@ -72,7 +72,12 @@ export interface AssistantSidebarSections {
  * Pins are per user and live in `assistant_thread_pins`, not in thread metadata.
  */
 export const ASSISTANT_THREAD_READ_MESSAGE_KEY = 'assistantReadMessageId';
-export const ASSISTANT_THREAD_METADATA_KEYS: readonly string[] = [ASSISTANT_THREAD_READ_MESSAGE_KEY];
+/** CHAT-5: the thread's model choice (same value as ASSISTANT_THREAD_MODEL_KEY in ./thread-model). */
+export const ASSISTANT_THREAD_MODEL_METADATA_KEY = 'assistantModel';
+export const ASSISTANT_THREAD_METADATA_KEYS: readonly string[] = [
+  ASSISTANT_THREAD_READ_MESSAGE_KEY,
+  ASSISTANT_THREAD_MODEL_METADATA_KEY,
+];
 
 /** "waiting on you" wins over "running": the user is the blocker. */
 export function agentChatStatus(input: { running: boolean; pendingApprovals: number }): AssistantAgentStatus {

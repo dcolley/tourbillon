@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db, approvals, issues, activityLog, companies, agents, type IssueStatus } from '@tourbillon/db';
+import { approvalTitleOf, newActivityCorrelationId } from '@/lib/activity-correlation';
 import { and, eq, inArray, desc, gte, or, ilike, sql } from 'drizzle-orm';
 import { authenticateAgentToken } from '@/lib/auth/agent-token-auth';
 import { parseCompanySettings, resolveHitlyGate, publicOriginFromRequest } from '@tourbillon/shared';
@@ -95,6 +96,8 @@ export async function POST(
     }
 
     const approvalId = randomUUID();
+    // ACT-1: the request, the issues it blocks and the HITLy hand-off are one action.
+    const correlationId = newActivityCorrelationId();
     const approval = await db.transaction(async (tx) => {
       const priorStatuses: Record<string, IssueStatus> = {};
 
@@ -158,6 +161,27 @@ export async function POST(
       // Lost an idempotency race to a concurrent create: nothing written; return the winner below.
       if (!created) throw Object.assign(new Error('idempotent repeat'), { idempotentRepeat: true });
 
+      // ACT-1 / #132: the request on the approval's own activity.
+      await tx.insert(activityLog).values({
+        companyId,
+        actorType: 'agent',
+        actorId: runCtx.agentId,
+        action: 'approval.created',
+        entityType: 'approval',
+        entityId: created.id,
+        details: {
+          title: approvalTitleOf(created),
+          type: created.type,
+          status: 'pending',
+          ...(hitl ? { answerType: hitl.answerType } : {}),
+          ...(hitl?.deadline ? { deadline: hitl.deadline } : {}),
+          ...(requesterAgentId !== runCtx.agentId ? { requestedByAgentId: requesterAgentId } : {}),
+          issueIds,
+          runId: runCtx.runId,
+        },
+        correlationId,
+      });
+
       if (issueIds.length > 0) {
         const now = new Date();
         await tx
@@ -186,7 +210,13 @@ export async function POST(
               priorStatus: priorStatuses[issueId],
               comment: `Blocked pending board approval (${created.type}).`,
               runId: runCtx.runId,
+              approvalId: created.id,
+              changes: {
+                status: { from: priorStatuses[issueId] ?? null, to: 'blocked' },
+                boardApprovalId: { from: null, to: created.id },
+              },
             },
+            correlationId,
           });
         }
       }
@@ -254,6 +284,7 @@ export async function POST(
           .where(eq(approvals.id, approval.id));
 
         approval.hitlyApprovalId = hitlyApprovalId;
+        await recordHitlyHandOff(companyId, approval.id, 'approval.forwarded', correlationId);
       } catch (hitlyErr: unknown) {
         // Fail-closed: store error but keep approval pending
         const errorMsg =
@@ -269,6 +300,7 @@ export async function POST(
           .where(eq(approvals.id, approval.id));
 
         approval.hitlyError = errorMsg;
+        await recordHitlyHandOff(companyId, approval.id, 'approval.forward_failed', correlationId);
       }
     }
 
@@ -283,6 +315,33 @@ export async function POST(
       return NextResponse.json({ error: e.message }, { status: e.status });
     }
     throw err;
+  }
+}
+
+/**
+ * ACT-1: HITLy hand-off row on the approval's activity. Carries no URL, token or error text (the
+ * approval keeps its own error field); a failure to write it never fails the request.
+ */
+async function recordHitlyHandOff(
+  companyId: string,
+  approvalId: string,
+  action: 'approval.forwarded' | 'approval.forward_failed',
+  correlationId: string,
+) {
+  try {
+    await db.insert(activityLog).values({
+      companyId,
+      actorType: 'system',
+      actorId: 'hitly-forward',
+      actorName: 'HITLy hand-off',
+      action,
+      entityType: 'approval',
+      entityId: approvalId,
+      details: { to: 'HITLy' },
+      correlationId,
+    });
+  } catch {
+    console.error('[createApproval] failed to record HITLy hand-off activity');
   }
 }
 

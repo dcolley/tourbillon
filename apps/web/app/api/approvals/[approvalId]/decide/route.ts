@@ -92,7 +92,9 @@ export async function POST(
     outcome: resolved.outcome,
     note: resolved.note,
     hitl: { value: resolved.value, reason: resolved.reason, decidedBy: BOARD_DECIDER },
-    actor: { actorId: 'board', actorName: 'Board' },
+    // ACT-1 / #132: record who decided, like the HITLy ('hitly') and MCP ('mcp') paths do.
+    decidedByUserId: 'board',
+    actor: { actorId: 'board', actorName: 'Board', actorType: 'user' },
     commentAuthor: { type: 'user', id: 'board', name: 'Board' },
     source: 'Board',
     logPrefix: '[approval-decide]',

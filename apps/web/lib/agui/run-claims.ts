@@ -57,6 +57,11 @@ export function isAguiRunClaimed(session: object, resourceId: string, threadId: 
   return sessionClaims().has(session) || threadClaims().has(threadKey(resourceId, threadId));
 }
 
+/** CHAT-5: true while any session has an AG-UI run claimed on this thread. */
+export function isAguiThreadRunClaimed(resourceId: string, threadId: string): boolean {
+  return threadClaims().has(threadKey(resourceId, threadId));
+}
+
 /**
  * True when the thread's run is claimed by a different session (e.g. another `sessionScope` of the
  * same agent). Control actions that act on a run (abort, steer, follow-up, tool approval / resume)

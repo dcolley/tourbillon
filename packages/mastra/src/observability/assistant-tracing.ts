@@ -3,7 +3,8 @@
  *
  * `buildAssistantTracingOptions` is the `tracingOptions` the AG-UI route hands to
  * `session.sendMessage` (same shape as the heartbeat options): a caller-chosen hex trace id plus
- * root-span metadata and tags (companyId, agentId, threadId, view=assistant, provider, model).
+ * root-span metadata and tags (companyId, agentId, threadId, view=assistant, provider, model, and
+ * with a CHAT-5 thread choice: modelSource, reasoningLevel).
  * Model, tool and memory spans of the turn are children of that root, and every span still goes
  * through the existing span output processors (known-secret scrub, then SensitiveDataFilter)
  * before any exporter, so nothing here bypasses redaction.
@@ -37,6 +38,10 @@ export interface AssistantTracingInput {
   provider?: string | null;
   /** Model id the turn was started with. */
   model?: string | null;
+  /** CHAT-5: reasoning effort the thread picked (unset: the agent's configured level). */
+  reasoningLevel?: string | null;
+  /** CHAT-5: `thread` when the thread picked the model, `agent` for the agent's configured model. */
+  modelSource?: 'thread' | 'agent' | null;
   /** AG-UI run id (client-chosen); kept so a trace can be matched to the client run. */
   aguiRunId?: string | null;
   /** Reuse this trace id (hex). A new one is created when omitted. */
@@ -81,6 +86,8 @@ export function buildAssistantTracingOptions(
     ['agentUrlKey', clean(input.agentUrlKey)],
     ['provider', clean(input.provider)],
     ['model', clean(input.model)],
+    ['reasoningLevel', clean(input.reasoningLevel)],
+    ['modelSource', clean(input.modelSource)],
     ['aguiRunId', clean(input.aguiRunId)],
   ];
   for (const [key, value] of optional) if (value !== undefined) metadata[key] = value;
