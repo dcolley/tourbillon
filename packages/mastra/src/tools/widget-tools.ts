@@ -21,6 +21,7 @@ import {
   widgetDismissedToolResult,
   widgetJsonBytes,
   widgetAnswerToolResult,
+  widgetPropsFromArgs,
   widgetResumeSchema,
   type WidgetAnswer,
   type WidgetSpec,
@@ -91,7 +92,9 @@ export function createWidgetTool(spec: WidgetSpec) {
           record.widget === spec.name &&
           record.version === spec.version &&
           (toolCallId === undefined || record.toolCallId === toolCallId) &&
-          acceptWidgetAnswer(spec, record.toolCallId, record.answer).ok;
+          // WID-3: answers that must fit the card (e.g. one of the offered options) are checked
+          // against the call's own args, which Mastra passes again on resume.
+          acceptWidgetAnswer(spec, record.toolCallId, record.answer, undefined, widgetPropsFromArgs(input)).ok;
         if (!ok) return { isError: true, content: 'The widget answer was not valid.' };
         recordAnswerSpan(ctx, record);
         return widgetAnswerToolResult(record);
