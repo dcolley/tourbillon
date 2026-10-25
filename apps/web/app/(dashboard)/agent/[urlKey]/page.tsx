@@ -39,6 +39,7 @@ import { AgentCloneForm } from './agent-clone-form';
 import { AgentOmSettingsForm } from './agent-om-settings-form';
 import { AgentSecretsForm } from './agent-secrets-form';
 import { ChatPageContext } from '@/components/chat/chat-page-context';
+import { OpenInChatButton } from '@/components/chat/open-in-chat-button';
 
 async function updateHeartbeatConfig(
   _prev: ActionResult | null,
@@ -615,6 +616,13 @@ export default async function AgentDetailPage({
             </div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
+            <OpenInChatButton
+              agentUrlKey={agent.urlKey}
+              agentName={agent.name}
+              contextType="agent"
+              contextId={agent.id}
+              contextTitle={agent.name}
+            />
             {canToggleAgentChip(agent.status) ? (
               <AgentActiveChip
                 agentId={agent.id}

@@ -19,6 +19,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { getCompanyById } from '@/lib/company';
 import { STICKY_TOOLBAR_ROOT_ATTR } from '@/lib/sticky-toolbar';
 import { ChatPageContext } from '@/components/chat/chat-page-context';
+import { OpenInChatButton } from '@/components/chat/open-in-chat-button';
 
 export default async function IssueDetailPage({
   params,
@@ -99,11 +100,19 @@ export default async function IssueDetailPage({
             </p>
           )}
           {assignee && (
-            <p>
+            <p className="flex flex-wrap items-center gap-x-1 gap-y-2">
               Assigned to{' '}
               <Link href={`/agent/${assignee.urlKey}`} className="text-foreground hover:underline">
                 {assignee.name}
               </Link>
+              <OpenInChatButton
+                className="ml-2"
+                agentUrlKey={assignee.urlKey}
+                agentName={assignee.name}
+                contextType="issue"
+                contextId={issue.id}
+                contextTitle={issue.title}
+              />
             </p>
           )}
         </div>
