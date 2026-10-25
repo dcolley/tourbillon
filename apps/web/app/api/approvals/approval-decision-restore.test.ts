@@ -2,6 +2,7 @@
  * APR-FIX: route-level tests for what an approval decision does to its linked issues.
  * Covers create → Board decide, HITLy resume and MCP `decide_approval` (through the MCP route) with an
  * in-memory db, including concurrent decisions on one approval.
+ * WID-2: the chat approval card route, and answers sent from the card through the Board decide route.
  */
 import { describe, it, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -233,6 +234,8 @@ describe('APR-FIX approval decision restore (routes)', () => {
     routes.mcp = await import('../mcp/route');
     routes.get = await import('../companies/[companyId]/approvals/[approvalId]/route');
     routes.open = await import('../../o/[token]/route');
+    routes.card = await import('./[approvalId]/card/route');
+    libs.cardView = await import('../../../lib/approval-card-view');
     libs.expiry = await import('../../../lib/approval-expiry');
     libs.host = await import('../../../lib/hitl-host');
   });
@@ -1014,6 +1017,196 @@ describe('APR-FIX approval decision restore (routes)', () => {
           Object.assign(console, saved);
         }
       });
+    });
+
+    // ---- WID-2: the chat approval card ---------------------------------------------------------
+    describe('WID-2 approval card (chat widget)', () => {
+      const cardReq = (id: string, headers: Record<string, string> = {}) =>
+        routes.card.GET(new NextRequest(`http://localhost/api/approvals/${id}/card`, { headers: { host: 'localhost:3001', ...headers } }), ctx({ approvalId: id }));
+      async function getCard(id: string, headers: Record<string, string> = {}) {
+        const res = await cardReq(id, headers);
+        return { res, body: (await res.json()) as Record<string, any> };
+      }
+      /** Answer from the card: the body the widget builds, sent like the widget sends it. */
+      async function cardDecide(id: string, input: Row) {
+        const { body: card } = await getCard(id);
+        const built = libs.cardView.approvalCardDecisionBody(card, input);
+        assert.ok(built.ok, JSON.stringify(built));
+        return decideJson(id, built.body);
+      }
+      const formDecide = (id: string, fields: Record<string, string>) => {
+        const form = new FormData();
+        for (const [k, v] of Object.entries(fields)) form.set(k, v);
+        form.set('returnTo', `/approval/${id}`);
+        return routes.decide.POST(
+          new NextRequest(`http://localhost/api/approvals/${id}/decide`, { method: 'POST', headers: { accept: 'text/html', host: 'localhost:3001' }, body: form }),
+          ctx({ approvalId: id }),
+        );
+      };
+      const presented = (id: string) => store.hitlEvents.filter((e) => e.approvalId === id && e.type === 'presented');
+
+      it('renders from the hitl request: question, options, recommended, default, reasons, items by label, deadline', async () => {
+        const deadline = inAnHour();
+        const id = await createHitl(single({ default: 'evri', reasonRequired: ['evri'], deadline, risk: { level: 'medium', reversible: true } }));
+        const { res, body } = await getCard(id);
+        assert.equal(res.status, 200);
+        assert.equal(res.headers.get('cache-control'), 'no-store');
+        assert.equal(body.id, id);
+        assert.equal(body.status, 'pending');
+        assert.equal(body.typed, true);
+        assert.equal(body.title, 'Which carrier should ship the replacement?');
+        assert.equal(body.answerType, 'single');
+        assert.deepEqual(body.options.map((o: Row) => o.value), ['dpd', 'evri']);
+        assert.deepEqual(body.recommended, { value: 'dpd', reason: 'Fastest.' });
+        assert.equal(body.default, 'evri');
+        assert.deepEqual(body.reasonRequired, ['evri']);
+        assert.deepEqual(body.risk, { level: 'medium', reversible: true });
+        assert.equal(body.deadline, new Date(deadline).toISOString());
+        assert.equal(body.requestedBy, 'CEO');
+        assert.equal(body.detailsPath, `/approval/${id}`);
+        assert.ok(!('payload' in body) && !('response' in body));
+      });
+
+      it('records presented once; a prefetch records nothing', async () => {
+        const id = await createHitl(binary());
+        await getCard(id, { 'sec-purpose': 'prefetch' });
+        await getCard(id, { purpose: 'prefetch' });
+        assert.equal(presented(id).length, 0);
+        await getCard(id);
+        await getCard(id);
+        assert.equal(presented(id).length, 1);
+        assert.ok(approvalRow(id).presentedAt instanceof Date);
+      });
+
+      it('no link URL, link token or HITLy resume token in the card', async () => {
+        const id = await createHitl(withLink());
+        approvalRow(id).payload = { ...(approvalRow(id).payload as Row), hitlyResumeToken: 'RESUME-SECRET-123' };
+        const token = (await libs.host.linkTokenFor({ companyId: 'company-a', approvalId: id, itemRef: 'lnk_terms' })) as string;
+        const text = await (await cardReq(id)).text();
+        assert.doesNotMatch(text, /RESUME-SECRET-123/);
+        assert.ok(!text.includes(token));
+        assert.doesNotMatch(text, /suppliers\.example\.com|\/o\//);
+        const body = JSON.parse(text) as Row;
+        assert.deepEqual(body.items, [{ ref: 'lnk_terms', kind: 'link', label: 'Terms', mustOpen: true, opened: false }]);
+        assert.equal(body.context, 'Renewal is up 6%.');
+      });
+
+      it('another company approval: card 404, nothing recorded; the route uses the Board guard', async () => {
+        store.approvals.push({ id: 'b-1', companyId: 'company-b', status: 'pending', type: 'request_board_approval', requestedByAgentId: 'agent-other', issueIds: [], payload: { title: 'B secret' }, hitlRequest: null, createdAt: new Date() });
+        const res = await cardReq('b-1');
+        assert.equal(res.status, 404);
+        assert.doesNotMatch(await res.text(), /B secret/);
+        assert.equal(store.hitlEvents.length, 0);
+        assert.equal(approvalRow('b-1').presentedAt, undefined);
+        assert.equal((await getCard('nope')).res.status, 404);
+        // Agent tokens are refused (403) by requireBoardCompany, the same guard as the decide route.
+        const src = readFileSync(join(__dirname, '[approvalId]/card/route.ts'), 'utf8');
+        assert.match(src, /const auth = await requireBoardCompany\(req\);\s*if \(!auth\.ok\) return auth\.response;/);
+        assert.match(src, /loadApprovalCard\(company\.id, approvalId/);
+      });
+
+      it('decide from the card: same route and claim as /approval (Board decider, comment, wake), then the card shows it', async () => {
+        addIssue({ id: 'i1', identifier: 'TB-1', status: 'todo', assigneeAgentId: 'agent-dev' });
+        const id = await createHitl(single(), ['i1']);
+        const res = await cardDecide(id, { value: 'evri' });
+        assert.equal(res.status, 200);
+        const row = approvalRow(id);
+        assert.equal(row.status, 'answered');
+        assert.deepEqual((row.hitlResponse as Row).decidedBy, { kind: 'group', id: 'board', display: 'Board' });
+        assert.equal(store.hitlEvents.filter((e) => e.approvalId === id && e.type === 'decided').length, 1);
+        assert.equal(comments.length, 1);
+        assert.deepEqual(wakes.map((w) => [w.agentId, w.status]).sort(), [['agent-dev', 'answered'], ['agent-req', 'answered']]);
+        const { body } = await getCard(id);
+        assert.equal(body.status, 'answered');
+        assert.deepEqual(body.response, { status: 'answered', answer: 'Evri', decidedBy: 'Board', ...(body.response.decidedAt ? { decidedAt: body.response.decidedAt } : {}) });
+        // A second answer from the card (stale tab) is refused and changes nothing.
+        const again = await decideJson(id, { status: 'answered', value: 'dpd' });
+        assert.equal(again.status, 409);
+        assert.equal(libs.cardView.approvalCardErrorText(409, await again.json()), 'This approval was already decided.');
+        assert.equal(comments.length, 1);
+      });
+
+      it('binary reject from the card needs the reason; with it, rejected', async () => {
+        const id = await createHitl(binary());
+        const bad = await cardDecide(id, { value: 'reject' });
+        assert.equal(bad.status, 422);
+        assert.match(libs.cardView.approvalCardErrorText(422, await bad.json()), /reason is required/);
+        assert.equal((await cardDecide(id, { value: 'reject', reason: 'Not this quarter' })).status, 200);
+        assert.equal(approvalRow(id).status, 'rejected');
+      });
+
+      it('secret: the card refuses an answer before sending, the route refuses it too; decline works', async () => {
+        const id = await createHitl({
+          spec: 'hitl/request/v0',
+          question: 'What is the API key for the billing sandbox?',
+          answerType: 'secret',
+          encryption: { publicKey: 'aUe06yud5-sO8Pp2F300oD5PJQpZE_muFRiArmDNsi8', alg: 'HPKE-X25519-SHA256-AES128GCM' },
+          requester: { agentId: 'agent-req' },
+        });
+        const { body: c } = await getCard(id);
+        assert.equal(c.answerType, 'secret');
+        assert.deepEqual(c.reasonRequired, []);
+        assert.equal(libs.cardView.approvalCardDecisionBody(c, { value: 'k' }).ok, false);
+        assert.equal((await decideJson(id, { status: 'answered', value: 'k' })).status, 422);
+        assert.equal((await cardDecide(id, { decline: true })).status, 200);
+        const { body: after } = await getCard(id);
+        assert.equal(after.response.status, 'declined');
+        assert.ok(!('answer' in after.response));
+      });
+
+      it('mustOpen: the card answer is refused until the item is opened (on the approval page), then accepted', async () => {
+        const id = await createHitl(withLink());
+        const bad = await cardDecide(id, { value: 'approve' });
+        assert.equal(bad.status, 422);
+        assert.match(libs.cardView.approvalCardErrorText(422, await bad.json()), /"Terms" must be opened before answering/);
+        const token = (await libs.host.linkTokenFor({ companyId: 'company-a', approvalId: id, itemRef: 'lnk_terms' })) as string;
+        await routes.open.GET(openReq(token), ctx({ token }));
+        assert.equal((await getCard(id)).body.items[0].opened, true);
+        assert.equal((await cardDecide(id, { value: 'approve' })).status, 200);
+      });
+
+      it('past deadline: the card shows expired (lazy expiry) and an answer gets 409 Expired', async () => {
+        const id = await createHitl(binary({ deadline: inAnHour() }));
+        approvalRow(id).deadline = new Date(Date.now() - 1000);
+        const { body } = await getCard(id);
+        assert.equal(body.status, 'expired');
+        assert.equal(body.response.status, 'expired');
+        const res = await decideJson(id, { decision: 'approved' });
+        assert.equal(res.status, 409);
+        assert.equal(libs.cardView.approvalCardErrorText(409, await res.json()), 'This request expired before a decision.');
+      });
+
+      for (const order of ['card first', 'page first'] as const) {
+        it(`race: card answer vs /approval form answer (${order}): one winner, one comment, one wake each`, async () => {
+          addIssue({ id: 'i1', identifier: 'TB-1', status: 'blocked', assigneeAgentId: 'agent-dev' });
+          const id = await createHitl(single(), ['i1']);
+          const { body: c } = await getCard(id);
+          const built = libs.cardView.approvalCardDecisionBody(c, { value: 'evri' });
+          const fromCard = () => decideJson(id, built.body);
+          const fromPage = () => formDecide(id, { status: 'answered', value: 'dpd' });
+          raceGate.n = 2;
+          const [cardRes, pageRes] = order === 'card first'
+            ? await Promise.all([fromCard(), fromPage()])
+            : ((await Promise.all([fromPage(), fromCard()])).reverse() as [Response, Response]);
+          const cardWon = cardRes.status === 200;
+          const pageLoc = new URL(pageRes.headers.get('location')!);
+          assert.equal(pageRes.status, 303);
+          const pageWon = !pageLoc.searchParams.get('decideError');
+          assert.equal(Number(cardWon) + Number(pageWon), 1, `one winner (card ${cardRes.status}, page ${pageLoc.search})`);
+          if (!cardWon) {
+            assert.equal(cardRes.status, 409);
+            assert.deepEqual(await cardRes.json(), { error: 'Already decided' });
+          } else assert.equal(pageLoc.searchParams.get('decideError'), 'This approval was already decided.');
+          const row = approvalRow(id);
+          assert.equal(row.status, 'answered');
+          assert.equal((row.hitlResponse as Row).value, cardWon ? 'evri' : 'dpd');
+          assert.equal(comments.length, 1);
+          assert.equal(store.hitlEvents.filter((e) => e.approvalId === id && e.type === 'decided').length, 1);
+          assert.deepEqual(wakes.map((w) => w.agentId).sort(), ['agent-dev', 'agent-req']);
+          // Both surfaces now show the same decision.
+          assert.equal((await getCard(id)).body.response.answer, cardWon ? 'Evri' : 'DPD next day');
+        });
+      }
     });
   });
 });
