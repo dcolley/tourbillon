@@ -42,6 +42,13 @@ import { buildChatWorkspace } from './execution-workspace';
 import { getInternalApiUrl } from './tools/api-client';
 import { requestScopedTools } from './tools/widget-tools';
 import { requireDatabaseUrl } from '@tourbillon/db/database-url';
+import {
+  ChatProviderUnavailableError,
+  chatEffectiveRecord,
+  chatModelOverrideKey,
+  chatModelSource,
+  type ChatModelOverrideOptions,
+} from './chat-model-override';
 
 const CHAT_IDENTITY_CHAR_LIMIT = 2000;
 
@@ -93,6 +100,7 @@ export function buildChatResourceId(
   return `company-${companyId}:chat:${type}:${id}`;
 }
 
+/** `modelId` is the override key part: a model id, or `chatModelOverrideKey(...)` for a CHAT-5 thread choice. */
 export function buildChatControllerId(agentId: string, modelId?: string): string {
   const modelKey = modelId?.trim();
   return modelKey
@@ -175,12 +183,10 @@ function assembleChatSystemPrompt(
  */
 export async function createChatAgentWithSkills(
   agentRecord: AgentRecord,
-  options?: AssembleAgentToolsOptions & { modelIdOverride?: string },
+  options?: AssembleAgentToolsOptions & ChatModelOverrideOptions,
 ): Promise<Agent> {
-  const effectiveRecord =
-    options?.modelIdOverride && options.modelIdOverride !== agentRecord.modelId
-      ? { ...agentRecord, modelId: options.modelIdOverride }
-      : agentRecord;
+  // CHAT-5: a thread may pick another model, provider and effort than the agent's.
+  const effectiveRecord = chatEffectiveRecord(agentRecord, options);
   const tools = await assembleAgentTools(effectiveRecord, options);
   const prepared = await prepareAgentSkills(effectiveRecord, { mode: 'chat' });
   const toolIds = Object.values(tools)
@@ -192,15 +198,20 @@ export async function createChatAgentWithSkills(
     .filter((id): id is string => Boolean(id));
   const systemPrompt = assembleChatSystemPrompt(effectiveRecord, prepared, toolIds);
 
+  const modelSource = chatModelSource(effectiveRecord, options);
   const providerOverrides = modelProviderOverridesFromAgent(
-    effectiveRecord.adapterType,
-    effectiveRecord.adapterConfig,
+    modelSource.adapterType,
+    modelSource.adapterConfig,
   );
   // PRV-1: honour the company's provider switches; one activity warning per chat agent build.
-  const { row: providerRow } = await resolveAgentProviderRow(effectiveRecord, {
+  // CHAT-5: a provider the thread picked is used only while it is on for the company (no fallback).
+  const { row: providerRow, fallbackFrom } = await resolveAgentProviderRow(effectiveRecord, {
     context: 'chat',
-    recordWarning: true,
+    recordWarning: !options?.providerIdOverride,
   });
+  if (options?.providerIdOverride && (!providerRow || fallbackFrom || providerRow.id !== options.providerIdOverride)) {
+    throw new ChatProviderUnavailableError();
+  }
   const providerRecord = providerRow ? llmProviderRowToRecord(providerRow) : null;
   const providerConfig = resolveModelProviderConfig(
     providerOverrides,
@@ -208,6 +219,7 @@ export async function createChatAgentWithSkills(
     providerRecord,
   );
   const generationOptions = resolveAgentGenerationOptions(effectiveRecord, providerRecord);
+  if (options?.reasoningLevelOverride) generationOptions.reasoning = options.reasoningLevelOverride;
   const contextBudget = resolveAgentContextBudget(effectiveRecord, providerRecord, 'chat');
 
   // Same Responses-API history sanitization as heartbeats (reasoning + tool-loop monologue).
@@ -223,6 +235,9 @@ export async function createChatAgentWithSkills(
       urlKey: effectiveRecord.urlKey,
       modelId: effectiveRecord.modelId,
       provider: providerConfig.provider,
+      ...(options?.providerIdOverride || options?.reasoningLevelOverride
+        ? { modelSource: 'thread', ...(options.reasoningLevelOverride ? { reasoning: options.reasoningLevelOverride } : {}) }
+        : {}),
       apiMode: chatApiMode,
       providerApiMode: providerConfig.apiMode,
       apiBase: getInternalApiUrl(),
@@ -236,7 +251,7 @@ export async function createChatAgentWithSkills(
     id: `${effectiveRecord.id}-chat`,
     name: `${effectiveRecord.name} (chat)`,
     instructions: systemPrompt,
-    model: getLanguageModelForAgent(effectiveRecord, providerRecord, {
+    model: getLanguageModelForAgent(modelSource, providerRecord, {
       apiModeOverride: chatApiMode,
     }),
     tools: tools as never,
@@ -268,12 +283,13 @@ export function getChatThreadStorageForTests(): PostgresStore {
  */
 export async function createChatController(
   agentRecord: AgentRecord,
-  options?: AssembleAgentToolsOptions & {
-    companySettings?: CompanySettings | null;
-    modelIdOverride?: string;
-  },
+  options?: AssembleAgentToolsOptions &
+    ChatModelOverrideOptions & {
+      companySettings?: CompanySettings | null;
+    },
 ): Promise<AgentController<ChatControllerState>> {
   const agent = await createChatAgentWithSkills(agentRecord, options);
+  const effectiveRecord = chatEffectiveRecord(agentRecord, options);
   const modes: AgentControllerMode[] = [
     {
       id: 'chat',
@@ -293,14 +309,14 @@ export async function createChatController(
     agentRecord.runtimeConfig as AgentRuntimeConfig,
   );
   const memory = await getAgentMemory(options?.companySettings ?? null, agentRecord.runtimeConfig as AgentRuntimeConfig);
-  const { row: providerRow } = await resolveAgentProviderRow(agentRecord, { context: 'chat' });
+  const { row: providerRow } = await resolveAgentProviderRow(effectiveRecord, { context: 'chat' });
   const providerRecord = providerRow ? llmProviderRowToRecord(providerRow) : null;
-  const contextBudget = resolveAgentContextBudget(agentRecord, providerRecord, 'chat');
+  const contextBudget = resolveAgentContextBudget(effectiveRecord, providerRecord, 'chat');
 
   // Session always requires a Workspace instance (Mastra AgentController contract).
   // Chat uses a tools-disabled workspace so sandbox schemas do not inflate context.
   return new AgentControllerClass<ChatControllerState>({
-    id: buildChatControllerId(agentRecord.id, options?.modelIdOverride),
+    id: buildChatControllerId(agentRecord.id, chatModelOverrideKey(options)),
     resourceId: buildChatResourceId(agentRecord.companyId, { contextType: 'free' }),
     storage: getChatThreadStorage(),
     memory,

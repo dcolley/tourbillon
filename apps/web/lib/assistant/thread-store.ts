@@ -1,6 +1,7 @@
 import { db } from '@tourbillon/db';
 import { sql } from 'drizzle-orm';
 import { ASSISTANT_MAX_PINS_PER_AGENT, ASSISTANT_THREAD_READ_MESSAGE_KEY } from './sidebar';
+import { ASSISTANT_THREAD_MODEL_KEY, type ThreadModelChoice } from './thread-model';
 
 /**
  * UI-2: single-statement writes for assistant threads.
@@ -10,6 +11,7 @@ import { ASSISTANT_MAX_PINS_PER_AGENT, ASSISTANT_THREAD_READ_MESSAGE_KEY } from 
  * merge and write back a stale copy of the thread:
  * - rename updates only the `title` column of Mastra's thread row;
  * - mark-read sets one metadata key in place (`jsonb_set`);
+ * - CHAT-5 model choice sets or removes one metadata key in place (`jsonb_set` / `-`);
  * - pins are rows in `assistant_thread_pins` (insert / delete), not thread metadata.
  *
  * Mastra's Postgres store keeps threads in `mastra_threads` (default schema) in the same
@@ -49,6 +51,22 @@ export async function markAssistantThreadReadRow(scope: ThreadScope, messageId: 
   const rows = await db.execute(
     sql`UPDATE ${threads} SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), ${path}::text[], to_jsonb(${messageId}::text), true) WHERE ${scoped(scope)} RETURNING id`,
   );
+  return rows.length > 0;
+}
+
+/**
+ * CHAT-5: set (or, with null, clear) the thread's model choice. Returns false when no thread
+ * matched the scope.
+ */
+export async function setAssistantThreadModelRow(scope: ThreadScope, choice: ThreadModelChoice | null): Promise<boolean> {
+  const path = `{${ASSISTANT_THREAD_MODEL_KEY}}`;
+  const rows = choice
+    ? await db.execute(
+        sql`UPDATE ${threads} SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), ${path}::text[], ${JSON.stringify(choice)}::jsonb, true) WHERE ${scoped(scope)} RETURNING id`,
+      )
+    : await db.execute(
+        sql`UPDATE ${threads} SET metadata = COALESCE(metadata, '{}'::jsonb) - ${ASSISTANT_THREAD_MODEL_KEY}::text WHERE ${scoped(scope)} RETURNING id`,
+      );
   return rows.length > 0;
 }
 

@@ -20,7 +20,8 @@
  * - `approvalWhere`: extra conditions ANDed into the claim (e.g. a resume-token check).
  * - `approvalSet`: extra columns written by the claim (e.g. clearing a one-time token).
  */
-import { db, approvals, type Approval, type NewApproval } from '@tourbillon/db';
+import { db, approvals, activityLog, type Approval, type NewApproval } from '@tourbillon/db';
+import { approvalTitleOf, newActivityCorrelationId } from './activity-correlation';
 import { and, eq, gt, isNull, or, type SQL } from 'drizzle-orm';
 import type { ApprovalOutcomeStatus } from '@tourbillon/shared';
 import type { HitlDecidedBy, HitlResponse } from '@tourbillon/shared/hitl';
@@ -97,6 +98,8 @@ export async function applyApprovalDecision(input: ApplyApprovalDecisionInput): 
   const outcome: ApprovalOutcomeStatus = input.outcome ?? input.decision ?? 'rejected';
   const decision: ApprovalDecision = input.decision ?? restoreEffectOf(outcome);
   const closesOnDeadline = outcome === 'expired' || outcome === 'cancelled';
+  // ACT-1: every activity row this decision writes (decision, restores, comments, wakes) shares it.
+  const correlationId = newActivityCorrelationId();
   const claimed = await db.transaction(async (tx) => {
     const now = new Date();
     const [row] = await tx
@@ -160,6 +163,36 @@ export async function applyApprovalDecision(input: ApplyApprovalDecisionInput): 
       issueIds: row.issueIds ?? [],
       note: input.note,
       activityActor: input.actor,
+      correlationId,
+    });
+
+    // ACT-1: the decision itself, on the approval's own activity (written by the winner only).
+    const reason = input.hitl ? input.hitl.reason : input.note;
+    // Same masked text the issue comments use (a secret answer is never written).
+    const answer = answerTextForComment(response, answerTypeOf(row));
+    await tx.insert(activityLog).values({
+      companyId: input.companyId,
+      actorType: input.actor.actorType ?? 'system',
+      actorId: input.actor.actorId,
+      actorName: input.actor.actorName,
+      action: 'approval.decided',
+      entityType: 'approval',
+      entityId: input.approvalId,
+      details: {
+        title: approvalTitleOf(row),
+        type: row.type,
+        status: outcome,
+        decision,
+        ...(reason ? { reason } : {}),
+        ...(input.note && input.note !== reason ? { note: input.note } : {}),
+        ...(answer ? { answer } : {}),
+        source: input.source,
+        decidedBy: input.decidedByUserId ?? input.hitl?.decidedBy?.id ?? input.actor.actorId,
+        // Only this company's linked issues (the restore never reads another company's).
+        issueIds: outcomes.map((o) => o.issueId),
+        changes: { status: { from: 'pending', to: outcome } },
+      },
+      correlationId,
     });
     return { row: { ...(row as Approval), hitlResponse: response } as Approval, outcomes, response };
   });
@@ -191,6 +224,8 @@ export async function applyApprovalDecision(input: ApplyApprovalDecisionInput): 
           note: input.note,
           outcome,
         }),
+        undefined,
+        { correlationId },
       );
     } catch (err) {
       console.error(`${input.logPrefix} failed to comment on issue`, outcome.issueId, err);
@@ -210,6 +245,7 @@ export async function applyApprovalDecision(input: ApplyApprovalDecisionInput): 
     outcomes,
     actor: input.actor,
     logPrefix: input.logPrefix,
+    correlationId,
   });
 
   return { applied: true, approval: row, response, outcomes, wakes };
