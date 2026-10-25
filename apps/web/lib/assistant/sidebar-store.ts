@@ -131,6 +131,11 @@ export interface AssistantSidebarStoreOptions {
   api: AssistantSidebarApi;
   /** Parallel thread-list requests while loading every agent's threads. */
   concurrency?: number;
+  /**
+   * Load each agent's thread list after the agents (default true). ASYNC-0 (Slice A): the assistant
+   * sidebar passes false; it shows agents only (one conversation per agent).
+   */
+  threadLists?: boolean;
 }
 
 export class AssistantSidebarStore {
@@ -141,10 +146,12 @@ export class AssistantSidebarStore {
   private loadToken = 0;
   private readonly api: AssistantSidebarApi;
   private readonly concurrency: number;
+  private readonly threadLists: boolean;
 
   constructor(opts: AssistantSidebarStoreOptions) {
     this.api = opts.api;
     this.concurrency = Math.max(1, opts.concurrency ?? 3);
+    this.threadLists = opts.threadLists ?? true;
   }
 
   getState = (): AssistantSidebarState => this.state;
@@ -223,6 +230,7 @@ export class AssistantSidebarStore {
       if (live()) this.update((s) => ({ ...s, phase: 'error', loadError: errorMessage(err, 'Could not load agents') }));
       return;
     }
+    if (!this.threadLists) return;
     const queue = [...agents];
     const worker = async () => {
       for (let a = queue.shift(); a && live(); a = queue.shift()) await this.loadThreads(a.id);

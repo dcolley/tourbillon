@@ -114,8 +114,10 @@ async function visit(page: PageMod, props: { params?: Record<string, string>; se
 describe('UI-2b assistant routes (pure)', () => {
   it('canonical path renders; agent id or query form redirects to the url-key path', () => {
     const agent = { id: CEO.id, urlKey: 'ceo' };
-    assert.deepEqual(decideAssistantRoute({ agent, requestedKey: 'ceo', threadId: 't1', via: 'path' }), { kind: 'render', agent, threadId: 't1' });
-    assert.deepEqual(decideAssistantRoute({ agent, requestedKey: CEO.id, threadId: 't1', via: 'path' }), { kind: 'redirect', location: '/assistant/ceo/t1' });
+    assert.deepEqual(decideAssistantRoute({ agent, requestedKey: 'ceo', threadId: null, via: 'path' }), { kind: 'render', agent, threadId: null });
+    // ASYNC-0: one conversation per agent; a thread link redirects to the agent path.
+    assert.deepEqual(decideAssistantRoute({ agent, requestedKey: 'ceo', threadId: 't1', via: 'path' }), { kind: 'redirect', location: '/assistant/ceo' });
+    assert.deepEqual(decideAssistantRoute({ agent, requestedKey: CEO.id, threadId: 't1', via: 'path' }), { kind: 'redirect', location: '/assistant/ceo' });
     assert.deepEqual(decideAssistantRoute({ agent, requestedKey: 'ceo', threadId: null, via: 'query' }), { kind: 'redirect', location: '/assistant/ceo' });
     assert.deepEqual(decideAssistantRoute({ agent: null, requestedKey: 'x', threadId: null, via: 'path' }), { kind: 'not-found' });
     assert.deepEqual(decideAssistantRoute({ agent, requestedKey: 'ceo', threadId: null, via: 'query', badThread: true }), { kind: 'not-found' });
@@ -157,25 +159,25 @@ describe('UI-2b assistant route pages', () => {
     assert.deepEqual(queries[0].params, ['company-a', 'ceo', 'ceo']);
   });
 
-  it('slug + thread path renders the view', async () => {
-    assert.equal(await visit(threadPage, { params: { agent: 'ceo', threadId: 'thread-1' } }), 'render');
+  it('ASYNC-0: slug + thread path redirects to the agent path (one conversation per agent)', async () => {
+    assert.equal(await visit(threadPage, { params: { agent: 'ceo', threadId: 'thread-1' } }), 'redirect /assistant/ceo');
   });
 
-  it('query links redirect to the slug path, keeping the thread (by url key or agent id)', async () => {
-    assert.equal(await visit(rootPage, { searchParams: { agent: 'ceo', thread: 'thread-1' } }), 'redirect /assistant/ceo/thread-1');
-    assert.equal(await visit(rootPage, { searchParams: { agent: CEO.id, thread: 'thread-1' } }), 'redirect /assistant/ceo/thread-1');
+  it('query links redirect to the slug path without the thread (by url key or agent id)', async () => {
+    assert.equal(await visit(rootPage, { searchParams: { agent: 'ceo', thread: 'thread-1' } }), 'redirect /assistant/ceo');
+    assert.equal(await visit(rootPage, { searchParams: { agent: CEO.id, thread: 'thread-1' } }), 'redirect /assistant/ceo');
     assert.equal(await visit(rootPage, { searchParams: { agent: 'ceo' } }), 'redirect /assistant/ceo');
-    // The thread is encoded into one path segment; the target is always a same-origin /assistant path.
-    assert.equal(await visit(rootPage, { searchParams: { agent: 'ceo', thread: '..x?y#z' } }), 'redirect /assistant/ceo/..x%3Fy%23z');
+    // The target is always a same-origin /assistant path.
+    assert.equal(await visit(rootPage, { searchParams: { agent: 'ceo', thread: '..x?y#z' } }), 'redirect /assistant/ceo');
     assert.equal(await visit(rootPage, { searchParams: { agent: 'ceo', thread: '../x' } }), 'not-found', 'no slashes in a thread id');
     assert.equal(await visit(rootPage, { searchParams: { agent: 'ceo', thread: '//evil.example' } }), 'not-found');
     assert.equal(await visit(rootPage, { searchParams: { agent: 'https://evil.example' } }), 'not-found');
     assert.equal(await visit(rootPage, {}), 'render', 'plain /assistant');
   });
 
-  it('agent-id (UUID) paths redirect to the slug path, keeping the thread', async () => {
+  it('agent-id (UUID) paths redirect to the slug path', async () => {
     assert.equal(await visit(agentPage, { params: { agent: CEO.id } }), 'redirect /assistant/ceo');
-    assert.equal(await visit(threadPage, { params: { agent: CEO.id, threadId: 'thread-1' } }), 'redirect /assistant/ceo/thread-1');
+    assert.equal(await visit(threadPage, { params: { agent: CEO.id, threadId: 'thread-1' } }), 'redirect /assistant/ceo');
   });
 
   it("another company's agent (by slug or id) gets the same not-found as a missing agent, and the lookup never leaves the company", async () => {
@@ -206,7 +208,7 @@ describe('UI-2b assistant route pages', () => {
     row.name = 'Chief Executive Officer';
     try {
       assert.equal(await visit(agentPage, { params: { agent: 'ceo' } }), 'render');
-      assert.equal(await visit(rootPage, { searchParams: { agent: 'ceo', thread: 't1' } }), 'redirect /assistant/ceo/t1');
+      assert.equal(await visit(rootPage, { searchParams: { agent: 'ceo', thread: 't1' } }), 'redirect /assistant/ceo');
     } finally {
       row.name = original;
     }

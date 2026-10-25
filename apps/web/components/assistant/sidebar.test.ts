@@ -1,14 +1,14 @@
 /**
- * UI-2b: assistant sidebar rendering — sections and grouping, status badges, unread marker,
- * search results, pin cap, rename form, loading / error / empty states, and the controls'
- * handlers. The repo has no DOM test library, so this renders with react-dom/server and walks
+ * UI-2b: assistant sidebar rendering — sections and grouping, status badges, loading / error /
+ * empty states, and the controls' handlers. ASYNC-0 (Slice A): agents only — no thread trees,
+ * New chat, rename, pin, Pinned / Recent threads or thread search. The repo has no DOM test library, so this renders with react-dom/server and walks
  * the element tree to reach the controls.
  */
 import { describe, it, before } from 'node:test';
 import assert from 'node:assert/strict';
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { ASSISTANT_MAX_PINS_PER_AGENT, type AssistantAgent, type AssistantThread } from '@/lib/assistant/sidebar';
+import type { AssistantAgent, AssistantThread } from '@/lib/assistant/sidebar';
 import { initialSidebarState, type AssistantSidebarState } from '@/lib/assistant/sidebar-store';
 
 type SidebarMod = typeof import('./sidebar');
@@ -79,22 +79,9 @@ function viewProps(state: AssistantSidebarState, over: Record<string, unknown> =
   const props = {
     state,
     currentAgentKey: null as string | null,
-    currentThreadId: null as string | null,
-    expanded: new Set<string>(),
-    editing: null,
-    onSearch: rec('search'),
     onSelectAgent: rec('select'),
-    onToggleAgent: rec('toggle'),
-    onNewThread: rec('new'),
-    onRetryThreads: rec('retryThreads'),
     onRetry: rec('retry'),
     onDismissNotice: rec('dismiss'),
-    onOpenThread: rec('open'),
-    onPin: rec('pin'),
-    onStartRename: rec('startRename'),
-    onRenameDraft: rec('draft'),
-    onRenameSubmit: rec('submit'),
-    onRenameCancel: rec('cancel'),
     ...over,
   };
   return { props, calls };
@@ -131,18 +118,6 @@ const byLabel = (label: string) => (p: Record<string, unknown>) => p['aria-label
 /** Clickable control by its text (containers whose only text is the control's are skipped). */
 const byText = (text: string) => (p: Record<string, unknown>) =>
   typeof p.onClick === 'function' && textOf(p.children as React.ReactNode).trim() === text;
-/** Only controls inside the element matching `scope`. */
-function controlIn(
-  props: ReturnType<typeof viewProps>['props'],
-  scope: (p: Record<string, unknown>) => boolean,
-  match: (p: Record<string, unknown>) => boolean,
-) {
-  const box = walk(React.createElement(AssistantSidebarView, props as never)).find((e) => scope(e.props as Record<string, unknown>));
-  assert.ok(box, 'scope not found');
-  const hit = walk((box.props as { children?: React.ReactNode }).children).find((e) => match(e.props as Record<string, unknown>));
-  assert.ok(hit, 'control not found in scope');
-  return hit.props as Record<string, (...a: unknown[]) => void> & Record<string, unknown>;
-}
 const click = () => {
   const e = { button: 0, metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, prevented: false, preventDefault() {
     this.prevented = true;
@@ -151,21 +126,23 @@ const click = () => {
 };
 
 describe('UI-2b assistant sidebar view', () => {
-  it('sections: Pinned threads, My agents, Teams by role, Recent threads', () => {
-    const out = html(viewProps(baseState()).props);
-    const order = ['data-section="pinned"', 'data-section="my-agents"', 'data-section="teams"', 'data-section="recent"'].map((s) => out.indexOf(s));
+  it('sections: My agents and Teams by role; ASYNC-0: no Pinned / Recent threads or thread trees', () => {
+    const out = html(viewProps(baseState(), { currentAgentKey: 'ceo-key' }).props);
+    const order = ['data-section="my-agents"', 'data-section="teams"'].map((s) => out.indexOf(s));
     assert.ok(order.every((i) => i >= 0), out);
-    assert.deepEqual([...order].sort((a, b) => a - b), order);
+    assert.ok(order[0] < order[1]);
     assert.ok(out.indexOf('data-team="designer"') < out.indexOf('data-team="engineer"'));
-    assert.match(out, /data-agent="ceo-key"/);
-    // Pinned section lists the pinned thread with its agent
-    const pinned = out.slice(out.indexOf('data-section="pinned"'), out.indexOf('data-section="my-agents"'));
-    assert.match(pinned, /Quarterly plan/);
-    assert.match(pinned, /Chief Exec/);
-    assert.doesNotMatch(pinned, /Fix login/);
-    // Recent threads, newest first
-    const recent = out.slice(out.indexOf('data-section="recent"'));
-    assert.ok(recent.indexOf('Fix login') < recent.indexOf('Thread t2'));
+    assert.match(out, /data-agent="ceo-key" data-current="true"/);
+    // Threads exist in the state, but none are shown.
+    assert.doesNotMatch(out, /data-section="pinned"|data-section="recent"|data-agent-threads|data-thread=/);
+    assert.doesNotMatch(out, /Quarterly plan|Fix login|Thread t2/);
+    assert.doesNotMatch(out, /New thread|New chat|Rename thread|Pin thread|threads<\/|Show .* threads/);
+  });
+
+  it('ASYNC-0: no thread search', () => {
+    const out = html(viewProps(baseState({ search: 'plan' })).props);
+    assert.doesNotMatch(out, /Search threads|type="search"|data-section="results"/);
+    assert.match(out, /data-section="my-agents"/, 'a stale search does not hide the agents');
   });
 
   it('agent rows: initials, status (waiting on you with count, running), paused agents', () => {
@@ -178,103 +155,30 @@ describe('UI-2b assistant sidebar view', () => {
     assert.match(out, /Paused/);
   });
 
-  it('thread links go to /assistant/<agent-url-key>/<threadId>; unread marker; current thread', () => {
-    const { props } = viewProps(baseState(), { currentAgentKey: 'ceo-key', currentThreadId: 't2', expanded: new Set(['ceo']) });
+  it('agent links go to the agent path (its one conversation); plain clicks call back', () => {
+    const { props, calls } = viewProps(baseState());
     const out = html(props);
-    assert.match(out, /href="\/assistant\/ceo-key\/t2"/);
-    assert.match(out, /data-unread/);
-    assert.match(out, /data-thread="t2" data-current="true"/);
-    assert.match(out, /data-agent-threads="ceo"/);
-    assert.doesNotMatch(out, /data-agent-threads="eng"/, 'collapsed agents do not list threads');
-  });
-
-  it('search shows matching threads across agents, or a no-match message', () => {
-    const { props, calls } = viewProps(baseState({ search: 'PLAN' }));
-    const out = html(props);
-    assert.match(out, /data-section="results"/);
-    assert.match(out, /Quarterly plan/);
-    assert.doesNotMatch(out, /Fix login/);
-    assert.doesNotMatch(out, /data-section="my-agents"/);
-    assert.match(html(viewProps(baseState({ search: 'zzz' })).props), /No threads match “zzz”/);
-    const input = control(props, byLabel('Search threads'));
-    input.onChange({ target: { value: 'fix' } });
-    assert.deepEqual(calls, [['search', 'fix']]);
-  });
-
-  it('pin: disabled with an explanation once the agent has the maximum pinned; unpin stays enabled', () => {
-    const many = Array.from({ length: ASSISTANT_MAX_PINS_PER_AGENT }, (_, i) => thread(`p${i}`, 'eng', { pinned: true }));
-    const state = baseState({ threads: { ...baseState().threads, eng: ready([...many, thread('free', 'eng')]) } });
-    const { props } = viewProps(state, { expanded: new Set(['eng']) });
-    const out = html(props);
-    assert.match(out, new RegExp(`aria-label="Pin thread"[^>]*title="Pin limit reached \\(${ASSISTANT_MAX_PINS_PER_AGENT} threads per agent\\)"[^>]*disabled`));
-    const pin = control(props, (p) => p['aria-label'] === 'Pin thread');
-    assert.equal(pin.disabled, true);
-    const unpin = control(props, byLabel('Unpin thread'));
-    assert.equal(unpin.disabled, false);
-    // under the cap: pin enabled and calls back
-    const under = viewProps(baseState(), { expanded: new Set(['eng']) });
-    const pin2 = controlIn(under.props, (p) => p['data-agent-threads'] === 'eng', byLabel('Pin thread'));
-    assert.equal(pin2.disabled, false);
-    pin2.onClick();
-    assert.deepEqual(under.calls, [['pin', 'eng', 't3', true]]);
-  });
-
-  it('pending pin disables the button', () => {
-    const { props } = viewProps(baseState({ pending: { 'pin:t3': true } }), { expanded: new Set(['eng']) });
-    assert.equal(controlIn(props, (p) => p['data-agent-threads'] === 'eng', byLabel('Pin thread')).disabled, true);
-  });
-
-  it('rename: inline form with the draft; save / cancel / escape call back', () => {
-    const { props, calls } = viewProps(baseState(), { expanded: new Set(['eng']), editing: { threadId: 't3', draft: 'New name' } });
-    const out = html(props);
-    assert.match(out, /data-thread-edit="t3"/);
-    assert.match(out, /aria-label="Thread title"[^>]*value="New name"/);
-    const form = control(props, (p) => p['data-thread-edit'] === 't3');
-    let prevented = false;
-    form.onSubmit({ preventDefault: () => (prevented = true) });
-    assert.ok(prevented);
-    const input = control(props, byLabel('Thread title'));
-    input.onChange({ target: { value: 'Newer' } });
-    input.onKeyDown({ key: 'Escape' });
-    control(props, byText('Cancel')).onClick();
-    assert.deepEqual(calls, [['submit', 'eng', 't3'], ['draft', 'Newer'], ['cancel'], ['cancel']]);
-    const view = viewProps(baseState(), { expanded: new Set(['eng']) });
-    controlIn(view.props, (p) => p['data-agent-threads'] === 'eng', byLabel('Rename thread')).onClick();
-    assert.deepEqual(view.calls, [['startRename', 't3', 'Fix login']]);
-  });
-
-  it('agent selection, expand toggle, new thread and opening a thread call back (plain clicks only)', () => {
-    const { props, calls } = viewProps(baseState(), { expanded: new Set(['eng']) });
+    assert.match(out, /href="\/assistant\/eng-key"/);
+    assert.doesNotMatch(out, /href="\/assistant\/[^"]+\/[^"]+"/, 'no thread links');
     const link = control(props, (p) => p.href === '/assistant/eng-key');
     const e = click();
     link.onClick(e);
     assert.ok(e.prevented);
     link.onClick({ ...click(), metaKey: true });
-    control(props, byLabel('Show Chief Exec threads')).onClick();
-    control(props, byText('New thread')).onClick();
-    const threadLink = control(props, (p) => p.href === '/assistant/eng-key/t3');
-    threadLink.onClick(click());
-    assert.deepEqual(calls, [['select', 'eng'], ['toggle', 'ceo'], ['new', 'eng'], ['open', 'eng', 't3', '/assistant/eng-key/t3']]);
+    assert.deepEqual(calls, [['select', 'eng']]);
   });
 
-  it('titles render as text, never as markup', () => {
-    const hostile = '<img src=x onerror="alert(1)"><script>alert(2)</script>';
-    const state = baseState({ threads: { ...baseState().threads, eng: ready([thread('t3', 'eng', { title: hostile })]) } });
-    for (const out of [html(viewProps(state, { expanded: new Set(['eng']) }).props), html(viewProps({ ...state, search: 'img' }).props)]) {
-      assert.ok(out.includes('&lt;img src=x onerror=&quot;alert(1)&quot;&gt;&lt;script&gt;'), out);
-      assert.doesNotMatch(out, /<img|<script/);
-    }
+  it('agent names render as text, never as markup', () => {
     const agentState = baseState({ agents: [agent('x', { name: '<b>bold</b>' })], threads: {} });
-    assert.match(html(viewProps(agentState).props), /&lt;b&gt;bold&lt;\/b&gt;/);
+    const out = html(viewProps(agentState).props);
+    assert.match(out, /&lt;b&gt;bold&lt;\/b&gt;/);
+    assert.doesNotMatch(out, /<b>/);
   });
 
-  it('selection not found: unknown agent or a thread missing from the list', () => {
-    const agentMissing = html(viewProps(baseState(), { currentAgentKey: 'someone-else', currentThreadId: 'x' }).props);
+  it('selection not found: unknown agent only', () => {
+    const agentMissing = html(viewProps(baseState(), { currentAgentKey: 'someone-else' }).props);
     assert.match(agentMissing, /data-selection-problem="agent-not-found"[^>]*>That agent is not in this company/);
-    const threadMissing = html(viewProps(baseState(), { currentAgentKey: 'eng-key', currentThreadId: 'nope' }).props);
-    assert.match(threadMissing, /data-selection-problem="thread-not-found"[^>]*>That thread was not found for this agent/);
-    const fine = html(viewProps(baseState(), { currentAgentKey: 'eng-key', currentThreadId: 't3' }).props);
-    assert.doesNotMatch(fine, /data-selection-problem/);
+    assert.doesNotMatch(html(viewProps(baseState(), { currentAgentKey: 'eng-key' }).props), /data-selection-problem/);
   });
 
   it('loading, load error with Retry, and no agents', () => {
@@ -287,28 +191,19 @@ describe('UI-2b assistant sidebar view', () => {
     assert.match(html(viewProps(baseState({ agents: [], threads: {} })).props), /No agents in this company yet/);
   });
 
-  it("an agent's thread list: loading, error with Retry, empty", () => {
-    const state = baseState({
-      threads: {
-        ceo: { status: 'loading', threads: [], initialThreadId: null, error: null },
-        eng: { status: 'error', threads: [], initialThreadId: null, error: 'Internal error' },
-        des: ready([]),
-      },
-    });
-    const { props, calls } = viewProps(state, { expanded: new Set(['ceo', 'eng', 'des']) });
-    const out = html(props);
-    assert.match(out, /Loading threads…/);
-    assert.match(out, /Internal error/);
-    assert.match(out, /No threads yet/);
-    control(props, byText('Retry')).onClick();
-    assert.deepEqual(calls, [['retryThreads', 'eng']]);
-  });
-
   it('notice banner shows the last failure and can be dismissed', () => {
-    const { props, calls } = viewProps(baseState({ notice: { message: 'Pin limit reached (50 threads per agent)' } }));
-    assert.match(html(props), /data-notice[^>]*>.*Pin limit reached/);
+    const { props, calls } = viewProps(baseState({ notice: { message: 'Could not load agents' } }));
+    assert.match(html(props), /data-notice[^>]*>.*Could not load agents/);
     control(props, byText('Dismiss')).onClick();
     assert.deepEqual(calls, [['dismiss']]);
+  });
+
+  it('ASYNC-0: the sidebar loads agents only', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { fileURLToPath } = await import('node:url');
+    const src = await readFile(fileURLToPath(new URL('./sidebar.tsx', import.meta.url)), 'utf8');
+    assert.match(src, /useAssistantSidebar\(\{ threadLists: false \}\)/);
+    assert.doesNotMatch(src, /agent-thread-list|newThread|setPinned|rename\(/);
   });
 
   it("the shell renders the sidebar for the active company only (keyed so a switch reloads it)", () => {

@@ -59,7 +59,7 @@ export function AssistantEmptyState() {
     <main className="flex flex-1 flex-col items-center justify-center gap-2 p-8 text-center">
       <h1 className="text-xl font-semibold tracking-tight">Assistant</h1>
       <p className="max-w-md text-sm text-muted-foreground">
-        Chat with your agents here. Pick an agent or a thread from the list to start.
+        Chat with your agents here. Pick an agent from the list to start.
       </p>
     </main>
   );

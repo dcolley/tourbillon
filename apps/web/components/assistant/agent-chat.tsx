@@ -38,6 +38,9 @@ import { feedbackTargets } from '@/lib/assistant/feedback';
 import { MessageFeedback, useThreadFeedback } from './message-feedback';
 import { useAgentChat, type AgentChatPhase } from './use-agent-chat';
 import { ModelPicker } from './model-picker/model-picker';
+import { AgentDmActivity } from './dm-activity';
+import { AgentChatMenu } from './agent-chat-menu';
+import { clearAgentChat } from '@/lib/assistant/single-chat';
 
 const DELIVERY_LABEL: Partial<Record<UserMessageDelivery, string>> = {
   sending: 'Sending…',
@@ -181,6 +184,10 @@ export interface AgentChatViewProps {
   registry?: WidgetRegistry;
   /** WID-3: link to another chat of this agent (a card waiting there); no link without it. */
   chatHref?: (threadId: string) => string;
+  /** DM-1: the agent's DM activity strip (read-only), shown above the message list. */
+  dmActivity?: React.ReactNode;
+  /** ASYNC-0: the chat's ⋯ menu (Clear chat, Observational Memory), at the end of the chat chrome. */
+  chatMenu?: React.ReactNode;
 }
 
 const CARD_KIND: Record<string, string> = {
@@ -327,6 +334,12 @@ export function AgentChatView(props: AgentChatViewProps) {
   const footers = props.assistantFooter ? feedbackTargets(state.items, runOpen) : null;
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-agent-chat data-status={state.status}>
+      {props.dmActivity || props.chatMenu ? (
+        <div className="flex min-h-9 items-center gap-2 border-b px-4 py-1" data-chat-chrome>
+          <div className="min-w-0 flex-1">{props.dmActivity ?? null}</div>
+          {props.chatMenu ?? null}
+        </div>
+      ) : null}
       <div className="flex-1 space-y-3 overflow-y-auto p-4" aria-live="polite">
         {state.items.map((item) => {
           const footerFor = footers?.get(item.id);
@@ -393,11 +406,11 @@ export function AgentChatView(props: AgentChatViewProps) {
 }
 
 /**
- * Link to an opened chat: the assistant path form `/assistant/<agent url key>/<threadId>`
- * (lib/assistant/sidebar.ts assistantAgentPath, the route shape UI-2b serves).
+ * Link to the agent's chat. ASYNC-0 (Slice A): one conversation per agent, so the link is the agent
+ * path `/assistant/<agent url key>` (lib/assistant/sidebar.ts assistantAgentPath) and never names a thread.
  */
-export function agentChatHref(agentKey: string, threadId: string): string {
-  return assistantAgentPath(agentKey, threadId);
+export function agentChatHref(agentKey: string): string {
+  return assistantAgentPath(agentKey);
 }
 
 /** WID-3: the chat cards, declared to every run as frontend tools (the server offers only those it knows). */
@@ -405,31 +418,39 @@ const CHAT_CARD_TOOLS = assistantWidgetRegistry.frontendTools();
 
 /**
  * Chat with one agent. `agentId` is used for the API calls; `agentKey` (the agent's url key, default
- * `agentId`) for the page link, so the address bar keeps the canonical `/assistant/<url key>/<thread>`.
+ * `agentId`) for the page link, so the address bar keeps the canonical `/assistant/<url key>`.
+ * ASYNC-0 (Slice A): the agent's one conversation (its latest thread). Clear chat (⋯ menu) starts a
+ * fresh one in place (lib/assistant/single-chat.ts); there is no New chat and no thread switching.
  */
 export function AgentChat({
   agentId,
   agentKey,
   threadId,
   initialContext,
+  companyId,
 }: {
   agentId: string;
   agentKey?: string;
   threadId?: string;
+  /** DM-1: active company; with it the chat shows the agent's DM activity strip. */
+  companyId?: string;
   /** UI-3: page context from an Open in chat link; sent with the first message unless removed. */
   initialContext?: OpenInChatContext;
 }) {
   const linkKey = agentKey ?? agentId;
-  // Once the thread is open, show its link in the address bar so a reload reopens it.
+  // The address bar shows the agent path (never a thread): a reload reopens the agent's current conversation.
   const onThreadOpened = React.useCallback(
-    (ref: AguiThreadRef) => {
+    (_ref: AguiThreadRef) => {
       if (typeof window === 'undefined') return;
-      const href = agentChatHref(linkKey, ref.threadId);
+      const href = agentChatHref(linkKey);
       if (window.location.pathname + window.location.search !== href) window.history.replaceState(null, '', href);
     },
     [linkKey],
   );
-  const chat = useAgentChat({ agentId, threadId, tools: CHAT_CARD_TOOLS, onThreadOpened });
+  // ASYNC-0: after Clear chat, the fresh thread (else the given one, else the agent's latest).
+  const [clearedThreadId, setClearedThreadId] = React.useState<string | undefined>(undefined);
+  const activeThreadId = clearedThreadId ?? threadId;
+  const chat = useAgentChat({ agentId, threadId: activeThreadId, tools: CHAT_CARD_TOOLS, onThreadOpened });
   const feedback = useThreadFeedback(agentId, chat.thread?.threadId ?? null);
   const [draft, setDraft] = React.useState('');
   const [context, setContext] = React.useState<OpenInChatContext | null>(initialContext ?? null);
@@ -472,7 +493,23 @@ export function AgentChat({
       }
       contextChip={context}
       onRemoveContext={() => setContext(null)}
-      chatHref={(t) => agentChatHref(linkKey, t)}
+      dmActivity={companyId ? <AgentDmActivity companyId={companyId} agentId={agentId} /> : undefined}
+      chatMenu={
+        <AgentChatMenu
+          agentUrlKey={linkKey}
+          runOpen={chat.state.status !== 'idle'}
+          onClear={async () => {
+            // Slice A: a fresh thread only; Observational Memory / resource ids are untouched (Slice B).
+            const r = await clearAgentChat(agentId);
+            if (r.ok) {
+              setDraft('');
+              setContext(null);
+              setClearedThreadId(r.threadId);
+            }
+            return r;
+          }}
+        />
+      }
       modelPicker={
         chat.thread ? (
           <ModelPicker agentId={agentId} threadId={chat.thread.threadId} disabled={chat.state.status !== 'idle'} />
