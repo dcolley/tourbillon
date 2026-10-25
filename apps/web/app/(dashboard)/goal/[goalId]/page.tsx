@@ -12,6 +12,7 @@ import { GoalEditForm } from './goal-edit-form';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { StatusBadge } from '@/lib/status-badges';
 import { ChatPageContext } from '@/components/chat/chat-page-context';
+import { OpenInChatButton } from '@/components/chat/open-in-chat-button';
 
 export default async function GoalDetailPage({
   params,
@@ -79,6 +80,13 @@ export default async function GoalDetailPage({
             )}
           </div>
           <div className="flex flex-col gap-2 shrink-0">
+            <OpenInChatButton
+              agentUrlKey={owner?.urlKey}
+              agentName={owner?.name}
+              contextType="goal"
+              contextId={goal.id}
+              contextTitle={goal.title}
+            />
             <NewProjectDialog
               goals={goalOption}
               agents={agentList}

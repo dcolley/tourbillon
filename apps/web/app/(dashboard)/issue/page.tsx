@@ -14,6 +14,7 @@ import {
   type IssueFilter,
 } from './issue-filter';
 import { ChatPageContext } from '@/components/chat/chat-page-context';
+import { OpenInChatButton } from '@/components/chat/open-in-chat-button';
 
 export default async function IssuesPage({
   searchParams,
@@ -56,6 +57,16 @@ export default async function IssuesPage({
         initialIssues={issueResult.rows}
         initialTotal={issueResult.total}
         agents={agentList}
+        openInChat={
+          <OpenInChatButton
+            key="open-in-chat"
+            agentUrlKey={defaultAgent?.urlKey}
+            agentName={defaultAgent?.name}
+            contextType="board"
+            contextId="board"
+            contextTitle="Issue Board"
+          />
+        }
         goals={goalList}
         projects={projectList}
         emptyMessage={emptyMsg}

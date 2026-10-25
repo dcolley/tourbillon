@@ -6,7 +6,7 @@
  * client, which stops an open run on the endpoint (AG-UI client disconnect).
  */
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { AgentChatClient, type AgentChatClientOptions } from '@/lib/agui/client/agent-chat-client';
+import { AgentChatClient, type AgentChatClientOptions, type AgentChatSendOptions } from '@/lib/agui/client/agent-chat-client';
 import { initialAgentChatState, type AgentChatState } from '@/lib/agui/client/chat-state';
 import { openAguiThread, type AguiThreadRef } from '@/lib/agui/client/thread-bootstrap';
 
@@ -98,8 +98,8 @@ export function useAgentChat({ agentId, threadId, tools, onRunEvent, onThreadOpe
     initial,
   );
 
-  const send = useCallback((text: string) => client?.send(text), [client]);
-  const steer = useCallback((text: string) => client?.steer(text), [client]);
+  const send = useCallback((text: string, opts?: AgentChatSendOptions) => client?.send(text, opts), [client]);
+  const steer = useCallback((text: string, opts?: AgentChatSendOptions) => client?.steer(text, opts), [client]);
   const abort = useCallback(() => client?.abort(), [client]);
   const respondToTool = useCallback(
     (toolCallId: string, approved: boolean) => client?.respondToTool(toolCallId, approved),

@@ -7,6 +7,7 @@
  * (assistant-route-view.tsx).
  */
 import * as React from 'react';
+import { X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { WidgetToolCall } from '@/components/assistant/widgets/widget-tool-call';
 import { assistantWidgetRegistry } from '@/components/assistant/widgets/registry';
@@ -19,6 +20,8 @@ import type {
   UserMessageDelivery,
 } from '@/lib/agui/client/chat-state';
 import type { AguiThreadRef } from '@/lib/agui/client/thread-bootstrap';
+import type { AgentChatResult, AgentChatSendOptions } from '@/lib/agui/client/agent-chat-client';
+import { contextChipLabel, type OpenInChatContext } from '@/lib/assistant/open-in-chat';
 import { assistantAgentPath } from '@/lib/assistant/sidebar';
 import { useAgentChat, type AgentChatPhase } from './use-agent-chat';
 
@@ -93,6 +96,28 @@ export interface AgentChatViewProps {
   onStop: () => void;
   onToolDecision: (toolCallId: string, approved: boolean) => void;
   onDismissError: () => void;
+  /** UI-3: page context to send with the next message, shown as a removable chip. */
+  contextChip?: OpenInChatContext | null;
+  onRemoveContext?: () => void;
+}
+
+/** UI-3: the page context (from an Open in chat link) waiting to go with the next message. */
+export function ContextChip({ context, onRemove }: { context: OpenInChatContext; onRemove?: () => void }) {
+  const label = contextChipLabel(context);
+  return (
+    <div
+      data-slot="context-chip"
+      data-context-type={context.contextType}
+      data-context-id={context.contextId}
+      title={`${label} — sent with your next message`}
+      className="flex w-fit max-w-full items-center gap-1 rounded-md border bg-muted/40 px-2 py-0.5 text-xs"
+    >
+      <span className="truncate">{label}</span>
+      <Button type="button" size="icon-xs" variant="ghost" aria-label="Remove context" onClick={onRemove}>
+        <X />
+      </Button>
+    </div>
+  );
 }
 
 function PendingTool({ tool, onDecision }: { tool: PendingToolDecision; onDecision: AgentChatViewProps['onToolDecision'] }) {
@@ -153,6 +178,7 @@ export function AgentChatView(props: AgentChatViewProps) {
           if (canSend) props.onSend();
         }}
       >
+        {props.contextChip ? <ContextChip context={props.contextChip} onRemove={props.onRemoveContext} /> : null}
         <textarea
           aria-label="Message"
           className="min-h-16 w-full resize-none rounded-md border bg-transparent p-2 text-sm"
@@ -196,7 +222,18 @@ export function agentChatHref(agentKey: string, threadId: string): string {
  * Chat with one agent. `agentId` is used for the API calls; `agentKey` (the agent's url key, default
  * `agentId`) for the page link, so the address bar keeps the canonical `/assistant/<url key>/<thread>`.
  */
-export function AgentChat({ agentId, agentKey, threadId }: { agentId: string; agentKey?: string; threadId?: string }) {
+export function AgentChat({
+  agentId,
+  agentKey,
+  threadId,
+  initialContext,
+}: {
+  agentId: string;
+  agentKey?: string;
+  threadId?: string;
+  /** UI-3: page context from an Open in chat link; sent with the first message unless removed. */
+  initialContext?: OpenInChatContext;
+}) {
   const linkKey = agentKey ?? agentId;
   // Once the thread is open, show its link in the address bar so a reload reopens it.
   const onThreadOpened = React.useCallback(
@@ -209,13 +246,21 @@ export function AgentChat({ agentId, agentKey, threadId }: { agentId: string; ag
   );
   const chat = useAgentChat({ agentId, threadId, onThreadOpened });
   const [draft, setDraft] = React.useState('');
-  const submit = (fn: ((text: string) => Promise<{ ok: boolean }> | undefined) | undefined) => {
+  const [context, setContext] = React.useState<OpenInChatContext | null>(initialContext ?? null);
+  const submit = (
+    fn: ((text: string, opts?: AgentChatSendOptions) => Promise<AgentChatResult> | undefined) | undefined,
+  ) => {
     const text = draft;
     if (!text.trim() || !fn) return;
+    const sentContext = context;
     setDraft('');
-    void fn(text)?.then((r) => {
-      // Keep the text when it was refused (e.g. 409) so it can be sent again.
-      if (!r.ok) setDraft((current) => (current === '' ? text : current));
+    setContext(null);
+    void fn(text, sentContext ? { context: sentContext } : undefined)?.then((r) => {
+      // Keep the text (and the context chip) when it was refused (e.g. 409) so it can be sent again.
+      if (!r.ok) {
+        setDraft((current) => (current === '' ? text : current));
+        if (sentContext) setContext((current) => current ?? sentContext);
+      }
     });
   };
   return (
@@ -230,6 +275,8 @@ export function AgentChat({ agentId, agentKey, threadId }: { agentId: string; ag
       onStop={() => void chat.abort()}
       onToolDecision={(id, approved) => void chat.respondToTool(id, approved)}
       onDismissError={chat.clearError}
+      contextChip={context}
+      onRemoveContext={() => setContext(null)}
     />
   );
 }

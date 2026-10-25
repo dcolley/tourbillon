@@ -252,8 +252,10 @@ describe('AGUI-1b assistant chat view', () => {
       const read = (rel: string) => readFile(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
       const agentPage = await read('../../app/(assistant)/assistant/[agent]/page.tsx');
       const threadPage = await read('../../app/(assistant)/assistant/[agent]/[threadId]/page.tsx');
-      assert.match(agentPage, /assistantRouteView\(applyAssistantRoute\(await resolveAssistantRoute\(\{ agentKey: agent, via: 'path' \}\)\)\)/);
-      assert.match(threadPage, /assistantRouteView\(applyAssistantRoute\(await resolveAssistantRoute\(\{ agentKey: agent, threadId, via: 'path' \}\)\)\)/);
+      // UI-3: both also pass the Open in chat context read from the search params.
+      assert.match(agentPage, /assistantRouteView\(applyAssistantRoute\(await resolveAssistantRoute\(\{ agentKey: agent, via: 'path' \}\)\), \{ context \}\)/);
+      assert.match(threadPage, /assistantRouteView\(applyAssistantRoute\(await resolveAssistantRoute\(\{ agentKey: agent, threadId, via: 'path' \}\)\), \{ context \}\)/);
+      for (const page of [agentPage, threadPage]) assert.match(page, /const context = parseOpenInChatContext\(await searchParams\);/);
       const queryPage = await read('../../app/(assistant)/assistant/page.tsx');
       assert.doesNotMatch(queryPage, /AgentChat|assistantRouteView/);
     });
@@ -270,5 +272,53 @@ describe('AGUI-1b assistant chat view', () => {
     const src = await readFile(fileURLToPath(new URL('./agent-chat.tsx', import.meta.url)), 'utf8');
     assert.match(src, /const linkKey = agentKey \?\? agentId;/);
     assert.match(src, /agentChatHref\(linkKey, ref\.threadId\)/);
+  });
+});
+
+describe('UI-3 context chip in the assistant composer', () => {
+  let ContextChip: View['ContextChip'];
+  before(async () => {
+    (globalThis as { React?: unknown }).React = React;
+    ({ AgentChatView, AgentChat, ContextChip } = await import('./agent-chat'));
+    ({ Button } = await import('@/components/ui/button'));
+    ({ WidgetToolCall } = await import('./widgets/widget-tool-call'));
+    ({ assistantRouteView } = await import('./assistant-route-view'));
+  });
+
+  const issue = { contextType: 'issue' as const, contextId: 'i-1', contextTitle: 'Fix login' };
+
+  it('shows the page context as a chip above the message box', () => {
+    const html = renderToStaticMarkup(React.createElement(AgentChatView, props({}, { contextChip: issue })));
+    assert.match(html, /data-slot="context-chip"[^>]*data-context-type="issue"[^>]*data-context-id="i-1"/);
+    assert.match(html, /Issue: Fix login/);
+    assert.match(html, /aria-label="Remove context"/);
+    assert.ok(html.indexOf('data-slot="context-chip"') < html.indexOf('aria-label="Message"'));
+  });
+
+  it('no context → no chip', () => {
+    for (const contextChip of [undefined, null]) {
+      const html = renderToStaticMarkup(React.createElement(AgentChatView, props({}, { contextChip })));
+      assert.doesNotMatch(html, /context-chip|Remove context/);
+    }
+  });
+
+  it('the chip can be removed', () => {
+    let removed = 0;
+    const bs = buttons(AgentChatView(props({}, { contextChip: issue, onRemoveContext: () => removed++ })));
+    assert.deepEqual(bs.map((b) => b.label), ['', 'Send']);
+    bs[0].onClick!();
+    assert.equal(removed, 1);
+    const chip = ContextChip({ context: { contextType: 'board', contextId: 'board' } });
+    assert.match(renderToStaticMarkup(chip), /Issue board/);
+  });
+
+  it('an Open in chat context reaches the chat as its starting context', () => {
+    const agent = { id: 'agent-1', urlKey: 'alice' };
+    const el = assistantRouteView({ kind: 'render', agent, threadId: null }, { context: issue });
+    assert.equal(el.type, AgentChat);
+    assert.deepEqual(el.props, { agentId: 'agent-1', agentKey: 'alice', threadId: undefined, initialContext: issue });
+    assert.equal(el.key, 'agent-1:');
+    const plain = assistantRouteView({ kind: 'render', agent, threadId: null }, { context: null });
+    assert.equal('initialContext' in plain.props, false);
   });
 });

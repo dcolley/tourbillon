@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -50,6 +50,7 @@ export function IssueListShell({
   goals,
   projects,
   emptyMessage,
+  openInChat,
 }: {
   filter: IssueFilter;
   visibleStatuses: readonly string[];
@@ -59,6 +60,8 @@ export function IssueListShell({
   goals: GoalOption[];
   projects: ProjectOption[];
   emptyMessage: string;
+  /** UI-3: Open in chat with the board's default agent (none when there is no agent). */
+  openInChat?: ReactNode;
 }) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -151,6 +154,7 @@ export function IssueListShell({
         statusFilter={<IssueStatusFilter current={filter} />}
         actions={
           <>
+            {openInChat}
             <select
               key="issue-refresh-interval"
               id="issue-refresh-interval"

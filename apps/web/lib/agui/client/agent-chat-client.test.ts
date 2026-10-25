@@ -665,6 +665,23 @@ describe('AGUI-1b AgentChatClient', () => {
       assert.deepEqual(withTools.buildInput('followUp', 'x').context, []);
     });
 
+    it('UI-3: a message can carry page context (overrides the client context); the endpoint accepts it', async () => {
+      const ctx = { contextType: 'issue' as const, contextId: 'i-1', contextTitle: 'Fix login' };
+      const client = new AgentChatClient({ agentId: 'alice', threadId: THREAD, newId, context: { contextType: 'free' } });
+      assert.deepEqual(client.buildInput('run', 'hi').forwardedProps.tourbillon, { action: 'run', context: { contextType: 'free' } });
+      const { server, client: c2 } = setup(runAndControls());
+      await c2.send('about this', { context: ctx });
+      await until(() => server.requests.length === 1);
+      assert.deepEqual(server.requests[0].body.forwardedProps.tourbillon.context, ctx);
+      assert.deepEqual(parseAguiRequest(server.requests[0].body).context, ctx);
+      server.streams[0].send(started(server.requests[0]), ...text('m1', 'ok'));
+      await c2.send('follow up');
+      await until(() => server.requests.length === 2);
+      assert.equal(server.requests[1].action, 'followUp');
+      assert.equal(server.requests[1].body.forwardedProps.tourbillon.context, undefined);
+      c2.dispose();
+    });
+
     it('a run refused with 409 "retry shortly" is not retried (only control actions are)', async () => {
       const { server, client } = setup(() => jsonError(409, 'A run is starting on this thread; retry shortly'));
       const r = await client.send('hello');
