@@ -129,11 +129,14 @@ export function ModelPicker({
   threadId,
   disabled,
   controller: provided,
+  onStateChange,
 }: {
   agentId: string;
   threadId: string;
   disabled?: boolean;
   controller?: ModelPickerController;
+  /** CTX-1: called when the thread's model state loads or changes (e.g. refresh the context meter). */
+  onStateChange?: () => void;
 }) {
   const controller = React.useMemo(
     () => provided ?? createModelPickerController({ agentId, threadId }),
@@ -143,6 +146,14 @@ export function ModelPicker({
   React.useEffect(() => {
     void controller.load();
   }, [controller]);
+  const onStateChangeRef = React.useRef(onStateChange);
+  React.useEffect(() => {
+    onStateChangeRef.current = onStateChange;
+  }, [onStateChange]);
+  const modelState = snapshot.state;
+  React.useEffect(() => {
+    if (modelState) onStateChangeRef.current?.();
+  }, [modelState]);
   return (
     <ModelPickerView
       snapshot={snapshot}

@@ -5,6 +5,7 @@ import { PostgresStore, PgVector } from '@mastra/pg';
 import type { Agent as AgentRecord } from '@tourbillon/db';
 import { resolveAgentProviderRow } from './company-provider';
 import {
+  CHAT_MEMORY_LAST_MESSAGES,
   formatTrace,
   modelProviderOverridesFromAgent,
   resolveModelProviderConfig,
@@ -80,7 +81,7 @@ export async function getAgentMemory(
   const config: ConstructorParameters<typeof Memory>[0] = {
     storage: new PostgresStore({ id: 'tourbillon-memory', connectionString }),
     options: {
-      lastMessages: 20,
+      lastMessages: CHAT_MEMORY_LAST_MESSAGES,
       ...(semanticRecallEnabled && embeddingModel
         ? {
             semanticRecall: {
