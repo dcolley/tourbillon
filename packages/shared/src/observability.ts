@@ -80,6 +80,26 @@ export function phoenixUiBaseUrl(): string | undefined {
   return url.toString().replace(/\/+$/, '');
 }
 
+/**
+ * OBS-2: base URL of the Phoenix REST API, for posting annotations (server side only). Phoenix
+ * serves OTLP/HTTP traces and its REST API on the same address, so this is
+ * PHOENIX_COLLECTOR_ENDPOINT without its `/v1/traces` path. Undefined when the Phoenix collector is
+ * off or the endpoint is not a plain http(s) URL; callers then skip annotations.
+ */
+export function phoenixApiBaseUrl(): string | undefined {
+  if (!isPhoenixCollectorEnabled()) return undefined;
+  let url: URL;
+  try {
+    url = new URL(phoenixCollectorEndpoint());
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined;
+  if (url.username || url.password) return undefined;
+  const path = url.pathname.replace(/\/+$/, '').replace(/\/v1\/traces$/, '');
+  return `${url.origin}${path}`;
+}
+
 export function shouldStoreModelChunks(): boolean {
   return process.env.OBSERVABILITY_STORE_MODEL_CHUNKS === 'true';
 }

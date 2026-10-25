@@ -34,6 +34,8 @@ import type { AguiThreadRef } from '@/lib/agui/client/thread-bootstrap';
 import type { AgentChatResult, AgentChatSendOptions } from '@/lib/agui/client/agent-chat-client';
 import { contextChipLabel, type OpenInChatContext } from '@/lib/assistant/open-in-chat';
 import { assistantAgentPath } from '@/lib/assistant/sidebar';
+import { feedbackTargets } from '@/lib/assistant/feedback';
+import { MessageFeedback, useThreadFeedback } from './message-feedback';
 import { useAgentChat, type AgentChatPhase } from './use-agent-chat';
 import { ModelPicker } from './model-picker/model-picker';
 
@@ -165,6 +167,8 @@ export interface AgentChatViewProps {
   onStop: () => void;
   onToolDecision: (toolCallId: string, approved: boolean) => void;
   onDismissError: () => void;
+  /** OBS-2: footer under each finished assistant message (reactions), by Mastra message id. */
+  assistantFooter?: (messageId: string) => React.ReactNode;
   /** CHAT-5: the thread's model picker, shown in the composer footer. */
   modelPicker?: React.ReactNode;
   /** UI-3: page context to send with the next message, shown as a removable chip. */
@@ -320,12 +324,19 @@ export function AgentChatView(props: AgentChatViewProps) {
   const runOpen = state.status !== 'idle';
   const parked = parkedCard(state, widgets.registry);
   const canSend = draft.trim().length > 0 && state.status !== 'stopping';
+  const footers = props.assistantFooter ? feedbackTargets(state.items, runOpen) : null;
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-agent-chat data-status={state.status}>
       <div className="flex-1 space-y-3 overflow-y-auto p-4" aria-live="polite">
-        {state.items.map((item) => (
-          <ItemView key={`${item.kind}:${item.id}`} item={item} widgets={widgets} />
-        ))}
+        {state.items.map((item) => {
+          const footerFor = footers?.get(item.id);
+          return (
+            <React.Fragment key={`${item.kind}:${item.id}`}>
+              <ItemView item={item} widgets={widgets} />
+              {footerFor && props.assistantFooter?.(footerFor)}
+            </React.Fragment>
+          );
+        })}
         {state.pendingTools
           .filter((tool) => !(tool.reason === 'tool_suspended' && isAnsweredInPlace(widgets.registry, tool.toolName)))
           .map((tool) => (
@@ -419,6 +430,7 @@ export function AgentChat({
     [linkKey],
   );
   const chat = useAgentChat({ agentId, threadId, tools: CHAT_CARD_TOOLS, onThreadOpened });
+  const feedback = useThreadFeedback(agentId, chat.thread?.threadId ?? null);
   const [draft, setDraft] = React.useState('');
   const [context, setContext] = React.useState<OpenInChatContext | null>(initialContext ?? null);
   const submit = (
@@ -451,6 +463,13 @@ export function AgentChat({
       onWidgetAnswer={(id, answer) => void chat.answerWidget(id, answer)}
       onWidgetDismiss={(id) => void chat.dismissWidget(id)}
       onDismissError={chat.clearError}
+      assistantFooter={
+        chat.thread
+          ? (messageId) => (
+              <MessageFeedback key={messageId} messageId={messageId} saved={feedback.feedback[messageId] ?? null} onSave={feedback.save} />
+            )
+          : undefined
+      }
       contextChip={context}
       onRemoveContext={() => setContext(null)}
       chatHref={(t) => agentChatHref(linkKey, t)}
