@@ -94,7 +94,8 @@ describe('WID-3 chat cards in the assistant chat view', () => {
       ),
     );
     assert.match(html, /data-pending-tool="card-1"/);
-    assert.match(html, /data-widget="fallback"/);
+    // CHAT-2: a tool with no widget renders the tool state card (not the WID-1 fallback card).
+    assert.match(html, /data-tool-card="true"[^>]*data-tool-state="waiting"/);
   });
 
   it('the card hands its answer and its dismissal to the chat with the tool call id', () => {

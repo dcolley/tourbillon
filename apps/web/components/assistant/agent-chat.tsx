@@ -14,6 +14,8 @@
  */
 import * as React from 'react';
 import { Button } from '@/components/ui/button';
+import { ChatMarkdown } from '@/components/assistant/message-markdown';
+import { ToolStateCard } from '@/components/assistant/tool-state-card';
 import { WidgetToolCall } from '@/components/assistant/widgets/widget-tool-call';
 import { assistantWidgetRegistry, type WidgetRegistry } from '@/components/assistant/widgets/registry';
 import { parseStoredWidgetAnswer } from '@tourbillon/shared/widgets';
@@ -76,6 +78,11 @@ interface WidgetHandlers {
   onWidgetDismiss?: (toolCallId: string) => void;
 }
 
+/**
+ * CHAT-2: assistant text renders as markdown (message-markdown.tsx: code blocks and tables with copy
+ * controls, no raw HTML). Plain tool calls render as tool-state cards (tool-state-card.tsx); tool
+ * calls with a registered widget still go through the widget registry.
+ */
 function ItemView({ item, widgets }: { item: AgentChatItem; widgets: WidgetHandlers }) {
   switch (item.kind) {
     case 'user':
@@ -92,8 +99,8 @@ function ItemView({ item, widgets }: { item: AgentChatItem; widgets: WidgetHandl
       );
     case 'assistant':
       return (
-        <div className="whitespace-pre-wrap text-sm" data-item="assistant" data-streaming={item.streaming ? 'true' : 'false'}>
-          {item.text}
+        <div className="text-sm" data-item="assistant" data-streaming={item.streaming ? 'true' : 'false'}>
+          <ChatMarkdown text={item.text} />
         </div>
       );
     case 'reasoning':
@@ -109,24 +116,34 @@ function ItemView({ item, widgets }: { item: AgentChatItem; widgets: WidgetHandl
       const busy = send?.phase === 'sending' || send?.phase === 'sent';
       return (
         <div data-item="tool" data-tool-status={item.status}>
-          <WidgetToolCall
-            registry={widgets.registry}
-            // WID-2: a finished createApproval / getApproval call shows the Board approval card.
-            toolCall={approvalCardCallFor(item) ?? { toolCallId: item.id, toolName: item.name, args: item.argsText || undefined }}
-            toolStatus={toolCardStatus(item.status)}
-            answer={outcome.answer}
-            dismissed={outcome.dismissed}
-            // Only a call the run is waiting on takes an answer.
-            answerable={item.status === 'suspended' && Boolean(widgets.onWidgetAnswer)}
-            busy={busy && outcome.answer === undefined && !outcome.dismissed}
-            attempt={send?.attempts ?? 0}
-            onAnswer={
-              widgets.onWidgetAnswer
-                ? ({ record }) => widgets.onWidgetAnswer?.(item.id, (record as { answer: unknown }).answer)
-                : undefined
-            }
-            onDismiss={widgets.onWidgetDismiss ? () => widgets.onWidgetDismiss?.(item.id) : undefined}
-          />
+          {approvalCardCallFor(item) || widgets.registry.latest(item.name) ? (
+            <WidgetToolCall
+              registry={widgets.registry}
+              // WID-2: a finished createApproval / getApproval call shows the Board approval card.
+              toolCall={approvalCardCallFor(item) ?? { toolCallId: item.id, toolName: item.name, args: item.argsText || undefined }}
+              toolStatus={toolCardStatus(item.status)}
+              answer={outcome.answer}
+              dismissed={outcome.dismissed}
+              // Only a call the run is waiting on takes an answer.
+              answerable={item.status === 'suspended' && Boolean(widgets.onWidgetAnswer)}
+              busy={busy && outcome.answer === undefined && !outcome.dismissed}
+              attempt={send?.attempts ?? 0}
+              onAnswer={
+                widgets.onWidgetAnswer
+                  ? ({ record }) => widgets.onWidgetAnswer?.(item.id, (record as { answer: unknown }).answer)
+                  : undefined
+              }
+              onDismiss={widgets.onWidgetDismiss ? () => widgets.onWidgetDismiss?.(item.id) : undefined}
+            />
+          ) : (
+            <ToolStateCard
+              toolCallId={item.id}
+              toolName={item.name}
+              status={item.status}
+              argsText={item.argsText}
+              result={item.result}
+            />
+          )}
           {item.status === 'stopped' && (
             <p className="mt-1 text-xs text-muted-foreground">Run stopped — this card no longer takes an answer.</p>
           )}
