@@ -72,6 +72,18 @@ export function invalidateChatControllerForAgent(agentId: string): void {
   }
 }
 
+/**
+ * ASYNC-0 (Slice B): the agent's chat controllers that are already built in this process (the default
+ * one and any CHAT-5 model-override ones). Never builds one; a controller that failed to build is skipped.
+ */
+export async function listCachedChatControllersForAgent(agentId: string): Promise<TourbillonChatController[]> {
+  const base = chatControllerCacheKey(agentId);
+  const pending = [...controllerCache().entries()]
+    .filter(([key]) => key === base || key.startsWith(`${base}::`))
+    .map(([, p]) => p.catch(() => null));
+  return (await Promise.all(pending)).filter((c): c is TourbillonChatController => c !== null);
+}
+
 function controllerCache(): Map<string, Promise<TourbillonChatController>> {
   if (!globalForChat.tourbillonChatControllers) {
     globalForChat.tourbillonChatControllers = new Map();

@@ -9,7 +9,7 @@ import {
   listAssistantThreads,
   openAssistantSession,
 } from '@/lib/assistant/threads';
-import { pickInitialThread } from '@/lib/assistant/sidebar';
+import { activateAssistantThread, assistantOmSummary, resolveActiveAssistantThread } from '@/lib/assistant/active-thread';
 import { assistantViewerKey } from '@/lib/assistant/viewer';
 import { takeThreadCreateSlot } from '@/lib/assistant/create-limit';
 
@@ -23,6 +23,9 @@ type Ctx = { params: Promise<{ agentId: string }> };
  * UI-2: the agent's threads for the assistant sidebar (active company only).
  * `?q=` filters by title, `?limit=` caps the list (default 50). Pinned first, then latest activity.
  * `initialThreadId` is the thread to open when the agent is selected (null = start a new one).
+ * ASYNC-0 (Slice B): that is the agent's pinned active thread (lib/assistant/active-thread.ts), never
+ * "latest by activity", so a thread from before Clear chat cannot come back. `observationalMemory`
+ * is the agent's OM mode for the chat ⋯ menu.
  */
 export async function GET(req: NextRequest, { params }: Ctx) {
   try {
@@ -34,8 +37,13 @@ export async function GET(req: NextRequest, { params }: Ctx) {
 
     const session = await openAssistantSession(agent);
     const threads = await listAssistantThreads(session, agent, { query, limit, viewerKey: await assistantViewerKey() });
-    const initial = query ? null : pickInitialThread(threads, agent.id);
-    return NextResponse.json({ agentId: agent.id, threads, initialThreadId: initial?.id ?? null });
+    const initialThreadId = query ? null : await resolveActiveAssistantThread(session, agent, threads);
+    return NextResponse.json({
+      agentId: agent.id,
+      threads,
+      initialThreadId,
+      observationalMemory: await assistantOmSummary(agent),
+    });
   } catch (err) {
     return assistantErrorResponse(err);
   }
@@ -43,6 +51,9 @@ export async function GET(req: NextRequest, { params }: Ctx) {
 
 /**
  * UI-2: start a new thread for the agent in the company's assistant resource.
+ * ASYNC-0 (Slice B): the new thread becomes the agent's active thread (Clear chat / first thread):
+ * it is pinned, and the agent's idle AG-UI session (AgentController + Observational Memory) is moved
+ * onto it.
  * 409 for an archived agent; 429 (with Retry-After) past the per-company creation limit.
  */
 export async function POST(req: NextRequest, { params }: Ctx) {
@@ -63,7 +74,11 @@ export async function POST(req: NextRequest, { params }: Ctx) {
     }
     const session = await openAssistantSession(agent);
     const thread = await createAssistantThread(session, agent, parsed.data);
-    return NextResponse.json({ thread }, { status: 201 });
+    await activateAssistantThread(agent, thread.id);
+    return NextResponse.json(
+      { thread, activeThreadId: thread.id, observationalMemory: await assistantOmSummary(agent) },
+      { status: 201 },
+    );
   } catch (err) {
     return assistantErrorResponse(err);
   }

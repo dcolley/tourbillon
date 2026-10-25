@@ -46,6 +46,8 @@ const sessionWrites: string[] = [];
 const storeCalls: string[] = [];
 /** Per-user pins, as the assistant_thread_pins table holds them. */
 let pins: Map<string, { userKey: string; companyId: string; agentId: string; threadId: string; at: number }>;
+/** ASYNC-0 Slice B: assistant_active_threads, keyed `${companyId}::${agentId}`. */
+let activeThreads: Map<string, string>;
 let pinSeq = 0;
 
 class ChatAgentError extends Error {
@@ -228,6 +230,18 @@ const memoryThreadStore = {
     const p = pins.get(`${scope.userKey}::${threadId}`);
     if (p && p.companyId === scope.companyId && p.agentId === scope.agentId) pins.delete(`${scope.userKey}::${threadId}`);
   },
+  async getActiveAssistantThreadId(scope: { companyId: string; agentId: string }) {
+    return activeThreads.get(`${scope.companyId}::${scope.agentId}`) ?? null;
+  },
+  async setActiveAssistantThread(scope: { companyId: string; agentId: string }, threadId: string) {
+    activeThreads.set(`${scope.companyId}::${scope.agentId}`, threadId);
+  },
+  async claimActiveAssistantThread(scope: { companyId: string; agentId: string }, threadId: string, replacing: string | null) {
+    const key = `${scope.companyId}::${scope.agentId}`;
+    if ((activeThreads.get(key) ?? null) !== replacing) return false;
+    activeThreads.set(key, threadId);
+    return true;
+  },
   async listPinnedAssistantThreadIds(scope: PinScope) {
     return [...pins.values()]
       .filter((p) => p.userKey === scope.userKey && p.companyId === scope.companyId && p.agentId === scope.agentId)
@@ -278,6 +292,7 @@ describe('UI-2 assistant sidebar API', () => {
             return agent;
           },
           getOrCreateChatController: async () => controller,
+          listCachedChatControllersForAgent: async () => [controller],
           getChatSession: async (
             _c: unknown,
             agent: { id: string },
@@ -333,6 +348,7 @@ describe('UI-2 assistant sidebar API', () => {
     sessionWrites.length = 0;
     storeCalls.length = 0;
     pins = new Map();
+    activeThreads = new Map();
     viewer = 'user-1';
     listAllResources = false;
     resetThreadCreateLimitForTests();
@@ -530,6 +546,103 @@ describe('UI-2 assistant sidebar API', () => {
       assert.equal(foreign.status, 404);
     });
   });
+  describe('ASYNC-0 Slice B: pinned active thread + AgentController/OM continuity', () => {
+    const AGUI_SCOPE = 'agui:agent-a';
+    /** A turn on an existing thread, as a late reply / tool result landing on it would add activity. */
+    async function turnOn(threadId: string) {
+      await new Promise((r) => setTimeout(r, 5));
+      const s = await session(RESOURCE_A, `late-${threadId}`);
+      await s.thread.switch({ threadId });
+      await s.sendMessage({ content: `late message on ${threadId}` });
+    }
+
+    it('after Clear, activity on the old thread cannot revive it (latest-by-activity is not used)', async () => {
+      await seedThread({ id: 'before-clear', title: 'Before', agentId: 'agent-a', turn: true });
+      // First open backfills the pin with the agent's latest thread.
+      assert.equal((await list('alice')).body.initialThreadId, 'before-clear');
+      assert.equal(activeThreads.get('company-a::agent-a'), 'before-clear');
+
+      const cleared = await post('alice');
+      assert.equal(cleared.status, 201);
+      const fresh = cleared.body.thread.id as string;
+      assert.equal(cleared.body.activeThreadId, fresh);
+      assert.equal(activeThreads.get('company-a::agent-a'), fresh);
+
+      // The pre-Clear thread gets newer activity than the fresh (still empty) thread...
+      await turnOn('before-clear');
+      const after = await list('alice');
+      assert.equal(after.body.threads[0].id, 'before-clear', 'it is the latest by activity');
+      // ...but the chat still opens the pinned fresh thread.
+      assert.equal(after.body.initialThreadId, fresh);
+    });
+
+    it('a remount (fresh GET, no thread id) reopens the pinned thread every time', async () => {
+      await seedThread({ id: 'older', title: 'Older', agentId: 'agent-a', turn: true });
+      await seedThread({ id: 'newer', title: 'Newer', agentId: 'agent-a', turn: true });
+      activeThreads.set('company-a::agent-a', 'older');
+      for (let i = 0; i < 2; i++) assert.equal((await list('alice')).body.initialThreadId, 'older');
+      // Another agent's pin is its own.
+      await seedThread({ id: 'bobs', title: 'Bob', agentId: 'agent-b', turn: true });
+      assert.equal((await list('bob')).body.initialThreadId, 'bobs');
+      assert.equal(activeThreads.get('company-a::agent-a'), 'older');
+    });
+
+    it('a pinned thread that vanished or is out of scope falls back to the latest and re-pins it', async () => {
+      await seedThread({ id: 'mine', title: 'Mine', agentId: 'agent-a', turn: true });
+      await seedThread({ id: 'bobs', title: 'Bob', agentId: 'agent-b', turn: true });
+      activeThreads.set('company-a::agent-a', 'bobs'); // another agent's thread is never opened for Alice
+      assert.equal((await list('alice')).body.initialThreadId, 'mine');
+      assert.equal(activeThreads.get('company-a::agent-a'), 'mine');
+      activeThreads.set('company-a::agent-a', 'deleted-thread');
+      assert.equal((await list('alice')).body.initialThreadId, 'mine');
+      // No threads at all: nothing to open (the client creates the first one, which is pinned).
+      const none = await list('zed');
+      assert.equal(none.body.initialThreadId, null);
+      assert.equal(activeThreads.has('company-a::agent-z'), false);
+    });
+
+    it('Clear moves the agent’s idle AG-UI session (and so its thread-scoped OM) to the new thread', async () => {
+      await seedThread({ id: 'before-clear', title: 'Before', agentId: 'agent-a', turn: true });
+      await seedThread({ id: 'bobs', title: 'Bob', agentId: 'agent-b', turn: true });
+      const agui = await session(RESOURCE_A, AGUI_SCOPE);
+      await agui.thread.switch({ threadId: 'before-clear' });
+      const bobAgui = await session(RESOURCE_A, 'agui:agent-b');
+      await bobAgui.thread.switch({ threadId: 'bobs' });
+      const shared = await session(RESOURCE_A, 'assistant');
+      await shared.thread.switch({ threadId: 'before-clear' });
+
+      const fresh = (await post('alice')).body.thread.id as string;
+      // The AG-UI session the chat runs on is now on the new thread under the free-chat resource: the
+      // AgentController session and Observational Memory (thread scope: keyed by resource + thread)
+      // continue on the new conversation.
+      assert.equal(agui.thread.getId(), fresh);
+      assert.equal(agui.identity.getResourceId(), RESOURCE_A);
+      assert.equal(await controller.getSessionByResource(RESOURCE_A, AGUI_SCOPE), agui);
+      // Other agents' sessions and the assistant list session are untouched.
+      assert.equal(bobAgui.thread.getId(), 'bobs');
+      assert.equal(shared.thread.getId(), 'before-clear');
+      // The next open (remount) agrees with the session.
+      assert.equal((await list('alice')).body.initialThreadId, fresh);
+    });
+
+    it('Clear leaves a session with an open or parked run on its thread (stopping it is offered in the chat)', async () => {
+      await seedThread({ id: 'before-clear', title: 'Before', agentId: 'agent-a', turn: true });
+      const agui = await session(RESOURCE_A, AGUI_SCOPE);
+      await agui.thread.switch({ threadId: 'before-clear' });
+      agui.getCurrentRunId = () => 'run-parked-on-card';
+      const fresh = (await post('alice')).body.thread.id as string;
+      assert.equal(agui.thread.getId(), 'before-clear');
+      assert.equal(activeThreads.get('company-a::agent-a'), fresh, 'the pin still moves');
+    });
+
+    it('list and create report the agent’s Observational Memory mode', async () => {
+      const listed = await list('alice');
+      assert.deepEqual(listed.body.observationalMemory, { mode: 'inherit', active: false });
+      const created = await post('alice');
+      assert.deepEqual(created.body.observationalMemory, { mode: 'inherit', active: false });
+    });
+  });
+
   describe('tagging and visibility (AG-UI only accepts threads tagged to the agent)', () => {
     beforeEach(async () => {
       await seedThread({ id: 'own', title: 'Own', agentId: 'agent-a', turn: true });

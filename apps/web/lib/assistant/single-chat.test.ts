@@ -1,10 +1,10 @@
 /**
- * ASYNC-0 (Slice A): single conversation per agent — chat path, Clear chat (a fresh thread via the
- * existing thread API), and the ⋯ menu items.
+ * ASYNC-0: single conversation per agent — chat path, Clear chat (a fresh thread via the existing
+ * thread API, Slice A), and the ⋯ menu items (with the OM mode, Slice B).
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { agentChatMenuItems, agentChatPath, agentOmSettingsHref, clearAgentChat } from './single-chat';
+import { agentChatMenuItems, agentChatPath, agentOmMenuLabel, agentOmSettingsHref, clearAgentChat, isAssistantOmSummary } from './single-chat';
 
 const respond = (status: number, body: unknown) =>
   (async (url: string, init?: RequestInit) => {
@@ -52,5 +52,40 @@ describe('ASYNC-0 single agent chat', () => {
     const clearing = agentChatMenuItems({ agentUrlKey: 'ceo', runOpen: false, clearing: true });
     assert.equal(clearing[0].disabled, true);
     assert.equal(clearing[0].hint, 'Clearing…');
+  });
+
+  it('Clear chat passes on the OM mode the server reports for the new thread (Slice B)', async () => {
+    calls = [];
+    const om = { mode: 'on', active: true };
+    assert.deepEqual(await clearAgentChat('a', { fetch: respond(201, { thread: { id: 't2' }, activeThreadId: 't2', observationalMemory: om }) }), {
+      ok: true,
+      threadId: 't2',
+      observationalMemory: om,
+    });
+    // A malformed OM summary is ignored, not passed on.
+    assert.deepEqual(await clearAgentChat('a', { fetch: respond(201, { thread: { id: 't3' }, observationalMemory: { mode: 'weird' } }) }), {
+      ok: true,
+      threadId: 't3',
+    });
+  });
+
+  it('menu: the Observational Memory item shows the current mode and links to Control Pane to change it (Slice B)', () => {
+    assert.equal(agentOmMenuLabel(null), 'Observational Memory');
+    assert.equal(agentOmMenuLabel({ mode: 'off', active: false }), 'Observational Memory: Off');
+    assert.equal(agentOmMenuLabel({ mode: 'on', active: true }), 'Observational Memory: On');
+    assert.equal(agentOmMenuLabel({ mode: 'on', active: false }), 'Observational Memory: On (not configured)');
+    assert.equal(agentOmMenuLabel({ mode: 'inherit', active: true }), 'Observational Memory: Inherit (on)');
+    assert.equal(agentOmMenuLabel({ mode: 'inherit', active: false }), 'Observational Memory: Inherit (off)');
+    const items = agentChatMenuItems({ agentUrlKey: 'ceo', runOpen: false, observationalMemory: { mode: 'inherit', active: true } });
+    assert.deepEqual(
+      items.map((i) => i.label),
+      ['Clear chat', 'Observational Memory: Inherit (on)'],
+    );
+    assert.equal(items[1].href, '/agent/ceo?view=overview&config=om');
+    assert.equal(items[1].hint, 'Change in Control Pane');
+    assert.equal(items[1].disabled, undefined, 'read-only display, still a link');
+    assert.equal(isAssistantOmSummary({ mode: 'off', active: false }), true);
+    assert.equal(isAssistantOmSummary({ mode: 'off' }), false);
+    assert.equal(isAssistantOmSummary(null), false);
   });
 });

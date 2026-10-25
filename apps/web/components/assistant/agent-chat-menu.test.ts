@@ -1,5 +1,6 @@
 /**
- * ASYNC-0 (Slice A): the agent chat ⋯ menu and the Clear chat confirm, plus the chat chrome slot.
+ * ASYNC-0: the agent chat ⋯ menu and the Clear chat confirm, plus the chat chrome slot.
+ * Slice B: the confirm warns about a waiting card; AgentChat stops it before clearing.
  * Rendered with react-dom/server (the repo has no DOM test library).
  */
 import { describe, it, before } from 'node:test';
@@ -66,6 +67,16 @@ describe('ASYNC-0 agent chat menu', () => {
     assert.equal(text(bs[1]), 'Clearing…');
   });
 
+  it('confirm: a waiting card is named and the user is told Clear stops it (Slice B)', () => {
+    const noop = () => {};
+    const html = renderToStaticMarkup(
+      React.createElement(ClearChatConfirmView, { busy: false, error: null, pendingCard: 'form card (“Setup”)', onConfirm: noop, onCancel: noop }),
+    );
+    assert.match(html, /data-clear-chat-pending[^>]*>The form card \(“Setup”\) is still waiting for your answer\. Clearing stops it/);
+    const none = renderToStaticMarkup(React.createElement(ClearChatConfirmView, { busy: false, error: null, onConfirm: noop, onCancel: noop }));
+    assert.doesNotMatch(none, /data-clear-chat-pending/);
+  });
+
   it('menu trigger renders as "Chat options" (items open on click)', () => {
     const html = renderToStaticMarkup(
       React.createElement(AgentChatMenu, { agentUrlKey: 'ceo', runOpen: false, onClear: async () => ({ ok: true as const, threadId: 't' }) }),
@@ -118,6 +129,10 @@ describe('ASYNC-0 agent chat menu', () => {
     const src = await readFile(fileURLToPath(new URL('./agent-chat.tsx', import.meta.url)), 'utf8');
     assert.match(src, /<AgentChatMenu/);
     assert.match(src, /clearAgentChat\(agentId/);
+    // Slice B: the menu gets the OM mode and the waiting card; a parked run is stopped before clearing.
+    assert.match(src, /observationalMemory=\{observationalMemory\}/);
+    assert.match(src, /pendingCard=\{pendingCardDescription\(parkedNow\)\}/);
+    assert.ok(src.indexOf('await chat.abort()') > -1 && src.indexOf('await chat.abort()') < src.indexOf('await clearAgentChat(agentId)'));
     assert.doesNotMatch(src, />New chat<|'New chat'|newThread\(/);
   });
 });
