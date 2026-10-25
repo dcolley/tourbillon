@@ -1,0 +1,319 @@
+/**
+ * WID-3: question, choice, form and confirm cards — specs (props / answers refused outside the card,
+ * credential-like form fields refused), the draft helpers behind each card, the registry's client-side
+ * check (same as the server's), and rendering of each card pending / answered / dismissed / busy,
+ * with agent text shown as text only. No DOM test library in the repo: react-dom/server markup.
+ */
+import { describe, it, before } from 'node:test';
+import assert from 'node:assert/strict';
+import * as React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { acceptWidgetAnswer } from '@tourbillon/shared/widgets';
+import {
+  askChoiceSpec,
+  askConfirmSpec,
+  askFormSpec,
+  askQuestionSpec,
+  type AskChoiceProps,
+  type AskConfirmProps,
+  type AskFormProps,
+} from './chat-card-specs';
+import { choiceDraft, confirmDraft, formDraft, initialChoice, initialFormDraft, questionDraft } from './chat-card-drafts';
+
+type Tool = typeof import('./widget-tool-call');
+type Reg = typeof import('./registry');
+let WidgetToolCall: Tool['WidgetToolCall'];
+let registry: Reg['assistantWidgetRegistry'];
+let createWidgetRegistry: Reg['createWidgetRegistry'];
+
+const CHOICE: AskChoiceProps = {
+  question: 'Which plan?',
+  options: [
+    { id: 'basic', label: 'Basic' },
+    { id: 'pro', label: 'Pro', description: 'More seats' },
+  ],
+  recommended: 'pro',
+};
+const FORM: AskFormProps = {
+  title: 'New project',
+  fields: [
+    { name: 'projectName', label: 'Name', type: 'text', maxLength: 10 },
+    { name: 'seats', label: 'Seats', type: 'number', min: 1, max: 50, integer: true },
+    { name: 'tier', label: 'Tier', type: 'select', options: [{ value: 'a', label: 'Tier A' }, { value: 'b', label: 'Tier B' }] },
+    { name: 'notes', label: 'Notes', type: 'text', required: false, multiline: true },
+  ],
+};
+const CONFIRM: AskConfirmProps = { question: 'Archive the board?', reason: 'required', confirmLabel: 'Archive', destructive: true };
+
+const issues = (props: unknown, spec: { propsSchema: { safeParse(v: unknown): any } }) => {
+  const r = spec.propsSchema.safeParse(props);
+  return r.success ? [] : r.error.issues.map((i: { path: PropertyKey[]; message: string; code: string }) => `${i.path.join('.')}: ${i.code === 'custom' ? i.message : i.code}`);
+};
+
+describe('WID-3 card specs', () => {
+  it('valid props pass; bad option references, duplicates and mixed field settings are refused', () => {
+    assert.deepEqual(issues(CHOICE, askChoiceSpec), []);
+    assert.deepEqual(issues(FORM, askFormSpec), []);
+    assert.deepEqual(issues({ ...CHOICE, recommended: 'gold' }, askChoiceSpec), ['recommended: not_an_option']);
+    assert.deepEqual(issues({ ...CHOICE, defaultOption: 'gold' }, askChoiceSpec), ['defaultOption: not_an_option']);
+    assert.deepEqual(issues({ ...CHOICE, recommended: undefined, options: [CHOICE.options[0], CHOICE.options[0]] }, askChoiceSpec), ['options: duplicate_id']);
+    assert.deepEqual(issues({ ...CHOICE, recommended: undefined, options: [CHOICE.options[0]] }, askChoiceSpec), ['options: too_small']);
+    const field = (f: Record<string, unknown>) => ({ title: 't', fields: [{ name: 'x', label: 'X', ...f }] });
+    assert.deepEqual(issues(field({ type: 'select' }), askFormSpec), ['fields.0.options: required_for_select']);
+    assert.deepEqual(issues(field({ type: 'text', options: [{ value: 'a', label: 'A' }] }), askFormSpec), ['fields.0.options: select_only']);
+    assert.deepEqual(issues(field({ type: 'text', min: 1 }), askFormSpec), ['fields.0.type: number_only']);
+    assert.deepEqual(issues(field({ type: 'number', min: 5, max: 1 }), askFormSpec), ['fields.0.min: min_above_max']);
+    assert.deepEqual(issues({ title: 't', fields: [FORM.fields[0], FORM.fields[0]] }, askFormSpec), ['fields: duplicate_name']);
+    assert.deepEqual(issues({ ...CHOICE, html: '<b>' }, askChoiceSpec), [': unrecognized_keys']);
+  });
+
+  it('forms cannot ask for passwords, tokens, keys or other credentials', () => {
+    for (const [name, label] of [
+      ['password', 'Password'],
+      ['apiKey', 'Key'],
+      ['note', 'Your access token'],
+      ['otpCode', 'Code'],
+      ['secretAnswer', 'Answer'],
+      ['pin', 'PIN'],
+    ]) {
+      assert.deepEqual(issues({ title: 't', fields: [{ name, label, type: 'text' }] }, askFormSpec), ['fields.0.name: credential_field'], name);
+    }
+    assert.deepEqual(issues({ title: 't', fields: [{ name: 'spinCount', label: 'Spins', type: 'number' }] }, askFormSpec), []);
+  });
+
+  it('near-miss credential fields are refused; look-alike harmless names are not', () => {
+    for (const [name, label] of [
+      ['pinCode', 'Code'],
+      ['pin_code', 'Code'],
+      ['pwd', 'Value'],
+      ['cardCheck', 'Card CVV'],
+      ['awsKeyId', 'Access key'],
+      ['mfa', 'MFA code'],
+      ['note', 'p\u0430ssword'], // Cyrillic "а"
+      ['userPassword', 'Login'],
+      ['verify', 'Verification code'],
+      ['devicePasscode', 'Passcode'], // a passcode is a secret code: refused on purpose
+      ['wallet', 'Seed phrase'],
+    ]) {
+      assert.deepEqual(issues({ title: 't', fields: [{ name, label, type: 'text' }] }, askFormSpec), ['fields.0.name: credential_field'], `${name}/${label}`);
+    }
+    for (const [name, label] of [
+      ['passportNumber', 'Passport number'],
+      ['compassHeading', 'Compass heading'],
+      ['footprint', 'Footprint'],
+      ['spinCount', 'Spins'],
+      ['pinnedNote', 'Pinned note'],
+    ]) {
+      assert.deepEqual(issues({ title: 't', fields: [{ name, label, type: 'text' }] }, askFormSpec), [], `${name}/${label}`);
+    }
+  });
+
+  it('credential-shaped questions, titles, placeholders and option labels are refused', () => {
+    assert.deepEqual(issues({ question: 'What is your password?' }, askQuestionSpec), ['question: credential_text']);
+    assert.deepEqual(issues({ question: 'Paste the API key here' }, askQuestionSpec), ['question: credential_text']);
+    assert.deepEqual(issues({ question: 'Code?', placeholder: 'One-time code from your app' }, askQuestionSpec), ['placeholder: credential_text']);
+    assert.deepEqual(issues({ ...CHOICE, question: 'Which MFA code did you get?' }, askChoiceSpec), ['question: credential_text']);
+    assert.deepEqual(
+      issues({ ...CHOICE, recommended: undefined, options: [{ id: 'a', label: 'Use my token' }, { id: 'b', label: 'Basic' }] }, askChoiceSpec),
+      ['options.0.label: credential_text'],
+    );
+    assert.deepEqual(issues({ ...FORM, title: 'Enter your credentials' }, askFormSpec), ['title: credential_text']);
+    assert.deepEqual(
+      issues({ title: 't', fields: [{ name: 'tier', label: 'Tier', type: 'select', options: [{ value: 'a', label: 'CVV 123' }] }] }, askFormSpec),
+      ['fields.0.options.0.label: credential_text'],
+    );
+    // Prose that only mentions common words is fine.
+    assert.deepEqual(issues({ question: 'Which token budget should the run use?' }, askQuestionSpec), []);
+    assert.deepEqual(issues({ question: 'Should I pin this issue or authorize the deploy?' }, askQuestionSpec), []);
+    assert.deepEqual(issues({ question: 'Which passport office and compass heading?' }, askQuestionSpec), []);
+  });
+
+  it('answers are checked against the props the card was asked with', () => {
+    const now = new Date(0);
+    const check = (spec: any, props: unknown, answer: unknown) => {
+      const r = acceptWidgetAnswer(spec, 'c1', answer, now, props);
+      return r.ok ? 'ok' : r.issues;
+    };
+    assert.equal(check(askChoiceSpec, CHOICE, { choice: 'pro' }), 'ok');
+    assert.deepEqual(check(askChoiceSpec, CHOICE, { choice: 'gold' }), ['choice: not_an_option']);
+    assert.equal(check(askQuestionSpec, { question: 'q', maxLength: 5 }, { text: 'short' }), 'ok');
+    assert.deepEqual(check(askQuestionSpec, { question: 'q', maxLength: 5 }, { text: 'longer' }), ['text: too_long']);
+    assert.deepEqual(check(askQuestionSpec, { question: 'q' }, { text: '   ' }), ['text: too_small']);
+    assert.equal(check(askFormSpec, FORM, { values: { projectName: 'Orbit', seats: 3, tier: 'a', notes: null } }), 'ok');
+    assert.deepEqual(check(askFormSpec, FORM, { values: { projectName: 'Orbit', seats: 3, tier: 'a' } }), 'ok');
+    assert.deepEqual(check(askFormSpec, FORM, { values: { projectName: 'A very long name', seats: 0, tier: 'c', x: 1 } }), [
+      'values.x: unknown_field',
+      'values.projectName: too_long',
+      'values.seats: too_small',
+      'values.tier: not_an_option',
+    ]);
+    assert.equal(check(askConfirmSpec, CONFIRM, { confirmed: true, reason: 'Done' }), 'ok');
+    assert.deepEqual(check(askConfirmSpec, CONFIRM, { confirmed: true }), ['reason: required']);
+    assert.deepEqual(check(askConfirmSpec, { question: 'q' }, { confirmed: true, reason: 'x' }), ['reason: not_asked']);
+    assert.equal(check(askConfirmSpec, { question: 'q', reason: 'optional' }, { confirmed: false }), 'ok');
+  });
+
+  it('fails closed: an answer cannot be accepted without valid props', () => {
+    assert.deepEqual(acceptWidgetAnswer(askChoiceSpec as any, 'c1', { choice: 'pro' }), { ok: false, issues: ['(props): unavailable'] });
+    assert.deepEqual(acceptWidgetAnswer(askChoiceSpec as any, 'c1', { choice: 'pro' }, new Date(), { question: '' }), {
+      ok: false,
+      issues: ['(props): invalid'],
+    });
+  });
+});
+
+describe('WID-3 card drafts', () => {
+  it('question: trimmed text, empty and too long refused', () => {
+    assert.deepEqual(questionDraft('  hi  '), { ok: true, answer: { text: 'hi' } });
+    assert.equal(questionDraft('   ').ok, false);
+    assert.equal(questionDraft('abcdef', 5).ok, false);
+  });
+
+  it('choice: default preselected, a pick must be an option', () => {
+    assert.equal(initialChoice(CHOICE), undefined);
+    assert.equal(initialChoice({ ...CHOICE, defaultOption: 'basic' }), 'basic');
+    assert.deepEqual(choiceDraft(CHOICE, 'pro'), { ok: true, answer: { choice: 'pro' } });
+    assert.equal(choiceDraft(CHOICE, undefined).ok, false);
+    assert.equal(choiceDraft(CHOICE, 'gold').ok, false);
+  });
+
+  it('form: typed text becomes values (numbers parsed, empty optional → null); errors per field', () => {
+    assert.deepEqual(initialFormDraft(FORM), { projectName: '', seats: '', tier: '', notes: '' });
+    assert.deepEqual(formDraft(FORM, { projectName: ' Orbit ', seats: '7', tier: 'b', notes: '' }), {
+      ok: true,
+      answer: { values: { projectName: 'Orbit', seats: 7, tier: 'b', notes: null } },
+    });
+    assert.deepEqual(formDraft(FORM, { projectName: '', seats: '2.5', tier: '', notes: '' }), {
+      ok: false,
+      errors: { projectName: 'Required.', seats: 'Enter a whole number.', tier: 'Required.' },
+    });
+    assert.deepEqual(formDraft(FORM, { projectName: 'x', seats: '99', tier: 'a', notes: '' }), { ok: false, errors: { seats: 'At most 50.' } });
+    assert.deepEqual(formDraft(FORM, { projectName: 'x', seats: 'abc', tier: 'a', notes: '' }), { ok: false, errors: { seats: 'Enter a valid value.' } });
+  });
+
+  it('confirm: reason only when asked, required reason enforced', () => {
+    assert.deepEqual(confirmDraft({ question: 'q' }, true, 'ignored'), { ok: true, answer: { confirmed: true } });
+    assert.deepEqual(confirmDraft(CONFIRM, false, '  '), { ok: false, errors: { reason: 'Give a reason.' } });
+    assert.deepEqual(confirmDraft(CONFIRM, false, ' Not yet '), { ok: true, answer: { confirmed: false, reason: 'Not yet' } });
+    assert.deepEqual(confirmDraft({ question: 'q', reason: 'optional' }, true, ''), { ok: true, answer: { confirmed: true } });
+  });
+});
+
+describe('WID-3 card rendering', () => {
+  before(async () => {
+    (globalThis as { React?: unknown }).React = React;
+    ({ WidgetToolCall } = await import('./widget-tool-call'));
+    ({ assistantWidgetRegistry: registry, createWidgetRegistry } = await import('./registry'));
+  });
+
+  const render = (toolName: string, args: unknown, extra: Record<string, unknown> = {}) =>
+    renderToStaticMarkup(
+      React.createElement(WidgetToolCall, {
+        registry,
+        toolCall: { toolCallId: 'c1', toolName, args },
+        onAnswer: () => {},
+        onDismiss: () => {},
+        ...extra,
+      }),
+    );
+
+  it('question: pending input with Send answer and Dismiss; answered shows the text; multiline uses a textarea', () => {
+    const html = render('askQuestion', { question: 'What changed?', placeholder: 'Describe it', detail: 'Short is fine.' });
+    assert.match(html, /data-card="question"/);
+    assert.match(html, /What changed\?/);
+    assert.match(html, /Short is fine\./);
+    assert.match(html, /<input[^>]*placeholder="Describe it"/);
+    assert.match(html, /Send answer/);
+    assert.match(html, /data-action="dismiss"/);
+    assert.match(render('askQuestion', { question: 'q', multiline: true }), /<textarea/);
+    const answered = render('askQuestion', { question: 'q' }, { answer: { text: 'All good' } });
+    assert.match(answered, /data-card-status="answered"/);
+    assert.match(answered, /All good/);
+    assert.doesNotMatch(answered, /Send answer|data-action="dismiss"/);
+  });
+
+  it('choice: options as radios with descriptions, the recommended one marked, the default checked', () => {
+    const html = render('askChoice', { ...CHOICE, defaultOption: 'basic' });
+    assert.match(html, /data-card="choice"/);
+    assert.equal(html.match(/type="radio"/g)?.length, 2);
+    assert.match(html, /data-option="pro" data-recommended="true"/);
+    assert.match(html, /Recommended/);
+    assert.match(html, /More seats/);
+    assert.match(html, /<input type="radio"[^>]*checked=""[^>]*value="basic"/);
+    const answered = render('askChoice', CHOICE, { answer: { choice: 'pro' } });
+    assert.match(answered, /<fieldset[^>]*disabled/);
+    assert.match(answered, /Chosen: Pro/);
+  });
+
+  it('form: text, number and select inputs with labels; optional marked; answered shows the values', () => {
+    const html = render('askForm', FORM);
+    assert.match(html, /data-card="form"/);
+    assert.match(html, /data-field="projectName" data-field-type="text"/);
+    assert.match(html, /<input[^>]*type="number"[^>]*min="1"[^>]*max="50"/);
+    assert.match(html, /<select[^>]*name="tier"/);
+    assert.match(html, /<option value="b">Tier B<\/option>/);
+    assert.match(html, /<textarea[^>]*name="notes"/);
+    assert.match(html, /\(optional\)/);
+    assert.match(html, />Submit</);
+    const answered = render('askForm', FORM, { answer: { values: { projectName: 'Orbit', seats: 5, tier: 'b', notes: null } } });
+    assert.match(answered, /<dd[^>]*>Orbit<\/dd>/);
+    assert.match(answered, /<dd[^>]*>Tier B<\/dd>/);
+    assert.match(answered, /<dd[^>]*>—<\/dd>/);
+    assert.doesNotMatch(answered, /<input|<select/);
+  });
+
+  it('confirm: custom labels, reason box when asked; answered shows the outcome and reason', () => {
+    const html = render('askConfirm', CONFIRM);
+    assert.match(html, /data-card="confirm"/);
+    assert.match(html, />Archive</);
+    assert.match(html, />Cancel</);
+    assert.match(html, /<textarea/);
+    assert.doesNotMatch(render('askConfirm', { question: 'Go?' }), /<textarea/);
+    const answered = render('askConfirm', CONFIRM, { answer: { confirmed: false, reason: 'Still used' } });
+    assert.match(answered, /data-confirmed="false"/);
+    assert.match(answered, />Cancel(led)?</);
+    assert.match(answered, /Still used/);
+  });
+
+  it('dismissed, busy and not-answerable cards are locked', () => {
+    const dismissed = render('askChoice', CHOICE, { dismissed: true });
+    assert.match(dismissed, /data-card-status="dismissed"/);
+    assert.match(dismissed, /Dismissed without an answer\./);
+    assert.match(dismissed, /<fieldset[^>]*disabled/);
+    const busy = render('askQuestion', { question: 'q' }, { busy: true });
+    assert.match(busy, /Sending…/);
+    assert.match(busy, /<input[^>]*disabled/);
+    assert.doesNotMatch(busy, /data-action="dismiss"/);
+    const closed = render('askConfirm', CONFIRM, { answerable: false });
+    assert.equal(closed.match(/<button[^>]*disabled/g)?.length, 2);
+  });
+
+  it('agent text is rendered as text, never markup', () => {
+    const hostile = '<img src=x onerror="alert(1)">';
+    const html = render('askChoice', { question: hostile, options: [{ id: 'a', label: hostile }, { id: 'b', label: '<script>x</script>' }] });
+    assert.doesNotMatch(html, /<img|<script/);
+    assert.match(html, /&lt;img src=x onerror=/);
+  });
+
+  it('the client check matches the server: an answer outside the card is refused before it is sent', () => {
+    const accepted: unknown[] = [];
+    const invalid: string[][] = [];
+    let onAnswer: ((a: unknown) => void) | undefined;
+    const Probe = registry.latest('askChoice')!;
+    const capture: typeof Probe = { ...Probe, component: (p: any) => ((onAnswer = p.onAnswer), null) };
+    renderToStaticMarkup(
+      React.createElement(WidgetToolCall, {
+        registry: createWidgetRegistry([capture]),
+        toolCall: { toolCallId: 'c1', toolName: 'askChoice', args: CHOICE },
+        onAnswer: (r) => accepted.push(r),
+        onInvalidAnswer: (i) => invalid.push(i),
+      }),
+    );
+    onAnswer!({ choice: 'gold' });
+    onAnswer!({ choice: 'basic' });
+    onAnswer!({ choice: 'pro' }); // only the first accepted answer per attempt
+    assert.deepEqual(invalid, [['choice: not_an_option']]);
+    assert.equal(accepted.length, 1);
+    assert.equal((accepted[0] as { toolResult: string }).toolResult, JSON.stringify({ widget: 'askChoice', version: 1, answer: { choice: 'basic' } }));
+  });
+});

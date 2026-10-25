@@ -11,6 +11,7 @@ import {
   widgetDismissedToolResult,
   widgetFrontendTool,
   widgetJsonBytes,
+  widgetPropsFromArgs,
   widgetResumeSchema,
   widgetSchemaProblems,
   widgetSpecProblems,
@@ -332,5 +333,46 @@ describe('WID-1 accepting and storing answers', () => {
     assert.equal(parseStoredWidgetAnswer('c1', 'other', result), null);
     assert.equal(parseStoredWidgetAnswer('c1', 'pickOne', { isError: true, content: 'x' }), null);
     assert.equal(parseStoredWidgetAnswer('c1', 'pickOne', '{bad'), null);
+  });
+});
+
+describe('WID-3 answers checked against the call\'s props', () => {
+  const at = new Date('2026-10-24T09:00:00.000Z');
+  const picker: WidgetSpec<{ options: string[] }, { choice: string }> = {
+    name: 'pickOne',
+    version: 1,
+    description: 'Pick one.',
+    propsSchema: z.strictObject({ options: z.array(z.string()).min(2) }),
+    answerSchema: z.strictObject({ choice: z.string() }),
+    frontendTool: true,
+    checkAnswer: (props, answer) => (props.options.includes(answer.choice) ? [] : ['choice: not_an_option']),
+  };
+  const props = { options: ['a', 'b'] };
+
+  it('an answer that fits the props is accepted; one outside them is refused with path: code only', () => {
+    assert.equal(acceptWidgetAnswer(picker, 'c1', { choice: 'a' }, at, props).ok, true);
+    assert.deepEqual(acceptWidgetAnswer(picker, 'c1', { choice: 'zz-secret' }, at, props), { ok: false, issues: ['choice: not_an_option'] });
+  });
+
+  it('fails closed when the props are missing, invalid or too large, or the check throws', () => {
+    assert.deepEqual(acceptWidgetAnswer(picker, 'c1', { choice: 'a' }, at), { ok: false, issues: ['(props): unavailable'] });
+    assert.deepEqual(acceptWidgetAnswer(picker, 'c1', { choice: 'a' }, at, { options: ['a'] }), { ok: false, issues: ['(props): invalid'] });
+    const huge = { options: ['a', 'b', 'x'.repeat(WIDGET_MAX_ARGS_BYTES)] };
+    assert.deepEqual(acceptWidgetAnswer(picker, 'c1', { choice: 'a' }, at, huge), { ok: false, issues: ['(props): unavailable'] });
+    const throwing = { ...picker, checkAnswer: () => { throw new Error('x'); } };
+    assert.deepEqual(acceptWidgetAnswer(throwing, 'c1', { choice: 'a' }, at, props), { ok: false, issues: ['(root): check_failed'] });
+  });
+
+  it('the answer schema runs first; specs without a check ignore props', () => {
+    assert.deepEqual(acceptWidgetAnswer(picker, 'c1', { choice: 1 }, at, props), { ok: false, issues: ['choice: invalid_type'] });
+    const { checkAnswer: _c, ...plain } = picker;
+    assert.equal(acceptWidgetAnswer(plain as WidgetSpec, 'c1', { choice: 'zz' }, at).ok, true);
+  });
+
+  it('widgetPropsFromArgs drops the reserved widgetVersion key and refuses non-objects', () => {
+    assert.deepEqual(widgetPropsFromArgs({ options: ['a'], widgetVersion: 1 }), { options: ['a'] });
+    assert.equal(widgetPropsFromArgs(null), undefined);
+    assert.equal(widgetPropsFromArgs(['a']), undefined);
+    assert.equal(widgetPropsFromArgs('{"options":[]}'), undefined);
   });
 });

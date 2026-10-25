@@ -19,7 +19,14 @@
  *   session starts a turn); it is detected from the first events and adopted as the open run.
  *
  * WID-1 seam: `tools` (frontend tool definitions sent as RunAgentInput.tools) and `onRunEvent` (every
- * run event after the state update). Nothing in this client answers frontend tools yet.
+ * run event after the state update).
+ * WID-3: `answerWidget()` / `dismissWidget()` answer a suspended widget call with an AG-UI `resume`
+ * entry; the endpoint validates the answer and resumes the run on a new stream, which is adopted here.
+ * WID-3 parked cards: the run stays parked while a card waits (its stream has ended on an interrupt).
+ * `restorePending()` (called when the chat opens) asks the endpoint for the cards still waiting on this
+ * thread and shows them again; a send refused because the run is parked on a card records the card in
+ * `parked` (409 `pendingWidget`); `abort()` with no run stream open stops a parked run (action `abort`
+ * on the parked run's thread).
  */
 import type { ChatDashboardContext } from '@/lib/chat/dashboard-context';
 import { readAguiEvents, type AguiClientEvent } from './sse';
@@ -29,13 +36,18 @@ import {
   endRun,
   initialAgentChatState,
   markDroppedFollowUps,
+  parkedWidgetFromBody,
+  releaseParkedWidgets,
+  restorePendingWidgets,
+  setParked,
+  setWidgetSend,
   TOOL_DETACHED_MESSAGE,
   type AgentChatError,
   type AgentChatItem,
   type AgentChatState,
 } from './chat-state';
 
-export type AguiAction = 'run' | 'steer' | 'followUp' | 'abort' | 'toolApproval';
+export type AguiAction = 'run' | 'steer' | 'followUp' | 'abort' | 'toolApproval' | 'pending';
 
 /** AG-UI tool definition (RunAgentInput.tools). */
 export interface AguiTool {
@@ -65,6 +77,16 @@ export interface AgentChatClientOptions {
   /** After an accepted abort, how long to wait for the run to end before closing the stream. */
   abortTimeoutMs?: number;
 }
+
+/** AG-UI `resume` entry (RunAgentInput.resume). */
+export interface AguiResumeInput {
+  interruptId: string;
+  status: 'resolved' | 'cancelled';
+  payload?: unknown;
+}
+
+/** Shown when a widget answer reaches a card that is no longer waiting (answered elsewhere or ended). */
+export const WIDGET_NOT_PENDING_MESSAGE = 'This card is no longer waiting for an answer.';
 
 export type AgentChatResult =
   | { ok: true; value?: Record<string, unknown> }
@@ -96,14 +118,16 @@ function defaultId(): string {
   return `id-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-async function errorMessage(res: Response): Promise<string> {
+async function errorBody(res: Response): Promise<{ message: string; body: unknown }> {
+  let body: unknown = null;
   try {
-    const body = (await res.json()) as { error?: unknown };
-    if (typeof body?.error === 'string' && body.error) return body.error;
+    body = await res.json();
+    const error = (body as { error?: unknown } | null)?.error;
+    if (typeof error === 'string' && error) return { message: error, body };
   } catch {
     /* not JSON */
   }
-  return `Request failed (${res.status})`;
+  return { message: `Request failed (${res.status})`, body };
 }
 
 export class AgentChatClient {
@@ -190,6 +214,7 @@ export class AgentChatClient {
         const error = this.toError(err);
         this.setItem(itemId, { delivery: 'failed' });
         this.update((s) => ({ ...s, status: 'idle', error }));
+        if (error.pendingWidget) this.onParked(error.pendingWidget);
         return { ok: false, error };
       }
     })();
@@ -210,11 +235,16 @@ export class AgentChatClient {
     return this.control('steer', message);
   }
 
-  /** Stops the open run. */
+  /** Stops the open run, or (no run stream open) a run parked on a card. */
   async abort(): Promise<AgentChatResult> {
     if (this.starting) await this.starting.catch(() => {});
     const run = this.active;
-    if (!run) return { ok: true, value: { accepted: false } };
+    if (!run) {
+      if (this.state.parked || this.state.pendingTools.some((p) => p.reason === 'tool_suspended')) {
+        return this.stopParkedRun();
+      }
+      return { ok: true, value: { accepted: false } };
+    }
     this.update((s) => ({ ...s, status: 'stopping' }));
     const result = await this.control('abort');
     if (this.active !== run) return result; // ended meanwhile
@@ -263,6 +293,91 @@ export class AgentChatClient {
     return { ok: false, error };
   }
 
+  /** WID-3: answers a suspended widget call; the endpoint validates it and resumes the run. */
+  answerWidget(toolCallId: string, answer: unknown): Promise<AgentChatResult> {
+    return this.resumeWidget({ interruptId: toolCallId, status: 'resolved', payload: { answer } });
+  }
+
+  /** WID-3: dismisses a suspended widget call; the run resumes with a dismissed result. */
+  dismissWidget(toolCallId: string): Promise<AgentChatResult> {
+    return this.resumeWidget({ interruptId: toolCallId, status: 'cancelled' });
+  }
+
+  private async resumeWidget(entry: AguiResumeInput): Promise<AgentChatResult> {
+    const id = entry.interruptId;
+    if (this.disposed) return this.fail({ kind: 'rejected', message: 'Chat closed' });
+    if (this.starting) await this.starting.catch(() => {});
+    this.update((s) => setWidgetSend({ ...s, error: null }, id, 'sending'));
+    // No `action`: a `resume` entry is the decision (the endpoint reads it as toolApproval).
+    const result = await this.control('toolApproval', undefined, undefined, [entry]);
+    if (!result.ok) {
+      this.update((s) => setWidgetSend(s, id, 'failed'));
+      return result;
+    }
+    if (result.value?.startedRun === true) {
+      this.update((s) => ({
+        ...setWidgetSend(s, id, 'sent'),
+        pendingTools: s.pendingTools.filter((p) => p.toolCallId !== id),
+      }));
+      return result;
+    }
+    // Answered with a control result: nothing was resumed (e.g. already answered elsewhere).
+    const error: AgentChatError = { kind: 'rejected', message: WIDGET_NOT_PENDING_MESSAGE };
+    this.update((s) => ({ ...setWidgetSend(s, id, 'failed'), error }));
+    return { ok: false, error };
+  }
+
+  /**
+   * WID-3: asks the endpoint which cards are still waiting on this thread (e.g. after a reload) and
+   * shows them again, answerable; also records the card the session's run is parked on, if any.
+   * Failures are not shown (the chat works as before without them).
+   */
+  async restorePending(): Promise<AgentChatResult> {
+    if (this.disposed) return this.fail({ kind: 'rejected', message: 'Chat closed' });
+    let decision: Decision;
+    try {
+      const { res, ac, runId } = await this.post('pending');
+      decision = await this.readDecision(res, ac, runId);
+    } catch (err) {
+      return { ok: false, error: this.toError(err) };
+    }
+    if (decision.mode !== 'control') return this.fail({ kind: 'rejected', message: 'No pending cards answer' });
+    const value = decision.value;
+    // A run opened meanwhile has its own state; do not overwrite it.
+    if (!this.active) this.update((s) => restorePendingWidgets(s, value, this.opts.threadId));
+    return { ok: true, value };
+  }
+
+  /** WID-3: a send was refused because the session's run is parked on a card. */
+  private onParked(parked: NonNullable<AgentChatState['parked']>) {
+    this.update((s) => setParked(s, parked));
+    // A card on this thread that is not shown (e.g. after a reload): fetch and show it.
+    const shown = this.state.items.some((it) => it.kind === 'tool' && it.id === parked.toolCallId && it.status === 'suspended');
+    if (!parked.elsewhere && !shown) void this.restorePending();
+  }
+
+  /** WID-3: stops a run parked on a card (no run stream is open here): action `abort` on its thread. */
+  private async stopParkedRun(): Promise<AgentChatResult> {
+    const threadId = this.state.parked?.threadId ?? this.opts.threadId;
+    let decision: Decision;
+    try {
+      const { res, ac, runId } = await this.post('abort', undefined, undefined, undefined, threadId);
+      decision = await this.readDecision(res, ac, runId);
+    } catch (err) {
+      const error = this.toError(err);
+      this.update((s) => ({ ...s, error }));
+      return { ok: false, error };
+    }
+    if (decision.mode !== 'control') {
+      const error: AgentChatError = { kind: 'network', message: 'No answer from the agent' };
+      this.update((s) => ({ ...s, error }));
+      return { ok: false, error };
+    }
+    // Accepted (stopped) or not running any more: either way nothing is parked now.
+    this.update((s) => ({ ...releaseParkedWidgets(s), error: null }));
+    return { ok: true, value: decision.value };
+  }
+
   /** Clears the last error (e.g. after the user dismisses it). */
   clearError(): void {
     this.update((s) => (s.error ? { ...s, error: null } : s));
@@ -293,19 +408,28 @@ export class AgentChatClient {
   }
 
   /** RunAgentInput for one request (the endpoint reads the last user message only). */
-  buildInput(action: AguiAction, message?: string, extra: Record<string, unknown> = {}) {
+  buildInput(
+    action: AguiAction,
+    message?: string,
+    extra: Record<string, unknown> = {},
+    resume?: AguiResumeInput[],
+    /** Another thread of the same agent (WID-3: stopping a run parked on a card there). */
+    threadId: string = this.opts.threadId,
+  ) {
     const { resourceId, sessionScope, context } = this.opts;
     const runId = this.newId();
     return {
-      threadId: this.opts.threadId,
+      threadId,
       runId,
       state: {},
       messages: message !== undefined ? [{ id: this.newId(), role: 'user' as const, content: message }] : [],
       tools: this.opts.tools ?? [],
       context: [],
+      ...(resume ? { resume } : {}),
       forwardedProps: {
         tourbillon: {
-          action,
+          // With `resume` entries the action is implied (and an explicit toolApproval would add a decision).
+          ...(resume ? {} : { action }),
           ...(resourceId ? { resourceId } : {}),
           ...(sessionScope ? { sessionScope } : {}),
           ...(context ? { context } : {}),
@@ -315,12 +439,18 @@ export class AgentChatClient {
     };
   }
 
-  private async post(action: AguiAction, message?: string, extra?: Record<string, unknown>) {
+  private async post(
+    action: AguiAction,
+    message?: string,
+    extra?: Record<string, unknown>,
+    resume?: AguiResumeInput[],
+    threadId?: string,
+  ) {
     const endpoint = this.opts.endpoint ?? `/api/agui/${encodeURIComponent(this.opts.agentId)}`;
     const attempts = action === 'run' ? 0 : (this.opts.retry?.attempts ?? 3);
     const delayMs = this.opts.retry?.delayMs ?? 300;
     for (let attempt = 0; ; attempt++) {
-      const input = this.buildInput(action, message, extra);
+      const input = this.buildInput(action, message, extra, resume, threadId);
       const ac = new AbortController();
       let res: Response;
       try {
@@ -335,12 +465,18 @@ export class AgentChatClient {
       }
       if (res.ok && res.body) return { res, ac, runId: input.runId };
       if (res.ok) throw new RequestFailed({ kind: 'network', message: 'Empty response from the agent' });
-      const msg = await errorMessage(res);
+      const { message: msg, body } = await errorBody(res);
       if (res.status === 409 && RETRY_SHORTLY.test(msg) && attempt < attempts && !this.disposed) {
         await sleep(delayMs * (attempt + 1));
         continue;
       }
-      throw new RequestFailed({ kind: res.status === 409 ? 'conflict' : 'http', message: msg, status: res.status });
+      const pendingWidget = res.status === 409 ? parkedWidgetFromBody(body, this.opts.threadId) : null;
+      throw new RequestFailed({
+        kind: res.status === 409 ? 'conflict' : 'http',
+        message: msg,
+        status: res.status,
+        ...(pendingWidget ? { pendingWidget } : {}),
+      });
     }
   }
 
@@ -349,6 +485,7 @@ export class AgentChatClient {
     action: Exclude<AguiAction, 'run'>,
     message?: string,
     extra?: Record<string, unknown>,
+    resume?: AguiResumeInput[],
   ): Promise<AgentChatResult> {
     const itemId = message !== undefined ? this.newId() : null;
     if (itemId && message !== undefined) {
@@ -360,7 +497,7 @@ export class AgentChatClient {
     }
     let decision: Decision;
     try {
-      const { res, ac, runId } = await this.post(action, message, extra);
+      const { res, ac, runId } = await this.post(action, message, extra, resume);
       decision = await this.readDecision(res, ac, runId);
     } catch (err) {
       const error = this.toError(err);

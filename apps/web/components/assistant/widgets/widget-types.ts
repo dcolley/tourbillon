@@ -5,7 +5,8 @@
 import type * as React from 'react';
 import type { ParsedWidgetCall, WidgetFallbackReason, WidgetFrontendTool, WidgetSpec } from '@tourbillon/shared/widgets';
 
-export type WidgetStatus = 'pending' | 'answered';
+/** `dismissed` (WID-3): the user closed the card without answering; it renders locked. */
+export type WidgetStatus = 'pending' | 'answered' | 'dismissed';
 
 export interface WidgetComponentProps<P, A> {
   toolCallId: string;
@@ -14,8 +15,12 @@ export interface WidgetComponentProps<P, A> {
   status: WidgetStatus;
   /** The stored answer once the user has answered (cards lock on answer). */
   answer?: A;
-  /** Interactive widgets call this once with the user's answer. */
+  /** Interactive widgets call this once with the user's answer (absent while the card cannot be answered). */
   onAnswer?: (answer: A) => void;
+  /** WID-3: dismiss the card without answering (absent while it cannot be dismissed). */
+  onDismiss?: () => void;
+  /** WID-3: an answer or dismissal is on its way; the card shows it and stays locked. */
+  busy?: boolean;
 }
 
 /**
