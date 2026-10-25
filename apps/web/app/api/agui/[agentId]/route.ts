@@ -48,6 +48,13 @@
  * turn and to follow-ups queued on the run, sent to the client as a `tourbillon.trace` CUSTOM event
  * and in the RUN_FINISHED result, and Mastra stamps it on the saved assistant message
  * (`content.metadata.traceId`). `traceUrl` is added only when PHOENIX_UI_BASE_URL is set.
+ *
+ * CHAT-5: a thread may carry its own model choice (provider, model, effort; thread metadata
+ * `assistantModel`, set through /api/assistant/agents/[agentId]/threads/[threadId]/model). It wins
+ * over the agent's model and over `?modelId=`. On every request the provider is re-checked (it must
+ * exist and be on for the company, PRV-1); when it is not, every action except abort is refused
+ * with 409 `provider_disabled_for_company`. The run's trace attributes then carry the chosen
+ * provider and model, `modelSource=thread` and the effort when one is set.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { isAssistantAvailable } from '@/lib/feature-flags';
@@ -64,6 +71,8 @@ import {
 import { wrapMessageWithDashboardContext } from '@/lib/chat/dashboard-context';
 import { chatErrorResponse } from '@/lib/chat/route-helpers';
 import { chatModelIdFromSearch } from '@/lib/chat/model-query';
+import { resolveThreadRunModel, threadProviderRefusedBody, type ThreadRunModel } from '@/lib/chat/thread-model';
+import { threadModelChoiceFromMetadata } from '@/lib/assistant/thread-model';
 import { AguiInputError, aguiSessionScope, parseAguiRequest } from '@/lib/agui/run-input';
 import { AGUI_CUSTOM } from '@/lib/agui/session-events';
 import {
@@ -114,6 +123,7 @@ async function assertOwnedThread(
   if (!thread || thread.resourceId !== resourceId || ownerAgentId !== agent.id) {
     throw new ChatAgentError('Thread not found', 404);
   }
+  return thread;
 }
 
 /** Points the session at the (already verified) AG-UI thread. */
@@ -161,15 +171,24 @@ function toToolApprovalResult(result: unknown): ToolApprovalResult {
 }
 
 /** OBS-1: tracing options for one assistant run (undefined when Mastra tracing is off). */
-function assistantTracing(agent: Agent, threadId: string, aguiRunId: string, modelIdOverride: string | undefined) {
+function assistantTracing(
+  agent: Agent,
+  threadId: string,
+  aguiRunId: string,
+  modelIdOverride: string | undefined,
+  runModel: ThreadRunModel,
+) {
+  const thread = runModel.source === 'thread' ? runModel.choice : null;
   return buildAssistantTracingOptions({
     companyId: agent.companyId,
     agentId: agent.id,
     agentUrlKey: agent.urlKey,
     threadId,
-    provider: agent.providerId,
-    model: modelIdOverride ?? agent.modelId,
+    provider: thread ? thread.providerId : agent.providerId,
+    model: thread ? thread.modelId : (modelIdOverride ?? agent.modelId),
     aguiRunId,
+    // CHAT-5: only set for a thread choice, so agent-default runs keep the same attributes.
+    ...(thread ? { modelSource: 'thread' as const, reasoningLevel: thread.reasoningLevel ?? null } : {}),
   });
 }
 
@@ -197,12 +216,24 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
     assertCompanyResource(agent, resourceId);
 
     const modelIdOverride = chatModelIdFromSearch(req);
-    const controller = await getOrCreateChatController(agent, { modelIdOverride });
-    const session = await getChatSession(controller, agent, {
-      resourceId,
-      scope: aguiSessionScope(agent, props.sessionScope),
-    });
-    await assertOwnedThread(session, agent, resourceId, input.threadId);
+    const sessionScope = aguiSessionScope(agent, props.sessionScope);
+    let controller = await getOrCreateChatController(agent, { modelIdOverride });
+    let session = await getChatSession(controller, agent, { resourceId, scope: sessionScope });
+    const thread = await assertOwnedThread(session, agent, resourceId, input.threadId);
+
+    // CHAT-5: the thread's own model choice, re-checked against company enablement on every request.
+    const runModel = await resolveThreadRunModel(agent.companyId, threadModelChoiceFromMetadata(thread.metadata));
+    if (runModel.source === 'thread') {
+      if (!runModel.allowed && action !== 'abort') {
+        return NextResponse.json(threadProviderRefusedBody(), { status: 409 });
+      }
+      controller = await getOrCreateChatController(agent, runModel.opts);
+      session = await getChatSession(controller, agent, {
+        resourceId,
+        scope: sessionScope,
+        createInitialThread: false,
+      });
+    }
 
     // ---- No await from here until the run is claimed (or the control action is decided). ----
     const requestContext = createChatRequestContext(agent);
@@ -232,7 +263,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
     }
 
     // One trace per AG-UI run; a follow-up queued on an open run joins that run's trace.
-    const tracingOptions = active?.tracingOptions ?? assistantTracing(agent, input.threadId, input.runId, modelIdOverride);
+    const tracingOptions = active?.tracingOptions ?? assistantTracing(agent, input.threadId, input.runId, modelIdOverride, runModel);
 
     const queueOnOpenRun = action === 'followUp' && Boolean(active) && onThread;
     const isControl =

@@ -22,6 +22,7 @@ import type {
 import type { AguiThreadRef } from '@/lib/agui/client/thread-bootstrap';
 import { assistantAgentPath } from '@/lib/assistant/sidebar';
 import { useAgentChat, type AgentChatPhase } from './use-agent-chat';
+import { ModelPicker } from './model-picker/model-picker';
 
 const DELIVERY_LABEL: Partial<Record<UserMessageDelivery, string>> = {
   sending: 'Sending…',
@@ -95,6 +96,8 @@ export interface AgentChatViewProps {
   onStop: () => void;
   onToolDecision: (toolCallId: string, approved: boolean) => void;
   onDismissError: () => void;
+  /** CHAT-5: the thread's model picker, shown in the composer footer. */
+  modelPicker?: React.ReactNode;
 }
 
 function PendingTool({ tool, onDecision }: { tool: PendingToolDecision; onDecision: AgentChatViewProps['onToolDecision'] }) {
@@ -163,6 +166,7 @@ export function AgentChatView(props: AgentChatViewProps) {
           placeholder={runOpen ? 'Send a follow-up or steer the reply' : 'Message the agent'}
         />
         <div className="flex items-center gap-2">
+          {props.modelPicker ? <div data-composer-model-picker>{props.modelPicker}</div> : null}
           <span className="text-xs text-muted-foreground" data-run-status>
             {STATUS_LABEL[state.status]}
           </span>
@@ -232,6 +236,11 @@ export function AgentChat({ agentId, agentKey, threadId }: { agentId: string; ag
       onStop={() => void chat.abort()}
       onToolDecision={(id, approved) => void chat.respondToTool(id, approved)}
       onDismissError={chat.clearError}
+      modelPicker={
+        chat.thread ? (
+          <ModelPicker agentId={agentId} threadId={chat.thread.threadId} disabled={chat.state.status !== 'idle'} />
+        ) : undefined
+      }
     />
   );
 }
