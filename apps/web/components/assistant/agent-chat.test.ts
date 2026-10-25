@@ -279,8 +279,10 @@ describe('AGUI-1b assistant chat view', () => {
       const agentPage = await read('../../app/(assistant)/assistant/[agent]/page.tsx');
       const threadPage = await read('../../app/(assistant)/assistant/[agent]/[threadId]/page.tsx');
       // UI-3: both also pass the Open in chat context read from the search params.
-      assert.match(agentPage, /assistantRouteView\(applyAssistantRoute\(await resolveAssistantRoute\(\{ agentKey: agent, via: 'path' \}\)\), \{ context \}\)/);
-      assert.match(threadPage, /assistantRouteView\(applyAssistantRoute\(await resolveAssistantRoute\(\{ agentKey: agent, threadId, via: 'path' \}\)\), \{ context \}\)/);
+      // DM-1: and the active company, for the chat's DM strip.
+      assert.match(agentPage, /const decision = applyAssistantRoute\(await resolveAssistantRoute\(\{ agentKey: agent, via: 'path' \}\)\);/);
+      assert.match(threadPage, /const decision = applyAssistantRoute\(await resolveAssistantRoute\(\{ agentKey: agent, threadId, via: 'path' \}\)\);/);
+      for (const page of [agentPage, threadPage]) assert.match(page, /return assistantRouteView\(decision, \{ context, companyId \}\);/);
       for (const page of [agentPage, threadPage]) assert.match(page, /const context = parseOpenInChatContext\(await searchParams\);/);
       const queryPage = await read('../../app/(assistant)/assistant/page.tsx');
       assert.doesNotMatch(queryPage, /AgentChat|assistantRouteView/);

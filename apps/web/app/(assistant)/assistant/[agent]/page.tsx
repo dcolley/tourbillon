@@ -1,6 +1,7 @@
 import { assistantRouteView } from '@/components/assistant/assistant-route-view';
 import { applyAssistantRoute, resolveAssistantRoute } from '@/lib/assistant/route-server';
 import { parseOpenInChatContext } from '@/lib/assistant/open-in-chat';
+import { getActiveCompanyOrNull } from '@/lib/company';
 
 /**
  * `/assistant/<agent-url-key>`: agent chat, latest thread (an agent id in the URL redirects to the url key).
@@ -15,5 +16,8 @@ export default async function AssistantAgentPage({
 }) {
   const { agent } = await params;
   const context = parseOpenInChatContext(await searchParams);
-  return assistantRouteView(applyAssistantRoute(await resolveAssistantRoute({ agentKey: agent, via: 'path' })), { context });
+  const decision = applyAssistantRoute(await resolveAssistantRoute({ agentKey: agent, via: 'path' }));
+  // DM-1: the chat's DM strip reads the company's agent mail through the board session.
+  const companyId = decision?.kind === 'render' ? ((await getActiveCompanyOrNull())?.id ?? null) : null;
+  return assistantRouteView(decision, { context, companyId });
 }

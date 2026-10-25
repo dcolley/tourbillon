@@ -11,10 +11,11 @@ import type { OpenInChatContext } from '@/lib/assistant/open-in-chat';
  * by applyAssistantRoute before this is reached.
  * UI-3: `context` (from `?context=<type>:<id>`, an Open in chat link) starts the composer with that
  * page context as a chip.
+ * DM-1: `companyId` (the active company) lets the chat show the agent's DM activity strip.
  */
 export function assistantRouteView(
   decision: AssistantRouteDecision | null,
-  opts: { context?: OpenInChatContext | null } = {},
+  opts: { context?: OpenInChatContext | null; companyId?: string | null } = {},
 ) {
   if (decision?.kind !== 'render') return <AssistantEmptyState />;
   const { agent, threadId } = decision;
@@ -25,6 +26,7 @@ export function assistantRouteView(
       agentKey={agent.urlKey}
       threadId={threadId ?? undefined}
       {...(opts.context ? { initialContext: opts.context } : {})}
+      {...(opts.companyId ? { companyId: opts.companyId } : {})}
     />
   );
 }

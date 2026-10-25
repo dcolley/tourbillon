@@ -38,6 +38,7 @@ import { feedbackTargets } from '@/lib/assistant/feedback';
 import { MessageFeedback, useThreadFeedback } from './message-feedback';
 import { useAgentChat, type AgentChatPhase } from './use-agent-chat';
 import { ModelPicker } from './model-picker/model-picker';
+import { AgentDmActivity } from './dm-activity';
 
 const DELIVERY_LABEL: Partial<Record<UserMessageDelivery, string>> = {
   sending: 'Sending…',
@@ -181,6 +182,8 @@ export interface AgentChatViewProps {
   registry?: WidgetRegistry;
   /** WID-3: link to another chat of this agent (a card waiting there); no link without it. */
   chatHref?: (threadId: string) => string;
+  /** DM-1: the agent's DM activity strip (read-only), shown above the message list. */
+  dmActivity?: React.ReactNode;
 }
 
 const CARD_KIND: Record<string, string> = {
@@ -327,6 +330,7 @@ export function AgentChatView(props: AgentChatViewProps) {
   const footers = props.assistantFooter ? feedbackTargets(state.items, runOpen) : null;
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-agent-chat data-status={state.status}>
+      {props.dmActivity ?? null}
       <div className="flex-1 space-y-3 overflow-y-auto p-4" aria-live="polite">
         {state.items.map((item) => {
           const footerFor = footers?.get(item.id);
@@ -412,10 +416,13 @@ export function AgentChat({
   agentKey,
   threadId,
   initialContext,
+  companyId,
 }: {
   agentId: string;
   agentKey?: string;
   threadId?: string;
+  /** DM-1: active company; with it the chat shows the agent's DM activity strip. */
+  companyId?: string;
   /** UI-3: page context from an Open in chat link; sent with the first message unless removed. */
   initialContext?: OpenInChatContext;
 }) {
@@ -473,6 +480,7 @@ export function AgentChat({
       contextChip={context}
       onRemoveContext={() => setContext(null)}
       chatHref={(t) => agentChatHref(linkKey, t)}
+      dmActivity={companyId ? <AgentDmActivity companyId={companyId} agentId={agentId} /> : undefined}
       modelPicker={
         chat.thread ? (
           <ModelPicker agentId={agentId} threadId={chat.thread.threadId} disabled={chat.state.status !== 'idle'} />
