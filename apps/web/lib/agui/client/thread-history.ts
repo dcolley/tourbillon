@@ -177,22 +177,36 @@ export function chatItemsFromStoredMessages(messages: readonly StoredThreadMessa
   return items;
 }
 
+export interface ThreadHistoryPage {
+  /** Oldest first. */
+  messages: StoredThreadMessage[];
+  /** Older messages exist before this page (show "Load previous"). */
+  hasMore: boolean;
+}
+
 /**
- * Fetches every persisted message of the agent's thread, bypassing any HTTP cache, so each time the
- * chat opens it shows the conversation as it is now.
+ * CHAT-PAGE-1: one page of the thread's persisted messages, bypassing any HTTP cache: without
+ * `before` the newest `limit`, with `before` (a stored message id) the `limit` messages before it.
+ * Without `limit` and `before` the whole transcript (`hasMore: false`).
  */
-export async function fetchThreadHistory(opts: {
+export async function fetchThreadHistoryPage(opts: {
   agentId: string;
   threadId: string;
+  limit?: number;
+  before?: string | null;
   fetch?: typeof fetch;
   signal?: AbortSignal;
-}): Promise<StoredThreadMessage[]> {
+}): Promise<ThreadHistoryPage> {
   const f = opts.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
   if (!isUsableAguiId(opts.agentId)) throw new AguiThreadBootstrapError('Agent not found', 404);
   if (!isUsableAguiId(opts.threadId)) throw new AguiThreadBootstrapError('Thread not found', 404);
-  const url = `/api/assistant/agents/${encodeURIComponent(opts.agentId)}/threads/${encodeURIComponent(opts.threadId)}/messages`;
+  const params = new URLSearchParams();
+  if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+  if (opts.before) params.set('before', opts.before);
+  const qs = params.toString();
+  const url = `/api/assistant/agents/${encodeURIComponent(opts.agentId)}/threads/${encodeURIComponent(opts.threadId)}/messages${qs ? `?${qs}` : ''}`;
   const res = await f(url, { method: 'GET', cache: 'no-store', signal: opts.signal });
-  let body: { messages?: unknown; error?: unknown } = {};
+  let body: { messages?: unknown; hasMore?: unknown; error?: unknown } = {};
   try {
     body = ((await res.json()) as typeof body) ?? {};
   } catch {
@@ -201,5 +215,22 @@ export async function fetchThreadHistory(opts: {
   if (!res.ok) {
     throw new AguiThreadBootstrapError(typeof body.error === 'string' && body.error ? body.error : 'Could not load this chat', res.status);
   }
-  return Array.isArray(body.messages) ? (body.messages as StoredThreadMessage[]) : [];
+  return {
+    messages: Array.isArray(body.messages) ? (body.messages as StoredThreadMessage[]) : [],
+    hasMore: body.hasMore === true,
+  };
+}
+
+/**
+ * Fetches every persisted message of the agent's thread, bypassing any HTTP cache, so each time the
+ * chat opens it shows the conversation as it is now. (CHAT-PAGE-1: the chat loads pages with
+ * fetchThreadHistoryPage; this full read remains for other callers.)
+ */
+export async function fetchThreadHistory(opts: {
+  agentId: string;
+  threadId: string;
+  fetch?: typeof fetch;
+  signal?: AbortSignal;
+}): Promise<StoredThreadMessage[]> {
+  return (await fetchThreadHistoryPage(opts)).messages;
 }

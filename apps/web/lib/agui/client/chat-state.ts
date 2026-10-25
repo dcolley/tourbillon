@@ -149,7 +149,27 @@ export interface AgentChatState {
    * the chat stays usable.
    */
   reconnecting?: boolean;
+  /** CHAT-PAGE-1: the transcript pager (older stored messages not shown yet). */
+  history: TranscriptHistoryState;
+  /**
+   * CHAT-PAGE-1 (B1): ids of the user messages shown from the store (any page, seeded or merged).
+   * These are never this client's own pending sends, so `mergeHistory` does not text-match them
+   * against newly stored messages (an older paged-out message with the same text must stay).
+   */
+  storedUserIds?: ReadonlySet<string>;
 }
+
+/** CHAT-PAGE-1: what "Load previous" needs: whether older messages exist, and the page cursor. */
+export interface TranscriptHistoryState {
+  /** Older stored messages exist before the oldest one shown. */
+  hasMore: boolean;
+  /** Stored id of the oldest message shown (the `before` cursor of the next page); null before the first page. */
+  cursor: string | null;
+  /** A "Load previous" request is in flight. */
+  loading: boolean;
+}
+
+export const initialTranscriptHistory: TranscriptHistoryState = { hasMore: false, cursor: null, loading: false };
 
 export const initialAgentChatState: AgentChatState = {
   status: 'idle',
@@ -161,6 +181,7 @@ export const initialAgentChatState: AgentChatState = {
   error: null,
   lastOutcome: null,
   parked: null,
+  history: initialTranscriptHistory,
 };
 
 function str(v: unknown): string | undefined {
@@ -475,10 +496,25 @@ export function restorePendingWidgets(
  */
 export function seedHistory(state: AgentChatState, history: readonly AgentChatItem[]): AgentChatState {
   if (history.length === 0) return state;
-  const have = new Set(state.items.map((it) => `${it.kind}\u0000${it.id}`));
-  const earlier = history.filter((it) => !have.has(`${it.kind}\u0000${it.id}`));
-  if (earlier.length === 0) return state;
-  return { ...state, items: [...earlier, ...state.items] };
+  const have = new Set(state.items.map(itemKey));
+  const earlier = history.filter((it) => !have.has(itemKey(it)));
+  const storedUserIds = withStoredUserIds(state, history);
+  if (earlier.length === 0) return storedUserIds === state.storedUserIds ? state : { ...state, storedUserIds };
+  return { ...state, items: [...earlier, ...state.items], storedUserIds };
+}
+
+const itemKey = (it: AgentChatItem) => `${it.kind}\u0000${it.id}`;
+
+/** CHAT-PAGE-1 (B1): `state.storedUserIds` plus the user messages of `history` (same set when none are new). */
+function withStoredUserIds(state: AgentChatState, history: readonly AgentChatItem[]): ReadonlySet<string> | undefined {
+  const prev = state.storedUserIds;
+  let next: Set<string> | undefined;
+  for (const it of history) {
+    if (it.kind !== 'user' || prev?.has(it.id) || next?.has(it.id)) continue;
+    next ??= new Set(prev);
+    next.add(it.id);
+  }
+  return next ?? prev;
 }
 
 /**
@@ -499,7 +535,6 @@ export function releaseParkedWidgets(state: AgentChatState): AgentChatState {
   };
 }
 
-const itemKey = (it: AgentChatItem) => `${it.kind}\u0000${it.id}`;
 
 /**
  * STREAM-1: the page came back (tab shown again, back online): shows the thread's persisted messages
@@ -508,7 +543,8 @@ const itemKey = (it: AgentChatItem) => `${it.kind}\u0000${it.id}`;
  * The result is the history, in order, followed by what this client holds that is not in it (a reply
  * still streaming, a message that failed to send). A message this client sent shows with its own id
  * until it is persisted; it is then replaced by its stored copy (the first newly persisted user message
- * with the same text). Unlike `seedHistory` (chat opening, nothing shown yet), newer persisted messages
+ * with the same text). Only this client's own sends are matched by text: a user message shown from the
+ * store (`storedUserIds`, e.g. an older page not in `history`) is never replaced (CHAT-PAGE-1 B1). Unlike `seedHistory` (chat opening, nothing shown yet), newer persisted messages
  * land after the ones already shown, not before them.
  */
 export function mergeHistory(state: AgentChatState, history: readonly AgentChatItem[]): AgentChatState {
@@ -520,10 +556,11 @@ export function mergeHistory(state: AgentChatState, history: readonly AgentChatI
   for (const it of history) {
     if (it.kind === 'user' && !local.has(itemKey(it))) fresh.set(it.text, (fresh.get(it.text) ?? 0) + 1);
   }
+  const stored = state.storedUserIds;
   const rest: AgentChatItem[] = [];
   for (const it of state.items) {
     if (inHistory.has(itemKey(it))) continue;
-    if (it.kind === 'user' && it.delivery !== 'failed') {
+    if (it.kind === 'user' && it.delivery !== 'failed' && !stored?.has(it.id)) {
       const n = fresh.get(it.text) ?? 0;
       if (n > 0) {
         fresh.set(it.text, n - 1);
@@ -540,7 +577,44 @@ export function mergeHistory(state: AgentChatState, history: readonly AgentChatI
     if (it.kind !== 'tool' || mine?.kind !== 'tool' || it.result !== undefined) return it;
     return mine.status === 'running' || mine.status === 'streaming_args' ? it : mine;
   });
-  return { ...state, items: [...merged, ...rest] };
+  return { ...state, items: [...merged, ...rest], storedUserIds: withStoredUserIds(state, history) };
+}
+
+/**
+ * STREAM-1 × CHAT-PAGE-1: on resume only the newest page of the thread is reloaded. Shown items older
+ * than that page (pages added with "Load previous", or messages that dropped out of the newest window
+ * while the stream was lost) stay in front of it, in order; otherwise the merge is `mergeHistory`
+ * (stored copy wins, this client's own sends are replaced by their stored copies). When none of the shown items is in the page although a page
+ * was shown before (more than a page was written meanwhile), the transcript restarts at the page, with
+ * this client's own undelivered sends kept, and the pager moves to it so "Load previous" fills the gap.
+ */
+export function mergeHistoryPage(
+  state: AgentChatState,
+  page: readonly AgentChatItem[],
+  pager: { hasMore: boolean; cursor: string | null },
+): AgentChatState {
+  if (page.length === 0) return state;
+  const inPage = new Set(page.map(itemKey));
+  const at = state.items.findIndex((it) => inPage.has(itemKey(it)));
+  if (at < 0 && state.history.cursor !== null) {
+    const mine = state.items.filter((it) => it.kind === 'user' && it.delivery !== 'delivered');
+    return {
+      ...mergeHistory({ ...state, items: mine }, page),
+      history: { hasMore: pager.hasMore, cursor: pager.cursor, loading: state.history.loading },
+    };
+  }
+  const merged = mergeHistory(state, page);
+  const history =
+    state.history.cursor === null
+      ? { hasMore: pager.hasMore, cursor: pager.cursor, loading: state.history.loading }
+      : state.history;
+  if (at <= 0) return { ...merged, history };
+  // mergeHistory gives [page…, rest…]; what was shown before the page's oldest item moves back in front.
+  const before = new Set(state.items.slice(0, at));
+  const rest = merged.items.slice(page.length);
+  const older = rest.filter((it) => before.has(it));
+  const after = rest.filter((it) => !before.has(it));
+  return { ...merged, items: [...older, ...merged.items.slice(0, page.length), ...after], history };
 }
 
 /**

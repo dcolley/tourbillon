@@ -351,3 +351,47 @@ describe('UI-3 context chip in the assistant composer', () => {
     assert.equal('initialContext' in plain.props, false);
   });
 });
+
+describe('CHAT-PAGE-1 transcript pager and sticky scroll (view)', () => {
+  const items: AgentChatState['items'] = [
+    { kind: 'user', id: 'u1', text: 'hello', mode: 'run', delivery: 'delivered' },
+    { kind: 'assistant', id: 'a1', text: 'hi', streaming: false },
+  ];
+  const html = (state: Partial<AgentChatState>, extra: Partial<Parameters<View['AgentChatView']>[0]> = {}) =>
+    renderToStaticMarkup(React.createElement(AgentChatView, props({ items, ...state }, extra)));
+
+  it('Load previous sits above the oldest message while older messages exist', () => {
+    let loads = 0;
+    const out = html({ history: { hasMore: true, cursor: 'u1', loading: false } }, { onLoadPrevious: () => loads++ });
+    assert.match(out, /data-load-previous/);
+    assert.ok(out.indexOf('Load previous') < out.indexOf('hello'), 'above the transcript');
+    const bs = buttons(AgentChatView(props({ items, history: { hasMore: true, cursor: 'u1', loading: false } }, { onLoadPrevious: () => loads++ })));
+    bs.find((b) => b.label === 'Load previous')!.onClick!();
+    assert.equal(loads, 1);
+  });
+
+  it('shows Loading… (disabled) while the page is in flight; hidden when nothing older exists', () => {
+    const loading = html({ history: { hasMore: true, cursor: 'u1', loading: true } }, { onLoadPrevious: noop });
+    assert.match(loading, /Loading…/);
+    assert.match(loading, /disabled/);
+    assert.doesNotMatch(html({ history: { hasMore: false, cursor: 'u1', loading: false } }, { onLoadPrevious: noop }), /Load previous/);
+    assert.doesNotMatch(html({ history: { hasMore: true, cursor: 'u1', loading: false } }), /Load previous/, 'no handler, no control');
+  });
+
+  it('pinned transcript: no Jump to latest; scrolled up: Jump to latest re-pins', () => {
+    assert.doesNotMatch(html({}, { pinned: true, onJumpToLatest: noop }), /Jump to latest/);
+    assert.match(html({}, { pinned: true }), /data-pinned="true"/);
+    let jumps = 0;
+    const up = html({}, { pinned: false, onJumpToLatest: () => jumps++ });
+    assert.match(up, /data-pinned="false"/);
+    assert.match(up, /Jump to latest/);
+    const bs = buttons(AgentChatView(props({ items }, { pinned: false, onJumpToLatest: () => jumps++ })));
+    bs.find((b) => b.label === 'Jump to latest')!.onClick!();
+    assert.equal(jumps, 1);
+  });
+
+  it('every transcript item root carries data-item (the scroll anchor for Load previous)', () => {
+    const out = html({});
+    assert.equal((out.match(/data-item="/g) ?? []).length, 2);
+  });
+});
