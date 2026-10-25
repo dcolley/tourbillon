@@ -137,6 +137,8 @@ export class AssistantSidebarStore {
   private state: AssistantSidebarState = initialSidebarState;
   private listeners = new Set<() => void>();
   private disposed = false;
+  /** Bumped by every `load()` and by `dispose()`; a load whose token is stale stops applying results. */
+  private loadToken = 0;
   private readonly api: AssistantSidebarApi;
   private readonly concurrency: number;
 
@@ -152,9 +154,14 @@ export class AssistantSidebarStore {
     return () => this.listeners.delete(listener);
   };
 
+  /**
+   * Stops updates and abandons any in-flight load. Not terminal: a later `load()` revives the store,
+   * because React Strict Mode (dev) runs effect cleanup then setup again on the same `useState`
+   * instance. Listeners are owned by their `subscribe` callers, which unsubscribe themselves.
+   */
   dispose() {
     this.disposed = true;
-    this.listeners.clear();
+    this.loadToken++;
   }
 
   private update(fn: (s: AssistantSidebarState) => AssistantSidebarState) {
@@ -202,19 +209,23 @@ export class AssistantSidebarStore {
 
   /** Agents of the active company, then every agent's threads (a few at a time). */
   async load(): Promise<void> {
+    this.disposed = false;
+    const token = ++this.loadToken;
+    const live = () => token === this.loadToken && !this.disposed;
     this.update((s) => ({ ...s, phase: 'loading', loadError: null }));
     let agents: AssistantAgent[];
     try {
       const res = await this.api.listAgents();
+      if (!live()) return;
       agents = res.agents;
       this.update((s) => ({ ...s, phase: 'ready', companyId: res.companyId, agents, threads: {} }));
     } catch (err) {
-      this.update((s) => ({ ...s, phase: 'error', loadError: errorMessage(err, 'Could not load agents') }));
+      if (live()) this.update((s) => ({ ...s, phase: 'error', loadError: errorMessage(err, 'Could not load agents') }));
       return;
     }
     const queue = [...agents];
     const worker = async () => {
-      for (let a = queue.shift(); a && !this.disposed; a = queue.shift()) await this.loadThreads(a.id);
+      for (let a = queue.shift(); a && live(); a = queue.shift()) await this.loadThreads(a.id);
     };
     await Promise.all(Array.from({ length: Math.min(this.concurrency, queue.length) }, worker));
   }
