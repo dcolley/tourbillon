@@ -11,6 +11,7 @@ import {
 } from '@/lib/jobs';
 import { JobDetailLive } from '../../jobs/[queue]/[jobId]/job-detail-live';
 import { ChatPageContext } from '@/components/chat/chat-page-context';
+import { OpenInChatButton } from '@/components/chat/open-in-chat-button';
 import { HeartbeatRunHeaderActions } from './heartbeat-run-header-actions';
 import { HeartbeatRunQueryToast } from './heartbeat-run-query-toast';
 import { requireBoardSession } from '@/lib/company';
@@ -88,11 +89,20 @@ export default async function HeartbeatRunPage({
               </p>
             )}
           </div>
-          <HeartbeatRunHeaderActions
-            runId={run.id}
-            companyId={run.companyId}
-            status={run.status}
-          />
+          <div className="flex items-center gap-2">
+            <OpenInChatButton
+              agentUrlKey={agent?.urlKey}
+              agentName={agent?.name}
+              contextType="heartbeat"
+              contextId={run.id}
+              contextTitle={`Heartbeat ${run.id.slice(0, 8)}`}
+            />
+            <HeartbeatRunHeaderActions
+              runId={run.id}
+              companyId={run.companyId}
+              status={run.status}
+            />
+          </div>
         </div>
       </div>
 

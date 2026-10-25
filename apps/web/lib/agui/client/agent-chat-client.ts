@@ -78,6 +78,12 @@ export interface AgentChatClientOptions {
   abortTimeoutMs?: number;
 }
 
+/** Per-message options for send / steer. */
+export interface AgentChatSendOptions {
+  /** UI-3: page context sent with this message only (overrides the client's `context`). */
+  context?: ChatDashboardContext;
+}
+
 /** AG-UI `resume` entry (RunAgentInput.resume). */
 export interface AguiResumeInput {
   interruptId: string;
@@ -128,6 +134,11 @@ async function errorBody(res: Response): Promise<{ message: string; body: unknow
     /* not JSON */
   }
   return { message: `Request failed (${res.status})`, body };
+}
+
+/** `forwardedProps.tourbillon` additions for one message. */
+function messageExtra(opts: AgentChatSendOptions): Record<string, unknown> | undefined {
+  return opts.context ? { context: opts.context } : undefined;
 }
 
 export class AgentChatClient {
@@ -191,12 +202,13 @@ export class AgentChatClient {
   // ---- actions ----
 
   /** Starts a run when idle; sends a follow-up while a run is open. */
-  async send(text: string): Promise<AgentChatResult> {
+  async send(text: string, opts: AgentChatSendOptions = {}): Promise<AgentChatResult> {
     const message = text.trim();
     if (!message) return this.fail({ kind: 'rejected', message: 'Message is empty' });
     if (this.disposed) return this.fail({ kind: 'rejected', message: 'Chat closed' });
     if (this.starting) await this.starting.catch(() => {});
-    if (this.active) return this.control('followUp', message);
+    const extra = messageExtra(opts);
+    if (this.active) return this.control('followUp', message, extra);
 
     const itemId = this.newId();
     this.update((s) => ({
@@ -207,7 +219,7 @@ export class AgentChatClient {
     }));
     const start = (async (): Promise<AgentChatResult> => {
       try {
-        const { res, ac, runId } = await this.post('run', message);
+        const { res, ac, runId } = await this.post('run', message, extra);
         this.openRun(res, ac, runId, []);
         return { ok: true };
       } catch (err) {
@@ -227,12 +239,12 @@ export class AgentChatClient {
   }
 
   /** Redirects the open run with a new instruction; starts a run when idle. */
-  async steer(text: string): Promise<AgentChatResult> {
+  async steer(text: string, opts: AgentChatSendOptions = {}): Promise<AgentChatResult> {
     const message = text.trim();
     if (!message) return this.fail({ kind: 'rejected', message: 'Message is empty' });
     if (this.starting) await this.starting.catch(() => {});
-    if (!this.active) return this.send(message);
-    return this.control('steer', message);
+    if (!this.active) return this.send(message, opts);
+    return this.control('steer', message, messageExtra(opts));
   }
 
   /** Stops the open run, or (no run stream open) a run parked on a card. */

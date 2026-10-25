@@ -10,6 +10,7 @@ import { NewProjectIssueDialog } from '../new-project-issue-dialog';
 import { updateProjectAction } from '../actions';
 import { ProjectEditForm } from './project-edit-form';
 import { ChatPageContext } from '@/components/chat/chat-page-context';
+import { OpenInChatButton } from '@/components/chat/open-in-chat-button';
 
 export default async function ProjectDetailPage({
   params,
@@ -92,7 +93,16 @@ export default async function ProjectDetailPage({
               <p className="text-muted-foreground whitespace-pre-wrap pt-1">{project.description}</p>
             )}
           </div>
-          <NewProjectIssueDialog projectId={project.id} agents={agentList} />
+          <div className="flex flex-col gap-2 shrink-0">
+            <OpenInChatButton
+              agentUrlKey={owner?.urlKey}
+              agentName={owner?.name}
+              contextType="project"
+              contextId={project.id}
+              contextTitle={project.title}
+            />
+            <NewProjectIssueDialog projectId={project.id} agents={agentList} />
+          </div>
         </div>
       </div>
 
