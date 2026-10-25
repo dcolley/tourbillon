@@ -25,7 +25,7 @@ export function AssistantShell({
 }) {
   return (
     <div className="flex h-svh flex-col overflow-hidden" data-app-view="assistant">
-      <header className="flex h-12 shrink-0 items-center gap-3 border-b px-4">
+      <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3 min-[528px]:gap-3 min-[528px]:px-4">
         <div className="flex min-w-0 items-center gap-2">
           <Logo size={24} />
           <span className="truncate text-sm font-semibold tracking-tight">
@@ -34,9 +34,10 @@ export function AssistantShell({
         </div>
         <ViewSwitcher current="assistant" />
         <div className="flex-1" />
-        {/* UI-4: same picker as the Control Pane sidebar header; it sets its own width. Shown at all widths. */}
+        {/* UI-4: same picker as the Control Pane sidebar header; it sets its own width. Shown at all
+            widths; H1: icon-only below 528px so ThemeToggle stays on-screen. */}
         <div className="shrink-0" data-assistant-company-picker>
-          <CompanySwitcher companies={companies} activeCompanyId={activeCompanyId} />
+          <CompanySwitcher companies={companies} activeCompanyId={activeCompanyId} compactOnNarrow />
         </div>
         <ThemeToggle />
       </header>

@@ -343,4 +343,49 @@ describe('UI-4 CompanySwitcher', () => {
     assert.match(body, /onSelect=\{handlers\.onSelect\}/);
     assert.match(body, /onCreate=\{handlers\.onCreate\}/);
   });
+
+  // ---- H1: compact icon picker on narrow screens (Assistant top bar) ----
+
+  it('the Assistant top bar asks for the compact-on-narrow picker', () => {
+    const tree = (shell.AssistantShell as (p: unknown) => React.ReactNode)({
+      companies,
+      activeCompanyId: companies[0].id,
+      activeCompanyName: 'Acme',
+      children: null,
+    });
+    const picker = walk(tree).find((e) => e.type === mod.CompanySwitcher)!;
+    assert.equal(picker.props.compactOnNarrow, true);
+    // The Control Pane sidebar keeps the full picker.
+    const src = readFileSync(fileURLToPath(new URL('./dashboard-sidebar.tsx', import.meta.url)), 'utf8');
+    assert.doesNotMatch(src, /compactOnNarrow/);
+  });
+
+  it('compact picker: icon-only below 528px, full 14rem name trigger from 528px', () => {
+    assert.equal(mod.COMPANY_SWITCHER_COMPACT_BELOW, '528px');
+    const { els } = view({ compactOnNarrow: true });
+    const trigger = els.find((e) => e.type === ui.SelectTrigger)!;
+    const cls = trigger.props.className.split(' ');
+    for (const c of ['max-[528px]:size-8', 'max-[528px]:p-0', 'min-[528px]:w-(--company-switcher-width)']) {
+      assert.ok(cls.includes(c), `${c} in ${trigger.props.className}`);
+    }
+    assert.equal(trigger.props.style['--company-switcher-width'], mod.COMPANY_SWITCHER_WIDTH);
+    // Icon-only still names the company for screen readers and on hover.
+    assert.equal(trigger.props['aria-label'], `Company: ${LONG}`);
+    assert.equal(trigger.props.title, LONG);
+    const kids = walk(trigger.props.children);
+    const icon = kids.find((e) => e.props['data-company-switcher-icon'] !== undefined)!;
+    assert.ok(icon.props.className.split(' ').includes('min-[528px]:hidden'), icon.props.className);
+    const name = kids.find((e) => e.type === 'span' && e.props.title === LONG)!;
+    const nameCls = name.props.className.split(' ');
+    assert.ok(nameCls.includes('hidden') && nameCls.includes('min-[528px]:block'), name.props.className);
+    // Never hidden as a whole: the wrapper only hides in the collapsed Control Pane sidebar.
+    const wrapper = view({ compactOnNarrow: true }).tree;
+    assert.doesNotMatch(wrapper.props.className, /(^|\s)(sm|md|max-sm):hidden/, wrapper.props.className);
+  });
+
+  it('default picker is unchanged (no compact classes)', () => {
+    const trigger = view().els.find((e) => e.type === ui.SelectTrigger)!;
+    assert.doesNotMatch(trigger.props.className, /528px/);
+    assert.equal(trigger.props['data-company-switcher-compact'], undefined);
+  });
 });
