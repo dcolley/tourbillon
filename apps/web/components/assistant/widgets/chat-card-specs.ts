@@ -11,14 +11,79 @@
  * answer against the props the card was asked with (e.g. a choice must be one of the offered
  * options, form values must fit their fields), so a client cannot answer outside the card.
  *
- * Props and answers carry plain text only. Field names that look like credentials are refused at the
- * props level so a card cannot ask for a password, token or key.
+ * Props and answers carry plain text only. Text that looks like it asks for a credential is refused at
+ * the props level so a card cannot ask for a password, token, key, card security code or one-time code:
+ * form field names and labels, select option labels and choice labels (all terms), and the question,
+ * title and placeholders (all terms except bare "secret", "token", "cookie", "pin" and "authorize", common in prose).
  */
 import { z } from 'zod';
 import type { WidgetSpec } from '@tourbillon/shared/widgets';
 
-/** Field, option and label names that look like credentials (cards must not collect secrets). */
-const CREDENTIAL_LIKE = /(pass(word|phrase)?|secret|token|api[-_]?key|authori[sz]ation|cookie|credential|private[-_]?key|\bpin\b|otp)/i;
+// ---------------------------------------------------------------------------------------------
+// Credential-like text (cards must not collect secrets).
+// ---------------------------------------------------------------------------------------------
+
+/** Cyrillic / Greek letters that look like Latin ones (lower case). */
+const CONFUSABLE: Record<string, string> = {
+  а: 'a', в: 'b', е: 'e', к: 'k', м: 'm', н: 'h', о: 'o', р: 'p', с: 'c', т: 't', у: 'y', х: 'x', і: 'i', ј: 'j', ѕ: 's', ԁ: 'd', ԝ: 'w',
+  α: 'a', β: 'b', ε: 'e', ι: 'i', κ: 'k', ν: 'v', ο: 'o', ρ: 'p', τ: 't', υ: 'u', χ: 'x', ω: 'w',
+};
+
+/** Words of a name or text: NFKC, look-alike letters as Latin, split on camelCase, `_` and non-alphanumerics. */
+export function credentialWords(value: string): string[] {
+  const spaced = value
+    .normalize('NFKC')
+    .replace(/[\u00ad\u200b-\u200f\u2060\ufeff]/g, '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .toLowerCase();
+  const latin = Array.from(spaced, (c) => CONFUSABLE[c] ?? c).join('');
+  return latin.split(/[^a-z0-9]+/).filter(Boolean);
+}
+
+const CREDENTIAL_WORDS = new Set([
+  'password', 'passwords', 'passwd', 'pwd', 'pw', 'passphrase', 'passcode', 'passcodes',
+  'credential', 'credentials', 'creds',
+  'otp', 'totp', 'hotp', 'mfa', '2fa', 'pincode', 'cvv', 'cvv2', 'cvc', 'cvc2',
+  'apikey', 'accesskey', 'secretkey', 'privatekey', 'accesstoken', 'authtoken',
+]);
+/** Also credential-like in names and labels, but common in prose (questions, titles, placeholders). */
+const CREDENTIAL_WORDS_SHORT = new Set([
+  'secret', 'secrets', 'token', 'tokens', 'cookie', 'cookies', 'pin', 'pins', 'authorization', 'authorisation',
+]);
+const CREDENTIAL_PAIRS = new Set([
+  'api key', 'access key', 'secret key', 'private key', 'access token', 'auth token', 'bearer token', 'refresh token',
+  'auth code', 'mfa code', 'security code', 'verification code', 'login code', 'one time', 'pin code',
+  'recovery code', 'recovery codes', 'backup code', 'backup codes', 'seed phrase', 'recovery phrase', 'pass phrase', 'pass code',
+]);
+/** Stems inside one word (e.g. `userPassword` written `userpassword`). */
+const CREDENTIAL_STEMS = /(password|passwd|passphrase|passcode|apikey|privatekey|accesskey|secretkey|accesstoken|credential|pincode)/;
+/** Stems refused in names and labels only ("authorize" is common in prose). */
+const CREDENTIAL_STEMS_SHORT = /authori[sz]/;
+
+/**
+ * Whether a name or text looks like it asks for a credential. `prose` (questions, titles,
+ * placeholders) leaves out bare "secret", "token", "cookie", "pin" and "authoriz…". "Passcode" is refused (a secret code);
+ * "Passport number", "Compass heading", "Footprint" and "spinCount" are not.
+ */
+export function isCredentialLike(value: string | undefined, opts: { prose?: boolean } = {}): boolean {
+  if (!value) return false;
+  const words = credentialWords(value);
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i]!;
+    if (CREDENTIAL_WORDS.has(w) || CREDENTIAL_STEMS.test(w)) return true;
+    if (!opts.prose && (CREDENTIAL_WORDS_SHORT.has(w) || CREDENTIAL_STEMS_SHORT.test(w))) return true;
+    if (i + 1 < words.length && CREDENTIAL_PAIRS.has(`${w} ${words[i + 1]}`)) return true;
+  }
+  return false;
+}
+
+/** Adds a `credential_text` issue for each credential-like text (`[path, value, prose]`). */
+function refuseCredentialText(ctx: z.RefinementCtx, texts: Array<[Array<string | number>, string | undefined, boolean]>) {
+  for (const [path, value, prose] of texts) {
+    if (isCredentialLike(value, { prose })) ctx.addIssue({ code: 'custom', path, message: 'credential_text' });
+  }
+}
 
 const text = (max: number) => z.string().trim().min(1).max(max);
 const optionalText = (max: number) => z.string().trim().max(max).optional();
@@ -29,13 +94,20 @@ const optionalText = (max: number) => z.string().trim().max(max).optional();
 
 export const QUESTION_MAX_ANSWER = 4000;
 
-export const askQuestionProps = z.strictObject({
-  question: text(500).describe('The question to ask the Board user.'),
-  detail: optionalText(1000).describe('Optional context shown under the question.'),
-  placeholder: optionalText(200),
-  multiline: z.boolean().optional().describe('Show a multi-line answer box.'),
-  maxLength: z.number().int().min(1).max(QUESTION_MAX_ANSWER).optional().describe('Longest answer in characters (default 4000).'),
-});
+export const askQuestionProps = z
+  .strictObject({
+    question: text(500).describe('The question to ask the Board user.'),
+    detail: optionalText(1000).describe('Optional context shown under the question.'),
+    placeholder: optionalText(200),
+    multiline: z.boolean().optional().describe('Show a multi-line answer box.'),
+    maxLength: z.number().int().min(1).max(QUESTION_MAX_ANSWER).optional().describe('Longest answer in characters (default 4000).'),
+  })
+  .superRefine((p, ctx) =>
+    refuseCredentialText(ctx, [
+      [['question'], p.question, true],
+      [['placeholder'], p.placeholder, true],
+    ]),
+  );
 export type AskQuestionProps = z.infer<typeof askQuestionProps>;
 
 export const askQuestionAnswer = z.strictObject({ text: text(QUESTION_MAX_ANSWER) });
@@ -87,6 +159,10 @@ export const askChoiceProps = z
     if (p.defaultOption !== undefined && !ids.includes(p.defaultOption)) {
       ctx.addIssue({ code: 'custom', path: ['defaultOption'], message: 'not_an_option' });
     }
+    refuseCredentialText(ctx, [
+      [['question'], p.question, true],
+      ...p.options.map((o, i): [Array<string | number>, string, boolean] => [['options', i, 'label'], o.label, false]),
+    ]);
   });
 export type AskChoiceProps = z.infer<typeof askChoiceProps>;
 
@@ -145,11 +221,16 @@ export const askFormProps = z
   .superRefine((p, ctx) => {
     const names = p.fields.map((f) => f.name);
     if (new Set(names).size !== names.length) ctx.addIssue({ code: 'custom', path: ['fields'], message: 'duplicate_name' });
+    refuseCredentialText(ctx, [[['title'], p.title, true]]);
     p.fields.forEach((f, i) => {
       const at = (key: string) => ['fields', i, key];
-      if (CREDENTIAL_LIKE.test(f.name) || CREDENTIAL_LIKE.test(f.label)) {
+      if (isCredentialLike(f.name) || isCredentialLike(f.label)) {
         ctx.addIssue({ code: 'custom', path: at('name'), message: 'credential_field' });
       }
+      refuseCredentialText(ctx, [
+        [at('placeholder'), f.placeholder, true],
+        ...(f.options ?? []).map((o, j): [Array<string | number>, string, boolean] => [['fields', i, 'options', j, 'label'], o.label, false]),
+      ]);
       if (f.type === 'select') {
         if (!f.options) ctx.addIssue({ code: 'custom', path: at('options'), message: 'required_for_select' });
         else if (new Set(f.options.map((o) => o.value)).size !== f.options.length) {

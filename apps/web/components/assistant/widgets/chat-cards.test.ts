@@ -81,6 +81,53 @@ describe('WID-3 card specs', () => {
     assert.deepEqual(issues({ title: 't', fields: [{ name: 'spinCount', label: 'Spins', type: 'number' }] }, askFormSpec), []);
   });
 
+  it('near-miss credential fields are refused; look-alike harmless names are not', () => {
+    for (const [name, label] of [
+      ['pinCode', 'Code'],
+      ['pin_code', 'Code'],
+      ['pwd', 'Value'],
+      ['cardCheck', 'Card CVV'],
+      ['awsKeyId', 'Access key'],
+      ['mfa', 'MFA code'],
+      ['note', 'p\u0430ssword'], // Cyrillic "а"
+      ['userPassword', 'Login'],
+      ['verify', 'Verification code'],
+      ['devicePasscode', 'Passcode'], // a passcode is a secret code: refused on purpose
+      ['wallet', 'Seed phrase'],
+    ]) {
+      assert.deepEqual(issues({ title: 't', fields: [{ name, label, type: 'text' }] }, askFormSpec), ['fields.0.name: credential_field'], `${name}/${label}`);
+    }
+    for (const [name, label] of [
+      ['passportNumber', 'Passport number'],
+      ['compassHeading', 'Compass heading'],
+      ['footprint', 'Footprint'],
+      ['spinCount', 'Spins'],
+      ['pinnedNote', 'Pinned note'],
+    ]) {
+      assert.deepEqual(issues({ title: 't', fields: [{ name, label, type: 'text' }] }, askFormSpec), [], `${name}/${label}`);
+    }
+  });
+
+  it('credential-shaped questions, titles, placeholders and option labels are refused', () => {
+    assert.deepEqual(issues({ question: 'What is your password?' }, askQuestionSpec), ['question: credential_text']);
+    assert.deepEqual(issues({ question: 'Paste the API key here' }, askQuestionSpec), ['question: credential_text']);
+    assert.deepEqual(issues({ question: 'Code?', placeholder: 'One-time code from your app' }, askQuestionSpec), ['placeholder: credential_text']);
+    assert.deepEqual(issues({ ...CHOICE, question: 'Which MFA code did you get?' }, askChoiceSpec), ['question: credential_text']);
+    assert.deepEqual(
+      issues({ ...CHOICE, recommended: undefined, options: [{ id: 'a', label: 'Use my token' }, { id: 'b', label: 'Basic' }] }, askChoiceSpec),
+      ['options.0.label: credential_text'],
+    );
+    assert.deepEqual(issues({ ...FORM, title: 'Enter your credentials' }, askFormSpec), ['title: credential_text']);
+    assert.deepEqual(
+      issues({ title: 't', fields: [{ name: 'tier', label: 'Tier', type: 'select', options: [{ value: 'a', label: 'CVV 123' }] }] }, askFormSpec),
+      ['fields.0.options.0.label: credential_text'],
+    );
+    // Prose that only mentions common words is fine.
+    assert.deepEqual(issues({ question: 'Which token budget should the run use?' }, askQuestionSpec), []);
+    assert.deepEqual(issues({ question: 'Should I pin this issue or authorize the deploy?' }, askQuestionSpec), []);
+    assert.deepEqual(issues({ question: 'Which passport office and compass heading?' }, askQuestionSpec), []);
+  });
+
   it('answers are checked against the props the card was asked with', () => {
     const now = new Date(0);
     const check = (spec: any, props: unknown, answer: unknown) => {

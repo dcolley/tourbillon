@@ -73,6 +73,8 @@ export function useAgentChat({ agentId, threadId, tools, onRunEvent, onThreadOpe
         });
         setSetup({ key, client: created, thread: ref, error: null });
         seam.current.onThreadOpened?.(ref);
+        // WID-3: show again the cards still waiting on this thread (e.g. after a reload).
+        void created.restorePending();
       },
       (err: unknown) => {
         if (cancelled) return;

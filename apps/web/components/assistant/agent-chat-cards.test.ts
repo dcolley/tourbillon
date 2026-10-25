@@ -1,7 +1,8 @@
 /**
  * WID-3: chat cards in the assistant chat view — a card the run waits on renders in place (no generic
  * Continue / Decline row), hands its answer / dismissal to the chat with the tool call id, and renders
- * locked once the tool result says it was answered or dismissed.
+ * locked once the tool result says it was answered or dismissed. While the run is parked on a card, a
+ * notice names it and offers Dismiss card / Stop (or a link when the card is in another chat).
  */
 import { describe, it, before } from 'node:test';
 import assert from 'node:assert/strict';
@@ -145,4 +146,76 @@ describe('WID-3 chat cards in the assistant chat view', () => {
     assert.deepEqual(widgetOutcome(toolItem({ status: 'done', result: JSON.stringify({ widget: 'askForm', version: 1, dismissed: true }) }) as never), { dismissed: false });
     assert.deepEqual(widgetOutcome(toolItem({ status: 'error', result: 'boom' }) as never), { dismissed: false });
   });
+
+  it('a parked card is named in a notice with Dismiss card and Stop, and the status says it waits for an answer', () => {
+    const stops: number[] = [];
+    const dismissed: string[] = [];
+    const p = props(suspended, { onWidgetAnswer: noop, onWidgetDismiss: (id: string) => dismissed.push(id), onStop: () => stops.push(1) });
+    const html = renderToStaticMarkup(React.createElement(AgentChatView, p));
+    assert.match(html, /data-parked-widget="card-1"/);
+    assert.match(html, /The choice card \(“Which plan\?”\) is waiting for your answer/);
+    assert.match(html, />Dismiss card</);
+    assert.match(html, />Stop</);
+    assert.match(html, /data-parked="true"[^>]*>Waiting for your answer</);
+    assert.match(html, /data-status="idle"/);
+
+    // The notice's buttons call dismiss (with the call id) and stop.
+    const notice = findByProp(AgentChatView(p), 'data-parked-widget')!;
+    const buttons = collect(notice, (n) => typeof n.props.onClick === 'function');
+    buttons.forEach((b) => b.props.onClick());
+    assert.deepEqual(dismissed, [CALL]);
+    assert.equal(stops.length, 1);
+  });
+
+  it('no notice when nothing is parked, or while a run is open', () => {
+    const idle = renderToStaticMarkup(React.createElement(AgentChatView, props({})));
+    assert.doesNotMatch(idle, /data-parked-widget/);
+    assert.match(idle, />Idle</);
+    const running = renderToStaticMarkup(React.createElement(AgentChatView, props({ ...suspended, status: 'running' })));
+    assert.doesNotMatch(running, /data-parked-widget/);
+  });
+
+  it('a card parked in another chat links to that chat (no Dismiss card here) and still offers Stop', () => {
+    const parked = { threadId: 'thread-0', toolCallId: 'card-0', toolName: 'askForm', label: 'Setup', elsewhere: true };
+    const html = renderToStaticMarkup(
+      React.createElement(AgentChatView, props({ parked }, { onWidgetDismiss: noop, chatHref: (t: string) => `/assistant/alice/${t}` })),
+    );
+    assert.match(html, /data-parked-elsewhere="true"/);
+    assert.match(html, /A form card in another chat \(“Setup”\) is waiting for your answer/);
+    assert.match(html, /href="\/assistant\/alice\/thread-0"/);
+    assert.doesNotMatch(html, />Dismiss card</);
+    assert.match(html, />Stop</);
+  });
+
+  it('a card whose parked run was stopped renders locked with a note', () => {
+    const html = renderToStaticMarkup(React.createElement(AgentChatView, props({ items: [toolItem({ status: 'stopped' })] }, { onWidgetAnswer: noop })));
+    assert.match(html, /Run stopped — this card no longer takes an answer\./);
+    assert.equal(widgetElement(AgentChatView(props({ items: [toolItem({ status: 'stopped' })] }, { onWidgetAnswer: noop })))!.answerable, false);
+    assert.doesNotMatch(html, /data-parked-widget/);
+  });
 });
+
+/** Expands function components (not Button) and returns matching elements. */
+function collect(node: React.ReactNode, match: (n: React.ReactElement<any>) => boolean, out: React.ReactElement<any>[] = []) {
+  if (node == null || typeof node !== 'object') return out;
+  if (Array.isArray(node)) {
+    node.forEach((n) => collect(n, match, out));
+    return out;
+  }
+  if (!React.isValidElement(node)) return out;
+  const el = node as React.ReactElement<any>;
+  if (match(el)) out.push(el);
+  if (typeof el.type === 'function' && /^[A-Z]/.test(el.type.name) && el.type.name !== 'Button') {
+    try {
+      collect((el.type as (p: unknown) => React.ReactNode)(el.props), match, out);
+      return out;
+    } catch {
+      /* hooks: fall through to children */
+    }
+  }
+  if (match(el) && el.type !== 'div') return out;
+  collect(el.props?.children, match, out);
+  return out;
+}
+
+const findByProp = (node: React.ReactNode, prop: string) => collect(node, (n) => typeof n.type === 'string' && n.props?.[prop] !== undefined)[0];

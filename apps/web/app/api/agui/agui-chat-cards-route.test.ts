@@ -4,6 +4,9 @@
  * entry, is checked against the spec AND the props the card was asked with, resumes the tool and
  * reaches the model as the tool result. Also: answers outside the card are refused with the widget
  * still pending, one answer wins a race, and another company cannot see or answer the card.
+ * Parked cards: a reopened chat gets the cards still waiting (action `pending`), a new run refused
+ * because the run is parked on a card names the card (409 `pendingWidget`), and stopping the parked
+ * run (action `abort` on its thread) lets the next message through.
  *
  * Same harness as agui-widgets-route.test.ts ('@/lib/chat' mocked at the registry boundary, a real
  * Mastra AgentController with a stub model), except the widget specs are the real ones and the agent
@@ -324,6 +327,95 @@ describe('WID-3 chat cards over AG-UI', () => {
     assert.deepEqual(await listWidgetAnswers(assistantWidgetSpecIndex, owner(), 'wc-company', OWNER), []);
     const ok = await readSse(await post(resumeBody('wc-company', answer)));
     assert.deepEqual(JSON.parse(ok.find((e) => e.type === 'TOOL_CALL_RESULT')!.content).answer, CARDS.askConfirm.answer);
+  });
+
+  const pendingBody = (threadId: string, extra: Record<string, unknown> = {}) =>
+    resumeBody(threadId, [], { forwardedProps: { tourbillon: { action: 'pending' } }, ...extra });
+  const abortBody = (threadId: string) => ({
+    ...runBody(threadId),
+    messages: [],
+    forwardedProps: { tourbillon: { action: 'abort' } },
+  });
+  const control = (events: Ev[]) => events.find((e) => e.type === 'CUSTOM' && e.name === 'tourbillon.control')?.value;
+
+  it('a reopened chat gets its waiting card back (with its props) and can answer it', async () => {
+    await askCard('wc-restore', 'askChoice');
+    const before = control(await readSse(await post(pendingBody('wc-restore'))));
+    assert.deepEqual(before, {
+      action: 'pending',
+      accepted: true,
+      widgets: [{ toolCallId: CALL, toolName: 'askChoice', args: CARDS.askChoice.args }],
+      parked: { threadId: 'wc-restore', toolCallId: CALL, toolName: 'askChoice', label: 'Which plan?' },
+    });
+    assert.ok(pending(), 'asking does not claim or resume anything');
+    assert.equal(stub.modelCalls, 1);
+    const events = await readSse(await post(resumeBody('wc-restore', [answerEntry(CARDS.askChoice.answer)])));
+    assert.deepEqual(JSON.parse(events.find((e) => e.type === 'TOOL_CALL_RESULT')!.content).answer, CARDS.askChoice.answer);
+    await sleep(300);
+    assert.deepEqual(control(await readSse(await post(pendingBody('wc-restore')))), {
+      action: 'pending',
+      accepted: true,
+      widgets: [],
+      parked: null,
+    });
+  });
+
+  it('a restored card can be dismissed', async () => {
+    await askCard('wc-restore-dis', 'askForm');
+    const value = control(await readSse(await post(pendingBody('wc-restore-dis'))));
+    assert.deepEqual(value.widgets.map((w: Ev) => [w.toolCallId, w.toolName]), [[CALL, 'askForm']]);
+    assert.equal(value.parked.label, 'New project');
+    const events = await readSse(await post(resumeBody('wc-restore-dis', [{ interruptId: CALL, status: 'cancelled' }])));
+    assert.deepEqual(JSON.parse(events.find((e) => e.type === 'TOOL_CALL_RESULT')!.content), { widget: 'askForm', version: 1, dismissed: true });
+    assert.ok(!pending());
+  });
+
+  it('another company does not get the waiting card', async () => {
+    await askCard('wc-restore-co', 'askQuestion');
+    activeCompany = AGENT_B.companyId;
+    assert.equal((await post(pendingBody('wc-restore-co'))).status, 404);
+    assert.equal((await post(pendingBody('wc-restore-co'), 'bob')).status, 404);
+    activeCompany = AGENT_A.companyId;
+    const foreign = { forwardedProps: { tourbillon: { action: 'pending', resourceId: RESOURCE_B } } };
+    assert.equal((await post(resumeBody('wc-restore-co', [], foreign))).status, 404);
+    assert.ok(pending());
+  });
+
+  it('a message refused while the run is parked on a card names the card; Stop clears it and the next message runs', async () => {
+    await seedThread('wc-parked-2'); // seeded first: the harness seeds with its own session
+    await askCard('wc-parked', 'askQuestion');
+    const refused = await post(runBody('wc-parked'));
+    assert.equal(refused.status, 409);
+    const body = await refused.json();
+    assert.deepEqual(body.pendingWidget, {
+      threadId: 'wc-parked',
+      toolCallId: CALL,
+      toolName: 'askQuestion',
+      label: 'What should the release note say?',
+    });
+    assert.match(body.error, /question card \(“What should the release note say\?”\) in this chat is waiting for your answer/);
+    assert.match(body.error, /stop the run/);
+
+    // Another chat of the same agent: the card is named as being in another chat.
+    const elsewhere = await post(runBody('wc-parked-2'));
+    assert.equal(elsewhere.status, 409);
+    const other = await elsewhere.json();
+    assert.equal(other.pendingWidget.threadId, 'wc-parked');
+    assert.match(other.error, /in another chat with this agent/);
+
+    // Stop: abort on the parked run's thread.
+    const stopped = control(await readSse(await post(abortBody('wc-parked'))));
+    assert.deepEqual(stopped, { action: 'abort', accepted: true });
+    await sleep(300);
+    assert.equal(owner().getCurrentRunId() ?? null, null);
+    assert.equal(control(await readSse(await post(pendingBody('wc-parked')))).parked, null);
+
+    // The next message runs (the stub model asks its card again).
+    const next = await post(runBody('wc-parked-2'));
+    assert.equal(next.status, 200);
+    const events = await readSse(next);
+    assert.equal(events[0]?.type, 'RUN_STARTED');
+    assert.ok(events.some((e) => e.type === 'TOOL_CALL_START'));
   });
 
   it('a form asking for a credential-like field is refused before it reaches the user (no suspension)', async () => {

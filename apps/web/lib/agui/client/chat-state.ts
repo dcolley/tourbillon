@@ -41,6 +41,8 @@ export type ToolCallStatus =
   | 'done'
   | 'error'
   | 'denied'
+  /** WID-3: a card whose parked run was stopped; it no longer takes an answer. */
+  | 'stopped'
   /** Approved after the run had ended: this client is not connected to the continued run, so no result will arrive here. */
   | 'detached';
 
@@ -94,6 +96,30 @@ export interface AgentChatError {
   kind: AgentChatErrorKind;
   message: string;
   status?: number;
+  /** WID-3: a send refused because this chat's session has a run parked on a card (409). */
+  pendingWidget?: ParkedWidget;
+}
+
+/**
+ * WID-3: a card the session's run is parked on, as reported by the endpoint (`pending` action, or the
+ * 409 of a refused send). The run stays parked until the card is answered or dismissed, or the run is
+ * stopped; until then a new message is refused.
+ */
+export interface ParkedWidget {
+  /** Thread of the parked run. */
+  threadId: string;
+  toolCallId: string;
+  toolName: string;
+  label?: string;
+  /** True when the card is on another thread than this chat's. */
+  elsewhere: boolean;
+}
+
+/** WID-3: a card still waiting on this chat's thread, as the endpoint's `pending` action lists it. */
+export interface PendingWidgetCard {
+  toolCallId: string;
+  toolName: string;
+  args: Record<string, unknown>;
 }
 
 export type AgentRunOutcome = 'success' | 'cancelled' | 'interrupt' | 'error' | 'disconnected';
@@ -116,6 +142,8 @@ export interface AgentChatState {
   droppedThisRun: number;
   error: AgentChatError | null;
   lastOutcome: AgentRunOutcome | null;
+  /** WID-3: the card the session's run is parked on, when the endpoint reported one (else null). */
+  parked: ParkedWidget | null;
 }
 
 export const initialAgentChatState: AgentChatState = {
@@ -127,6 +155,7 @@ export const initialAgentChatState: AgentChatState = {
   droppedThisRun: 0,
   error: null,
   lastOutcome: null,
+  parked: null,
 };
 
 function str(v: unknown): string | undefined {
@@ -223,6 +252,8 @@ export function applyRunEvent(state: AgentChatState, event: AguiClientEvent): Ag
     case 'RUN_STARTED':
       return {
         ...state,
+        // A run started, so the session is no longer parked on a card.
+        parked: null,
         status: state.status === 'stopping' ? 'stopping' : 'running',
         runId: str(event.runId) ?? state.runId,
         error: null,
@@ -292,7 +323,11 @@ export function applyRunEvent(state: AgentChatState, event: AguiClientEvent): Ag
       const status: ToolCallStatus = meta.denied === true ? 'denied' : meta.isError === true ? 'error' : 'done';
       const content = typeof event.content === 'string' ? event.content : '';
       const s = updateItem(state, id, 'tool', (it) => ({ ...it, status, result: content }));
-      return { ...s, pendingTools: s.pendingTools.filter((p) => p.toolCallId !== id) };
+      return {
+        ...s,
+        pendingTools: s.pendingTools.filter((p) => p.toolCallId !== id),
+        parked: s.parked?.toolCallId === id ? null : s.parked,
+      };
     }
     case 'CUSTOM':
       return applyCustom(state, event);
@@ -350,4 +385,82 @@ export function setWidgetSend(state: AgentChatState, toolCallId: string, phase: 
     ...it,
     widgetSend: { phase, attempts: (it.widgetSend?.attempts ?? 0) + (phase === 'failed' ? 1 : 0) },
   }));
+}
+
+function parkedFrom(value: unknown, threadId: string): ParkedWidget | null {
+  const v = value as Record<string, unknown> | null | undefined;
+  if (!v || typeof v !== 'object') return null;
+  const thread = str(v.threadId);
+  const toolCallId = str(v.toolCallId);
+  const toolName = str(v.toolName);
+  if (!thread || !toolCallId || !toolName) return null;
+  const label = str(v.label);
+  return { threadId: thread, toolCallId, toolName, ...(label ? { label } : {}), elsewhere: thread !== threadId };
+}
+
+/** WID-3: reads the `pendingWidget` of a refused send (409 body) for the chat on `threadId`. */
+export function parkedWidgetFromBody(body: unknown, threadId: string): ParkedWidget | null {
+  return parkedFrom((body as { pendingWidget?: unknown } | null | undefined)?.pendingWidget, threadId);
+}
+
+/** WID-3: records the card the session's run is parked on (null: not parked). */
+export function setParked(state: AgentChatState, parked: ParkedWidget | null): AgentChatState {
+  return { ...state, parked };
+}
+
+/**
+ * WID-3: shows again the cards still waiting on this chat's thread (endpoint `pending` action), e.g.
+ * after a reload: each becomes a suspended tool item the user can answer or dismiss. Cards already
+ * shown are marked suspended again unless they have a result; `parked` is replaced by the reported one.
+ */
+export function restorePendingWidgets(
+  state: AgentChatState,
+  value: { widgets?: unknown; parked?: unknown },
+  threadId: string,
+): AgentChatState {
+  let s = state;
+  const widgets = Array.isArray(value.widgets) ? value.widgets : [];
+  for (const raw of widgets) {
+    const w = raw as Partial<PendingWidgetCard> | null;
+    const toolCallId = str(w?.toolCallId);
+    const toolName = str(w?.toolName);
+    const args = w?.args;
+    if (!toolCallId || !toolName || !args || typeof args !== 'object' || Array.isArray(args)) continue;
+    const existing = s.items.find((it) => it.kind === 'tool' && it.id === toolCallId) as
+      | Extract<AgentChatItem, { kind: 'tool' }>
+      | undefined;
+    if (existing && existing.result !== undefined) continue;
+    s = existing
+      ? updateItem(s, toolCallId, 'tool', (it) => ({ ...it, status: 'suspended' }))
+      : {
+          ...s,
+          items: [...s.items, { kind: 'tool', id: toolCallId, name: toolName, argsText: JSON.stringify(args), status: 'suspended' }],
+        };
+    s = {
+      ...s,
+      pendingTools: [
+        ...s.pendingTools.filter((p) => p.toolCallId !== toolCallId),
+        { toolCallId, toolName, reason: 'tool_suspended', args },
+      ],
+    };
+  }
+  return { ...s, parked: parkedFrom(value.parked, threadId) };
+}
+
+/**
+ * WID-3: the parked run was stopped (or was no longer running): its cards on this thread no longer
+ * take an answer. They stay shown, locked; `parked` is cleared.
+ */
+export function releaseParkedWidgets(state: AgentChatState): AgentChatState {
+  const parkedHere = state.parked && !state.parked.elsewhere ? state.parked.toolCallId : undefined;
+  const ids = new Set(state.pendingTools.filter((p) => p.reason === 'tool_suspended').map((p) => p.toolCallId));
+  if (parkedHere) ids.add(parkedHere);
+  return {
+    ...state,
+    parked: null,
+    pendingTools: state.pendingTools.filter((p) => !ids.has(p.toolCallId)),
+    items: state.items.map((it) =>
+      it.kind === 'tool' && ids.has(it.id) && it.status === 'suspended' ? { ...it, status: 'stopped' } : it,
+    ),
+  };
 }

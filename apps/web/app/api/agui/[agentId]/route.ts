@@ -43,6 +43,14 @@
  * dismiss it first); a follow-up is queued and runs after the answer. Run errors on a resumed widget
  * run carry a generic message; details are logged server-side.
  *
+ * Parked cards (WID-3, see lib/agui/parked-widgets.ts): the run stays parked while a card waits, so
+ * - action `pending` answers (control stream, nothing claimed) with the cards this session still has
+ *   waiting on the thread (`widgets`, with the props they were asked with) and the card its run is
+ *   parked on (`parked`, possibly on another thread), so a reloaded chat shows the cards again;
+ * - a new run refused because this session's run is parked on a card gets a 409 that names the card
+ *   (`pendingWidget: { threadId, toolCallId, toolName, label? }`); the client offers to answer or
+ *   dismiss it, or to stop the run (action `abort` on that thread).
+ *
  * OBS-1: when Mastra tracing is on, each AG-UI run gets one trace id (attributes companyId, agentId,
  * threadId, view=assistant, provider, model; see buildAssistantTracingOptions). It is passed to the
  * turn and to follow-ups queued on the run, sent to the client as a `tourbillon.trace` CUSTOM event
@@ -84,6 +92,7 @@ import { buildTraceUrl } from '@/lib/assistant/trace-link';
 import { setRequestWidgetSpecs } from '@tourbillon/mastra/widget-tools';
 import { assistantWidgetSpecIndex } from '@/components/assistant/widgets/specs';
 import { isWidgetAnswerEntry, selectWidgetSpecs, suspendedWidgetSpec, widgetResumeFromEntry } from '@/lib/agui/widgets';
+import { parkedWidgetCall, parkedWidgetMessage, pendingWidgetCards } from '@/lib/agui/parked-widgets';
 import {
   hasOtherSessionPendingWidget,
   pendingOwnedWidgetCalls,
@@ -226,6 +235,15 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
     // (its run is parked on the widget): refuse every action from other sessions.
     if (hasOtherSessionPendingWidget(session, resourceId, input.threadId)) {
       throw new ChatAgentError('A widget on this thread is waiting on another session', 409);
+    }
+    // WID-3: the cards this session still has waiting here (a reloaded chat shows them again).
+    if (action === 'pending') {
+      const parked = parkedWidgetCall(assistantWidgetSpecIndex, session, resourceId);
+      return controlResponse(input.threadId, input.runId, action, {
+        accepted: true,
+        widgets: pendingWidgetCards(assistantWidgetSpecIndex, session, resourceId, input.threadId),
+        parked: parked ?? null,
+      });
     }
     // A steer would abort the run parked on this session's widget and drop the widget: refuse it.
     if (action === 'steer' && onThread && pendingOwnedWidgetCalls(session, resourceId, input.threadId).length > 0) {
@@ -384,6 +402,14 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
 
     // run (or steer / followUp on an idle session, which simply starts a turn).
     if (running) {
+      // WID-3: parked on one of this session's cards: say which, so the client can offer answer / dismiss / Stop.
+      const parked = parkedWidgetCall(assistantWidgetSpecIndex, session, resourceId);
+      if (parked) {
+        return NextResponse.json(
+          { error: parkedWidgetMessage(parked, parked.threadId === input.threadId), pendingWidget: parked },
+          { status: 409 },
+        );
+      }
       throw new ChatAgentError('A run is already in progress; send steer or followUp instead', 409);
     }
     const claim = claimAguiRun(session, resourceId, input.threadId, { tracingOptions });
