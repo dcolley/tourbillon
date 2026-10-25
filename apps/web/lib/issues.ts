@@ -21,6 +21,7 @@ import {
   resolveIssueAssignees,
 } from '@tourbillon/shared';
 import { enqueueHeartbeat } from '@/lib/wake-client';
+import { changesBetween, TRACKED_CHANGE_FIELDS } from './activity-correlation';
 import { findHeartbeatJobsForTask, type JobSummary } from './jobs';
 import {
   CHECKOUT_LOCK_CLEAR_FIELDS,
@@ -254,7 +255,13 @@ export async function getIssueDetail(issueId: string): Promise<IssueDetail | nul
     db
       .select()
       .from(activityLog)
-      .where(and(eq(activityLog.entityType, 'issue'), eq(activityLog.entityId, issueId)))
+      .where(
+        and(
+          eq(activityLog.companyId, record.issue.companyId),
+          eq(activityLog.entityType, 'issue'),
+          eq(activityLog.entityId, issueId),
+        ),
+      )
       .orderBy(desc(activityLog.createdAt))
       .limit(100),
     findHeartbeatJobsForTask(issueId),
@@ -449,7 +456,8 @@ export async function updateIssue(
     action: 'issue.updated',
     entityType: 'issue',
     entityId: issueId,
-    details: changed,
+    // ACT-1: before → after for each changed field, next to the legacy changed-field keys.
+    details: { ...changed, changes: changesBetween(issue as unknown as Record<string, unknown>, changed, TRACKED_CHANGE_FIELDS) },
   });
 
   const nextAgentId =

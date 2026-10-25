@@ -133,6 +133,6 @@ describe('UI-2 thread helpers', () => {
   });
 
   it('assistant metadata keys are declared for the chat tag filter', () => {
-    assert.deepEqual([...ASSISTANT_THREAD_METADATA_KEYS], ['assistantReadMessageId']);
+    assert.deepEqual([...ASSISTANT_THREAD_METADATA_KEYS], ['assistantReadMessageId', 'assistantModel']);
   });
 });

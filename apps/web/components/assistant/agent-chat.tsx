@@ -11,6 +11,7 @@ import { X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { WidgetToolCall } from '@/components/assistant/widgets/widget-tool-call';
 import { assistantWidgetRegistry } from '@/components/assistant/widgets/registry';
+import { approvalCardCallFor } from '@/components/assistant/widgets/approval-card-binding';
 import type { ToolCardStatus } from '@/components/assistant/widgets/fallback-card';
 import type {
   AgentChatItem,
@@ -24,6 +25,7 @@ import type { AgentChatResult, AgentChatSendOptions } from '@/lib/agui/client/ag
 import { contextChipLabel, type OpenInChatContext } from '@/lib/assistant/open-in-chat';
 import { assistantAgentPath } from '@/lib/assistant/sidebar';
 import { useAgentChat, type AgentChatPhase } from './use-agent-chat';
+import { ModelPicker } from './model-picker/model-picker';
 
 const DELIVERY_LABEL: Partial<Record<UserMessageDelivery, string>> = {
   sending: 'Sending…',
@@ -77,7 +79,8 @@ function ItemView({ item }: { item: AgentChatItem }) {
         <div data-item="tool" data-tool-status={item.status}>
           <WidgetToolCall
             registry={assistantWidgetRegistry}
-            toolCall={{ toolCallId: item.id, toolName: item.name, args: item.argsText || undefined }}
+            // WID-2: a finished createApproval / getApproval call shows the Board approval card.
+            toolCall={approvalCardCallFor(item) ?? { toolCallId: item.id, toolName: item.name, args: item.argsText || undefined }}
             toolStatus={toolCardStatus(item.status)}
           />
         </div>
@@ -96,6 +99,8 @@ export interface AgentChatViewProps {
   onStop: () => void;
   onToolDecision: (toolCallId: string, approved: boolean) => void;
   onDismissError: () => void;
+  /** CHAT-5: the thread's model picker, shown in the composer footer. */
+  modelPicker?: React.ReactNode;
   /** UI-3: page context to send with the next message, shown as a removable chip. */
   contextChip?: OpenInChatContext | null;
   onRemoveContext?: () => void;
@@ -187,6 +192,7 @@ export function AgentChatView(props: AgentChatViewProps) {
           placeholder={runOpen ? 'Send a follow-up or steer the reply' : 'Message the agent'}
         />
         <div className="flex items-center gap-2">
+          {props.modelPicker ? <div data-composer-model-picker>{props.modelPicker}</div> : null}
           <span className="text-xs text-muted-foreground" data-run-status>
             {STATUS_LABEL[state.status]}
           </span>
@@ -277,6 +283,11 @@ export function AgentChat({
       onDismissError={chat.clearError}
       contextChip={context}
       onRemoveContext={() => setContext(null)}
+      modelPicker={
+        chat.thread ? (
+          <ModelPicker agentId={agentId} threadId={chat.thread.threadId} disabled={chat.state.status !== 'idle'} />
+        ) : undefined
+      }
     />
   );
 }

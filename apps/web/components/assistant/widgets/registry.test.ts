@@ -60,8 +60,8 @@ describe('WID-1 registry lookup', () => {
     assert.throws(() => createWidgetRegistry([{ ...pickV1, version: 1.5 }]), /Invalid version/);
   });
 
-  it('the assistant registry starts empty, so every tool call falls back', () => {
-    assert.deepEqual(assistantWidgetRegistry.list(), []);
+  it('the assistant registry has the WID-2 approval card only, and it is not a frontend tool', () => {
+    assert.deepEqual(assistantWidgetRegistry.list().map((d) => `${d.name}@${d.version}`), ['approvalCard@1']);
     assert.deepEqual(assistantWidgetRegistry.frontendTools(), []);
   });
 

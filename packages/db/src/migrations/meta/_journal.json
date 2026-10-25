@@ -148,6 +148,13 @@
       "when": 1792861730365,
       "tag": "0020_apr2_hitl",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1792877744191,
+      "tag": "0021_act1_activity_detail",
+      "breakpoints": true
     }
   ]
 }

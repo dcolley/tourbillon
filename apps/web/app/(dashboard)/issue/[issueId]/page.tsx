@@ -5,6 +5,8 @@ import { listGoalOptions } from '@/lib/goals';
 import { listProjectOptions } from '@/lib/projects';
 import { listIssueComments } from '@/lib/issue-comments';
 import { getIssueDetail, listIssueAgentOptions } from '@/lib/issues';
+import { listIssueActivityViews } from '@/lib/activity';
+import { ActivityFeed } from '@/components/activity/activity-feed';
 import { commentOnIssueAction, updateIssueAction, updateIssueDescriptionAction, releaseCheckoutLockAction } from '../actions';
 import { IssueCommentsSection } from './issue-comments-section';
 import { IssueDescriptionSection } from './issue-description-section';
@@ -41,7 +43,10 @@ export default async function IssueDetailPage({
   const { comments } = await listIssueComments(issueId, companyId, { order: 'desc' });
 
   const { issue, assignee, goal, project, activity, heartbeatRuns, heartbeatJobs } = detail;
-  const company = await getCompanyById(companyId);
+  const [company, activityViews] = await Promise.all([
+    getCompanyById(companyId),
+    listIssueActivityViews(companyId, activity),
+  ]);
   const savedFlag = saved === '1';
   const activeJob = heartbeatJobs.find((job) => job.state === 'active') ?? heartbeatJobs[0];
   const holdingRun = issue.checkoutRunId
@@ -209,38 +214,17 @@ export default async function IssueDetailPage({
 
       <div>
         <h2 className="mb-3 text-lg font-semibold">Activity</h2>
-        {activity.length === 0 ? (
+        {activityViews.length === 0 ? (
           <p className="rounded-lg border bg-muted/30 p-4 text-sm text-muted-foreground">
             No activity yet.
           </p>
         ) : (
-          <div className="rounded-lg border divide-y">
-            {activity.map((entry) => (
-              <div key={entry.id} className="flex items-start justify-between gap-4 p-4">
-                <div className="min-w-0 space-y-1">
-                  <p className="text-sm font-medium">{formatAction(entry.action)}</p>
-                  <p className="text-sm text-muted-foreground capitalize">
-                    {entry.actorType}
-                    {entry.actorName ? ` · ${entry.actorName}` : ''}
-                  </p>
-                  {hasDetails(entry.details) && (
-                    <p className="break-all font-mono text-xs text-muted-foreground">
-                      {summarizeDetails(
-                        entry.action,
-                        entry.details as Record<string, unknown>,
-                        entry.actorName
-                      )}
-                    </p>
-                  )}
-                </div>
-                <time
-                  dateTime={entry.createdAt.toISOString()}
-                  className="shrink-0 text-xs text-muted-foreground"
-                >
-                  {formatRelativeTime(entry.createdAt)}
-                </time>
-              </div>
-            ))}
+          <div className="rounded-lg border">
+            <ActivityFeed
+              views={activityViews}
+              showItem={false}
+              correlationHref={(id) => `/activity?correlation=${encodeURIComponent(id)}`}
+            />
           </div>
         )}
       </div>
@@ -325,64 +309,4 @@ function DetailField({ label, value }: { label: string; value: string }) {
       <p className="mt-1 font-medium capitalize">{value}</p>
     </div>
   );
-}
-
-function hasDetails(details: unknown): details is Record<string, unknown> {
-  return (
-    details !== null &&
-    typeof details === 'object' &&
-    Object.keys(details as object).length > 0
-  );
-}
-
-function formatAction(action: string): string {
-  const labels: Record<string, string> = {
-    'issue.checked_out': 'Issue checked out',
-    'issue.updated': 'Issue updated',
-    'issue.created': 'Issue created',
-  };
-  return labels[action] ?? action.replace(/\./g, ' · ').replace(/_/g, ' ');
-}
-
-function summarizeDetails(
-  action: string,
-  details: Record<string, unknown>,
-  actorName?: string | null
-): string {
-  if (action === 'issue.created') {
-    const createdBy = details.createdBy ?? actorName ?? 'unknown';
-    const parts = [`created by ${createdBy}`];
-    if (details.identifier) parts.push(String(details.identifier));
-    if (details.source) parts.push(`source: ${details.source}`);
-    return parts.join(' · ');
-  }
-
-  const parts: string[] = [];
-  if (details.status) parts.push(`status → ${details.status}`);
-  if (details.priority) parts.push(`priority → ${details.priority}`);
-  if (details.title) parts.push(`title → ${details.title}`);
-  if (details.comment) parts.push(String(details.comment));
-  if (details.assigneeAgentId !== undefined || details.assigneeUserId !== undefined) {
-    if (details.assigneeUserId) {
-      parts.push('assigned to Board');
-    } else if (details.assigneeAgentId) {
-      parts.push('assignee changed');
-    } else {
-      parts.push('unassigned');
-    }
-  }
-  if (details.runId) parts.push(`run ${String(details.runId).slice(0, 8)}…`);
-  return parts.join(', ') || JSON.stringify(details);
-}
-
-function formatRelativeTime(date: Date): string {
-  const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
-  if (seconds < 60) return 'just now';
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 7) return `${days}d ago`;
-  return date.toLocaleDateString();
 }

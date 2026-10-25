@@ -21,6 +21,7 @@ import {
   stubToolCall,
   type StubAgentController,
 } from '../../../lib/agui/testing/stub-agent-controller';
+import { setThreadProviderDepsForTests } from '../../../lib/chat/thread-model';
 
 type Ev = BaseEvent & Record<string, any>;
 type Handler = (req: NextRequest, ctx: { params: Promise<{ agentId: string }> }) => Promise<Response>;
@@ -926,6 +927,89 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
       const assistant = saved.filter((m) => m.role === 'assistant');
       assert.ok(assistant.length >= 1);
       for (const m of assistant) assert.equal(m.content.metadata?.traceId, traceId);
+    });
+  });
+  describe('CHAT-5 model choice per thread', () => {
+    let availability: Record<string, boolean>;
+    const providerChecks: Array<[string, string]> = [];
+
+    beforeEach(() => {
+      availability = { 'provider-b': true };
+      providerChecks.length = 0;
+      setThreadProviderDepsForTests({
+        isProviderAvailable: async (companyId, providerId) => {
+          providerChecks.push([companyId, providerId]);
+          return availability[providerId] ?? false;
+        },
+      });
+    });
+    afterEach(() => setThreadProviderDepsForTests(null));
+
+    async function seedWithChoice(threadId: string, choice: Record<string, unknown>) {
+      await seedThread(threadId);
+      const seeder = await stub.createSession(DEFAULT_RESOURCE, `seed-${threadId}`);
+      await seeder.thread.switch({ threadId });
+      await seeder.thread.setSetting({ key: 'assistantModel', value: choice as never });
+    }
+
+    it("runs on the thread's provider, model and effort (over ?modelId=), with trace attributes", async () => {
+      await seedWithChoice('chat5-thread-1', { providerId: 'provider-b', modelId: 'other/model', reasoningLevel: 'high' });
+      const { events, failure } = await clientRun('chat5-thread-1', { query: '?modelId=provider/model-x' });
+      assert.equal(failure, undefined, JSON.stringify(events.find((e) => e.type === 'RUN_ERROR')));
+      assert.equal(events.at(-1)!.type, 'RUN_FINISHED');
+      assert.deepEqual(providerChecks, [['company-a', 'provider-b']], 're-checked against the agent company');
+      assert.deepEqual(controllerCalls.at(-1)!.opts, {
+        modelIdOverride: 'other/model',
+        providerIdOverride: 'provider-b',
+        reasoningLevelOverride: 'high',
+      });
+      assert.equal(tracingCalls.length, 1);
+      assert.equal(tracingCalls[0].provider, 'provider-b');
+      assert.equal(tracingCalls[0].model, 'other/model');
+      assert.equal(tracingCalls[0].modelSource, 'thread');
+      assert.equal(tracingCalls[0].reasoningLevel, 'high');
+    });
+
+    it('a provider that is off or gone → 409 provider_disabled_for_company, no thread controller, no model call', async () => {
+      availability = { 'provider-b': false };
+      await seedWithChoice('chat5-thread-2', { providerId: 'provider-b', modelId: 'other/model' });
+      const res = await request('alice', input('chat5-thread-2'));
+      assert.equal(res.status, 409);
+      const body = await res.json();
+      assert.equal(body.code, 'provider_disabled_for_company');
+      assert.doesNotMatch(JSON.stringify(body), /provider-b|other\/model/);
+      assert.equal(controllerCalls.length, 1, 'only the lookup controller');
+      assert.deepEqual(controllerCalls[0].opts, { modelIdOverride: undefined });
+      assert.equal(stub.modelCalls, 0);
+
+      for (const action of ['steer', 'followUp']) {
+        const r = await request('alice', input('chat5-thread-2', { forwardedProps: { tourbillon: { action } } }));
+        assert.equal(r.status, 409, action);
+      }
+      // Abort stays possible.
+      const abort = await request('alice', input('chat5-thread-2', { forwardedProps: { tourbillon: { action: 'abort' } } }));
+      assert.equal(abort.status, 200);
+      assert.equal(stub.modelCalls, 0);
+    });
+
+    it("another thread without a choice keeps the agent's model", async () => {
+      await seedWithChoice('chat5-thread-3', { providerId: 'provider-b', modelId: 'other/model' });
+      const { failure } = await clientRun('chat5-thread-4');
+      assert.equal(failure, undefined);
+      assert.equal(controllerCalls.length, 1);
+      assert.deepEqual(controllerCalls[0].opts, { modelIdOverride: undefined });
+      assert.equal(providerChecks.length, 0);
+      assert.equal(tracingCalls[0].provider, 'provider-a');
+      assert.equal(tracingCalls[0].model, 'm');
+      assert.equal('modelSource' in tracingCalls[0], false);
+    });
+
+    it('an invalid stored choice is ignored (agent default)', async () => {
+      await seedWithChoice('chat5-thread-5', { providerId: 'provider-b', modelId: 'bad model id' });
+      const { failure } = await clientRun('chat5-thread-5');
+      assert.equal(failure, undefined);
+      assert.equal(controllerCalls.length, 1);
+      assert.equal(providerChecks.length, 0);
     });
   });
 });
