@@ -1,7 +1,8 @@
 /**
  * AGUI-1b: the assistant-view client (lib/agui/client) end to end against the real
  * POST /api/agui/[agentId] route: a turn with text + a tool call, follow-up / steer / abort mid-run,
- * disconnect (dispose) stopping the run, a run refused with 409, and a second tab opening the same
+ * disconnect (dispose) leaving the run going and a new client re-attaching to it (STREAM-1), a run
+ * refused with 409, and a second tab opening the same
  * agent (thread bootstrap through lib/assistant/threads) while the first tab's run streams.
  *
  * Same mock boundary as agui-route.test.ts: '@/lib/chat' at the registry, and a real Mastra
@@ -240,10 +241,10 @@ describe('AGUI-1b client ↔ POST /api/agui/[agentId]', () => {
     assert.ok(assistantText(st).endsWith('fresh'));
   });
 
-  it('dispose mid-run (navigating away) stops the run on the server', async () => {
-    // First turn would stream for ~1.2 s; the thread must free up well before that.
-    chunkDelayMs = 20;
-    script = () => stubText('t1', Array.from({ length: 60 }, (_, i) => `w${i} `));
+  it('STREAM-1: dispose mid-run (navigating away) only detaches; a new client re-attaches to the run', async () => {
+    chunkDelayMs = 10;
+    const words = Array.from({ length: 40 }, (_, i) => `w${i} `);
+    script = () => stubText('t1', words);
     await seedThread('c-thread-dispose');
     let disposed = false;
     const first = chatClient('c-thread-dispose', {
@@ -255,22 +256,28 @@ describe('AGUI-1b client ↔ POST /api/agui/[agentId]', () => {
       },
     });
     await first.send('start');
-    // A new client on the same thread can run straight away: the old run is not left going.
-    chunkDelayMs = 0;
-    script = () => stubText('t4', ['after dispose']);
-    const second = chatClient('c-thread-dispose');
-    let ok = false;
-    const t0 = Date.now();
-    for (let i = 0; i < 50 && !ok; i++) {
-      await sleep(20);
-      if ((await second.send('hello again')).ok) ok = true;
-      else second.clearError();
-    }
-    assert.ok(ok, 'thread became free after dispose');
-    assert.ok(Date.now() - t0 < 900, `freed after ${Date.now() - t0} ms, not when the old run would have ended`);
+    // The chat opened again (no stored messages served here): it re-attaches to the run still going.
+    const withHistory = (async (url: string, init: RequestInit) =>
+      url.endsWith('/messages')
+        ? new Response(JSON.stringify({ messages: [] }), { headers: { 'content-type': 'application/json' } })
+        : routeFetch(url, init)) as unknown as typeof fetch;
+    const second = chatClient('c-thread-dispose', { fetch: withHistory });
+    const resumed = await second.resume();
+    assert.equal(resumed.ok, true, JSON.stringify(resumed));
+    assert.deepEqual(resumed.ok && resumed.value, { attached: true });
     await second.whenIdle();
-    assert.equal(second.getState().lastOutcome, 'success');
-    assert.equal(assistantText(second.getState()), 'after dispose');
+    const st = second.getState();
+    assert.equal(st.error, null, JSON.stringify(st.error));
+    assert.equal(st.lastOutcome, 'success');
+    assert.equal(assistantText(st), words.join(''), 'the whole reply, once (replayed, then live)');
+    assert.equal(st.items.filter((i) => i.kind === 'assistant').length, 1);
+    assert.equal(stub.modelCalls, 1);
+    // Ended: the thread takes a new run.
+    chunkDelayMs = 0;
+    script = () => stubText('t4', ['after']);
+    assert.equal((await second.send('hello again')).ok, true);
+    await second.whenIdle();
+    assert.ok(assistantText(second.getState()).endsWith('after'));
   });
 
   it('a second session starting a run on a busy thread gets a 409 conflict', async () => {

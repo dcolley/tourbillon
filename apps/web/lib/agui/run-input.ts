@@ -13,8 +13,10 @@ const idSchema = z.string().regex(/^[A-Za-z0-9._:-]{1,200}$/);
 /**
  * `pending` (WID-3): asks which widget cards this session still has waiting on the thread (to show them
  * again after a reload) and whether a run of this session is parked on one. Read-only; claims nothing.
+ * `attach` (STREAM-1): re-subscribes to this session's open AG-UI run on the thread (e.g. after a
+ * backgrounded tab lost its stream): the run's events so far, then live. Read-only; claims nothing.
  */
-export const aguiActionSchema = z.enum(['run', 'steer', 'followUp', 'abort', 'toolApproval', 'pending']);
+export const aguiActionSchema = z.enum(['run', 'steer', 'followUp', 'abort', 'toolApproval', 'pending', 'attach']);
 export type AguiAction = z.infer<typeof aguiActionSchema>;
 
 export const tourbillonPropsSchema = z

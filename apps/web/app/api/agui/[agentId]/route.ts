@@ -7,7 +7,7 @@
  * agent looked up inside that company only, agent tokens refused.
  *
  * Tourbillon options ride in `forwardedProps.tourbillon` (see lib/agui/run-input.ts):
- * - action: run (default) | steer | followUp | abort | toolApproval
+ * - action: run (default) | steer | followUp | abort | toolApproval | pending | attach
  * - resourceId (must be one of the active company's chat resources), sessionScope, context
  * The AG-UI threadId is the Mastra memory thread id inside that resource.
  *
@@ -20,7 +20,7 @@
  * (including untagged threads) is refused with 404.
  *
  * One run per thread and per session: the run is claimed synchronously (no await between the check
- * and the claim) and released when its stream closes. Control actions that act on a run (abort, steer,
+ * and the claim) and released when the run ends. Control actions that act on a run (abort, steer,
  * followUp, toolApproval / AG-UI `resume`) are refused with 409 when the thread's run is claimed by
  * another session (e.g. another sessionScope of the same agent). Follow-ups sent while the run is open
  * are queued on the claim; any that will not run (abort, error, run ended first) are reported to the
@@ -50,6 +50,12 @@
  * - a new run refused because this session's run is parked on a card gets a 409 that names the card
  *   (`pendingWidget: { threadId, toolCallId, toolName, label? }`); the client offers to answer or
  *   dismiss it, or to stop the run (action `abort` on that thread).
+ *
+ * STREAM-1: a client that goes away (closed or backgrounded tab, iPad Safari suspending the fetch) only
+ * detaches from the run; the run, its claim and its queued follow-ups carry on. Only action `abort`
+ * stops a run. Action `attach` gives the same session a new SSE body for its open run on the thread
+ * (the run's events so far, replayed, then live; lib/agui/session-stream.ts); with no open run it
+ * answers a control stream `{ accepted: false, running }`, and the client reloads the history.
  *
  * OBS-1: when Mastra tracing is on, each AG-UI run gets one trace id (attributes companyId, agentId,
  * threadId, view=assistant, provider, model; see buildAssistantTracingOptions). It is passed to the
@@ -276,6 +282,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
         parked: parked ?? null,
       });
     }
+    // STREAM-1: re-subscribe to this session's open run on the thread (nothing is claimed or started).
+    if (action === 'attach') {
+      const attached = onThread && !claimedByOther ? active?.attach(req.signal) : null;
+      if (attached) return new Response(attached, { headers: AGUI_SSE_HEADERS });
+      return controlResponse(input.threadId, input.runId, action, { accepted: false, running: running && onThread });
+    }
     // A steer would abort the run parked on this session's widget and drop the widget: refuse it.
     if (action === 'steer' && onThread && pendingOwnedWidgetCalls(session, resourceId, input.threadId).length > 0) {
       throw new ChatAgentError('A widget is waiting for an answer; answer or dismiss it first', 409);
@@ -373,6 +385,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
           mastraThreadId: input.threadId,
           resourceId,
           signal: req.signal,
+          onAttachable: claim.setAttach,
           resumedToolCallIds: [toolCallId],
           publicRunError: WIDGET_RUN_ERROR,
           onClose: () => {
@@ -465,6 +478,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
       mastraThreadId: input.threadId,
       resourceId,
       signal: req.signal,
+      onAttachable: claim.setAttach,
       onClose: () => {
         untrackWidgets();
         claim.release();

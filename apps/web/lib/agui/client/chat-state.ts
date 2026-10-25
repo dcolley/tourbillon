@@ -144,6 +144,11 @@ export interface AgentChatState {
   lastOutcome: AgentRunOutcome | null;
   /** WID-3: the card the session's run is parked on, when the endpoint reported one (else null). */
   parked: ParkedWidget | null;
+  /**
+   * STREAM-1: catching up after the page came back (history reload + re-attach to an open run). Brief;
+   * the chat stays usable.
+   */
+  reconnecting?: boolean;
 }
 
 export const initialAgentChatState: AgentChatState = {
@@ -179,6 +184,20 @@ function upsertItem(state: AgentChatState, item: AgentChatItem): AgentChatState 
   const i = state.items.findIndex((it) => it.id === item.id && it.kind === item.kind);
   if (i >= 0) return state;
   return { ...state, items: [...state.items, item] };
+}
+
+/**
+ * STREAM-1: adds the item, or (same kind and id already shown) restarts it from `item`, keeping its
+ * place and any widget answer state. Used for the START events: a run re-attached after a lost stream
+ * replays its events from RUN_STARTED, so each message / tool call streams again from its start.
+ */
+function restartItem(state: AgentChatState, item: AgentChatItem): AgentChatState {
+  const i = state.items.findIndex((it) => it.id === item.id && it.kind === item.kind);
+  if (i < 0) return { ...state, items: [...state.items, item] };
+  const items = state.items.slice();
+  const prev = items[i] as AgentChatItem & { widgetSend?: unknown };
+  items[i] = { ...item, ...(prev.kind === 'tool' && prev.widgetSend ? { widgetSend: prev.widgetSend } : {}) } as AgentChatItem;
+  return { ...state, items };
 }
 
 function closeStreaming(items: AgentChatItem[]): AgentChatItem[] {
@@ -261,8 +280,10 @@ export function applyRunEvent(state: AgentChatState, event: AguiClientEvent): Ag
         items: setDelivery(state.items, (it) => it.mode === 'run' && it.delivery === 'sending', 'delivered'),
       };
     case 'TEXT_MESSAGE_START': {
+      // STREAM-1: a START for an item already shown (a re-attached run replays from RUN_STARTED, so
+      // the message streams again from its start) restarts it instead of appending a second copy.
       const id = str(event.messageId);
-      return id ? upsertItem(state, { kind: 'assistant', id, text: '', streaming: true }) : state;
+      return id ? restartItem(state, { kind: 'assistant', id, text: '', streaming: true }) : state;
     }
     case 'TEXT_MESSAGE_CONTENT': {
       const id = str(event.messageId);
@@ -277,7 +298,7 @@ export function applyRunEvent(state: AgentChatState, event: AguiClientEvent): Ag
     }
     case 'REASONING_MESSAGE_START': {
       const id = str(event.messageId);
-      return id ? upsertItem(state, { kind: 'reasoning', id, text: '', streaming: true }) : state;
+      return id ? restartItem(state, { kind: 'reasoning', id, text: '', streaming: true }) : state;
     }
     case 'REASONING_MESSAGE_CONTENT': {
       const id = str(event.messageId);
@@ -294,7 +315,7 @@ export function applyRunEvent(state: AgentChatState, event: AguiClientEvent): Ag
       const id = str(event.toolCallId);
       if (!id) return state;
       const parentMessageId = str(event.parentMessageId);
-      return upsertItem(state, {
+      return restartItem(state, {
         kind: 'tool',
         id,
         name: str(event.toolCallName) ?? 'tool',
@@ -475,5 +496,71 @@ export function releaseParkedWidgets(state: AgentChatState): AgentChatState {
     items: state.items.map((it) =>
       it.kind === 'tool' && ids.has(it.id) && it.status === 'suspended' ? { ...it, status: 'stopped' } : it,
     ),
+  };
+}
+
+const itemKey = (it: AgentChatItem) => `${it.kind}\u0000${it.id}`;
+
+/**
+ * STREAM-1: the page came back (tab shown again, back online): shows the thread's persisted messages
+ * as they are now, so anything written while the stream was lost appears in place.
+ *
+ * The result is the history, in order, followed by what this client holds that is not in it (a reply
+ * still streaming, a message that failed to send). A message this client sent shows with its own id
+ * until it is persisted; it is then replaced by its stored copy (the first newly persisted user message
+ * with the same text). Unlike `seedHistory` (chat opening, nothing shown yet), newer persisted messages
+ * land after the ones already shown, not before them.
+ */
+export function mergeHistory(state: AgentChatState, history: readonly AgentChatItem[]): AgentChatState {
+  if (history.length === 0) return state;
+  const local = new Set(state.items.map(itemKey));
+  const inHistory = new Set(history.map(itemKey));
+  /** Persisted user messages not shown yet, by text: candidates for this client's own sends. */
+  const fresh = new Map<string, number>();
+  for (const it of history) {
+    if (it.kind === 'user' && !local.has(itemKey(it))) fresh.set(it.text, (fresh.get(it.text) ?? 0) + 1);
+  }
+  const rest: AgentChatItem[] = [];
+  for (const it of state.items) {
+    if (inHistory.has(itemKey(it))) continue;
+    if (it.kind === 'user' && it.delivery !== 'failed') {
+      const n = fresh.get(it.text) ?? 0;
+      if (n > 0) {
+        fresh.set(it.text, n - 1);
+        continue;
+      }
+    }
+    rest.push(it);
+  }
+  // The stored copy wins, except a tool call without a stored result that this client shows waiting
+  // (approval, card) or finished: that state is newer than the store's.
+  const shown = new Map(state.items.map((it) => [itemKey(it), it] as const));
+  const merged = history.map((it) => {
+    const mine = shown.get(itemKey(it));
+    if (it.kind !== 'tool' || mine?.kind !== 'tool' || it.result !== undefined) return it;
+    return mine.status === 'running' || mine.status === 'streaming_args' ? it : mine;
+  });
+  return { ...state, items: [...merged, ...rest] };
+}
+
+/**
+ * STREAM-1: after the page came back, the endpoint has no open run for this chat any more (it ended
+ * while the stream was lost): settle what was left running here. Follow-ups still queued here did not
+ * reach the history (mergeHistory replaced the ones that ran), so they did not run.
+ */
+export function settleAfterResume(state: AgentChatState): AgentChatState {
+  const lost = state.error?.kind === 'disconnected';
+  if (state.status === 'idle' && !lost && !state.items.some((it) => it.kind === 'user' && it.delivery === 'queued')) {
+    return state;
+  }
+  let items = closeStreaming(state.items);
+  items = setDelivery(items, (it) => it.delivery === 'queued', 'dropped');
+  return {
+    ...state,
+    status: 'idle',
+    items,
+    runtimeQueuedFollowUps: 0,
+    droppedThisRun: 0,
+    error: lost ? null : state.error,
   };
 }

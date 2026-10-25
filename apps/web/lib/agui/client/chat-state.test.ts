@@ -6,7 +6,9 @@ import {
   endRun,
   initialAgentChatState,
   markDroppedFollowUps,
+  mergeHistory,
   RUN_CANCELLED_MESSAGE,
+  settleAfterResume,
   type AgentChatItem,
   type AgentChatState,
   type UserMessageDelivery,
@@ -153,5 +155,74 @@ describe('seedHistory (P0: transcript loaded when the chat opens)', () => {
     assert.equal((next.items[1] as { text: string }).text, 'live');
     assert.equal(next.status, 'running');
     assert.equal(seedHistory(state, []), state);
+  });
+});
+
+describe('STREAM-1 mergeHistory / settleAfterResume / START on a shown item', () => {
+  const u = (id: string, text: string, delivery: UserMessageDelivery = 'delivered'): AgentChatItem => ({
+    kind: 'user',
+    id,
+    text,
+    mode: 'run',
+    delivery,
+  });
+  const a = (id: string, text: string, streaming = false): AgentChatItem => ({ kind: 'assistant', id, text, streaming });
+
+  it('history first (stored copies win), then local-only items; own sends replaced by their stored copy', () => {
+    const local = withItems([u('old-u', 'earlier'), a('old-a', 'earlier reply'), u('client-1', 'hi'), a('m', 'hal', true), u('client-2', 'failed one', 'failed')]);
+    const merged = mergeHistory(local, [u('old-u', 'earlier'), a('old-a', 'earlier reply'), u('s-1', 'hi'), a('m', 'half done'), u('s-9', 'other tab'), a('m9', 'more')]);
+    assert.deepEqual(
+      merged.items.map((i) => `${i.kind}:${i.id}:${(i as { text: string }).text}`),
+      [
+        'user:old-u:earlier',
+        'assistant:old-a:earlier reply',
+        'user:s-1:hi',
+        'assistant:m:half done',
+        'user:s-9:other tab',
+        'assistant:m9:more',
+        'user:client-2:failed one',
+      ],
+    );
+  });
+
+  it('an unsent local message with the same text as an older stored one is kept', () => {
+    const local = withItems([u('old', 'yes'), u('client-1', 'yes', 'queued')]);
+    const merged = mergeHistory(local, [u('old', 'yes')]);
+    assert.deepEqual(merged.items.map((i) => i.id), ['old', 'client-1']);
+  });
+
+  it('empty history leaves the state alone; a waiting tool call keeps its local state', () => {
+    const local = withItems([{ kind: 'tool', id: 'c1', name: 'ask', argsText: '{}', status: 'awaiting_approval' } as AgentChatItem]);
+    assert.equal(mergeHistory(local, []), local);
+    const merged = mergeHistory(local, [{ kind: 'tool', id: 'c1', name: 'ask', argsText: '{}', status: 'running' } as AgentChatItem]);
+    assert.equal((merged.items[0] as { status: string }).status, 'awaiting_approval');
+  });
+
+  it('settleAfterResume: idle, streaming closed, queued follow-ups dropped, disconnected error cleared', () => {
+    const st = settleAfterResume(
+      withItems([u('q', 'later', 'queued'), a('m', 'x', true)], { error: { kind: 'disconnected', message: 'lost' } }),
+    );
+    assert.equal(st.status, 'idle');
+    assert.equal(st.error, null);
+    assert.deepEqual(deliveries(st), ['dropped']);
+    assert.equal((st.items[1] as { streaming: boolean }).streaming, false);
+    const idle = withItems([a('m', 'x')], { status: 'idle' });
+    assert.equal(settleAfterResume(idle), idle);
+    const other = settleAfterResume(withItems([], { status: 'idle', error: { kind: 'http', message: 'boom', status: 500 } }));
+    assert.equal(other.error?.kind, 'http');
+  });
+
+  it('a START for a shown message / tool call restarts it in place (re-attached replay)', () => {
+    let s = withItems([u('u', 'hi'), a('m', 'half', true), { kind: 'tool', id: 't', name: 'x', argsText: '{"a"', status: 'streaming_args' } as AgentChatItem]);
+    s = apply(
+      s,
+      { type: 'TEXT_MESSAGE_START', messageId: 'm', role: 'assistant' },
+      { type: 'TEXT_MESSAGE_CONTENT', messageId: 'm', delta: 'half and more' },
+      { type: 'TOOL_CALL_START', toolCallId: 't', toolCallName: 'x' },
+      { type: 'TOOL_CALL_ARGS', toolCallId: 't', delta: '{"a":1}' },
+    );
+    assert.deepEqual(s.items.map((i) => i.id), ['u', 'm', 't']);
+    assert.equal((s.items[1] as { text: string }).text, 'half and more');
+    assert.equal((s.items[2] as { argsText: string }).argsText, '{"a":1}');
   });
 });
