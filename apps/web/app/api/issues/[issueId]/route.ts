@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db, issues, activityLog, agents } from '@tourbillon/db';
+import { changesBetween, TRACKED_CHANGE_FIELDS } from '@/lib/activity-correlation';
 import { and, eq } from 'drizzle-orm';
 import { IssueAssigneeError, resolveIssueAssignees } from '@tourbillon/shared';
 import { authenticateAgentToken } from '@/lib/auth/agent-token-auth';
@@ -147,6 +148,9 @@ export async function PATCH(
     comment: body.comment,
     runId,
   };
+  // ACT-1: before → after for each changed field.
+  const changes = changesBetween(issue as unknown as Record<string, unknown>, updates, TRACKED_CHANGE_FIELDS);
+  if (Object.keys(changes).length > 0) activityDetails.changes = changes;
   if (reviewAssigneeAutoResolved) {
     activityDetails.reviewAssigneeAutoResolved = true;
     activityDetails.reviewAssigneeReason = reviewAssigneeReason;

@@ -1,102 +1,110 @@
-import { db, activityLog } from '@tourbillon/db';
-import { desc, eq } from 'drizzle-orm';
+import Link from 'next/link';
 import { PageHeader } from '@/components/page-header';
 import { Card, CardContent } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { ActivityFeed } from '@/components/activity/activity-feed';
 import { getActiveCompanyOrNull } from '@/lib/company';
+import { ACTIVITY_PAGE_LIMIT, listActivityActorOptions, listCompanyActivity } from '@/lib/activity';
+import { ACTIVITY_ENTITY_TYPES, hasActiveFilters, parseActivityFilters } from '@/lib/activity-view';
 
-export default async function ActivityPage() {
+const TYPE_LABELS: Record<string, string> = {
+  issue: 'Issues',
+  approval: 'Approvals',
+  agent: 'Agents',
+  project: 'Projects',
+  goal: 'Goals',
+  workspace: 'Workspace',
+  llm_provider: 'LLM providers',
+};
+
+const fieldClass =
+  'h-9 rounded-md border border-input bg-background px-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring';
+
+export default async function ActivityPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
   const company = await getActiveCompanyOrNull();
   if (!company) return null;
-  const entries = await db
-    .select()
-    .from(activityLog)
-    .where(eq(activityLog.companyId, company.id))
-    .orderBy(desc(activityLog.createdAt))
-    .limit(100);
+  const filters = parseActivityFilters(await searchParams);
+  const [views, actorOptions] = await Promise.all([
+    listCompanyActivity(company.id, filters),
+    listActivityActorOptions(company.id),
+  ]);
+  const filtered = hasActiveFilters(filters);
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Activity" description="Audit log of agent and system actions" />
+      <PageHeader title="Activity" description="Audit log of agent, Board and system actions" />
+
+      <form method="get" className="flex flex-wrap items-end gap-3 text-sm" aria-label="Filter activity">
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-muted-foreground">Item type</span>
+          <select name="type" defaultValue={filters.raw.type} className={fieldClass}>
+            <option value="">All items</option>
+            {ACTIVITY_ENTITY_TYPES.map((t) => (
+              <option key={t} value={t}>
+                {TYPE_LABELS[t] ?? t}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-muted-foreground">Actor</span>
+          <select name="actor" defaultValue={filters.raw.actor} className={fieldClass}>
+            <option value="">Anyone</option>
+            {actorOptions.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-muted-foreground">From (UTC)</span>
+          <input type="date" name="from" defaultValue={filters.raw.from} className={fieldClass} />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-muted-foreground">To (UTC)</span>
+          <input type="date" name="to" defaultValue={filters.raw.to} className={fieldClass} />
+        </label>
+        {filters.raw.correlation ? <input type="hidden" name="correlation" value={filters.raw.correlation} /> : null}
+        <Button type="submit" size="sm">
+          Apply
+        </Button>
+        {filtered ? (
+          <Link href="/activity" className="text-xs text-muted-foreground underline-offset-4 hover:underline">
+            Clear filters
+          </Link>
+        ) : null}
+      </form>
+
+      {filters.correlationId ? (
+        <p className="text-xs text-muted-foreground">Showing only rows from one action.</p>
+      ) : null}
 
       <Card>
         <CardContent className="p-0">
-          {entries.length === 0 ? (
+          {views.length === 0 ? (
             <p className="p-8 text-center text-sm text-muted-foreground">
-              No activity yet. Actions like issue checkouts and updates will appear here.
+              {filtered
+                ? 'No activity matches these filters.'
+                : 'No activity yet. Actions like issue checkouts and updates will appear here.'}
             </p>
           ) : (
-            <div className="divide-y">
-              {entries.map((entry) => (
-                <div key={entry.id} className="flex items-start justify-between gap-4 p-4 text-sm">
-                  <div className="min-w-0 space-y-1">
-                    <p className="font-medium">{formatAction(entry.action)}</p>
-                    <p className="text-muted-foreground">
-                      <span className="capitalize">{entry.actorType}</span>
-                      {entry.actorName ? ` · ${entry.actorName}` : ''}
-                      {' · '}
-                      <span className="font-mono text-xs">{entry.entityType}</span>
-                      <span className="font-mono text-xs">/{entry.entityId.slice(0, 8)}…</span>
-                    </p>
-                    {entry.details != null &&
-                    typeof entry.details === 'object' &&
-                    Object.keys(entry.details as object).length > 0 ? (
-                      <p className="truncate font-mono text-xs text-muted-foreground">
-                        {summarizeDetails(entry.details as Record<string, unknown>)}
-                      </p>
-                    ) : null}
-                  </div>
-                  <time
-                    className="shrink-0 text-xs text-muted-foreground"
-                    dateTime={entry.createdAt.toISOString()}
-                  >
-                    {formatRelativeTime(entry.createdAt)}
-                  </time>
-                </div>
-              ))}
-            </div>
+            <ActivityFeed
+              views={views}
+              correlationHref={(id) => `/activity?correlation=${encodeURIComponent(id)}`}
+            />
           )}
         </CardContent>
       </Card>
+      {views.length >= ACTIVITY_PAGE_LIMIT ? (
+        <p className="text-xs text-muted-foreground">
+          Showing the newest {ACTIVITY_PAGE_LIMIT} rows. Narrow the date range to see older activity.
+        </p>
+      ) : null}
     </div>
   );
-}
-
-function formatAction(action: string): string {
-  const labels: Record<string, string> = {
-    'issue.checked_out': 'Issue checked out',
-    'issue.updated': 'Issue updated',
-    'issue.created': 'Issue created',
-    'agent.created': 'Agent hired',
-    'agent.code_execution_updated': 'Agent code & execution updated',
-    'approval.created': 'Approval requested',
-    'approval.decided': 'Approval decided',
-  };
-  return labels[action] ?? action.replace(/\./g, ' · ').replace(/_/g, ' ');
-}
-
-function summarizeDetails(details: Record<string, unknown>): string {
-  const parts: string[] = [];
-  if (details.status) parts.push(`status → ${details.status}`);
-  if (details.comment) parts.push('comment added');
-  if (details.runId) parts.push(`run ${String(details.runId).slice(0, 8)}…`);
-  if ('egressAllowList' in details) {
-    parts.push(
-      Array.isArray(details.egressAllowList)
-        ? `egress ${details.egressAllowList.length === 0 ? '[]' : details.egressAllowList.join(', ')}`
-        : 'egress off',
-    );
-  }
-  return parts.join(', ') || JSON.stringify(details);
-}
-
-function formatRelativeTime(date: Date): string {
-  const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
-  if (seconds < 60) return 'just now';
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 7) return `${days}d ago`;
-  return date.toLocaleDateString();
 }

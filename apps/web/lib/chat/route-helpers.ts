@@ -8,6 +8,7 @@ import {
 } from '@/lib/chat';
 import { agentTokenConfigErrorResponse, isAgentTokenConfigError } from '@/lib/auth/agent-token-config';
 import { isControlChatServerEnabled } from '@/lib/feature-flags';
+import { threadProviderRefusedBody } from '@/lib/chat/thread-model';
 
 export function chatErrorResponse(err: unknown): NextResponse {
   if (err instanceof ChatAgentError) {
@@ -15,6 +16,10 @@ export function chatErrorResponse(err: unknown): NextResponse {
   }
   if (err instanceof ActiveCompanyError) {
     return NextResponse.json({ error: err.message }, { status: 400 });
+  }
+  // CHAT-5: the controller refused a thread's provider that is not available to the company.
+  if (err instanceof Error && err.name === 'ChatProviderUnavailableError') {
+    return NextResponse.json(threadProviderRefusedBody(), { status: 409 });
   }
   // Mastra rejects thread ids outside the session resource with "Thread not found: <id>".
   if (err instanceof Error && /^Thread not found\b/.test(err.message)) {

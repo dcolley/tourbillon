@@ -6,7 +6,9 @@ import {
   buildChatResourceId,
   buildChatControllerId,
   createHeartbeatRuntimeContext,
+  chatModelOverrideKey,
   type AgentController,
+  type ChatModelOverrideOptions,
   type ChatControllerState,
   type ChatResourceContext,
   type Session,
@@ -143,13 +145,15 @@ export class ChatAgentError extends Error {
 /**
  * Lazy per-agent (optional model override) AgentController in the Next.js process.
  * Controllers are long-lived across chat requests (not destroyed after each message).
+ * CHAT-5: a thread's model choice (model, provider, effort) gets its own controller, keyed by
+ * chatModelOverrideKey; a model-only override keeps the existing key.
  */
 export async function getOrCreateChatController(
   agentRecord: Agent,
-  opts?: { modelIdOverride?: string },
+  opts?: ChatModelOverrideOptions,
 ): Promise<TourbillonChatController> {
   const cache = controllerCache();
-  const cacheKey = chatControllerCacheKey(agentRecord.id, opts?.modelIdOverride);
+  const cacheKey = chatControllerCacheKey(agentRecord.id, chatModelOverrideKey(opts));
   const existing = cache.get(cacheKey);
   if (existing) return existing;
 
@@ -161,6 +165,8 @@ export async function getOrCreateChatController(
       allowedMcpServerIds: company?.allowedMcpServerIds ?? [],
       companySettings: parseCompanySettings(company?.settings),
       modelIdOverride: opts?.modelIdOverride,
+      ...(opts?.providerIdOverride ? { providerIdOverride: opts.providerIdOverride } : {}),
+      ...(opts?.reasoningLevelOverride ? { reasoningLevelOverride: opts.reasoningLevelOverride } : {}),
     });
     await controller.init();
     return controller;

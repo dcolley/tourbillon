@@ -11,6 +11,8 @@ import {
   type WidgetAnswer,
 } from '@tourbillon/shared/widgets';
 import type { FrontendToolDefinition, WidgetDefinition, WidgetResolution, WidgetWarn } from './widget-types';
+import { approvalCardSpec } from './specs';
+import { ApprovalCardWidget } from './approval-card';
 
 export class WidgetRegistryError extends Error {
   constructor(message: string) {
@@ -95,11 +97,11 @@ export function createWidgetRegistry(
 }
 
 /**
- * The assistant's widget registry. Empty until the first widgets land (WID-2 approval card,
- * WID-3 question/form/confirm cards); every tool call therefore renders the fallback card.
+ * The assistant's widget registry: WID-2 approval card (WID-3 adds question/form/confirm cards).
+ * Any other tool call renders the fallback card.
  *
  * Each definition is `{ ...spec, component }` for a spec in `assistantWidgetSpecs` (./specs), the
  * component-free list the AG-UI route uses to offer widget tools and validate answers. The two
  * lists must match (registry test).
  */
-export const assistantWidgetRegistry: WidgetRegistry = createWidgetRegistry([]);
+export const assistantWidgetRegistry: WidgetRegistry = createWidgetRegistry([{ ...approvalCardSpec, component: ApprovalCardWidget }]);

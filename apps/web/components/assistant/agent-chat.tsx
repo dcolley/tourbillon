@@ -12,6 +12,7 @@ import { ChatMarkdown } from '@/components/assistant/message-markdown';
 import { ToolStateCard } from '@/components/assistant/tool-state-card';
 import { WidgetToolCall } from '@/components/assistant/widgets/widget-tool-call';
 import { assistantWidgetRegistry } from '@/components/assistant/widgets/registry';
+import { approvalCardCallFor } from '@/components/assistant/widgets/approval-card-binding';
 import type { ToolCardStatus } from '@/components/assistant/widgets/fallback-card';
 import type {
   AgentChatItem,
@@ -23,6 +24,7 @@ import type {
 import type { AguiThreadRef } from '@/lib/agui/client/thread-bootstrap';
 import { assistantAgentPath } from '@/lib/assistant/sidebar';
 import { useAgentChat, type AgentChatPhase } from './use-agent-chat';
+import { ModelPicker } from './model-picker/model-picker';
 
 const DELIVERY_LABEL: Partial<Record<UserMessageDelivery, string>> = {
   sending: 'Sending…',
@@ -79,10 +81,11 @@ function ItemView({ item }: { item: AgentChatItem }) {
     case 'tool':
       return (
         <div data-item="tool" data-tool-status={item.status}>
-          {assistantWidgetRegistry.latest(item.name) ? (
+          {approvalCardCallFor(item) || assistantWidgetRegistry.latest(item.name) ? (
             <WidgetToolCall
               registry={assistantWidgetRegistry}
-              toolCall={{ toolCallId: item.id, toolName: item.name, args: item.argsText || undefined }}
+              // WID-2: a finished createApproval / getApproval call shows the Board approval card.
+              toolCall={approvalCardCallFor(item) ?? { toolCallId: item.id, toolName: item.name, args: item.argsText || undefined }}
               toolStatus={toolCardStatus(item.status)}
             />
           ) : (
@@ -110,6 +113,8 @@ export interface AgentChatViewProps {
   onStop: () => void;
   onToolDecision: (toolCallId: string, approved: boolean) => void;
   onDismissError: () => void;
+  /** CHAT-5: the thread's model picker, shown in the composer footer. */
+  modelPicker?: React.ReactNode;
 }
 
 function PendingTool({ tool, onDecision }: { tool: PendingToolDecision; onDecision: AgentChatViewProps['onToolDecision'] }) {
@@ -178,6 +183,7 @@ export function AgentChatView(props: AgentChatViewProps) {
           placeholder={runOpen ? 'Send a follow-up or steer the reply' : 'Message the agent'}
         />
         <div className="flex items-center gap-2">
+          {props.modelPicker ? <div data-composer-model-picker>{props.modelPicker}</div> : null}
           <span className="text-xs text-muted-foreground" data-run-status>
             {STATUS_LABEL[state.status]}
           </span>
@@ -247,6 +253,11 @@ export function AgentChat({ agentId, agentKey, threadId }: { agentId: string; ag
       onStop={() => void chat.abort()}
       onToolDecision={(id, approved) => void chat.respondToTool(id, approved)}
       onDismissError={chat.clearError}
+      modelPicker={
+        chat.thread ? (
+          <ModelPicker agentId={agentId} threadId={chat.thread.threadId} disabled={chat.state.status !== 'idle'} />
+        ) : undefined
+      }
     />
   );
 }
