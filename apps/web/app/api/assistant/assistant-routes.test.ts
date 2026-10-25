@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { NextRequest } from 'next/server';
+import { chatItemsFromStoredMessages } from '../../../lib/agui/client/thread-history';
 
 const mastraRequire = createRequire(join(__dirname, '../../../../../packages/mastra/package.json'));
 
@@ -127,6 +128,7 @@ let threadsGET: Handler;
 let threadsPOST: Handler;
 let threadPATCH: Handler;
 let threadGET: Handler;
+let messagesGET: Handler;
 let resetThreadCreateLimitForTests: () => void;
 let threadsLib: typeof import('../../../lib/assistant/threads');
 
@@ -152,6 +154,14 @@ async function patch(agentId: string, threadId: string, body: unknown): Promise<
     ctx({ agentId, threadId }),
   );
   return { status: res.status, body: (await res.json()) as Json };
+}
+
+async function messages(agentId: string, threadId: string): Promise<{ status: number; body: Json; headers: Headers }> {
+  const res = await messagesGET(
+    req(`/api/assistant/agents/${agentId}/threads/${threadId}/messages`),
+    ctx({ agentId, threadId }),
+  );
+  return { status: res.status, body: (await res.json()) as Json, headers: res.headers };
 }
 
 /** Session proxy: records rename/switch/pin-metadata writes; optionally lists across resources. */
@@ -309,6 +319,7 @@ describe('UI-2 assistant sidebar API', () => {
     ({ GET: agentsGET } = await import('./agents/route'));
     ({ GET: threadsGET, POST: threadsPOST } = (await import('./agents/[agentId]/threads/route')) as any);
     ({ PATCH: threadPATCH, GET: threadGET } = (await import('./agents/[agentId]/threads/[threadId]/route')) as any);
+    ({ GET: messagesGET } = (await import('./agents/[agentId]/threads/[threadId]/messages/route')) as any);
     ({ resetThreadCreateLimitForTests } = await import('../../../lib/assistant/create-limit'));
     threadsLib = await import('../../../lib/assistant/threads');
   });
@@ -795,6 +806,52 @@ describe('UI-2 assistant sidebar API', () => {
       assert.equal(r.status, 409);
       assert.match(r.body.error, /Pin limit/);
       assert.equal((await patch('alice', 'p1', { pinned: true })).status, 200, 're-pinning an existing pin is fine');
+    });
+  });
+  describe('thread messages (P0: the chat loads its transcript every time it opens)', () => {
+    beforeEach(async () => {
+      await seedThread({ id: 'own', title: 'Own', agentId: 'agent-a', turn: true });
+      await seedThread({ id: 'untagged', title: 'Untagged', turn: true });
+      await seedThread({ id: 'pane', title: 'Pane', agentId: 'agent-a', resourceId: 'company-company-a:chat:agent:agent-a', turn: true });
+    });
+
+    it('returns the persisted messages oldest first, uncached, as the chat shows them', async () => {
+      const r = await messages('alice', 'own');
+      assert.equal(r.status, 200);
+      assert.equal(r.headers.get('cache-control'), 'no-store');
+      const items = chatItemsFromStoredMessages(r.body.messages);
+      assert.deepEqual(
+        items.map((i) => i.kind),
+        ['user', 'assistant'],
+      );
+      assert.equal((items[0] as { text: string }).text, 'hello own');
+      assert.match((items[1] as { text: string }).text, /^reply \d+$/);
+      // The assistant text item keeps the stored message id (message feedback is saved under it).
+      const assistant = r.body.messages.find((m: Json) => m.role === 'assistant');
+      assert.equal(items[1].id, assistant.id);
+    });
+
+    it('a later read includes turns written since (no stale copy)', async () => {
+      assert.equal((await messages('alice', 'own')).body.messages.length, 2);
+      const s = await session(RESOURCE_A, 'seed-own');
+      await s.sendMessage({ content: 'second' });
+      const items = chatItemsFromStoredMessages((await messages('alice', 'own')).body.messages);
+      assert.deepEqual(
+        items.map((i) => i.kind),
+        ['user', 'assistant', 'user', 'assistant'],
+      );
+      assert.equal((items[2] as { text: string }).text, 'second');
+      assert.match((items[3] as { text: string }).text, /^reply \d+$/);
+    });
+
+    it('another agent, an untagged thread or another resource → 404; no active company → 400', async () => {
+      assert.equal((await messages('bob', 'own')).status, 404);
+      assert.equal((await messages('alice', 'untagged')).status, 404);
+      assert.equal((await messages('alice', 'pane')).status, 404);
+      assert.equal((await messages('alice', 'missing')).status, 404);
+      assert.equal((await messages('xavier', 'own')).status, 404);
+      activeCompany = null;
+      assert.equal((await messages('alice', 'own')).status, 400);
     });
   });
 });

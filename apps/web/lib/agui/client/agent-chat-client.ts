@@ -27,6 +27,8 @@
  * thread and shows them again; a send refused because the run is parked on a card records the card in
  * `parked` (409 `pendingWidget`); `abort()` with no run stream open stops a parked run (action `abort`
  * on the parked run's thread).
+ * P0 (agent switch): `loadHistory()` (called when the chat opens, before `restorePending()`) fetches the
+ * thread's persisted messages and shows them, so a chat opened again shows the conversation up to now.
  */
 import type { ChatDashboardContext } from '@/lib/chat/dashboard-context';
 import { readAguiEvents, type AguiClientEvent } from './sse';
@@ -39,6 +41,7 @@ import {
   parkedWidgetFromBody,
   releaseParkedWidgets,
   restorePendingWidgets,
+  seedHistory,
   setParked,
   setWidgetSend,
   TOOL_DETACHED_MESSAGE,
@@ -46,6 +49,7 @@ import {
   type AgentChatItem,
   type AgentChatState,
 } from './chat-state';
+import { chatItemsFromStoredMessages, fetchThreadHistory } from './thread-history';
 
 export type AguiAction = 'run' | 'steer' | 'followUp' | 'abort' | 'toolApproval' | 'pending';
 
@@ -337,6 +341,47 @@ export class AgentChatClient {
     const error: AgentChatError = { kind: 'rejected', message: WIDGET_NOT_PENDING_MESSAGE };
     this.update((s) => ({ ...setWidgetSend(s, id, 'failed'), error }));
     return { ok: false, error };
+  }
+
+  /**
+   * Opens the chat on its thread: loads the thread's messages (fresh), then shows again the cards still
+   * waiting on it (WID-3; after the history, so a waiting card is the stored call, not a duplicate).
+   * Resolves once the history is shown.
+   */
+  async open(): Promise<AgentChatResult> {
+    const history = await this.loadHistory();
+    if (!this.disposed) void this.restorePending();
+    return history;
+  }
+
+  /**
+   * P0 (agent switch): fetches every persisted message of this thread (never from a cache) and shows
+   * them before anything this client streamed itself. Each chat that opens (agent switch, reload)
+   * calls this, so the transcript includes turns the agent wrote while the user was elsewhere.
+   * A failure is shown as the chat error; the chat still works.
+   */
+  async loadHistory(): Promise<AgentChatResult> {
+    if (this.disposed) return this.fail({ kind: 'rejected', message: 'Chat closed' });
+    let items: AgentChatItem[];
+    try {
+      const messages = await fetchThreadHistory({
+        agentId: this.opts.agentId,
+        threadId: this.opts.threadId,
+        fetch: this.fetchImpl,
+      });
+      items = chatItemsFromStoredMessages(messages);
+    } catch (err) {
+      const status = (err as { status?: unknown })?.status;
+      const error: AgentChatError = {
+        kind: typeof status === 'number' ? 'http' : 'network',
+        message: `Could not load earlier messages: ${err instanceof Error ? err.message : String(err)}`,
+        ...(typeof status === 'number' ? { status } : {}),
+      };
+      this.update((s) => ({ ...s, error }));
+      return { ok: false, error };
+    }
+    this.update((s) => seedHistory(s, items));
+    return { ok: true };
   }
 
   /**

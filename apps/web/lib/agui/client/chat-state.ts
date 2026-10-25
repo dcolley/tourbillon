@@ -448,6 +448,19 @@ export function restorePendingWidgets(
 }
 
 /**
+ * P0 (agent switch): shows the thread's persisted messages (thread-history.ts) before what this client
+ * already holds. Items this client already has (same kind and id, e.g. a run that started before the
+ * history arrived) are kept as they are; the rest of the state is unchanged.
+ */
+export function seedHistory(state: AgentChatState, history: readonly AgentChatItem[]): AgentChatState {
+  if (history.length === 0) return state;
+  const have = new Set(state.items.map((it) => `${it.kind}\u0000${it.id}`));
+  const earlier = history.filter((it) => !have.has(`${it.kind}\u0000${it.id}`));
+  if (earlier.length === 0) return state;
+  return { ...state, items: [...earlier, ...state.items] };
+}
+
+/**
  * WID-3: the parked run was stopped (or was no longer running): its cards on this thread no longer
  * take an answer. They stay shown, locked; `parked` is cleared.
  */

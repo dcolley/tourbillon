@@ -267,3 +267,45 @@ export async function getAssistantThread(
   const pinned = (await listPinnedAssistantThreadIds(pinScope(agent, viewerKey))).includes(threadId);
   return toAssistantThread(session, thread, pinned);
 }
+
+/** A stored message of an assistant thread, as GET …/threads/[threadId]/messages returns it. */
+export interface AssistantThreadMessage {
+  id: string;
+  role: string;
+  content: unknown;
+  createdAt?: string;
+  type?: string;
+}
+
+/**
+ * P0 (agent switch): every persisted message of one of the agent's assistant threads, oldest first,
+ * so the assistant chat can show the whole conversation when it opens (including turns written while
+ * the user was on another agent). 404 when the thread is not the agent's (requireAssistantThread).
+ */
+export async function listAssistantThreadMessages(
+  session: TourbillonChatSession,
+  agent: AgentLike,
+  threadId: string,
+): Promise<AssistantThreadMessage[]> {
+  await requireAssistantThread(session, agent, threadId);
+  const messages = (await session.thread.listMessages({ threadId })) as Array<{
+    id: string;
+    role: string;
+    content: unknown;
+    createdAt?: unknown;
+    type?: unknown;
+  }>;
+  return messages
+    .map((m, index) => ({ m, index }))
+    .sort((a, b) => time(a.m.createdAt) - time(b.m.createdAt) || a.index - b.index)
+    .map(({ m }) => {
+      const createdAt = iso(m.createdAt);
+      return {
+        id: m.id,
+        role: m.role,
+        content: m.content,
+        ...(createdAt ? { createdAt } : {}),
+        ...(typeof m.type === 'string' ? { type: m.type } : {}),
+      };
+    });
+}
