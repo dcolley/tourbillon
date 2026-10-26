@@ -18,7 +18,7 @@ import {
   type AskConfirmProps,
   type AskFormProps,
 } from './chat-card-specs';
-import { choiceDraft, confirmDraft, formDraft, initialChoice, initialFormDraft, questionDraft } from './chat-card-drafts';
+import { choiceDraft, confirmDraft, formDraft, formValueText, initialChoice, initialChoiceDraft, initialFormDraft, questionDraft } from './chat-card-drafts';
 
 type Tool = typeof import('./widget-tool-call');
 type Reg = typeof import('./registry');
@@ -128,6 +128,46 @@ describe('WID-3 card specs', () => {
     assert.deepEqual(issues({ question: 'Which passport office and compass heading?' }, askQuestionSpec), []);
   });
 
+  it('multiSelect (WID-MS): one card carries a list answer (bounds, dupes, membership); a multiSelect field takes string[]', () => {
+    const now = new Date(0);
+    const check = (spec: any, props: unknown, answer: unknown) => {
+      const r = acceptWidgetAnswer(spec, 'c1', answer, now, props);
+      return r.ok ? 'ok' : r.issues;
+    };
+    const MULTI = { ...CHOICE, recommended: undefined, multiSelect: true };
+    const MULTI_MAX1 = { ...MULTI, maxSelected: 1 };
+    const MULTI_MIN0 = { ...MULTI, minSelected: 0 };
+    // A multi-select card answers with the chosen ids; single-select keeps { choice } and refuses a list.
+    assert.deepEqual(check(askChoiceSpec, MULTI, { choices: ['basic', 'pro'] }), 'ok'); // default max = every option
+    assert.deepEqual(check(askChoiceSpec, MULTI_MIN0, { choices: [] }), 'ok'); // minSelected: 0 allows an empty submit
+    assert.deepEqual(check(askChoiceSpec, MULTI, { choices: [] }), ['choices: too_few']); // default minSelected is 1
+    assert.deepEqual(check(askChoiceSpec, MULTI_MAX1, { choices: ['basic', 'pro'] }), ['choices: too_many']);
+    assert.deepEqual(check(askChoiceSpec, MULTI, { choices: ['basic', 'basic'] }), ['choices: duplicate_id']);
+    assert.deepEqual(check(askChoiceSpec, MULTI, { choices: ['gold'] }), ['choices: not_an_option']);
+    assert.deepEqual(check(askChoiceSpec, MULTI, { choices: ['gold', 'gold'] }), ['choices: duplicate_id', 'choices: not_an_option']);
+    assert.deepEqual(check(askChoiceSpec, CHOICE, { choices: ['basic'] }), ['choices: multi_only']); // a single-select card takes one option
+    assert.deepEqual(check(askChoiceSpec, MULTI, { choice: 'basic' }), ['choices: invalid_type']); // a multi-select card takes a list
+    // Props-side: recommended may be a list (highlighted, never preselected) and bounds are validated on props.
+    assert.deepEqual(issues(MULTI, askChoiceSpec), []);
+    assert.deepEqual(issues({ ...MULTI, recommended: ['gold', 'pro'] }, askChoiceSpec), ['recommended: not_an_option']);
+    assert.deepEqual(issues({ ...MULTI, maxSelected: 3 }, askChoiceSpec), ['maxSelected: max_above_options']); // only two options offered
+    assert.deepEqual(issues({ ...MULTI, minSelected: 3, maxSelected: 2 }, askChoiceSpec), ['minSelected: min_above_max']);
+    // askForm: a multiSelect field answers with a string[] of offered option values.
+    const TAGS = { name: 'tags', label: 'Tags', type: 'multiSelect' as const, options: [{ value: 'x', label: 'X' }, { value: 'y', label: 'Y' }, { value: 'z', label: 'Z' }] };
+    const formProps = { title: 't', fields: [TAGS] };
+    assert.deepEqual(issues(formProps, askFormSpec), []);
+    assert.deepEqual(issues({ title: 't', fields: [{ ...TAGS, minSelected: 2, maxSelected: 1 }] }, askFormSpec), ['fields.0.minSelected: min_above_max']);
+    assert.deepEqual(issues({ title: 't', fields: [{ ...TAGS, maxSelected: 4 }] }, askFormSpec), ['fields.0.maxSelected: max_above_options']);
+    assert.deepEqual(issues({ title: 't', fields: [{ name: 'x', label: 'X', type: 'multiSelect' as const }] }, askFormSpec), ['fields.0.options: required_for_select']);
+    assert.deepEqual(check(askFormSpec, formProps, { values: { tags: ['x', 'z'] } }), 'ok');
+    assert.deepEqual(check(askFormSpec, formProps, { values: { tags: 'x' } }), ['values.tags: invalid_type']);
+    assert.deepEqual(check(askFormSpec, formProps, { values: { tags: ['x', 'x'] } }), ['values.tags: duplicate_value']);
+    assert.deepEqual(check(askFormSpec, formProps, { values: { tags: ['q'] } }), ['values.tags: not_an_option']);
+    assert.deepEqual(check(askFormSpec, formProps, { values: { tags: [] } }), ['values.tags: required']);
+    assert.deepEqual(check(askFormSpec, { title: 't', fields: [{ ...TAGS, required: false }] }, { values: { tags: [] } }), 'ok');
+    assert.deepEqual(check(askFormSpec, { title: 't', fields: [{ ...TAGS, maxSelected: 2 }] }, { values: { tags: ['x', 'y', 'z'] } }), ['values.tags: too_many']);
+  });
+
   it('answers are checked against the props the card was asked with', () => {
     const now = new Date(0);
     const check = (spec: any, props: unknown, answer: unknown) => {
@@ -163,6 +203,25 @@ describe('WID-3 card specs', () => {
 });
 
 describe('WID-3 card drafts', () => {
+  it('multiSelect drafts (WID-MS): the card and the form field hold lists; out-of-bounds picks refuse to submit', () => {
+    const multi = { ...CHOICE, multiSelect: true, maxSelected: 1 };
+    assert.deepEqual(initialChoiceDraft(multi), []); // recommended is a hint, never a preselection
+    assert.equal(initialChoiceDraft(CHOICE), undefined);
+    assert.equal(initialChoiceDraft({ ...CHOICE, defaultOption: 'basic' }), 'basic');
+    assert.deepEqual(choiceDraft(multi, ['basic']), { ok: true, answer: { choices: ['basic'] } });
+    assert.equal(choiceDraft(multi, ['basic', 'pro']).ok, false); // maxSelected: 1 refuses two picks
+    assert.equal(choiceDraft(multi, []).ok, false); // under minSelected
+    assert.deepEqual(choiceDraft(CHOICE, ['gold']), { ok: false, errors: { choice: 'Pick one option.' } });
+    const field = { name: 'tags', label: 'Tags', type: 'multiSelect' as const, options: [{ value: 'x', label: 'X' }, { value: 'y', label: 'Y' }] };
+    const props = { title: 't', fields: [field] };
+    const propsMax1 = { title: 't', fields: [{ ...field, maxSelected: 1 }] };
+    assert.deepEqual(initialFormDraft(props), { tags: [] });
+    assert.deepEqual(formDraft(props, { tags: ['x'] }), { ok: true, answer: { values: { tags: ['x'] } } });
+    assert.equal(formDraft(props, { tags: [] }).ok, false); // a required multiSelect field refuses to submit empty
+    assert.equal(formDraft(propsMax1, { tags: ['x', 'y'] }).ok, false); // over maxSelected
+    assert.equal(formValueText(field, ['x', 'y']), 'X, Y'); // the answered card lists every chosen label
+  });
+
   it('question: trimmed text, empty and too long refused', () => {
     assert.deepEqual(questionDraft('  hi  '), { ok: true, answer: { text: 'hi' } });
     assert.equal(questionDraft('   ').ok, false);
@@ -295,6 +354,28 @@ describe('WID-3 card rendering', () => {
     assert.match(html, /&lt;img src=x onerror=/);
   });
 
+  it('multiSelect (WID-MS): one checkbox card with a counter, and the answered state lists every chosen label', () => {
+    const multi = { ...CHOICE, recommended: undefined, multiSelect: true, maxSelected: 1 };
+    const pending = render('askChoice', multi);
+    assert.match(pending, /data-card="choice"/);
+    assert.equal(pending.match(/type="checkbox"/g)?.length, 2); // one card of checkboxes — not one toggle per option
+    assert.doesNotMatch(pending, /type="radio"/);
+    assert.match(pending, /0 of 1 selected/); // counter names the cap while nothing is picked
+    const answered = render('askChoice', multi, { answer: { choices: ['basic', 'pro'] } });
+    assert.match(answered, /data-card-status="answered"/);
+    assert.match(answered, /Chosen: Basic, Pro/);
+  });
+
+  it('form multiSelect (WID-MS): a field renders as one checkbox group; the answered card lists every chosen label', () => {
+    const props = { title: 'Scope', fields: [{ name: 'tags', label: 'Tags', type: 'multiSelect', options: [{ value: 'x', label: 'X' }, { value: 'y', label: 'Y' }] }] };
+    const pending = render('askForm', props);
+    assert.match(pending, /data-field="tags" data-field-type="multiSelect"/);
+    assert.match(pending, /<fieldset/);
+    assert.equal(pending.match(/name="tags\.(x|y)"/g)?.length, 2);
+    const answered = render('askForm', props, { answer: { values: { tags: ['x', 'y'] } } });
+    assert.match(answered, /<dd[^>]*>X, Y<\/dd>/);
+  });
+
   it('the client check matches the server: an answer outside the card is refused before it is sent', () => {
     const accepted: unknown[] = [];
     const invalid: string[][] = [];
@@ -303,7 +384,7 @@ describe('WID-3 card rendering', () => {
     const capture: typeof Probe = { ...Probe, component: (p: any) => ((onAnswer = p.onAnswer), null) };
     renderToStaticMarkup(
       React.createElement(WidgetToolCall, {
-        registry: createWidgetRegistry([capture]),
+        registry: createWidgetRegistry([capture, { ...capture, version: 1 }]), // WID-MS: askChoice registers v1 + v2; register both so a widgetVersion-omitting call (default v1) resolves
         toolCall: { toolCallId: 'c1', toolName: 'askChoice', args: CHOICE },
         onAnswer: (r) => accepted.push(r),
         onInvalidAnswer: (i) => invalid.push(i),
