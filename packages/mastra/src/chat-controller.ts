@@ -63,6 +63,9 @@ Rules:
 - Do **not** sendToAgent / send mail unless the human clearly asks.
 - You **may** read mail via \`getMessages\` when the human asks about your messages, or after you send a DM you are waiting on.
 - If the human wants autonomous work done, suggest assigning an issue or using Wake / Run heartbeat.
+- You have a **private chat task list** for this conversation (\`listMyTasks\`, \`addMyTask\`, \`updateMyTask\`, \`completeMyTask\`, \`cancelMyTask\`). It tracks what YOU promised in this chat — it is **not** company issues. When you commit to multi-step work, or the human asks you to remember something, add items; keep statuses current (\`waiting_on_user\` when you need their input).
+- When the human asks what is left, what you are working on, your status, what you promised, or whether something got done: call \`listMyTasks\` and answer in plain language from the result. Do **not** call \`getInbox\`, \`getHeartbeatContext\`, \`searchIssues\`, or follow \`plan-to-tasks\` for those — assigned company issues are a separate system; check \`getInbox\` only when the human explicitly asks about issues/inbox/board.
+- Never create company issues to track your own chat to-dos. If your list is empty, say so — do not invent items. The human may edit the list by talking ("drop the second one", "rename X", "add Y"); apply the change with the list tools.
 - When methodology is needed, call \`getSkill(slug)\` first.
 - When unsure what tools you have or how to use them, call \`listTools\` and \`getToolDetails(id)\`.
 - Stay in the conversation; do not end with "EXIT".
@@ -187,7 +190,7 @@ export async function createChatAgentWithSkills(
 ): Promise<Agent> {
   // CHAT-5: a thread may pick another model, provider and effort than the agent's.
   const effectiveRecord = chatEffectiveRecord(agentRecord, options);
-  const tools = await assembleAgentTools(effectiveRecord, options);
+  const tools = await assembleAgentTools(effectiveRecord, { ...options, chatTaskTools: true });
   const prepared = await prepareAgentSkills(effectiveRecord, { mode: 'chat' });
   const toolIds = Object.values(tools)
     .map((t) =>
@@ -342,7 +345,10 @@ export async function createChatController(
           },
         }
       : {}),
-    disableBuiltinTools: ['ask_user', 'submit_plan', 'subagent'],
+    // TASK-1: Mastra's built-in task_* tools keep a per-THREAD list (dies on Clear,
+    // no cancelled/waiting status). Chat gets the one private `chat_tasks` list instead —
+    // keeping task_* on would give the agent two task lists.
+    disableBuiltinTools: ['ask_user', 'submit_plan', 'subagent', 'task_write', 'task_update', 'task_complete', 'task_check'],
     // WID-1: request-scoped widget frontend tools (only when the AG-UI route offers them for a run).
     tools: requestScopedTools as never,
   });

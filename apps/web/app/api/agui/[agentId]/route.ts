@@ -71,6 +71,7 @@
  * provider and model, `modelSource=thread` and the effort when one is set.
  */
 import { NextRequest, NextResponse } from 'next/server';
+import { resolveChatRequestUser } from '@/lib/chat/request-user';
 import { isAssistantAvailable } from '@/lib/feature-flags';
 import { EventType, type BaseEvent } from '@ag-ui/core';
 import {
@@ -253,7 +254,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
     }
 
     // ---- No await from here until the run is claimed (or the control action is decided). ----
-    const requestContext = createChatRequestContext(agent);
+    const requestContext = createChatRequestContext(agent, {
+      threadId: input.threadId,
+      requestingUser: await resolveChatRequestUser(req.headers),
+    });
     // Widget tools the client declared and the server knows (request-scoped, see lib/agui/widgets.ts).
     const offeredWidgets = selectWidgetSpecs(assistantWidgetSpecIndex, input.tools);
     if (offeredWidgets.length > 0) setRequestWidgetSpecs(requestContext, offeredWidgets);

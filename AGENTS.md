@@ -111,7 +111,7 @@ Each agent row in the `agents` table has:
 
 **Tier 1 tools (all agents):**
 - `getIdentity` — agent identity, role, budget
-- `getInbox` — assigned tasks (todo, in_progress, in_review, blocked)
+- `getInbox` — assigned **company issues** (todo, in_progress, in_review, blocked). Company assignments — NOT the agent's personal to-dos; those live in the agent's private per-agent `chat_tasks` list, read in chat via `listMyTasks`.
 - `checkoutIssue` — atomic lock acquisition before any work
 - `getHeartbeatContext` — task state + comment cursor
 - `getComments` — full or incremental comment thread
