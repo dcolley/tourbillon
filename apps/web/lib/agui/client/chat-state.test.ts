@@ -7,7 +7,9 @@ import {
   initialAgentChatState,
   markDroppedFollowUps,
   mergeHistory,
+  mergeHistoryPage,
   RUN_CANCELLED_MESSAGE,
+  seedHistory,
   settleAfterResume,
   type AgentChatItem,
   type AgentChatState,
@@ -224,5 +226,86 @@ describe('STREAM-1 mergeHistory / settleAfterResume / START on a shown item', ()
     assert.deepEqual(s.items.map((i) => i.id), ['u', 'm', 't']);
     assert.equal((s.items[1] as { text: string }).text, 'half and more');
     assert.equal((s.items[2] as { argsText: string }).argsText, '{"a":1}');
+  });
+});
+
+describe('STREAM-1 × CHAT-PAGE-1 mergeHistoryPage (resume reloads only the newest page)', () => {
+  const u = (id: string, text: string, delivery: UserMessageDelivery = 'delivered'): AgentChatItem => ({
+    kind: 'user',
+    id,
+    text,
+    mode: 'run',
+    delivery,
+  });
+  const a = (id: string, text: string, streaming = false): AgentChatItem => ({ kind: 'assistant', id, text, streaming });
+  const ids = (s: AgentChatState) => s.items.map((i) => i.id);
+  const pager = { hasMore: true, cursor: 'p1' };
+
+  it('older pages already shown (Load previous) stay in front of the newest page, pager unchanged', () => {
+    const local = withItems([u('o1', 'old'), a('o2', 'old reply'), u('p1', 'q'), a('p2', 'half', true)], {
+      history: { hasMore: true, cursor: 'o1', loading: false },
+    });
+    const merged = mergeHistoryPage(local, [u('p1', 'q'), a('p2', 'done'), u('p3', 'other tab')], pager);
+    assert.deepEqual(ids(merged), ['o1', 'o2', 'p1', 'p2', 'p3']);
+    assert.equal((merged.items[3] as { text: string }).text, 'done');
+    assert.deepEqual(merged.history, { hasMore: true, cursor: 'o1', loading: false });
+  });
+
+  it('own send before the page anchor is replaced by its stored copy (no duplicate)', () => {
+    const local = withItems([u('o1', 'old'), u('client-1', 'hi'), a('m', 'ha', true)], {
+      history: { hasMore: false, cursor: 'o1', loading: false },
+    });
+    const merged = mergeHistoryPage(local, [u('s-1', 'hi'), a('m', 'hallo')], { hasMore: true, cursor: 's-1' });
+    assert.deepEqual(ids(merged), ['o1', 's-1', 'm']);
+  });
+
+  it('more than a page written meanwhile: restarts at the page, keeps own undelivered sends, pager moves', () => {
+    const local = withItems([u('o1', 'old'), a('o2', 'old reply'), u('client-2', 'failed one', 'failed')], {
+      history: { hasMore: false, cursor: 'o1', loading: false },
+    });
+    const merged = mergeHistoryPage(local, [u('n1', 'new'), a('n2', 'new reply')], { hasMore: true, cursor: 'n1' });
+    assert.deepEqual(ids(merged), ['n1', 'n2', 'client-2']);
+    assert.deepEqual(merged.history, { hasMore: true, cursor: 'n1', loading: false });
+  });
+
+  // B1: shown messages that came from the store (older pages, or ones that fell out of the newest
+  // page) are never text-matched as this client's own sends.
+  const pagedIn = (newest: AgentChatItem[], older: AgentChatItem[], own: AgentChatItem[] = []) => {
+    let s: AgentChatState = { ...withItems([]), history: { hasMore: true, cursor: newest[0]!.id, loading: false } };
+    s = seedHistory(s, newest);
+    s = { ...seedHistory(s, older), history: { hasMore: false, cursor: older[0]!.id, loading: false } };
+    return { ...s, items: [...s.items, ...own] };
+  };
+
+  it('B1: older paged-in message with the same text as an own in-flight send is kept, no duplicate', () => {
+    const local = pagedIn([u('p1', 'q'), a('p2', 'r')], [u('o1', 'continue'), a('o2', 'ok')], [u('client-1', 'continue', 'sending')]);
+    const merged = mergeHistoryPage(local, [u('p1', 'q'), a('p2', 'r'), u('s-1', 'continue'), a('s-2', 'going')], pager);
+    assert.deepEqual(ids(merged), ['o1', 'o2', 'p1', 'p2', 's-1', 's-2']);
+  });
+
+  it('B1: another tab sending an older message text does not remove the older one', () => {
+    const local = pagedIn([u('p1', 'q'), a('p2', 'r')], [u('o1', 'SEED-07'), a('o2', 'ok')]);
+    const merged = mergeHistoryPage(local, [u('p1', 'q'), a('p2', 'r'), u('s-1', 'SEED-07')], pager);
+    assert.deepEqual(ids(merged), ['o1', 'o2', 'p1', 'p2', 's-1']);
+  });
+
+  it('B1: a message that fell out of the newest page keeps its place when its text is sent again', () => {
+    let local = seedHistory(
+      { ...withItems([]), history: { hasMore: false, cursor: 'x1', loading: false } },
+      [u('x1', 'again'), a('x2', 'one'), u('x3', 'q'), a('x4', 'two')],
+    );
+    local = { ...local, items: [...local.items, u('client-1', 'again', 'delivered')] };
+    const merged = mergeHistoryPage(local, [u('x3', 'q'), a('x4', 'two'), u('s-1', 'again'), a('s-2', 'three')], { hasMore: true, cursor: 'x3' });
+    assert.deepEqual(ids(merged), ['x1', 'x2', 'x3', 'x4', 's-1', 's-2']);
+    // A second resume with the same page changes nothing.
+    assert.deepEqual(ids(mergeHistoryPage(merged, [u('x3', 'q'), a('x4', 'two'), u('s-1', 'again'), a('s-2', 'three')], { hasMore: true, cursor: 'x3' })), ids(merged));
+  });
+
+  it('no page shown yet: plain mergeHistory and the pager takes the page cursor; empty page is a no-op', () => {
+    const local = withItems([u('client-1', 'hi')]);
+    const merged = mergeHistoryPage(local, [u('s-1', 'hi'), a('m', 'reply')], pager);
+    assert.deepEqual(ids(merged), ['s-1', 'm']);
+    assert.deepEqual(merged.history, { hasMore: true, cursor: 'p1', loading: false });
+    assert.equal(mergeHistoryPage(local, [], pager), local);
   });
 });

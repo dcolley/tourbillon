@@ -966,5 +966,68 @@ describe('UI-2 assistant sidebar API', () => {
       activeCompany = null;
       assert.equal((await messages('alice', 'own')).status, 400);
     });
+
+    describe('CHAT-PAGE-1: paged by query params (limit / before)', () => {
+      const page = async (query: string) => {
+        const res = await messagesGET(req(`/api/assistant/agents/alice/threads/own/messages?${query}`), {
+          params: Promise.resolve({ agentId: 'alice', threadId: 'own' }),
+        });
+        return { status: res.status, body: (await res.json()) as Json, headers: res.headers };
+      };
+      beforeEach(async () => {
+        // 'own' already holds one turn (2 messages); 12 more turns → 26 messages.
+        const s = await session(RESOURCE_A, 'seed-own');
+        for (let i = 1; i <= 12; i++) await s.sendMessage({ content: `turn ${i}` });
+      });
+
+      it('limit → the newest N oldest-first with hasMore; before → the N strictly older; pages join up exactly', async () => {
+        const all = (await messages('alice', 'own')).body;
+        assert.equal(all.messages.length, 26);
+        assert.equal(all.hasMore, false, 'no paging params: everything, as before');
+        const allIds = all.messages.map((m: Json) => m.id);
+
+        const first = await page('limit=10');
+        assert.equal(first.status, 200);
+        assert.equal(first.headers.get('cache-control'), 'no-store');
+        assert.deepEqual(first.body.messages.map((m: Json) => m.id), allIds.slice(16));
+        assert.equal(first.body.hasMore, true);
+
+        const second = await page(`limit=10&before=${first.body.messages[0].id}`);
+        assert.deepEqual(second.body.messages.map((m: Json) => m.id), allIds.slice(6, 16));
+        assert.equal(second.body.hasMore, true);
+
+        const third = await page(`limit=10&before=${second.body.messages[0].id}`);
+        assert.deepEqual(third.body.messages.map((m: Json) => m.id), allIds.slice(0, 6));
+        assert.equal(third.body.hasMore, false);
+        // The pages render as the same transcript as the full read.
+        const joined = [...third.body.messages, ...second.body.messages, ...first.body.messages];
+        assert.deepEqual(chatItemsFromStoredMessages(joined), chatItemsFromStoredMessages(all.messages));
+      });
+
+      it('default page of 20 on open', async () => {
+        const r = await page('limit=20');
+        assert.equal(r.body.messages.length, 20);
+        assert.equal(r.body.hasMore, true);
+      });
+
+      it('a cursor far back still pages correctly (window widens)', async () => {
+        const allIds = (await messages('alice', 'own')).body.messages.map((m: Json) => m.id);
+        const r = await page(`limit=2&before=${allIds[3]}`);
+        assert.deepEqual(r.body.messages.map((m: Json) => m.id), allIds.slice(1, 3));
+        assert.equal(r.body.hasMore, true);
+      });
+
+      it('bad params → 400; a cursor from another thread → 400; scope still enforced (404)', async () => {
+        assert.equal((await page('limit=0')).status, 400);
+        assert.equal((await page('limit=abc')).status, 400);
+        assert.equal((await page('limit=101')).status, 400);
+        assert.equal((await page('before=')).status, 400);
+        assert.equal((await page('limit=10&before=not-a-message')).status, 400);
+        const res = await messagesGET(req('/api/assistant/agents/bob/threads/own/messages?limit=10'), {
+          params: Promise.resolve({ agentId: 'bob', threadId: 'own' }),
+        });
+        assert.equal(res.status, 404);
+      });
+    });
   });
 });

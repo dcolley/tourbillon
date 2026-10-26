@@ -11,6 +11,11 @@
  * While the run is parked on a card (its stream has ended; a new message is refused until the card is
  * answered or dismissed), a notice names the card and offers to dismiss it or stop the run; cards still
  * waiting are shown again when the chat is reopened (use-agent-chat → restorePending).
+ *
+ * CHAT-PAGE-1: the transcript opens on its newest page (20 messages) with a Load previous control at the
+ * top while older messages exist; loading them keeps the view in place. The list opens at the bottom and
+ * stays pinned there while content streams, until the user scrolls up; scrolling back down, sending, or
+ * Jump to latest pins it again (use-sticky-transcript.ts).
  */
 import * as React from 'react';
 import { X } from 'lucide-react';
@@ -42,6 +47,7 @@ import { ContextMeter } from './context-meter/context-meter';
 import { AgentDmActivity } from './dm-activity';
 import { AgentChatMenu } from './agent-chat-menu';
 import { clearAgentChat, type AssistantOmSummary } from '@/lib/assistant/single-chat';
+import { useStickyTranscript } from './use-sticky-transcript';
 
 const DELIVERY_LABEL: Partial<Record<UserMessageDelivery, string>> = {
   sending: 'Sending…',
@@ -189,6 +195,14 @@ export interface AgentChatViewProps {
   dmActivity?: React.ReactNode;
   /** ASYNC-0: the chat's ⋯ menu (Clear chat, Observational Memory), at the end of the chat chrome. */
   chatMenu?: React.ReactNode;
+  /** CHAT-PAGE-1: load the previous transcript page (Load previous is shown while `state.history.hasMore`). */
+  onLoadPrevious?: () => void;
+  /** CHAT-PAGE-1: the scrolling message list (sticky-bottom binding). */
+  scrollRef?: React.Ref<HTMLDivElement>;
+  onScroll?: () => void;
+  /** CHAT-PAGE-1: false once the user scrolled up; shows Jump to latest (with `onJumpToLatest`). */
+  pinned?: boolean;
+  onJumpToLatest?: () => void;
 }
 
 const CARD_KIND: Record<string, string> = {
@@ -333,7 +347,7 @@ function PendingTool({ tool, onDecision }: { tool: PendingToolDecision; onDecisi
 
 /** Stateless view (tested with react-dom/server). */
 export function AgentChatView(props: AgentChatViewProps) {
-  const { phase, setupError, state, draft } = props;
+  const { phase, setupError, state, draft, scrollRef } = props;
   if (phase === 'connecting') {
     return <p className="p-6 text-sm text-muted-foreground">Opening chat…</p>;
   }
@@ -361,7 +375,29 @@ export function AgentChatView(props: AgentChatViewProps) {
           {props.chatMenu ?? null}
         </div>
       ) : null}
-      <div className="flex-1 space-y-3 overflow-y-auto p-4" aria-live="polite">
+      <div className="relative flex min-h-0 flex-1 flex-col">
+      <div
+        ref={scrollRef}
+        onScroll={props.onScroll}
+        className="relative flex-1 space-y-3 overflow-y-auto p-4"
+        aria-live="polite"
+        data-transcript
+        data-pinned={props.pinned === false ? 'false' : 'true'}
+      >
+        {state.history?.hasMore && props.onLoadPrevious ? (
+          <div className="flex justify-center" data-load-previous>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              disabled={state.history.loading}
+              aria-busy={state.history.loading || undefined}
+              onClick={props.onLoadPrevious}
+            >
+              {state.history.loading ? 'Loading…' : 'Load previous'}
+            </Button>
+          </div>
+        ) : null}
         {state.items.map((item) => {
           const footerFor = footers?.get(item.id);
           return (
@@ -376,6 +412,14 @@ export function AgentChatView(props: AgentChatViewProps) {
           .map((tool) => (
             <PendingTool key={tool.toolCallId} tool={tool} onDecision={props.onToolDecision} />
           ))}
+      </div>
+      {props.pinned === false && props.onJumpToLatest ? (
+        <div className="pointer-events-none absolute inset-x-0 bottom-2 flex justify-center" data-jump-to-latest>
+          <Button type="button" size="sm" variant="secondary" className="pointer-events-auto shadow" onClick={props.onJumpToLatest}>
+            Jump to latest
+          </Button>
+        </div>
+      ) : null}
       </div>
       {parked && <ParkedNotice parked={parked} state={state} props={props} />}
       {state.error && (
@@ -487,6 +531,13 @@ export function AgentChat({
   const [clearedOm, setClearedOm] = React.useState<AssistantOmSummary | undefined>(undefined);
   const observationalMemory = clearedOm ?? chat.thread?.observationalMemory ?? null;
   const parkedNow = parkedCard(chat.state, assistantWidgetRegistry);
+  // CHAT-PAGE-1: open at the bottom, stay pinned while content streams, until the user scrolls up.
+  // A new thread (Clear chat) remounts nothing, so the key resets the binding through `ready`.
+  const scroll = useStickyTranscript([chat.state.items, chat.state.pendingTools, chat.thread?.threadId], chat.phase === 'ready');
+  const loadPrevious = () => {
+    scroll.beforePrepend();
+    void Promise.resolve(chat.loadPrevious()).finally(scroll.afterPrepend);
+  };
   const [draft, setDraft] = React.useState('');
   const [context, setContext] = React.useState<OpenInChatContext | null>(initialContext ?? null);
   // CTX-1: reload the context meter on open, after each turn (back to idle) and on a model change.
@@ -500,6 +551,8 @@ export function AgentChat({
     const text = draft;
     if (!text.trim() || !fn) return;
     const sentContext = context;
+    // CHAT-PAGE-1: sending re-pins the transcript to the bottom.
+    scroll.pin('send');
     setDraft('');
     setContext(null);
     void fn(text, sentContext ? { context: sentContext } : undefined)?.then((r) => {
@@ -524,6 +577,11 @@ export function AgentChat({
       onWidgetAnswer={(id, answer) => void chat.answerWidget(id, answer)}
       onWidgetDismiss={(id) => void chat.dismissWidget(id)}
       onDismissError={chat.clearError}
+      onLoadPrevious={loadPrevious}
+      scrollRef={scroll.ref}
+      onScroll={scroll.onScroll}
+      pinned={scroll.pinned}
+      onJumpToLatest={() => scroll.pin('jump')}
       assistantFooter={
         chat.thread
           ? (messageId) => (

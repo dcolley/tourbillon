@@ -163,6 +163,21 @@ export function useAgentChat({ agentId, threadId, tools, onRunEvent, onThreadOpe
   );
   const dismissWidget = useCallback((toolCallId: string) => client?.dismissWidget(toolCallId), [client]);
   const clearError = useCallback(() => client?.clearError(), [client]);
+  /** CHAT-PAGE-1: prepend the previous page of the transcript. */
+  const loadPrevious = useCallback(() => client?.loadPrevious(), [client]);
 
-  return { phase, setupError, thread, state, send, steer, abort, respondToTool, answerWidget, dismissWidget, clearError };
+  return {
+    phase,
+    setupError,
+    thread,
+    state,
+    send,
+    steer,
+    abort,
+    respondToTool,
+    answerWidget,
+    dismissWidget,
+    clearError,
+    loadPrevious,
+  };
 }

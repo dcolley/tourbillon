@@ -34,6 +34,8 @@
  * open on the thread (action `attach`: the run's events so far, then live), and `resume()` (called when
  * the page is shown again or comes back online) reloads the history, merges it into what is shown and
  * re-attaches.
+ * CHAT-PAGE-1: `loadHistory()` loads only the newest page (ASSISTANT_TRANSCRIPT_PAGE_SIZE messages);
+ * `loadPrevious()` prepends the page before the oldest message shown (state.history: hasMore, cursor).
  */
 import type { ChatDashboardContext } from '@/lib/chat/dashboard-context';
 import { readAguiEvents, type AguiClientEvent } from './sse';
@@ -43,7 +45,7 @@ import {
   endRun,
   initialAgentChatState,
   markDroppedFollowUps,
-  mergeHistory,
+  mergeHistoryPage,
   parkedWidgetFromBody,
   releaseParkedWidgets,
   restorePendingWidgets,
@@ -56,7 +58,8 @@ import {
   type AgentChatItem,
   type AgentChatState,
 } from './chat-state';
-import { chatItemsFromStoredMessages, fetchThreadHistory } from './thread-history';
+import { chatItemsFromStoredMessages, fetchThreadHistoryPage } from './thread-history';
+import { ASSISTANT_TRANSCRIPT_PAGE_SIZE } from '@/lib/assistant/transcript-page';
 
 export type AguiAction = 'run' | 'steer' | 'followUp' | 'abort' | 'toolApproval' | 'pending' | 'attach';
 
@@ -87,6 +90,8 @@ export interface AgentChatClientOptions {
   retry?: { attempts: number; delayMs: number };
   /** After an accepted abort, how long to wait for the run to end before closing the stream. */
   abortTimeoutMs?: number;
+  /** CHAT-PAGE-1: messages per transcript page (default ASSISTANT_TRANSCRIPT_PAGE_SIZE). */
+  historyPageSize?: number;
 }
 
 /** Per-message options for send / steer. */
@@ -428,22 +433,41 @@ export class AgentChatClient {
   }
 
   /**
-   * P0 (agent switch): fetches every persisted message of this thread (never from a cache) and shows
-   * them before anything this client streamed itself. Each chat that opens (agent switch, reload)
-   * calls this, so the transcript includes turns the agent wrote while the user was elsewhere.
+   * P0 (agent switch): fetches the thread's persisted messages (never from a cache) and shows them
+   * before anything this client streamed itself. Each chat that opens (agent switch, reload) calls
+   * this, so the transcript includes turns the agent wrote while the user was elsewhere.
+   * CHAT-PAGE-1: only the newest page; older pages come from `loadPrevious()`.
    * A failure is shown as the chat error; the chat still works.
-   * `merge` (STREAM-1 resume): merged into what is shown (`mergeHistory`) instead of put before it.
+   * `merge` (STREAM-1 resume): the newest page is merged into what is shown (`mergeHistoryPage`:
+   * older pages already shown stay in front) instead of put before it.
    */
   async loadHistory(mode: 'seed' | 'merge' = 'seed'): Promise<AgentChatResult> {
+    return this.loadPage(null, mode);
+  }
+
+  /**
+   * CHAT-PAGE-1: "Load previous": fetches the page before the oldest stored message shown and prepends
+   * it. No-op (ok) when there is nothing older or a load is already in flight.
+   */
+  async loadPrevious(): Promise<AgentChatResult> {
+    const { hasMore, cursor, loading } = this.state.history;
     if (this.disposed) return this.fail({ kind: 'rejected', message: 'Chat closed' });
-    let items: AgentChatItem[];
+    if (!hasMore || !cursor || loading) return { ok: true };
+    return this.loadPage(cursor);
+  }
+
+  private async loadPage(before: string | null, mode: 'seed' | 'merge' = 'seed'): Promise<AgentChatResult> {
+    if (this.disposed) return this.fail({ kind: 'rejected', message: 'Chat closed' });
+    if (before) this.update((s) => ({ ...s, history: { ...s.history, loading: true } }));
+    let page: Awaited<ReturnType<typeof fetchThreadHistoryPage>>;
     try {
-      const messages = await fetchThreadHistory({
+      page = await fetchThreadHistoryPage({
         agentId: this.opts.agentId,
         threadId: this.opts.threadId,
+        limit: this.opts.historyPageSize ?? ASSISTANT_TRANSCRIPT_PAGE_SIZE,
+        before,
         fetch: this.fetchImpl,
       });
-      items = chatItemsFromStoredMessages(messages);
     } catch (err) {
       const status = (err as { status?: unknown })?.status;
       const error: AgentChatError = {
@@ -451,10 +475,24 @@ export class AgentChatClient {
         message: `Could not load earlier messages: ${err instanceof Error ? err.message : String(err)}`,
         ...(typeof status === 'number' ? { status } : {}),
       };
-      this.update((s) => ({ ...s, error }));
+      this.update((s) => ({ ...s, error, history: { ...s.history, loading: false } }));
       return { ok: false, error };
     }
-    this.update((s) => (mode === 'merge' ? mergeHistory(s, items) : seedHistory(s, items)));
+    const items = chatItemsFromStoredMessages(page.messages);
+    if (mode === 'merge') {
+      const pager = { hasMore: page.hasMore, cursor: page.messages[0]?.id ?? null };
+      this.update((s) => mergeHistoryPage(s, items, pager));
+      return { ok: true };
+    }
+    this.update((s) => ({
+      ...seedHistory(s, items),
+      history: {
+        hasMore: page.hasMore,
+        // An empty page keeps the cursor it was asked with (nothing older was found).
+        cursor: page.messages[0]?.id ?? before,
+        loading: false,
+      },
+    }));
     return { ok: true };
   }
 

@@ -258,8 +258,9 @@ describe('AGUI-1b client ↔ POST /api/agui/[agentId]', () => {
     await first.send('start');
     // The chat opened again (no stored messages served here): it re-attaches to the run still going.
     const withHistory = (async (url: string, init: RequestInit) =>
-      url.endsWith('/messages')
-        ? new Response(JSON.stringify({ messages: [] }), { headers: { 'content-type': 'application/json' } })
+      // CHAT-PAGE-1: the history GET carries ?limit=…
+      url.split('?')[0].endsWith('/messages')
+        ? new Response(JSON.stringify({ messages: [], hasMore: false }), { headers: { 'content-type': 'application/json' } })
         : routeFetch(url, init)) as unknown as typeof fetch;
     const second = chatClient('c-thread-dispose', { fetch: withHistory });
     const resumed = await second.resume();

@@ -653,16 +653,21 @@ describe('AGUI-1b AgentChatClient', () => {
   });
 
   describe('STREAM-1 resume (page shown again / back online)', () => {
-    /** The fake endpoint plus GET …/messages answered from `stored`. */
+    /** The fake endpoint plus GET …/messages answered from `stored` (CHAT-PAGE-1: newest `limit`). */
     function resumable(handler: Parameters<typeof createFakeAguiServer>[0]) {
       const stored: unknown[] = [];
       let historyCalls = 0;
       const base = setup(handler);
       const server = base.server;
       const fetchImpl = (async (url: string, init: RequestInit) => {
-        if (String(url).endsWith('/messages')) {
+        const u = new URL(String(url), 'http://local');
+        if (u.pathname.endsWith('/messages')) {
           historyCalls++;
-          return new Response(JSON.stringify({ messages: stored }), { headers: { 'Content-Type': 'application/json' } });
+          const limit = Number(u.searchParams.get('limit') ?? stored.length);
+          const page = stored.slice(Math.max(0, stored.length - limit));
+          return new Response(JSON.stringify({ messages: page, hasMore: stored.length > page.length }), {
+            headers: { 'Content-Type': 'application/json' },
+          });
         }
         return server.fetch(url, init);
       }) as unknown as typeof fetch;

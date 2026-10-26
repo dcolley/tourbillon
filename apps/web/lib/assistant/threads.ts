@@ -27,6 +27,7 @@ import {
   sortAssistantThreads,
   type AssistantThread,
 } from './sidebar';
+import { initialTranscriptWindow, sliceTranscriptPage, type TranscriptPageQuery } from './transcript-page';
 
 /**
  * UI-2: thread data for the assistant sidebar.
@@ -277,10 +278,33 @@ export interface AssistantThreadMessage {
   type?: string;
 }
 
+type RawStoredMessage = { id: string; role: string; content: unknown; createdAt?: unknown; type?: unknown };
+
+/** Stored messages oldest first (creation time, then store order for ties). */
+function oldestFirst(messages: RawStoredMessage[]): RawStoredMessage[] {
+  return messages
+    .map((m, index) => ({ m, index }))
+    .sort((a, b) => time(a.m.createdAt) - time(b.m.createdAt) || a.index - b.index)
+    .map(({ m }) => m);
+}
+
+function toAssistantThreadMessage(m: RawStoredMessage): AssistantThreadMessage {
+  const createdAt = iso(m.createdAt);
+  return {
+    id: m.id,
+    role: m.role,
+    content: m.content,
+    ...(createdAt ? { createdAt } : {}),
+    ...(typeof m.type === 'string' ? { type: m.type } : {}),
+  };
+}
+
 /**
  * P0 (agent switch): every persisted message of one of the agent's assistant threads, oldest first,
  * so the assistant chat can show the whole conversation when it opens (including turns written while
  * the user was on another agent). 404 when the thread is not the agent's (requireAssistantThread).
+ * CHAT-PAGE-1: the chat itself now loads pages (listAssistantThreadMessagesPage); this full read is
+ * kept for callers of the route without paging params.
  */
 export async function listAssistantThreadMessages(
   session: TourbillonChatSession,
@@ -288,24 +312,40 @@ export async function listAssistantThreadMessages(
   threadId: string,
 ): Promise<AssistantThreadMessage[]> {
   await requireAssistantThread(session, agent, threadId);
-  const messages = (await session.thread.listMessages({ threadId })) as Array<{
-    id: string;
-    role: string;
-    content: unknown;
-    createdAt?: unknown;
-    type?: unknown;
-  }>;
-  return messages
-    .map((m, index) => ({ m, index }))
-    .sort((a, b) => time(a.m.createdAt) - time(b.m.createdAt) || a.index - b.index)
-    .map(({ m }) => {
-      const createdAt = iso(m.createdAt);
-      return {
-        id: m.id,
-        role: m.role,
-        content: m.content,
-        ...(createdAt ? { createdAt } : {}),
-        ...(typeof m.type === 'string' ? { type: m.type } : {}),
-      };
+  const messages = (await session.thread.listMessages({ threadId })) as RawStoredMessage[];
+  return oldestFirst(messages).map(toAssistantThreadMessage);
+}
+
+export interface AssistantThreadMessagePage {
+  /** Oldest first. */
+  messages: AssistantThreadMessage[];
+  /** Older messages exist before this page. */
+  hasMore: boolean;
+}
+
+/**
+ * CHAT-PAGE-1: one page of an assistant thread's transcript: the newest `limit` messages, or the
+ * `limit` messages strictly before the stored message `before`. Uses the session's newest-N read
+ * (no schema change, no offset column): a `before` page reads a window of the newest messages that
+ * doubles until it reaches past the cursor, then slices (lib/assistant/transcript-page.ts).
+ * 404 when the thread is not the agent's; 400 when `before` is not a message of the thread.
+ */
+export async function listAssistantThreadMessagesPage(
+  session: TourbillonChatSession,
+  agent: AgentLike,
+  threadId: string,
+  query: TranscriptPageQuery,
+): Promise<AssistantThreadMessagePage> {
+  await requireAssistantThread(session, agent, threadId);
+  for (let window = initialTranscriptWindow(query); ; window *= 2) {
+    const raw = (await session.thread.listMessages({ threadId, limit: window })) as RawStoredMessage[];
+    const slice = sliceTranscriptPage(oldestFirst(raw), {
+      limit: query.limit,
+      before: query.before,
+      exhausted: raw.length < window,
     });
+    if (!slice.complete) continue;
+    if (!slice.found) throw new AssistantThreadError('Message not found in this thread', 400);
+    return { messages: slice.messages.map(toAssistantThreadMessage), hasMore: slice.hasMore };
+  }
 }
