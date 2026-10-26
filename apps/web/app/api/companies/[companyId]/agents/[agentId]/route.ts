@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db, agents } from '@tourbillon/db';
 import { and, eq } from 'drizzle-orm';
-import { validateRunToken } from '@/lib/auth/run-token';
+import { authenticateAgentToken } from '@/lib/auth/agent-token-auth';
 import {
   AgentValidationError,
   setAgentStatus,
@@ -14,7 +14,7 @@ import {
   type AgentStatus,
   type UpdateAgentObservationalMemoryInput,
 } from '@/lib/agents';
-import { normalizeHeartbeatConfig, validateHeartbeatSchedule } from '@tourbillon/shared';
+import { normalizeHeartbeatConfig, validateHeartbeatSchedule, redactAgentRuntimeSecrets } from '@tourbillon/shared';
 
 function unauthorized() {
   return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -102,7 +102,8 @@ function sanitizeAgentForTool(agent: any) {
     sanitized.runtimeConfig = runtimeConfig;
   }
 
-  return sanitized;
+  // #100: main-wide redaction (secrets.*, HITLy keys, any other runtime secret) — key names only.
+  return redactAgentRuntimeSecrets(sanitized);
 }
 
 export async function GET(
@@ -114,7 +115,7 @@ export async function GET(
   const token = req.headers.get('authorization')?.replace('Bearer ', '');
   if (!token) return unauthorized();
 
-  const runCtx = validateRunToken(token);
+  const runCtx = await authenticateAgentToken(token);
   if (!runCtx) return unauthorized();
   if (runCtx.companyId !== companyId) return forbidden();
 
@@ -136,7 +137,7 @@ export async function PATCH(
   const token = req.headers.get('authorization')?.replace('Bearer ', '');
   if (!token) return unauthorized();
 
-  const runCtx = validateRunToken(token);
+  const runCtx = await authenticateAgentToken(token);
   if (!runCtx) return unauthorized();
   if (runCtx.companyId !== companyId) return forbidden();
 

@@ -894,6 +894,16 @@ export async function setAgentStatus(
     throw new AgentValidationError('Invalid status. Must be active, paused, or archived.');
   }
 
+  // #119 B1 parity with setAgentActiveWithOutcome: un-archiving would revive the agent's run and
+  // chat tokens (agent-token-auth refuses only archived agents), so archived is terminal here.
+  // Re-archiving an archived agent is a no-op.
+  if (agent.status === 'archived') {
+    if (status !== 'archived') {
+      throw new AgentValidationError('Agent is archived and cannot be reactivated or paused.');
+    }
+    return agent;
+  }
+
   // Prevent archiving or pausing the last active CEO
   if (agent.role === 'ceo' && (status === 'archived' || status === 'paused') && !options?.skipLastCeoCheck) {
     const activeCeos = await db.query.agents.findMany({
