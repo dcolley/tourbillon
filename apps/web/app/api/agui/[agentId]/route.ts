@@ -77,6 +77,7 @@ import {
   type TourbillonChatSession,
 } from '@/lib/chat';
 import { wrapMessageWithDashboardContext } from '@/lib/chat/dashboard-context';
+import { steerPreservingTurn } from '@/lib/chat/steer-preserving-turn';
 import { chatErrorResponse } from '@/lib/chat/route-helpers';
 import { chatModelIdFromSearch } from '@/lib/chat/model-query';
 import { resolveThreadRunModel, threadProviderRefusedBody, type ThreadRunModel } from '@/lib/chat/thread-model';
@@ -412,7 +413,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
       const content = wrapMessageWithDashboardContext(request.message, request.context);
       if (action === 'steer') {
         expectRunContinuation(session);
-        void session.steer({ content, requestContext: requestContext as never });
+        // STEER-1: keep the interrupted user turn in history for the steer run.
+        void steerPreservingTurn(session, { content, requestContext }).catch((err) =>
+          console.error('[agui] steer failed', err),
+        );
       } else if (active) {
         // Started by the open AG-UI stream once the current turn completes; dropped if it closes first.
         const queued = active.queueTurn(() =>
