@@ -872,6 +872,57 @@ export async function setAgentActiveWithOutcome(
   return { agent: updated, changed: updated.status !== previousStatus };
 }
 
+export type AgentStatus = 'active' | 'paused' | 'archived';
+
+/**
+ * Set agent status to active, paused, or archived.
+ * Enforces safety rules: no mutations on pending_approval, cannot archive last active CEO.
+ */
+export async function setAgentStatus(
+  agentId: string,
+  status: AgentStatus,
+  options?: { skipLastCeoCheck?: boolean }
+): Promise<Agent> {
+  const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+  if (!agent) throw new AgentValidationError('Agent not found.');
+
+  if (agent.status === 'pending_approval') {
+    throw new AgentValidationError('Agent is pending approval and cannot be modified yet.');
+  }
+
+  if (!['active', 'paused', 'archived'].includes(status)) {
+    throw new AgentValidationError('Invalid status. Must be active, paused, or archived.');
+  }
+
+  // #119 B1 parity with setAgentActiveWithOutcome: un-archiving would revive the agent's run and
+  // chat tokens (agent-token-auth refuses only archived agents), so archived is terminal here.
+  // Re-archiving an archived agent is a no-op.
+  if (agent.status === 'archived') {
+    if (status !== 'archived') {
+      throw new AgentValidationError('Agent is archived and cannot be reactivated or paused.');
+    }
+    return agent;
+  }
+
+  // Prevent archiving or pausing the last active CEO
+  if (agent.role === 'ceo' && (status === 'archived' || status === 'paused') && !options?.skipLastCeoCheck) {
+    const activeCeos = await db.query.agents.findMany({
+      where: and(eq(agents.companyId, agent.companyId), eq(agents.role, 'ceo'), eq(agents.status, 'active')),
+    });
+    if (activeCeos.length === 1 && activeCeos[0].id === agentId) {
+      throw new AgentValidationError('Cannot pause or archive the last active CEO in the company.');
+    }
+  }
+
+  const [updated] = await db
+    .update(agents)
+    .set({ status, updatedAt: new Date() })
+    .where(eq(agents.id, agentId))
+    .returning();
+
+  return updated;
+}
+
 export async function updateAgentRole(agentId: string, roleInput: string): Promise<Agent> {
   const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
   if (!agent) throw new AgentValidationError('Agent not found.');
