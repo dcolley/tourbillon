@@ -27,11 +27,13 @@ import {
   type AskQuestionProps,
 } from './chat-card-specs';
 import {
+  checkedChoiceIds,
   choiceBounds,
   choiceDraft,
   choiceLabel,
   choiceLabels,
   confirmDraft,
+  draftChoiceIds,
   formDraft,
   formValueText,
   initialChoiceDraft,
@@ -175,7 +177,9 @@ export function ChoiceCard({ props, status, answer, onAnswer, onDismiss, busy }:
   const name = React.useId();
   const locked = !onAnswer || status !== 'pending';
   const bounds = choiceBounds(props);
-  const chosen = Array.isArray(selected) ? selected : selected === undefined ? [] : [selected];
+  const chosen = draftChoiceIds(selected);
+  // B1: answered cards (incl. history replay) tick the stored answer; the draft only drives a pending card.
+  const checked = checkedChoiceIds(status, answer, selected);
   const inBounds = multi ? chosen.length >= bounds.min && chosen.length <= bounds.max : chosen.length === 1;
   const recommendedIds = Array.isArray(props.recommended) ? props.recommended : props.recommended === undefined ? [] : [props.recommended];
   const submit = (e: React.FormEvent) => {
@@ -211,7 +215,7 @@ export function ChoiceCard({ props, status, answer, onAnswer, onDismiss, busy }:
                   type="checkbox"
                   name={`${name}-multi`}
                   value={option.id}
-                  checked={chosen.includes(option.id)}
+                  checked={checked.includes(option.id)}
                   onChange={(e) => setSelected(e.target.checked ? [...chosen, option.id] : chosen.filter((id) => id !== option.id))}
                   className="mt-0.5"
                   aria-invalid={error ? true : undefined}
@@ -221,7 +225,7 @@ export function ChoiceCard({ props, status, answer, onAnswer, onDismiss, busy }:
                   type="radio"
                   name={name}
                   value={option.id}
-                  checked={chosen.includes(option.id)}
+                  checked={checked.includes(option.id)}
                   onChange={() => setSelected(option.id)}
                   className="mt-0.5"
                   aria-invalid={error ? true : undefined}

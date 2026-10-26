@@ -11,6 +11,7 @@ import {
   CONFIRM_REASON_MAX,
   formFieldIssues,
   QUESTION_MAX_ANSWER,
+  type AskChoiceAnswer,
   type AskChoiceProps,
   type AskConfirmAnswer,
   type AskConfirmProps,
@@ -100,6 +101,26 @@ export function choiceDraft(props: AskChoiceProps, selected: ChoiceDraft): Draft
   const single = Array.isArray(selected) ? selected[0] : selected;
   if (single === undefined || !ids.includes(single)) return { ok: false, errors: { choice: 'Pick one option.' } };
   return { ok: true, answer: { choice: single } };
+}
+
+/** The option ids a draft holds, as a list (single-select: zero or one id). */
+export function draftChoiceIds(selected: ChoiceDraft): string[] {
+  return Array.isArray(selected) ? selected : selected === undefined ? [] : [selected];
+}
+
+/**
+ * The option ids the choice card shows checked. An answered card shows the stored answer
+ * (`{ choice }` or `{ choices }`), so thread-history replay ticks what was actually chosen rather than
+ * the card's fresh draft (default option / nothing); only a card that is not answered shows the draft.
+ */
+export function checkedChoiceIds(status: string, answer: AskChoiceAnswer | undefined, selected: ChoiceDraft): string[] {
+  if (status === 'answered') {
+    if (answer === undefined) return [];
+    if ('choices' in answer) return [...answer.choices];
+    if ('choice' in answer) return [answer.choice];
+    return [];
+  }
+  return draftChoiceIds(selected);
 }
 
 /** Label of the chosen option (for the answered card), or undefined. */

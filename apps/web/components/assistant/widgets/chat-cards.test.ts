@@ -18,7 +18,7 @@ import {
   type AskConfirmProps,
   type AskFormProps,
 } from './chat-card-specs';
-import { choiceDraft, confirmDraft, formDraft, formValueText, initialChoice, initialChoiceDraft, initialFormDraft, questionDraft } from './chat-card-drafts';
+import { checkedChoiceIds, choiceDraft, confirmDraft, formDraft, formValueText, initialChoice, initialChoiceDraft, initialFormDraft, questionDraft } from './chat-card-drafts';
 
 type Tool = typeof import('./widget-tool-call');
 type Reg = typeof import('./registry');
@@ -203,6 +203,15 @@ describe('WID-3 card specs', () => {
 });
 
 describe('WID-3 card drafts', () => {
+  it('checked options (WID-MS B1): an answered card ticks the stored answer; only a pending card ticks the draft', () => {
+    assert.deepEqual(checkedChoiceIds('answered', { choice: 'pro' }, 'basic'), ['pro']); // answer wins over defaultOption draft
+    assert.deepEqual(checkedChoiceIds('answered', { choices: ['basic', 'pro'] }, []), ['basic', 'pro']);
+    assert.deepEqual(checkedChoiceIds('answered', undefined, 'basic'), []);
+    assert.deepEqual(checkedChoiceIds('pending', undefined, 'basic'), ['basic']);
+    assert.deepEqual(checkedChoiceIds('pending', undefined, ['pro']), ['pro']);
+    assert.deepEqual(checkedChoiceIds('dismissed', undefined, undefined), []);
+  });
+
   it('multiSelect drafts (WID-MS): the card and the form field hold lists; out-of-bounds picks refuse to submit', () => {
     const multi = { ...CHOICE, multiSelect: true, maxSelected: 1 };
     assert.deepEqual(initialChoiceDraft(multi), []); // recommended is a hint, never a preselection
@@ -374,6 +383,28 @@ describe('WID-3 card rendering', () => {
     assert.equal(pending.match(/name="tags\.(x|y)"/g)?.length, 2);
     const answered = render('askForm', props, { answer: { values: { tags: ['x', 'y'] } } });
     assert.match(answered, /<dd[^>]*>X, Y<\/dd>/);
+  });
+
+  it('history replay (WID-MS B1): answered single (v1 + v2) and multi cards tick the stored answer, not the draft', () => {
+    /** Option ids whose input renders checked, in option order. */
+    const checkedOptions = (html: string) =>
+      [...html.matchAll(/data-option="([^"]+)"[^>]*>\s*<input([^>]*)>/g)].filter((m) => /\schecked=""/.test(m[2])).map((m) => m[1]);
+    // single v1 (no widgetVersion) with defaultOption basic, answered pro: pro is ticked (main behaviour), not the default.
+    const v1 = render('askChoice', { ...CHOICE, defaultOption: 'basic' }, { answer: { choice: 'pro' } });
+    assert.match(v1, /data-widget-version="1"/);
+    assert.match(v1, /Chosen: Pro/);
+    assert.deepEqual(checkedOptions(v1), ['pro']);
+    // single v2, no default, answered pro: pro is ticked (was: none).
+    const v2 = render('askChoice', { ...CHOICE, widgetVersion: 2 }, { answer: { choice: 'pro' } });
+    assert.match(v2, /data-widget-version="2"/);
+    assert.deepEqual(checkedOptions(v2), ['pro']);
+    // multi, answered both: both ticked (was: all unticked).
+    const multi = render('askChoice', { ...CHOICE, recommended: undefined, multiSelect: true, widgetVersion: 2 }, { answer: { choices: ['basic', 'pro'] } });
+    assert.match(multi, /Chosen: Basic, Pro/);
+    assert.deepEqual(checkedOptions(multi), ['basic', 'pro']);
+    // a pending card still opens on its draft: the default option for single, nothing for multi.
+    assert.deepEqual(checkedOptions(render('askChoice', { ...CHOICE, defaultOption: 'basic' })), ['basic']);
+    assert.deepEqual(checkedOptions(render('askChoice', { ...CHOICE, recommended: undefined, multiSelect: true, widgetVersion: 2 })), []);
   });
 
   it('the client check matches the server: an answer outside the card is refused before it is sent', () => {
