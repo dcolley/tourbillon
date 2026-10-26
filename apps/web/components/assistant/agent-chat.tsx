@@ -38,6 +38,7 @@ import { feedbackTargets } from '@/lib/assistant/feedback';
 import { MessageFeedback, useThreadFeedback } from './message-feedback';
 import { useAgentChat, type AgentChatPhase } from './use-agent-chat';
 import { ModelPicker } from './model-picker/model-picker';
+import { ContextMeter } from './context-meter/context-meter';
 import { AgentDmActivity } from './dm-activity';
 import { AgentChatMenu } from './agent-chat-menu';
 import { clearAgentChat, type AssistantOmSummary } from '@/lib/assistant/single-chat';
@@ -488,6 +489,11 @@ export function AgentChat({
   const parkedNow = parkedCard(chat.state, assistantWidgetRegistry);
   const [draft, setDraft] = React.useState('');
   const [context, setContext] = React.useState<OpenInChatContext | null>(initialContext ?? null);
+  // CTX-1: reload the context meter on open, after each turn (back to idle) and on a model change.
+  const [modelRev, setModelRev] = React.useState(0);
+  const bumpModelRev = React.useCallback(() => setModelRev((n) => n + 1), []);
+  const meterRefreshKey =
+    chat.state.status === 'idle' ? `idle:${chat.state.items.length}:${chat.state.runId ?? ''}:${modelRev}` : null;
   const submit = (
     fn: ((text: string, opts?: AgentChatSendOptions) => Promise<AgentChatResult> | undefined) | undefined,
   ) => {
@@ -556,7 +562,15 @@ export function AgentChat({
       }
       modelPicker={
         chat.thread ? (
-          <ModelPicker agentId={agentId} threadId={chat.thread.threadId} disabled={chat.state.status !== 'idle'} />
+          <div className="flex items-center gap-2">
+            <ModelPicker
+              agentId={agentId}
+              threadId={chat.thread.threadId}
+              disabled={chat.state.status !== 'idle'}
+              onStateChange={bumpModelRev}
+            />
+            <ContextMeter agentId={agentId} threadId={chat.thread.threadId} refreshKey={meterRefreshKey} />
+          </div>
         ) : undefined
       }
     />

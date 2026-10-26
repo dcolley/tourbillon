@@ -7,6 +7,8 @@ export const DURABLE_TOOL_SCHEMA_RESERVE = 8_000;
 export const HARNESS_TOOL_SCHEMA_RESERVE = 16_000;
 export const DEFAULT_OM_OBSERVATION_TOKENS = 30_000;
 export const DEFAULT_OM_REFLECTION_TOKENS = 40_000;
+/** Messages Mastra memory recalls into each prompt (`lastMessages`); CTX-1 meter counts the same window. */
+export const CHAT_MEMORY_LAST_MESSAGES = 20;
 
 export type ContextBudgetKind = 'durable' | 'harness' | 'chat';
 
