@@ -29,6 +29,11 @@
  * on the parked run's thread).
  * P0 (agent switch): `loadHistory()` (called when the chat opens, before `restorePending()`) fetches the
  * thread's persisted messages and shows them, so a chat opened again shows the conversation up to now.
+ * STREAM-1: closing a run stream (dispose, a lost connection, a backgrounded iPad tab) does not stop the
+ * run on the endpoint; only `abort()` does. `open()` re-attaches to this session's run if one is still
+ * open on the thread (action `attach`: the run's events so far, then live), and `resume()` (called when
+ * the page is shown again or comes back online) reloads the history, merges it into what is shown and
+ * re-attaches.
  */
 import type { ChatDashboardContext } from '@/lib/chat/dashboard-context';
 import { readAguiEvents, type AguiClientEvent } from './sse';
@@ -38,11 +43,13 @@ import {
   endRun,
   initialAgentChatState,
   markDroppedFollowUps,
+  mergeHistory,
   parkedWidgetFromBody,
   releaseParkedWidgets,
   restorePendingWidgets,
   seedHistory,
   setParked,
+  settleAfterResume,
   setWidgetSend,
   TOOL_DETACHED_MESSAGE,
   type AgentChatError,
@@ -51,7 +58,7 @@ import {
 } from './chat-state';
 import { chatItemsFromStoredMessages, fetchThreadHistory } from './thread-history';
 
-export type AguiAction = 'run' | 'steer' | 'followUp' | 'abort' | 'toolApproval' | 'pending';
+export type AguiAction = 'run' | 'steer' | 'followUp' | 'abort' | 'toolApproval' | 'pending' | 'attach';
 
 /** AG-UI tool definition (RunAgentInput.tools). */
 export interface AguiTool {
@@ -155,6 +162,7 @@ export class AgentChatClient {
   private starting: Promise<unknown> | null = null;
   private tokens = 0;
   private disposed = false;
+  private resuming: Promise<AgentChatResult> | null = null;
 
   constructor(opts: AgentChatClientOptions) {
     this.opts = opts;
@@ -274,7 +282,8 @@ export class AgentChatClient {
       void run.done.finally(() => clearTimeout(timer));
       return result;
     }
-    // Refused or failed: close the stream; the endpoint aborts the run when its client goes away.
+    // Refused or failed: stop listening here. (STREAM-1: closing the stream does not stop the run on
+    // the endpoint; a refused abort means there was no run to stop.)
     this.closeRun(run, 'abort');
     return result.ok ? { ok: true, value: { ...result.value, closedStream: true } } : result;
   }
@@ -344,14 +353,78 @@ export class AgentChatClient {
   }
 
   /**
-   * Opens the chat on its thread: loads the thread's messages (fresh), then shows again the cards still
+   * Opens the chat on its thread: loads the thread's messages (fresh), then re-attaches to this
+   * session's run if one is still open on the thread (STREAM-1), else shows again the cards still
    * waiting on it (WID-3; after the history, so a waiting card is the stored call, not a duplicate).
    * Resolves once the history is shown.
    */
   async open(): Promise<AgentChatResult> {
     const history = await this.loadHistory();
-    if (!this.disposed) void this.restorePending();
+    if (!this.disposed) {
+      void this.attachOpenRun().then((attached) => {
+        if (!attached && !this.disposed) void this.restorePending();
+      });
+    }
     return history;
+  }
+
+  /**
+   * STREAM-1: the page is shown again (or back online) after its run stream may have been lost (iPad
+   * Safari suspends a backgrounded tab's fetch). Closes the local run stream if one is open (it may be
+   * dead without having errored; the endpoint keeps the run going, so this only detaches), reloads the
+   * thread's messages and merges them into what is shown, then re-attaches to the run if it is still
+   * open; if not, what was left running here is settled. `state.reconnecting` is set meanwhile.
+   * Concurrent calls share one resume.
+   */
+  resume(): Promise<AgentChatResult> {
+    if (this.disposed) return Promise.resolve(this.fail({ kind: 'rejected', message: 'Chat closed' }));
+    if (this.resuming) return this.resuming;
+    const resuming = this.doResume().finally(() => {
+      if (this.resuming === resuming) this.resuming = null;
+    });
+    this.resuming = resuming;
+    return resuming;
+  }
+
+  private async doResume(): Promise<AgentChatResult> {
+    if (this.starting) await this.starting.catch(() => {});
+    const run = this.active;
+    if (run) {
+      run.closedLocally = 'superseded';
+      this.active = null;
+      run.ac.abort();
+    }
+    this.update((s) => ({ ...s, reconnecting: true }));
+    try {
+      const history = await this.loadHistory('merge');
+      if (this.disposed) return history;
+      const attached = await this.attachOpenRun();
+      // (A run this client started meanwhile is its own; leave it.)
+      if (!attached && !this.disposed && !this.active && !this.starting) {
+        // The run ended while the stream was lost: its last messages may have been stored just now.
+        if (run || this.state.status !== 'idle') await this.loadHistory('merge');
+        this.update(settleAfterResume);
+        void this.restorePending();
+      }
+      return history.ok ? { ok: true, value: { attached } } : history;
+    } finally {
+      this.update((s) => (s.reconnecting ? { ...s, reconnecting: false } : s));
+    }
+  }
+
+  /**
+   * STREAM-1: re-subscribes to this session's run on the thread if one is open (action `attach`); the
+   * response replays the run from RUN_STARTED and is adopted as the open run. True when attached.
+   */
+  private async attachOpenRun(): Promise<boolean> {
+    if (this.disposed || this.active || this.starting) return false;
+    try {
+      const { res, ac, runId } = await this.post('attach');
+      const decision = await this.readDecision(res, ac, runId);
+      return decision.mode === 'run';
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -359,8 +432,9 @@ export class AgentChatClient {
    * them before anything this client streamed itself. Each chat that opens (agent switch, reload)
    * calls this, so the transcript includes turns the agent wrote while the user was elsewhere.
    * A failure is shown as the chat error; the chat still works.
+   * `merge` (STREAM-1 resume): merged into what is shown (`mergeHistory`) instead of put before it.
    */
-  async loadHistory(): Promise<AgentChatResult> {
+  async loadHistory(mode: 'seed' | 'merge' = 'seed'): Promise<AgentChatResult> {
     if (this.disposed) return this.fail({ kind: 'rejected', message: 'Chat closed' });
     let items: AgentChatItem[];
     try {
@@ -380,7 +454,7 @@ export class AgentChatClient {
       this.update((s) => ({ ...s, error }));
       return { ok: false, error };
     }
-    this.update((s) => seedHistory(s, items));
+    this.update((s) => (mode === 'merge' ? mergeHistory(s, items) : seedHistory(s, items)));
     return { ok: true };
   }
 
@@ -440,7 +514,10 @@ export class AgentChatClient {
     this.update((s) => (s.error ? { ...s, error: null } : s));
   }
 
-  /** Closes the client. An open run stream is closed, which stops the run on the endpoint. */
+  /**
+   * Closes the client. An open run stream is closed; STREAM-1: the run itself goes on at the endpoint
+   * (a chat opened again re-attaches to it). Use `abort()` to stop it.
+   */
   dispose(): void {
     if (this.disposed) return;
     const run = this.active;
@@ -640,8 +717,8 @@ export class AgentChatClient {
   ): (e: AguiClientEvent) => void {
     const previous = this.active;
     if (previous) {
-      // A new run was accepted, so the endpoint no longer holds the old one; detach it without
-      // closing it (closing would stop the session's current run, i.e. the new one).
+      // A new run was accepted (or re-attached), so the endpoint no longer holds the old one: stop
+      // reading it without closing it here.
       previous.closedLocally = 'superseded';
     }
     const token = ++this.tokens;
@@ -676,7 +753,7 @@ export class AgentChatClient {
     );
   }
 
-  /** Closes the open run stream from this side (the endpoint aborts the run and drops queued turns). */
+  /** Stops listening to the open run stream from this side (STREAM-1: the endpoint run goes on). */
   private closeRun(run: OpenRun, why: 'abort') {
     if (run.closedLocally) return;
     run.closedLocally = why;

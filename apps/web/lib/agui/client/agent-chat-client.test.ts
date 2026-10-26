@@ -635,7 +635,7 @@ describe('AGUI-1b AgentChatClient', () => {
       await client.whenIdle();
     });
 
-    it('dispose closes the open stream (the endpoint stops the run) and stops updates', async () => {
+    it('dispose closes the open stream (STREAM-1: the endpoint run goes on) and stops updates', async () => {
       const { server, client, states } = setup(runAndControls());
       void client.send('first');
       await until(() => server.streams.length === 1);
@@ -649,6 +649,129 @@ describe('AGUI-1b AgentChatClient', () => {
       assert.equal(states.length, before);
       assert.equal((await client.send('x')).ok, false);
       assert.equal(server.requests.length, 1);
+    });
+  });
+
+  describe('STREAM-1 resume (page shown again / back online)', () => {
+    /** The fake endpoint plus GET …/messages answered from `stored`. */
+    function resumable(handler: Parameters<typeof createFakeAguiServer>[0]) {
+      const stored: unknown[] = [];
+      let historyCalls = 0;
+      const base = setup(handler);
+      const server = base.server;
+      const fetchImpl = (async (url: string, init: RequestInit) => {
+        if (String(url).endsWith('/messages')) {
+          historyCalls++;
+          return new Response(JSON.stringify({ messages: stored }), { headers: { 'Content-Type': 'application/json' } });
+        }
+        return server.fetch(url, init);
+      }) as unknown as typeof fetch;
+      base.client.dispose();
+      const client = new AgentChatClient({
+        agentId: 'alice',
+        threadId: THREAD,
+        resourceId: RESOURCE,
+        fetch: fetchImpl,
+        newId,
+        retry: { attempts: 3, delayMs: 5 },
+      });
+      return { server, client, stored, historyCalls: () => historyCalls };
+    }
+    const userMsg = (id: string, text: string) => ({ id, role: 'user', content: { parts: [{ type: 'text', text }] } });
+    const assistantMsg = (id: string, text: string) => ({ id, role: 'assistant', content: { parts: [{ type: 'text', text }] } });
+
+    it('run ended while away: history merged (no duplicate user message), settled, disconnected error cleared', async () => {
+      const { server, client, stored } = resumable(
+        runAndControls({ attach: (req) => controlResponse(req.body, { accepted: false, running: false }) }),
+      );
+      void client.send('first');
+      await until(() => server.streams.length === 1);
+      server.streams[0].send(started(server.requests[0]), { type: 'TEXT_MESSAGE_START', messageId: 'm', role: 'assistant' }, { type: 'TEXT_MESSAGE_CONTENT', messageId: 'm', delta: 'half' });
+      await until(() => assistantText(client.getState()) === 'half');
+      server.streams[0].fail(new Error('Load failed')); // iPad Safari suspended the fetch
+      await client.whenIdle();
+      assert.equal(client.getState().error?.kind, 'disconnected');
+      stored.push(userMsg('stored-u1', 'first'), assistantMsg('m', 'half and the rest'), userMsg('stored-u2', 'from another tab'), assistantMsg('m2', 'second answer'));
+
+      const result = await client.resume();
+      assert.deepEqual(result, { ok: true, value: { attached: false } });
+      const st = client.getState();
+      assert.equal(st.error, null);
+      assert.equal(st.status, 'idle');
+      assert.equal(st.reconnecting, false);
+      assert.deepEqual(
+        st.items.map((i) => [i.kind, i.id, (i as { text?: string }).text]),
+        [
+          ['user', 'stored-u1', 'first'],
+          ['assistant', 'm', 'half and the rest'],
+          ['user', 'stored-u2', 'from another tab'],
+          ['assistant', 'm2', 'second answer'],
+        ],
+      );
+      assert.deepEqual(server.requests.map((r) => r.action), ['run', 'attach', 'pending']);
+    });
+
+    it('run still going: re-attaches; the replay rebuilds the reply without duplicating it', async () => {
+      const { server, client } = resumable((req) => (req.action === 'run' || req.action === 'attach' ? 'stream' : controlResponse(req.body, { accepted: true })));
+      void client.send('first');
+      await until(() => server.streams.length === 1);
+      const run = server.requests[0];
+      server.streams[0].send(started(run), { type: 'TEXT_MESSAGE_START', messageId: 'm', role: 'assistant' }, { type: 'TEXT_MESSAGE_CONTENT', messageId: 'm', delta: 'half' });
+      await until(() => assistantText(client.getState()) === 'half');
+      // Stream not errored yet (suspended): resume closes it and attaches again.
+      const resuming = client.resume();
+      await until(() => server.streams.length === 2);
+      assert.equal(server.streams[0].aborted, true, 'the old stream is closed (detach only)');
+      assert.equal(client.getState().reconnecting, true);
+      server.streams[1].send(
+        { type: 'RUN_STARTED', threadId: THREAD, runId: run.body.runId },
+        { type: 'TEXT_MESSAGE_START', messageId: 'm', role: 'assistant' },
+        { type: 'TEXT_MESSAGE_CONTENT', messageId: 'm', delta: 'half' },
+        { type: 'TEXT_MESSAGE_CONTENT', messageId: 'm', delta: ' and more' },
+      );
+      assert.deepEqual(await resuming, { ok: true, value: { attached: true } });
+      await until(() => assistantText(client.getState()) === 'half and more');
+      server.streams[1].send({ type: 'TEXT_MESSAGE_END', messageId: 'm' }, { type: 'RUN_FINISHED', threadId: THREAD, runId: run.body.runId, outcome: { type: 'success' } });
+      server.streams[1].close();
+      await client.whenIdle();
+      const st = client.getState();
+      assert.equal(st.error, null);
+      assert.equal(st.lastOutcome, 'success');
+      assert.equal(st.reconnecting, false);
+      assert.equal(st.items.filter((i) => i.kind === 'assistant').length, 1);
+      assert.equal(assistantText(st), 'half and more');
+      assert.deepEqual(server.requests.map((r) => r.action), ['run', 'attach']);
+    });
+
+    it('concurrent resumes share one catch-up', async () => {
+      const { server, client, historyCalls } = resumable(runAndControls({ attach: (req) => controlResponse(req.body, { accepted: false, running: false }) }));
+      const [a, b] = [client.resume(), client.resume()];
+      assert.equal(a, b);
+      await a;
+      assert.equal(historyCalls(), 1);
+      assert.deepEqual(server.requests.map((r) => r.action), ['attach', 'pending']);
+    });
+
+    it('open() re-attaches to a run still going (and skips the pending-cards check)', async () => {
+      const { server, client } = resumable((req) => (req.action === 'attach' ? 'stream' : controlResponse(req.body, { accepted: true })));
+      assert.equal((await client.open()).ok, true);
+      await until(() => server.streams.length === 1);
+      server.streams[0].send({ type: 'RUN_STARTED', threadId: THREAD, runId: 'r-open' }, ...text('m', 'still going'));
+      await until(() => client.getState().status === 'running');
+      server.streams[0].send({ type: 'RUN_FINISHED', threadId: THREAD, runId: 'r-open', outcome: { type: 'success' } });
+      server.streams[0].close();
+      await client.whenIdle();
+      assert.equal(assistantText(client.getState()), 'still going');
+      assert.deepEqual(server.requests.map((r) => r.action), ['attach']);
+    });
+
+    it('attach answered as a control (no run) is not a run; open() then restores pending cards', async () => {
+      const { server, client } = resumable((req) => controlResponse(req.body, { accepted: true }));
+      await client.open();
+      await until(() => server.requests.length === 2);
+      assert.deepEqual(server.requests.map((r) => r.action), ['attach', 'pending']);
+      assert.equal(client.getState().status, 'idle');
+      assert.equal(client.isRunOpen, false);
     });
   });
 

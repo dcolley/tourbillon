@@ -2,12 +2,14 @@
  * AGUI-1: one AG-UI run at a time per thread and per session.
  *
  * `claimAguiRun` is synchronous, so a route that checks and claims without an await in between cannot
- * accept two parallel runs. The claim is released when the run's stream closes (finish, error or client
- * disconnect).
+ * accept two parallel runs. The claim is released when the AG-UI run ends (finish or error).
+ * STREAM-1: a client disconnect does not end the run (lib/agui/session-stream.ts); the claim stays held
+ * while the run goes on detached, and `attach()` gives a later request of the same session a new body
+ * for it (replay so far, then live events).
  *
  * Follow-ups sent while an AG-UI run is open are queued on the claim (not in the Mastra session), so they
- * are started by the open stream after the current turn completes and are dropped with the claim when
- * the stream closes: nothing runs for a client that has gone.
+ * are started by the open run after the current turn completes, attached client or not; an `abort`
+ * drops the ones not started.
  *
  * Scope: in-process. The chat controllers and their Mastra sessions (run state, follow-up queue,
  * approvals) live in this process's controller cache, as for /api/chat/*, so the claim lives next to
@@ -15,6 +17,7 @@
  */
 
 import type { AssistantTracingOptions } from '@tourbillon/mastra';
+import type { AguiRunAttach } from './session-stream';
 
 export type AguiQueuedTurn = () => Promise<void>;
 
@@ -30,6 +33,10 @@ export interface AguiRunClaim {
   droppedTurns(): number;
   release(): void;
   readonly released: boolean;
+  /** STREAM-1: set by the run's stream (`aguiRunStream` `onAttachable`). */
+  setAttach(attach: AguiRunAttach): void;
+  /** STREAM-1: a new response body for the open run, or null (released, or no stream yet). */
+  attach(signal?: AbortSignal): ReadableStream<Uint8Array> | null;
   /** OBS-1: tracing options of the open run, so follow-ups queued on it join the same trace. */
   readonly tracingOptions?: AssistantTracingOptions;
 }
@@ -90,6 +97,7 @@ export function claimAguiRun(
   const queue: AguiQueuedTurn[] = [];
   let released = false;
   let dropped = 0;
+  let attachRun: AguiRunAttach | undefined;
   const claim: AguiRunClaim = {
     queueTurn(turn) {
       if (!released) queue.push(turn);
@@ -114,11 +122,18 @@ export function claimAguiRun(
       if (released) return;
       released = true;
       queue.length = 0;
+      attachRun = undefined;
       if (threadClaims().get(key) === claim) threadClaims().delete(key);
       if (sessionClaims().get(session) === claim) sessionClaims().delete(session);
     },
     get released() {
       return released;
+    },
+    setAttach(attach) {
+      if (!released) attachRun = attach;
+    },
+    attach(signal) {
+      return released || !attachRun ? null : attachRun(signal);
     },
     ...(options.tracingOptions ? { tracingOptions: options.tracingOptions } : {}),
   };

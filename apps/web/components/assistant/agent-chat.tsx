@@ -402,8 +402,17 @@ export function AgentChatView(props: AgentChatViewProps) {
         />
         <div className="flex items-center gap-2">
           {props.modelPicker ? <div data-composer-model-picker>{props.modelPicker}</div> : null}
-          <span className="text-xs text-muted-foreground" data-run-status data-parked={parked ? 'true' : undefined}>
-            {parked && state.status === 'idle' ? 'Waiting for your answer' : STATUS_LABEL[state.status]}
+          <span
+            className="text-xs text-muted-foreground"
+            data-run-status
+            data-parked={parked ? 'true' : undefined}
+            data-reconnecting={state.reconnecting ? 'true' : undefined}
+          >
+            {parked && state.status === 'idle'
+              ? 'Waiting for your answer'
+              : state.reconnecting
+                ? 'Reconnecting…'
+                : STATUS_LABEL[state.status]}
           </span>
           <div className="flex-1" />
           {runOpen && (

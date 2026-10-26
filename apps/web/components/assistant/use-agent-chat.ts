@@ -3,7 +3,9 @@
 /**
  * AGUI-1b: React binding for the AG-UI agent chat client (lib/agui/client). Opens a thread through
  * the assistant thread API, then runs turns over POST /api/agui/[agentId]. Unmounting closes the
- * client, which stops an open run on the endpoint (AG-UI client disconnect).
+ * client; STREAM-1: an open run goes on at the endpoint (only Stop ends it), and the next mount
+ * re-attaches to it. When the page comes back (tab shown again after iPad Safari suspended it, back
+ * online) the client resumes: history reloaded and merged, open run re-attached (lib/agui/client/page-resume.ts).
  * P0 (agent switch): each mount loads the thread's persisted messages fresh before the chat is ready
  * (connectAgentChat → AgentChatClient.open), so returning to an agent shows the conversation up to now.
  */
@@ -11,6 +13,7 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from '
 import { AgentChatClient, type AgentChatClientOptions, type AgentChatSendOptions } from '@/lib/agui/client/agent-chat-client';
 import { initialAgentChatState, type AgentChatState } from '@/lib/agui/client/chat-state';
 import { openAguiThread, type AguiThreadRef } from '@/lib/agui/client/thread-bootstrap';
+import { watchPageResume } from '@/lib/agui/client/page-resume';
 
 export type AgentChatPhase = 'connecting' | 'ready' | 'error';
 
@@ -137,6 +140,9 @@ export function useAgentChat({ agentId, threadId, tools, onRunEvent, onThreadOpe
   const thread = current?.thread ?? null;
   const setupError = current?.error ?? null;
   const phase: AgentChatPhase = !current ? 'connecting' : current.client ? 'ready' : 'error';
+
+  // STREAM-1: catch up when the page comes back (the run stream may have been lost meanwhile).
+  useEffect(() => (client ? watchPageResume(() => void client.resume()) : undefined), [client]);
 
   const state: AgentChatState = useSyncExternalStore(
     client?.subscribe ?? noopSubscribe,

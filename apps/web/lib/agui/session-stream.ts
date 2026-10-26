@@ -3,79 +3,23 @@
  *
  * The run stays open across Mastra run restarts that belong to the same user turn (a steer aborts and
  * restarts; a queued follow-up starts right after the turn ends), so a client sees one RUN_STARTED …
- * RUN_FINISHED pair per request. Client disconnect (AG-UI `abortRun()` aborts the fetch) aborts the
- * session run.
+ * RUN_FINISHED pair per request.
+ *
+ * STREAM-1: a client disconnect (the fetch aborted or the body cancelled: AG-UI `abortRun()`, a closed
+ * tab, iPad Safari suspending a backgrounded page) only detaches that subscriber. The session run keeps
+ * going, queued turns still start, and the run claim is released only when the run itself ends. A
+ * later request can re-attach (`attach`): it gets the events of this AG-UI run so far, replayed, then
+ * the live events up to RUN_FINISHED / RUN_ERROR. Only an explicit `abort` action stops the run.
  */
 import { EventType, type BaseEvent } from '@ag-ui/core';
 import { EventEncoder } from '@ag-ui/encoder';
 import { AGUI_CUSTOM, createAguiEventMapper, type AguiSourceEvent } from './session-events';
-
-/**
- * Mastra Agent thread-queue API (`@mastra/core` Agent): messages queued on a thread while a run is
- * active (e.g. `session.followUp()`) wait in the agent runtime's pending-signal queue for that thread,
- * not in the session, and survive `session.abort()`.
- */
-export interface AguiThreadQueue {
-  subscribeThreadEvents?(
-    scope: { resourceId: string; threadId: string },
-    listener: (event: { type: string; count?: number }) => void,
-  ): () => void;
-  abortThreadStream?(options: {
-    resourceId: string;
-    threadId: string;
-    clearPendingSignals?: boolean;
-    localOnly?: boolean;
-  }): boolean;
-}
 
 /** The parts of an AgentController session this module uses (Mastra `Session` satisfies it). */
 export interface AguiSession {
   subscribe(listener: (event: AguiSourceEvent) => void): () => void;
   abort(): void;
   getCurrentRunId(): string | null | undefined;
-  /** Mastra: drops follow-ups still being prepared and the follow-up binding. */
-  cleanupFollowUpBinding?(): void;
-  /** Mastra: the session's run machinery; its agent owns the thread's queued follow-ups. */
-  readonly machinery?: { getAgent(): AguiThreadQueue };
-}
-
-function threadQueue(session: AguiSession): AguiThreadQueue | undefined {
-  try {
-    return session.machinery?.getAgent();
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Client gone: stop the run and drop every queued turn so nothing runs for a closed stream:
- * - Mastra follow-ups still being prepared (`cleanupFollowUpBinding`);
- * - Mastra follow-ups already queued on the thread (`mastraQueued` > 0): the agent runtime's pending
- *   signals for the thread are cleared (`abortThreadStream({ clearPendingSignals: true })`);
- * - AG-UI follow-ups queued on the run claim: dropped when `onClose` releases the claim.
- */
-function abortAndDropQueued(
-  session: AguiSession,
-  target: { resourceId?: string; threadId?: string; mastraQueued: number },
-): void {
-  try {
-    session.cleanupFollowUpBinding?.();
-  } catch {
-    /* best effort */
-  }
-  if (session.getCurrentRunId()) session.abort();
-  if (target.mastraQueued > 0 && target.resourceId && target.threadId) {
-    try {
-      threadQueue(session)?.abortThreadStream?.({
-        resourceId: target.resourceId,
-        threadId: target.threadId,
-        clearPendingSignals: true,
-        localOnly: true,
-      });
-    } catch {
-      /* best effort */
-    }
-  }
 }
 
 const continuationExpected = new WeakMap<object, number>();
@@ -103,11 +47,14 @@ export interface AguiRunStreamOptions {
   runId: string;
   /** Mastra thread the run is bound to (filters tool events from other threads). */
   mastraThreadId?: string;
-  /** Mastra resource of that thread; with `mastraThreadId`, lets a disconnect clear the thread's queue. */
+  /** Mastra resource of that thread. */
   resourceId?: string;
   /** Starts the turn (e.g. `session.sendMessage`); resolves when Mastra reports the turn done. */
   start: () => Promise<void>;
-  /** Request abort signal; abort ends the stream and aborts the session run. */
+  /**
+   * Request abort signal. STREAM-1: abort only detaches this request's subscriber; the session run
+   * keeps going (stop it with the `abort` action).
+   */
   signal?: AbortSignal;
   /** Quiet period after a run ends before RUN_FINISHED, to catch an immediate restart. */
   settleMs?: number;
@@ -115,11 +62,21 @@ export interface AguiRunStreamOptions {
   continuationTimeoutMs?: number;
   /** SSE comment keep-alive interval. */
   heartbeatMs?: number;
-  /** Called once when the stream closes for any reason (finish, error, client disconnect). */
+  /**
+   * Called once when the AG-UI run ends (RUN_FINISHED / RUN_ERROR). STREAM-1: not on a client
+   * disconnect; a detached run still ends (and calls this) when its session run ends.
+   */
   onClose?: () => void;
   /**
-   * Next turn queued on this run (AG-UI follow-up), started after the current turn completes. Queued
-   * turns that have not started when the stream closes are never started.
+   * STREAM-1: receives the run's `attach` function once the stream starts, so a later request can
+   * re-subscribe (see `AguiRunAttach`). Typically stored on the run claim.
+   */
+  onAttachable?: (attach: AguiRunAttach) => void;
+  /** STREAM-1: most bytes of this run's events kept for replay to a re-attaching client. */
+  replayLimitBytes?: number;
+  /**
+   * Next turn queued on this run (AG-UI follow-up), started after the current turn completes (also
+   * while no client is attached).
    */
   takeQueuedTurn?: () => (() => Promise<void>) | undefined;
   /**
@@ -142,6 +99,16 @@ export interface AguiRunStreamOptions {
    */
   trace?: { traceId: string; traceUrl?: string };
 }
+
+/**
+ * STREAM-1: a new response body for an open AG-UI run: the run's events so far (from RUN_STARTED; or
+ * only RUN_STARTED when the replay buffer overflowed), then its live events up to RUN_FINISHED /
+ * RUN_ERROR. `signal` aborting detaches it again. Null once the run has ended.
+ */
+export type AguiRunAttach = (signal?: AbortSignal) => ReadableStream<Uint8Array> | null;
+
+/** Default replay buffer for a re-attaching client (per open run). */
+export const AGUI_REPLAY_LIMIT_BYTES = 2 * 1024 * 1024;
 
 export const AGUI_SSE_HEADERS = {
   'Content-Type': 'text/event-stream; charset=utf-8',
@@ -191,6 +158,7 @@ export function aguiRunStream(opts: AguiRunStreamOptions): ReadableStream<Uint8A
   const settleMs = opts.settleMs ?? 250;
   const continuationTimeoutMs = opts.continuationTimeoutMs ?? 15_000;
   const heartbeatMs = opts.heartbeatMs ?? 25_000;
+  const replayLimit = opts.replayLimitBytes ?? AGUI_REPLAY_LIMIT_BYTES;
   const mapper = createAguiEventMapper({
     threadId: opts.threadId,
     runId: opts.runId,
@@ -199,6 +167,7 @@ export function aguiRunStream(opts: AguiRunStreamOptions): ReadableStream<Uint8A
   });
   const { session } = opts;
 
+  /** The AG-UI run has ended (terminal events sent to every attached client). */
   let closed = false;
   let unsubscribe: (() => void) | undefined;
   let finishTimer: ReturnType<typeof setTimeout> | undefined;
@@ -206,14 +175,15 @@ export function aguiRunStream(opts: AguiRunStreamOptions): ReadableStream<Uint8A
   let sawAgentStart = false;
   let running = false;
   let queuedFollowUps = 0;
-  let onAbort: (() => void) | undefined;
-  let unsubscribeQueue: (() => void) | undefined;
-  /** Messages queued on the Mastra thread (any session), from the agent's thread events. */
-  let mastraQueued = 0;
-  const dropAll = () => {
-    const queued = Math.max(mastraQueued, queuedFollowUps);
-    abortAndDropQueued(session, { resourceId: opts.resourceId, threadId: opts.mastraThreadId, mastraQueued: queued });
-  };
+
+  /** STREAM-1: attached response bodies (the first request's, plus any re-attached ones). */
+  type Sink = { ctrl: ReadableStreamDefaultController<Uint8Array>; detach: () => void };
+  const sinks = new Set<Sink>();
+  /** Encoded events of this run so far, replayed to a client that re-attaches. */
+  const replay: Uint8Array[] = [];
+  let replayBytes = 0;
+  let replayOverflow = false;
+  let runStarted: Uint8Array | undefined;
 
   let closeNotified = false;
   const notifyClose = () => {
@@ -231,177 +201,215 @@ export function aguiRunStream(opts: AguiRunStreamOptions): ReadableStream<Uint8A
     finishTimer = undefined;
   };
 
-  return new ReadableStream<Uint8Array>({
-    start(ctrl) {
-      const write = (events: BaseEvent[]) => {
-        if (closed || events.length === 0) return;
-        try {
-          ctrl.enqueue(encodeAguiEvents(events));
-        } catch {
-          teardown();
-        }
-      };
+  const enqueue = (sink: Sink, chunk: Uint8Array) => {
+    try {
+      sink.ctrl.enqueue(chunk);
+    } catch {
+      // That client has gone: detach it; the run carries on.
+      sink.detach();
+    }
+  };
 
-      const teardown = () => {
-        if (closed) return;
-        closed = true;
-        clearFinishTimer();
-        if (heartbeat) clearInterval(heartbeat);
-        unsubscribe?.();
-        unsubscribeQueue?.();
-        if (onAbort) opts.signal?.removeEventListener('abort', onAbort);
-        try {
-          ctrl.close();
-        } catch {
-          /* already closed */
-        }
-        notifyClose();
-      };
+  const record = (chunk: Uint8Array) => {
+    if (replayOverflow) return;
+    if (replayBytes + chunk.byteLength > replayLimit) {
+      // Too much to replay: a re-attaching client gets RUN_STARTED and the live events only.
+      replayOverflow = true;
+      replay.length = 0;
+      replayBytes = 0;
+      return;
+    }
+    replay.push(chunk);
+    replayBytes += chunk.byteLength;
+  };
 
-      const finish = (override?: Parameters<typeof mapper.finish>[0]) => {
-        if (closed) return;
-        const events = mapper.finish(override);
-        if (opts.publicRunError) {
-          for (const event of events) {
-            if (event.type !== EventType.RUN_ERROR) continue;
-            const raw = String((event as { message?: unknown }).message ?? '');
-            console.warn('[agui] run failed', { runId: opts.runId.slice(0, 100), error: raw.slice(0, 300) });
-            (event as { message?: string }).message = opts.publicRunError;
-          }
-        }
-        let dropped = 0;
-        try {
-          dropped = opts.droppedQueuedTurns?.() ?? 0;
-        } catch {
-          /* ignore */
-        }
-        if (dropped > 0) {
-          // After any closing message/tool events, before RUN_FINISHED / RUN_ERROR.
-          events.splice(Math.max(events.length - 1, 0), 0, {
-            type: EventType.CUSTOM,
-            name: AGUI_CUSTOM.followUpDropped,
-            value: { count: dropped },
-          } as BaseEvent);
-        }
-        if (opts.trace) {
-          for (let i = 0; i < events.length; i++) {
-            const e = events[i] as BaseEvent & { result?: unknown };
-            if (e.type !== EventType.RUN_FINISHED) continue;
-            const result = e.result && typeof e.result === 'object' ? (e.result as Record<string, unknown>) : {};
-            events[i] = { ...e, result: { ...result, ...traceValue(opts.trace) } } as BaseEvent;
-          }
-        }
-        write(events);
-        teardown();
-      };
+  const write = (events: BaseEvent[]) => {
+    if (closed || events.length === 0) return;
+    const chunk = encodeAguiEvents(events);
+    record(chunk);
+    for (const sink of [...sinks]) enqueue(sink, chunk);
+  };
 
-      const scheduleFinish = (delayMs: number) => {
-        clearFinishTimer();
-        finishTimer = setTimeout(() => {
-          finishTimer = undefined;
-          if (!running) finish();
-        }, delayMs);
-      };
-
-      write([
-        { type: EventType.RUN_STARTED, threadId: opts.threadId, runId: opts.runId } as BaseEvent,
-        ...(opts.trace
-          ? [{ type: EventType.CUSTOM, name: AGUI_CUSTOM.trace, value: traceValue(opts.trace) } as BaseEvent]
-          : []),
-      ]);
-
-      unsubscribe = session.subscribe((event) => {
-        if (closed) return;
-        write(mapper.map(event));
-        if (event.type === 'agent_start') {
-          sawAgentStart = true;
-          running = true;
-          clearFinishTimer();
-          takeContinuation(session);
-        } else if (event.type === 'follow_up_queued') {
-          queuedFollowUps = typeof event.count === 'number' ? event.count : 0;
-        } else if (event.type === 'agent_end') {
-          running = false;
-          if (event.reason === 'complete' && opts.takeQueuedTurn) {
-            const next = opts.takeQueuedTurn();
-            if (next) {
-              // Keep the run open for the queued turn; start it once the finished turn has settled.
-              scheduleFinish(continuationTimeoutMs);
-              setTimeout(() => {
-                if (closed) return;
-                next().catch((err: unknown) => {
-                  finish({ error: err instanceof Error ? err.message : String(err) });
-                });
-              }, 0);
-              return;
-            }
-          }
-          const restartExpected =
-            (event.reason === 'aborted' && peekContinuation(session)) ||
-            (event.reason === 'complete' && queuedFollowUps > 0);
-          scheduleFinish(restartExpected ? continuationTimeoutMs : settleMs);
-        }
-      });
-
-      if (opts.resourceId && opts.mastraThreadId) {
-        try {
-          unsubscribeQueue = threadQueue(session)?.subscribeThreadEvents?.(
-            { resourceId: opts.resourceId, threadId: opts.mastraThreadId },
-            (event) => {
-              if (event.type === 'queue-count-changed' && typeof event.count === 'number') mastraQueued = event.count;
-            },
-          );
-        } catch {
-          unsubscribeQueue = undefined;
-        }
+  /** Ends the AG-UI run: closes every attached body, stops listening, releases the claim. */
+  const teardown = () => {
+    if (closed) return;
+    closed = true;
+    clearFinishTimer();
+    if (heartbeat) clearInterval(heartbeat);
+    unsubscribe?.();
+    for (const sink of [...sinks]) {
+      sinks.delete(sink);
+      try {
+        sink.ctrl.close();
+      } catch {
+        /* already closed */
       }
+      sink.detach();
+    }
+    replay.length = 0;
+    notifyClose();
+  };
 
-      if (opts.signal) {
-        onAbort = () => {
-          if (closed) return;
-          dropAll();
-          // The client has gone; nothing more can be delivered.
-          teardown();
-        };
-        if (opts.signal.aborted) {
-          onAbort();
+  const finish = (override?: Parameters<typeof mapper.finish>[0]) => {
+    if (closed) return;
+    const events = mapper.finish(override);
+    if (opts.publicRunError) {
+      for (const event of events) {
+        if (event.type !== EventType.RUN_ERROR) continue;
+        const raw = String((event as { message?: unknown }).message ?? '');
+        console.warn('[agui] run failed', { runId: opts.runId.slice(0, 100), error: raw.slice(0, 300) });
+        (event as { message?: string }).message = opts.publicRunError;
+      }
+    }
+    let dropped = 0;
+    try {
+      dropped = opts.droppedQueuedTurns?.() ?? 0;
+    } catch {
+      /* ignore */
+    }
+    if (dropped > 0) {
+      // After any closing message/tool events, before RUN_FINISHED / RUN_ERROR.
+      events.splice(Math.max(events.length - 1, 0), 0, {
+        type: EventType.CUSTOM,
+        name: AGUI_CUSTOM.followUpDropped,
+        value: { count: dropped },
+      } as BaseEvent);
+    }
+    if (opts.trace) {
+      for (let i = 0; i < events.length; i++) {
+        const e = events[i] as BaseEvent & { result?: unknown };
+        if (e.type !== EventType.RUN_FINISHED) continue;
+        const result = e.result && typeof e.result === 'object' ? (e.result as Record<string, unknown>) : {};
+        events[i] = { ...e, result: { ...result, ...traceValue(opts.trace) } } as BaseEvent;
+      }
+    }
+    write(events);
+    teardown();
+  };
+
+  const scheduleFinish = (delayMs: number) => {
+    clearFinishTimer();
+    finishTimer = setTimeout(() => {
+      finishTimer = undefined;
+      if (!running) finish();
+    }, delayMs);
+  };
+
+  /** A response body attached to this run; `signal` aborting (or the body cancelled) detaches it. */
+  const openSink = (signal: AbortSignal | undefined, first: Uint8Array[]): ReadableStream<Uint8Array> => {
+    let sink: Sink | undefined;
+    let onAbort: (() => void) | undefined;
+    const detach = () => {
+      if (sink) sinks.delete(sink);
+      if (onAbort) signal?.removeEventListener('abort', onAbort);
+      onAbort = undefined;
+    };
+    return new ReadableStream<Uint8Array>({
+      start(ctrl) {
+        sink = { ctrl, detach };
+        for (const chunk of first) ctrl.enqueue(chunk);
+        if (closed) {
+          ctrl.close();
           return;
         }
-        opts.signal.addEventListener('abort', onAbort, { once: true });
-      }
+        if (signal?.aborted) return;
+        sinks.add(sink);
+        if (signal) {
+          onAbort = () => {
+            // STREAM-1: the client has gone (or is suspended): detach only; the run keeps going.
+            detach();
+            try {
+              ctrl.close();
+            } catch {
+              /* already closed */
+            }
+          };
+          signal.addEventListener('abort', onAbort, { once: true });
+        }
+      },
+      cancel() {
+        detach();
+      },
+    });
+  };
 
-      if (heartbeatMs > 0) {
-        heartbeat = setInterval(() => {
-          if (closed) return;
-          try {
-            ctrl.enqueue(textEncoder.encode(': keep-alive\n\n'));
-          } catch {
-            teardown();
-          }
-        }, heartbeatMs);
-      }
+  const attach: AguiRunAttach = (signal) => {
+    if (closed || !runStarted) return null;
+    return openSink(signal, replayOverflow ? [runStarted] : [...replay]);
+  };
 
-      opts.start().then(
-        () => {
-          // Turn reported done. If no agent_start was seen the turn never ran (nothing to stream).
-          if (!sawAgentStart && !closed) scheduleFinish(settleMs);
-        },
-        (err: unknown) => {
-          const message = err instanceof Error ? err.message : String(err);
-          finish({ error: message });
-        },
-      );
-    },
-    cancel() {
+  const begin = () => {
+    write([
+      { type: EventType.RUN_STARTED, threadId: opts.threadId, runId: opts.runId } as BaseEvent,
+      ...(opts.trace
+        ? [{ type: EventType.CUSTOM, name: AGUI_CUSTOM.trace, value: traceValue(opts.trace) } as BaseEvent]
+        : []),
+    ]);
+    runStarted = encodeAguiEvents([
+      { type: EventType.RUN_STARTED, threadId: opts.threadId, runId: opts.runId } as BaseEvent,
+    ]);
+
+    unsubscribe = session.subscribe((event) => {
       if (closed) return;
-      closed = true;
-      clearFinishTimer();
-      if (heartbeat) clearInterval(heartbeat);
-      dropAll();
-      unsubscribe?.();
-      unsubscribeQueue?.();
-      if (onAbort) opts.signal?.removeEventListener('abort', onAbort);
-      notifyClose();
-    },
-  });
+      write(mapper.map(event));
+      if (event.type === 'agent_start') {
+        sawAgentStart = true;
+        running = true;
+        clearFinishTimer();
+        takeContinuation(session);
+      } else if (event.type === 'follow_up_queued') {
+        queuedFollowUps = typeof event.count === 'number' ? event.count : 0;
+      } else if (event.type === 'agent_end') {
+        running = false;
+        if (event.reason === 'complete' && opts.takeQueuedTurn) {
+          const next = opts.takeQueuedTurn();
+          if (next) {
+            // Keep the run open for the queued turn; start it once the finished turn has settled.
+            scheduleFinish(continuationTimeoutMs);
+            setTimeout(() => {
+              if (closed) return;
+              next().catch((err: unknown) => {
+                finish({ error: err instanceof Error ? err.message : String(err) });
+              });
+            }, 0);
+            return;
+          }
+        }
+        const restartExpected =
+          (event.reason === 'aborted' && peekContinuation(session)) ||
+          (event.reason === 'complete' && queuedFollowUps > 0);
+        scheduleFinish(restartExpected ? continuationTimeoutMs : settleMs);
+      }
+    });
+
+    if (heartbeatMs > 0) {
+      const keepAlive = textEncoder.encode(': keep-alive\n\n');
+      heartbeat = setInterval(() => {
+        if (closed) return;
+        for (const sink of [...sinks]) enqueue(sink, keepAlive);
+      }, heartbeatMs);
+    }
+
+    try {
+      opts.onAttachable?.(attach);
+    } catch {
+      /* ignore */
+    }
+
+    opts.start().then(
+      () => {
+        // Turn reported done. If no agent_start was seen the turn never ran (nothing to stream).
+        if (!sawAgentStart && !closed) scheduleFinish(settleMs);
+      },
+      (err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        finish({ error: message });
+      },
+    );
+  };
+
+  // The first request's body is the first sink; the run starts with it, attached or not.
+  const stream = openSink(opts.signal, []);
+  begin();
+  return stream;
 }

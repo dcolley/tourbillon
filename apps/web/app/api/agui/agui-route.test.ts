@@ -143,6 +143,16 @@ async function seedThread(threadId: string, opts: { resourceId?: string; agentId
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** STREAM-1: waits for this session's run on the thread to end (a detached run goes on after its client). */
+async function waitIdle(threadId: string) {
+  for (let i = 0; i < 200; i++) {
+    const events = await readSse(await request('alice', input(threadId, { forwardedProps: { tourbillon: { action: 'attach' } } }, '')));
+    if (events.some((e) => e.type === 'CUSTOM' && e.name === 'tourbillon.control')) return;
+    await sleep(10);
+  }
+  throw new Error(`run on ${threadId} did not end`);
+}
+
 const types = (events: Ev[]) => events.map((e) => e.type);
 const text = (events: Ev[]) =>
   events.filter((e) => e.type === 'TEXT_MESSAGE_CONTENT').map((e) => e.delta as string).join('');
@@ -383,9 +393,9 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
       assert.equal(status, 409);
     });
 
-    it('client disconnect (abortRun) aborts the session run', async () => {
+    it('STREAM-1: client disconnect (abortRun) detaches; the session run completes', async () => {
       script = () => stubText('t', Array.from({ length: 30 }, (_, i) => `w${i} `));
-      chunkDelayMs = 20;
+      chunkDelayMs = 10;
       const ends: string[] = [];
       let aborted = false;
       await clientRun('agui-thread-5', {
@@ -403,7 +413,67 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
       });
       const until = Date.now() + 3000;
       while (ends.length === 0 && Date.now() < until) await new Promise((r) => setTimeout(r, 10));
+      assert.deepEqual(ends, ['complete']);
+      await waitIdle('agui-thread-5');
+    });
+
+    it('STREAM-1: attach after a disconnect replays the run and streams it to the end', async () => {
+      const words = Array.from({ length: 30 }, (_, i) => `w${i} `);
+      script = () => stubText('t', words);
+      chunkDelayMs = 10;
+      let aborted = false;
+      await clientRun('agui-thread-attach', {
+        onEvent: (e, agent) => {
+          if (e.type === 'TEXT_MESSAGE_CONTENT' && !aborted) {
+            aborted = true;
+            agent.abortRun();
+          }
+        },
+      });
+      await sleep(30);
+      const attached = await request('alice', input('agui-thread-attach', { forwardedProps: { tourbillon: { action: 'attach' } } }, ''));
+      assert.equal(attached.status, 200);
+      const events = await readSse(attached);
+      assert.equal(events[0].type, 'RUN_STARTED');
+      assert.ok(!events.some((e) => e.type === 'CUSTOM' && e.name === 'tourbillon.control'), 'a run, not a control reply');
+      assert.equal(text(events), words.join(''));
+      assert.equal(events.filter((e) => e.type === 'RUN_FINISHED').length, 1);
+      // The run has ended: attach answers "nothing running", and the thread takes a new run.
+      const after = await readSse(
+        await request('alice', input('agui-thread-attach', { forwardedProps: { tourbillon: { action: 'attach' } } }, '')),
+      );
+      assert.deepEqual(after[1].value, { action: 'attach', accepted: false, running: false });
+      const next = await request('alice', input('agui-thread-attach'));
+      assert.equal(next.status, 200);
+      await readSse(next);
+    });
+
+    it('STREAM-1: explicit abort still stops a detached run', async () => {
+      script = () => stubText('t', Array.from({ length: 60 }, (_, i) => `w${i} `));
+      chunkDelayMs = 20;
+      const ends: string[] = [];
+      let aborted = false;
+      await clientRun('agui-thread-detached-abort', {
+        onEvent: (e, agent) => {
+          if (e.type === 'RUN_STARTED') {
+            sessions.get(SESSION_KEY).subscribe((ev: any) => {
+              if (ev.type === 'agent_end') ends.push(ev.reason);
+            });
+          }
+          if (e.type === 'TEXT_MESSAGE_CONTENT' && !aborted) {
+            aborted = true;
+            agent.abortRun();
+          }
+        },
+      });
+      const ctl = await readSse(
+        await request('alice', input('agui-thread-detached-abort', { forwardedProps: { tourbillon: { action: 'abort' } } }, '')),
+      );
+      assert.equal(ctl[1].value.accepted, true);
+      const until = Date.now() + 3000;
+      while (ends.length === 0 && Date.now() < until) await sleep(10);
       assert.deepEqual(ends, ['aborted']);
+      await waitIdle('agui-thread-detached-abort');
     });
   });
 
@@ -706,33 +776,31 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
       await readSse(second);
     });
 
-    it('client disconnect drops queued follow-ups', async () => {
-      chunkDelayMs = 20;
+    it('STREAM-1: client disconnect keeps queued follow-ups; they run on the open run', async () => {
+      chunkDelayMs = 10;
       script = (call) =>
         call === 1 ? stubText('t1', Array.from({ length: 30 }, (_, i) => `w${i} `)) : stubText('t2', ['queued-turn']);
       let queued: Promise<Response> | undefined;
-      let disconnected = false;
       await clientRun('agui-thread-drop', {
         onEvent: (e, agent) => {
           if (e.type === 'TEXT_MESSAGE_CONTENT' && !queued) {
             queued = request('alice', input('agui-thread-drop', { forwardedProps: { tourbillon: { action: 'followUp' } } }, 'later'));
             void queued.then(async (r) => {
               assert.equal(r.status, 200);
-              await sleep(60);
-              disconnected = true;
+              await sleep(30);
               agent.abortRun();
             });
           }
         },
       });
-      const until = Date.now() + 3000;
-      while (!disconnected && Date.now() < until) await sleep(10);
-      await sleep(500);
-      assert.equal(stub.modelCalls, 1, 'the queued follow-up must not run after the stream closed');
+      const until = Date.now() + 4000;
+      while (stub.modelCalls < 2 && Date.now() < until) await sleep(10);
+      assert.equal(stub.modelCalls, 2, 'the queued follow-up runs after the client has gone');
+      await waitIdle('agui-thread-drop');
     });
 
-    it("client disconnect also drops a follow-up queued in Mastra's own queue for the thread", async () => {
-      chunkDelayMs = 20;
+    it("STREAM-1: client disconnect keeps a follow-up queued in Mastra's own queue", async () => {
+      chunkDelayMs = 10;
       script = (call) =>
         call === 1 ? stubText('t1', Array.from({ length: 30 }, (_, i) => `w${i} `)) : stubText('t2', ['mastra-queued']);
       let queued = false;
@@ -742,12 +810,14 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
             queued = true;
             // Queued straight into Mastra (not through the AG-UI claim), as another caller on the thread would.
             void sessions.get(SESSION_KEY).followUp({ content: 'queued in mastra', requestContext });
-            setTimeout(() => agent.abortRun(), 60);
+            setTimeout(() => agent.abortRun(), 30);
           }
         },
       });
-      await sleep(500);
-      assert.equal(stub.modelCalls, 1, 'the Mastra follow-up must not run after the stream closed');
+      const until = Date.now() + 4000;
+      while (stub.modelCalls < 2 && Date.now() < until) await sleep(10);
+      assert.equal(stub.modelCalls, 2, 'the Mastra follow-up runs after the client has gone');
+      await waitIdle('agui-thread-mastra-q');
     });
 
     it('the claim is released when binding the thread fails, so the next run is accepted', async () => {
