@@ -7,7 +7,7 @@ export function getInternalApiUrl(): string {
 }
 
 export interface HeartbeatRuntimeValues {
-  apiKey: string;
+  apiKey: string
   runId: string;
   agentId: string;
   companyId: string;
@@ -15,6 +15,11 @@ export interface HeartbeatRuntimeValues {
   goalId?: string;
   projectId?: string;
   jobId?: string;
+  /** Chat (TASK-1): the Mastra thread this turn runs on (chat_tasks.source_thread_id audit). */
+  threadId?: string;
+  /** Chat (TASK-1): the board user who sent the chat turn, best-effort (null when anonymous). */
+  requestingUserId?: string;
+  requestingUserDisplayName?: string;
   agentRuntimeConfig?: AgentRuntimeConfig;
 }
 
@@ -22,6 +27,9 @@ export interface ToolRuntimeContext extends TraceContext {
   apiKey?: string;
   goalId?: string;
   projectId?: string;
+  threadId?: string;
+  requestingUserId?: string;
+  requestingUserDisplayName?: string;
 }
 
 export function createHeartbeatRuntimeContext(
@@ -36,6 +44,9 @@ export function createHeartbeatRuntimeContext(
   if (values.goalId) requestContext.set('goalId', values.goalId);
   if (values.projectId) requestContext.set('projectId', values.projectId);
   if (values.jobId) requestContext.set('jobId', values.jobId);
+  if (values.threadId) requestContext.set('threadId', values.threadId);
+  if (values.requestingUserId) requestContext.set('requestingUserId', values.requestingUserId);
+  if (values.requestingUserDisplayName) requestContext.set('requestingUserDisplayName', values.requestingUserDisplayName);
   if (values.agentRuntimeConfig) {
     requestContext.set('agentRuntimeConfig', values.agentRuntimeConfig);
     // #100: every run (heartbeat, harness, chat) builds its context here, so the running
@@ -61,6 +72,9 @@ export function extractToolRuntimeContext(requestContext: unknown): ToolRuntimeC
       goalId: asString(ctx.get('goalId')),
       projectId: asString(ctx.get('projectId')),
       jobId: asString(ctx.get('jobId')),
+      threadId: asString(ctx.get('threadId')),
+      requestingUserId: asString(ctx.get('requestingUserId')),
+      requestingUserDisplayName: asString(ctx.get('requestingUserDisplayName')),
       apiKey: asString(ctx.get('apiKey')),
     };
   }
@@ -74,6 +88,9 @@ export function extractToolRuntimeContext(requestContext: unknown): ToolRuntimeC
     goalId: asString(value.goalId),
     projectId: asString(value.projectId),
     jobId: asString(value.jobId),
+    threadId: asString(value.threadId),
+    requestingUserId: asString(value.requestingUserId),
+    requestingUserDisplayName: asString(value.requestingUserDisplayName),
     apiKey: asString(value.apiKey),
   };
 }

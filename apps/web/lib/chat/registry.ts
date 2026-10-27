@@ -15,6 +15,7 @@ import {
 } from '../../../../packages/mastra/src/chat';
 import { parseCompanySettings, type AgentRuntimeConfig } from '@tourbillon/shared';
 import { and, eq } from 'drizzle-orm';
+import type { ChatRequestUser } from './request-user';
 import { getActiveCompany } from '@/lib/company';
 import { buildChatScopedApiKey, validateChatToken } from '@/lib/auth/chat-token';
 import { chatSessionIdForAgent } from '@tourbillon/shared/agent-token';
@@ -222,7 +223,10 @@ export function getOrCreateChatApiKey(agentRecord: Agent): string {
   return key;
 }
 
-export function createChatRequestContext(agentRecord: Agent) {
+export function createChatRequestContext(
+  agentRecord: Agent,
+  opts?: { threadId?: string | null; requestingUser?: ChatRequestUser | null },
+) {
   const apiKey = getOrCreateChatApiKey(agentRecord);
   return createHeartbeatRuntimeContext({
     apiKey,
@@ -230,6 +234,10 @@ export function createChatRequestContext(agentRecord: Agent) {
     agentId: agentRecord.id,
     companyId: agentRecord.companyId,
     jobId: `chat-${agentRecord.id}`,
+    // TASK-1: audit context for the private chat task list (source_thread_id + requestedBy).
+    threadId: opts?.threadId ?? undefined,
+    requestingUserId: opts?.requestingUser?.userId,
+    requestingUserDisplayName: opts?.requestingUser?.displayName,
     agentRuntimeConfig: agentRecord.runtimeConfig as AgentRuntimeConfig,
   }) as ReturnType<typeof createHeartbeatRuntimeContext> & { get: (key: string) => unknown };
 }

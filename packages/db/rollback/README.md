@@ -21,6 +21,7 @@ To roll back to just before migration N, run the down file for every applied mig
 Back up the database first. Then apply the file by hand against the target database:
 
 ```sh
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f packages/db/rollback/0023_chat_tasks.down.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f packages/db/rollback/0022_assistant_active_threads.down.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f packages/db/rollback/0021_act1_activity_detail.down.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f packages/db/rollback/0020_apr2_hitl.down.sql
@@ -37,4 +38,4 @@ A PR that adds a migration must also add:
 1. `packages/db/rollback/<migration tag>.down.sql`. It reverses only that migration's objects and deletes its `drizzle.__drizzle_migrations` row (matched on `created_at`, the journal `when`).
 2. A rollback test in `packages/db/src/*.test.ts`. The test runs against an in-memory Postgres (PGlite) with the repo's migrations applied, and goes up, down, then up again. It checks that the objects are gone after the down file, that unrelated data is untouched, and that the normal migrator recreates the objects. It also checks that the down file only touches that migration's objects and journal row.
 
-`src/assistant-active-threads-migration.test.ts` (0022), `src/act1-activity-migration.test.ts` (0021), `src/apr2-hitl-migration.test.ts` (0020), `src/assistant-thread-pins-migration.test.ts` (0019) and `src/company-llm-provider-queries.test.ts` (0018) are examples.
+`src/chat-tasks-migration.test.ts` (0023), `src/assistant-active-threads-migration.test.ts` (0022), `src/act1-activity-migration.test.ts` (0021), `src/apr2-hitl-migration.test.ts` (0020), `src/assistant-thread-pins-migration.test.ts` (0019) and `src/company-llm-provider-queries.test.ts` (0018) are examples.

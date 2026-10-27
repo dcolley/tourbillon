@@ -216,12 +216,19 @@ describe('Chat ↔ Heartbeat Tool Parity', () => {
       const chatToolIds = new Set(Object.keys(chatAgent.tools || {}));
       const heartbeatToolIds = new Set(Object.keys(heartbeatTools));
 
-      // Tool sets should be equal (same size and contents)
-      expect(chatToolIds.size).toBe(heartbeatToolIds.size);
+      // TASK-1: chat runs the heartbeat toolset PLUS the five private chat-task list tools.
+      // (The private list is chat-only — never company issues, never the heartbeat loop.)
+      const CHAT_TASK_TOOL_IDS = ['listMyTasks', 'addMyTask', 'updateMyTask', 'completeMyTask', 'cancelMyTask'];
+      expect(chatToolIds.size).toBe(heartbeatToolIds.size + CHAT_TASK_TOOL_IDS.length);
 
       // All heartbeat tools should be in chat
       for (const toolId of heartbeatToolIds) {
         expect(chatToolIds.has(toolId)).toBe(true);
+      }
+      // ...plus the five list tools in chat, and none of them in the heartbeat set.
+      for (const toolId of CHAT_TASK_TOOL_IDS) {
+        expect(chatToolIds.has(toolId)).toBe(true);
+        expect(heartbeatToolIds.has(toolId)).toBe(false);
       }
     });
   });

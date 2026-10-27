@@ -27,6 +27,7 @@ import {
 import { CONTROL_PLANE_TOOLS } from './tools/control-plane-tools';
 import { ROLE_TOOLS } from './tools/role-tools';
 import { assignableToolsForIds } from './tools/assignable-tools';
+import { CHAT_TASK_TOOLS } from './tools/chat-task-tools';
 import {
   formatSkillsCatalogSection,
   prepareAgentSkills,
@@ -134,6 +135,12 @@ export async function getAgentMemory(
 export interface AssembleAgentToolsOptions {
   allowedMcpServerIds?: string[];
   companySettings?: CompanySettings | null;
+  /**
+   * TASK-1: dashboard-chat only — add the agent's private chat task list tools
+   * (chat_tasks). Heartbeat / DurableAgent assemblies never set this, so the five
+   * list tools stay out of every non-chat run.
+   */
+  chatTaskTools?: boolean;
 }
 
 export async function assembleAgentTools(
@@ -181,6 +188,11 @@ export async function assembleAgentTools(
   const mailEnabled = runtimeConfig.mail?.enabled ?? true;
   if (!mailEnabled) {
     delete tools.sendToAgentTool;
+  }
+
+  // TASK-1: the private per-agent chat task list (chat_tasks) — chat AgentController only.
+  if (options?.chatTaskTools) {
+    Object.assign(tools, CHAT_TASK_TOOLS);
   }
 
   // #100: one choke point — no tool result may carry agent runtimeConfig secret values.

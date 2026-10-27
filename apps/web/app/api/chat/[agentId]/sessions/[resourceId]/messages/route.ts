@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
+import { resolveChatRequestUser } from '@/lib/chat/request-user';
 import {
   getOrCreateChatController,
   createChatRequestContext,
@@ -47,10 +48,13 @@ export async function POST(
       resourceId,
       scope: sessionScope,
     });
-    const requestContext = createChatRequestContext(agent);
+    const threadId = session.thread.getId() ?? `${resourceId}`;
+    const requestContext = createChatRequestContext(agent, {
+      threadId,
+      requestingUser: await resolveChatRequestUser(req.headers),
+    });
 
     // Wrap chat session sendMessage with heartbeat context for sticky session support
-    const threadId = session.thread.getId() ?? `${resourceId}`;
     void runWithHeartbeatContext(
       {
         runId: `chat-${agent.id}`,

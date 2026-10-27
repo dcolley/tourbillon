@@ -1,15 +1,17 @@
 import { createTool } from '@mastra/core/tools';
-import { db, agents, companies, eq } from '@tourbillon/db';
+import { agents, companies, eq } from '@tourbillon/db';
 import { z } from 'zod';
 import { extractToolRuntimeContext } from './api-client';
 import { assembleAgentTools } from '../agent-factory';
+import { CHAT_TASK_TOOL_IDS } from './chat-task-tools';
+import { toolDb } from './tool-db';
 import { parseCompanySettings } from '@tourbillon/shared';
 import type { CompanySettings } from '@tourbillon/shared';
 import { serializeToolInputSchema } from './tool-schema-serialize';
 
 async function loadAgentRecord(agentId: string | undefined) {
   if (!agentId) return null;
-  return db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+  return toolDb().query.agents.findFirst({ where: eq(agents.id, agentId) });
 }
 
 function extractToolDescription(tool: unknown): string {
@@ -52,6 +54,7 @@ function extractToolId(key: string, tool: unknown): string {
 
 function getToolsetForId(toolId: string): string | undefined {
   const toolsetMap: Record<string, string> = {
+    ...Object.fromEntries(CHAT_TASK_TOOL_IDS.map((id) => [id, 'chat-tasks'])),
     addComment: 'comments',
     listAgents: 'roster',
     createApproval: 'approvals',
@@ -78,14 +81,15 @@ export const listToolsTool = createTool({
     'Prefer calling tools directly once you know their parameters — no invokeTool wrapper needed.',
   inputSchema: z.object({}),
   execute: async (_inputData, { requestContext }) => {
-    const { agentId, companyId } = extractToolRuntimeContext(requestContext);
+    const { agentId, companyId, runId } = extractToolRuntimeContext(requestContext);
+    const isChatRun = typeof runId === 'string' && runId.startsWith('chat-');
     const agent = await loadAgentRecord(agentId);
     if (!agent) {
       return { error: 'agent_not_found', message: 'Could not resolve agent for listTools' };
     }
 
     const company = companyId
-      ? await db.query.companies.findFirst({ where: eq(companies.id, companyId) })
+      ? await toolDb().query.companies.findFirst({ where: eq(companies.id, companyId) })
       : null;
     const companySettings: CompanySettings | null = company
       ? parseCompanySettings(company.settings)
@@ -94,6 +98,7 @@ export const listToolsTool = createTool({
     const tools = await assembleAgentTools(agent, {
       companySettings,
       allowedMcpServerIds: agent.mcpServerIds ?? [],
+      chatTaskTools: isChatRun,
     });
 
     const catalog = Object.entries(tools).map(([key, tool]) => {
@@ -128,14 +133,15 @@ export const getToolDetailsTool = createTool({
     id: z.string().describe('Tool id, e.g. webSearchTavily or createSubtask'),
   }),
   execute: async (inputData, { requestContext }) => {
-    const { agentId, companyId } = extractToolRuntimeContext(requestContext);
+    const { agentId, companyId, runId } = extractToolRuntimeContext(requestContext);
+    const isChatRun = typeof runId === 'string' && runId.startsWith('chat-');
     const agent = await loadAgentRecord(agentId);
     if (!agent) {
       return { error: 'agent_not_found', message: 'Could not resolve agent for getToolDetails' };
     }
 
     const company = companyId
-      ? await db.query.companies.findFirst({ where: eq(companies.id, companyId) })
+      ? await toolDb().query.companies.findFirst({ where: eq(companies.id, companyId) })
       : null;
     const companySettings: CompanySettings | null = company
       ? parseCompanySettings(company.settings)
@@ -144,6 +150,7 @@ export const getToolDetailsTool = createTool({
     const tools = await assembleAgentTools(agent, {
       companySettings,
       allowedMcpServerIds: agent.mcpServerIds ?? [],
+      chatTaskTools: isChatRun,
     });
 
     let foundTool: unknown = null;
