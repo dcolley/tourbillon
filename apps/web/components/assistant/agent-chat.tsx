@@ -44,7 +44,20 @@ import { MessageFeedback, useThreadFeedback } from './message-feedback';
 import { useAgentChat, type AgentChatPhase } from './use-agent-chat';
 import { ModelPicker } from './model-picker/model-picker';
 import { ContextMeter } from './context-meter/context-meter';
-import { AgentDmActivity } from './dm-activity';
+import { DmActivityStripView } from './dm-activity';
+import { DmConversationModal } from './dm-peek-dialog';
+import { useAgentDms } from './use-agent-dms';
+import {
+  buildConversations,
+  dmChipText,
+  dmDirection,
+  dmPeer,
+  dmSnippet,
+  dmStripSummary,
+  dmTranscriptChips,
+  mergeDmTranscriptTimeline,
+  type AgentDm,
+} from '@/lib/assistant/agent-dms';
 import { AgentChatMenu } from './agent-chat-menu';
 import { clearAgentChat, type AssistantOmSummary } from '@/lib/assistant/single-chat';
 import { useStickyTranscript } from './use-sticky-transcript';
@@ -193,6 +206,17 @@ export interface AgentChatViewProps {
   chatHref?: (threadId: string) => string;
   /** DM-1: the agent's DM activity strip (read-only), shown above the message list. */
   dmActivity?: React.ReactNode;
+  /**
+   * DM-2: the agent's DMs (A2A mail) shown as chips in the transcript, merged by timestamp.
+   * Display only: chips are neither model context nor stored thread content (see agent-dms.ts).
+   */
+  dms?: readonly AgentDm[];
+  /** DM-2: this chat's agent (chips and the modal read each pair from its side). */
+  agentId?: string;
+  /** DM-2: start of the current conversation (epoch ms): chips cover DMs from that time on only. */
+  dmThreadStartedAt?: number | null;
+  /** DM-2: opens the conversation modal on this peer and message (from the strip or a chip). */
+  onOpenDm?: (peerId?: string, messageId?: string) => void;
   /** ASYNC-0: the chat's ⋯ menu (Clear chat, Observational Memory), at the end of the chat chrome. */
   chatMenu?: React.ReactNode;
   /** CHAT-PAGE-1: load the previous transcript page (Load previous is shown while `state.history.hasMore`). */
@@ -345,6 +369,49 @@ function PendingTool({ tool, onDecision }: { tool: PendingToolDecision; onDecisi
   );
 }
 
+/**
+ * DM-2: one DM as a quiet chip in the transcript (display only — never model context, never stored).
+ * The chip keeps the message to one line; expanding peeks the body inline, and "Open conversation"
+ * opens the conversation modal on this message.
+ */
+export function DmChatChip({
+  mail,
+  agentId,
+  onOpenDm,
+}: {
+  mail: AgentDm;
+  agentId: string;
+  onOpenDm?: (peerId?: string, messageId?: string) => void;
+}) {
+  const dir = dmDirection(mail, agentId);
+  const peer = dmPeer(mail, agentId);
+  const snippet = dmSnippet(mail.body);
+  return (
+    <div className="flex flex-col items-start gap-1" data-dm-chip={mail.id} data-dm-peer={peer.id} data-dm-direction={dir}>
+      <details className="max-w-[80%] rounded-md border p-2 text-xs text-muted-foreground">
+        <summary className="cursor-pointer select-none">
+          {dmChipText(mail, agentId)}
+          {snippet ? ` · ${snippet}` : ''}
+        </summary>
+        <div className="mt-1 space-y-1.5">
+          <ChatMarkdown text={mail.body} />
+          {onOpenDm ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              data-dm-open-conversation={mail.id}
+              onClick={() => onOpenDm(peer.id, mail.id)}
+            >
+              Open conversation
+            </Button>
+          ) : null}
+        </div>
+      </details>
+    </div>
+  );
+}
+
 /** Stateless view (tested with react-dom/server). */
 export function AgentChatView(props: AgentChatViewProps) {
   const { phase, setupError, state, draft, scrollRef } = props;
@@ -367,6 +434,13 @@ export function AgentChatView(props: AgentChatViewProps) {
   const parked = parkedCard(state, widgets.registry);
   const canSend = draft.trim().length > 0 && state.status !== 'stopping';
   const footers = props.assistantFooter ? feedbackTargets(state.items, runOpen) : null;
+  // DM-2: merge the agent's DMs into the transcript rows by timestamp (display only — chips are not
+  // model context and never join a message sent to the model). Keys and order are stable across polls.
+  const chips =
+    props.agentId && props.dms && props.dms.length > 0
+      ? dmTranscriptChips(props.dms, { threadStartedAt: props.dmThreadStartedAt })
+      : [];
+  const rows = mergeDmTranscriptTimeline(state.items, chips);
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-agent-chat data-status={state.status}>
       {props.dmActivity || props.chatMenu ? (
@@ -398,11 +472,14 @@ export function AgentChatView(props: AgentChatViewProps) {
             </Button>
           </div>
         ) : null}
-        {state.items.map((item) => {
-          const footerFor = footers?.get(item.id);
+        {rows.map((row) => {
+          if (row.kind === 'dm') {
+            return <DmChatChip key={row.key} mail={row.mail} agentId={props.agentId ?? ''} onOpenDm={props.onOpenDm} />;
+          }
+          const footerFor = footers?.get(row.item.id);
           return (
-            <React.Fragment key={`${item.kind}:${item.id}`}>
-              <ItemView item={item} widgets={widgets} />
+            <React.Fragment key={row.key}>
+              <ItemView item={row.item} widgets={widgets} />
               {footerFor && props.assistantFooter?.(footerFor)}
             </React.Fragment>
           );
@@ -491,6 +568,23 @@ export function agentChatHref(agentKey: string): string {
 const CHAT_CARD_TOOLS = assistantWidgetRegistry.frontendTools();
 
 /**
+ * DM-2: the conversation cut-off time (ms) for transcript chips. The thread's own start time when
+ * the bootstrap answer carries it (see thread-bootstrap.ts), else the moment this client first saw
+ * the thread — snapshotted per thread identity, so it never wanders between renders and the clock
+ * is never called mid-render.
+ */
+const UNKNOWN_THREAD_START = new WeakMap<object, number>();
+function threadStartMs(thread: { threadId: string; threadCreatedAt?: string }): number {
+  const known = thread.threadCreatedAt ? Date.parse(thread.threadCreatedAt) : Number.NaN;
+  if (!Number.isNaN(known)) return known;
+  const seen = UNKNOWN_THREAD_START.get(thread);
+  if (seen !== undefined) return seen;
+  const now = Date.now();
+  UNKNOWN_THREAD_START.set(thread, now);
+  return now;
+}
+
+/**
  * Chat with one agent. `agentId` is used for the API calls; `agentKey` (the agent's url key, default
  * `agentId`) for the page link, so the address bar keeps the canonical `/assistant/<url key>`.
  * ASYNC-0: the agent's one conversation (its pinned active thread, Slice B). Clear chat (⋯ menu)
@@ -563,8 +657,28 @@ export function AgentChat({
       }
     });
   };
+  // DM-2: one client-side read of the agent's DMs (polled while the page is visible) feeds the
+  // transcript chips, the strip and the conversation modal. Display only — sendToAgent is unchanged.
+  const dms = useAgentDms(companyId, agentId);
+  const dmConversations = React.useMemo(() => buildConversations(dms.mails, agentId), [dms.mails, agentId]);
+  const dmSummary = React.useMemo(() => dmStripSummary(dmConversations), [dmConversations]);
+  // Start time (ms) of this conversation (the chips cut-off): the true thread start when the API
+  // carries it, else the client-side time this chat was opened (snapshotted once per thread by
+  // `threadStartMs`). Clear chat begins a new conversation (chips after that only); the modal
+  // keeps showing the full durable history either way.
+  const dmThreadStartedAt = chat.thread ? threadStartMs(chat.thread) : null;
+  // The conversation modal (opened from the strip or a chip). `key` remounts it per open, so the
+  // selection and the read-marks (client-only, no server unread state) start fresh each time.
+  const [dmModal, setDmModal] = React.useState<{ open: boolean; seq: number; peerId?: string; messageId?: string }>({
+    open: false,
+    seq: 0,
+  });
+  const openDm = (peerId?: string, messageId?: string) => {
+    setDmModal((s) => ({ open: true, seq: s.seq + 1, ...(peerId ? { peerId } : {}), ...(messageId ? { messageId } : {}) }));
+  };
   return (
-    <AgentChatView
+    <>
+      <AgentChatView
       phase={chat.phase}
       setupError={chat.setupError}
       state={chat.state}
@@ -591,7 +705,11 @@ export function AgentChat({
       }
       contextChip={context}
       onRemoveContext={() => setContext(null)}
-      dmActivity={companyId ? <AgentDmActivity companyId={companyId} agentId={agentId} /> : undefined}
+      dmActivity={companyId ? <DmActivityStripView summary={dmSummary} onOpen={() => openDm()} /> : undefined}
+      dms={dms.mails}
+      agentId={agentId}
+      dmThreadStartedAt={dmThreadStartedAt}
+      onOpenDm={openDm}
       chatMenu={
         <AgentChatMenu
           agentUrlKey={linkKey}
@@ -631,6 +749,18 @@ export function AgentChat({
           </div>
         ) : undefined
       }
-    />
+      />
+      {dmConversations.length > 0 ? (
+        <DmConversationModal
+          key={`dm-modal-${dmModal.seq}`}
+          open={dmModal.open}
+          onOpenChange={(open) => setDmModal((s) => (s.open === open ? s : { ...s, open }))}
+          agentId={agentId}
+          mails={dms.mails}
+          error={dms.error}
+          focus={dmModal.peerId || dmModal.messageId ? { peerId: dmModal.peerId, messageId: dmModal.messageId } : null}
+        />
+      ) : null}
+    </>
   );
 }

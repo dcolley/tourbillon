@@ -1,15 +1,16 @@
 'use client';
 
 /**
- * DM-1: DM activity strip at the top of the assistant agent chat. Hidden until the agent has a DM
- * (also when DMs cannot be read); otherwise one quiet line, e.g. "3 DMs with CEO, CTO +1", that
- * opens the read-only peek (dm-peek-dialog.tsx).
+ * DM-1: the DM activity strip above the assistant agent chat. Hidden until the agent has DMs
+ * (also when DMs could not be read); otherwise one quiet line, e.g. "3 DMs with CEO, CTO +1".
+ *
+ * DM-2: the strip only opens the conversation modal (dm-peek-dialog.tsx). It is a pure view now —
+ * AgentChat owns the DM read and the modal, so the strip, the transcript chips and the modal all
+ * read from the same client-side list.
  */
 import * as React from 'react';
 import { MessagesSquare } from 'lucide-react';
-import { dmStripLabel, dmStripSummary, groupDmsByPeer, type AgentDm, type DmStripSummary } from '@/lib/assistant/agent-dms';
-import { DmPeekDialog } from './dm-peek-dialog';
-import { useAgentDms } from './use-agent-dms';
+import { dmStripLabel, type DmStripSummary } from '@/lib/assistant/agent-dms';
 
 /** Stateless strip; null (nothing rendered) without a summary. */
 export function DmActivityStripView({ summary, onOpen }: { summary: DmStripSummary | null; onOpen: () => void }) {
@@ -29,23 +30,4 @@ export function DmActivityStripView({ summary, onOpen }: { summary: DmStripSumma
       </button>
     </div>
   );
-}
-
-/** Strip + peek for already-loaded DMs (stateless apart from the dialog's open state). */
-export function DmActivity({ agentId, mails, error }: { agentId: string; mails: readonly AgentDm[]; error?: string | null }) {
-  const [open, setOpen] = React.useState(false);
-  const summary = dmStripSummary(groupDmsByPeer(mails, agentId));
-  if (!summary) return null;
-  return (
-    <>
-      <DmActivityStripView summary={summary} onOpen={() => setOpen(true)} />
-      <DmPeekDialog open={open} onOpenChange={setOpen} agentId={agentId} mails={mails} error={error} />
-    </>
-  );
-}
-
-/** The agent's DMs through the board session, polled while the page is visible. */
-export function AgentDmActivity({ companyId, agentId }: { companyId: string; agentId: string }) {
-  const dms = useAgentDms(companyId, agentId);
-  return <DmActivity agentId={agentId} mails={dms.mails} error={dms.error} />;
 }

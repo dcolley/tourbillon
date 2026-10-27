@@ -46,10 +46,14 @@ export type ToolCallStatus =
   /** Approved after the run had ended: this client is not connected to the continued run, so no result will arrive here. */
   | 'detached';
 
+/**
+ * DM-2: `at` is a client-side display timestamp (a reloaded message's stored `createdAt`). It only
+ * positions DM chips in the transcript; it never joins a message sent to the model.
+ */
 export type AgentChatItem =
-  | { kind: 'user'; id: string; text: string; mode: 'run' | 'followUp' | 'steer'; delivery: UserMessageDelivery }
-  | { kind: 'assistant'; id: string; text: string; streaming: boolean }
-  | { kind: 'reasoning'; id: string; text: string; streaming: boolean }
+  | { kind: 'user'; id: string; text: string; mode: 'run' | 'followUp' | 'steer'; delivery: UserMessageDelivery; at?: string }
+  | { kind: 'assistant'; id: string; text: string; streaming: boolean; at?: string }
+  | { kind: 'reasoning'; id: string; text: string; streaming: boolean; at?: string }
   | {
       kind: 'tool';
       id: string;
@@ -58,6 +62,7 @@ export type AgentChatItem =
       status: ToolCallStatus;
       result?: string;
       parentMessageId?: string;
+      at?: string;
       /**
        * WID-3: a widget answer or dismissal sent from this client for this call: `sending` while the
        * request is out, `sent` once the endpoint resumed the run (the card stays locked until the tool
