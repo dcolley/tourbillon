@@ -128,10 +128,13 @@ export const askQuestionSpec: WidgetSpec<AskQuestionProps, AskQuestionAnswer> = 
 };
 
 // ---------------------------------------------------------------------------------------------
-// askChoice: single select from labelled options.
+// askChoice: single or multi select from labelled options (WID-MS: v2 adds multiSelect).
 // ---------------------------------------------------------------------------------------------
 
 const optionId = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
+
+/** WID-MS: `recommended` is one option id, or (when `multiSelect`) a list of option ids. */
+const recommendedIds = z.union([optionId, z.array(optionId).min(1).max(10)]);
 
 export const askChoiceProps = z
   .strictObject({
@@ -147,17 +150,27 @@ export const askChoiceProps = z
       )
       .min(2)
       .max(10),
-    recommended: optionId.optional().describe('Id of the option you recommend (highlighted, not preselected).'),
-    defaultOption: optionId.optional().describe('Id of the option preselected for the user.'),
+    recommended: recommendedIds.optional().describe('Id(s) of the options you recommend (highlighted, not preselected). A list when multiSelect.'),
+    defaultOption: optionId.optional().describe('Single-select only: id of the option preselected for the user.'),
+    multiSelect: z.boolean().optional().describe('Let the user tick any number of options in this one card (the answer is then the list of chosen ids). For "pick any/all that apply".'),
+    minSelected: z.number().int().min(0).optional().describe('multiSelect only: fewest options the user must tick (default 1).'),
+    maxSelected: z.number().int().min(1).max(10).optional().describe('multiSelect only: most options the user may tick (default: all options).'),
   })
   .superRefine((p, ctx) => {
     const ids = p.options.map((o) => o.id);
     if (new Set(ids).size !== ids.length) ctx.addIssue({ code: 'custom', path: ['options'], message: 'duplicate_id' });
-    if (p.recommended !== undefined && !ids.includes(p.recommended)) {
-      ctx.addIssue({ code: 'custom', path: ['recommended'], message: 'not_an_option' });
+    const recommended = p.recommended === undefined ? [] : Array.isArray(p.recommended) ? p.recommended : [p.recommended];
+    for (const id of recommended) {
+      if (!ids.includes(id)) ctx.addIssue({ code: 'custom', path: ['recommended'], message: 'not_an_option' });
     }
     if (p.defaultOption !== undefined && !ids.includes(p.defaultOption)) {
       ctx.addIssue({ code: 'custom', path: ['defaultOption'], message: 'not_an_option' });
+    }
+    if (p.multiSelect === true) {
+      const max = p.maxSelected ?? ids.length;
+      const min = p.minSelected ?? 1;
+      if (min > max) ctx.addIssue({ code: 'custom', path: ['minSelected'], message: 'min_above_max' });
+      if (max > ids.length) ctx.addIssue({ code: 'custom', path: ['maxSelected'], message: 'max_above_options' });
     }
     refuseCredentialText(ctx, [
       [['question'], p.question, true],
@@ -166,34 +179,71 @@ export const askChoiceProps = z
   });
 export type AskChoiceProps = z.infer<typeof askChoiceProps>;
 
-export const askChoiceAnswer = z.strictObject({ choice: optionId });
+/** Single-select answers `{ choice }`; multi-select (WID-MS) answers `{ choices }` (unique option ids). */
+export const askChoiceAnswer = z.union([
+  z.strictObject({ choice: optionId }),
+  z.strictObject({ choices: z.array(optionId).max(10) }),
+]);
 export type AskChoiceAnswer = z.infer<typeof askChoiceAnswer>;
+
+/**
+ * WID-MS: checks a choice answer against the card's props. A single-select card takes exactly one
+ * offered option; a multi-select card takes a de-duplicated list of offered options, counted against
+ * `minSelected`/`maxSelected` (defaults 1 and all options).
+ */
+export function checkChoiceAnswer(props: AskChoiceProps, answer: AskChoiceAnswer): string[] {
+  const ids = props.options.map((o) => o.id);
+  if (props.multiSelect === true) {
+    if (!('choices' in answer)) return ['choices: invalid_type'];
+    const chosen = answer.choices;
+    const issues: string[] = [];
+    if (new Set(chosen).size !== chosen.length) issues.push('choices: duplicate_id');
+    if (chosen.some((id) => !ids.includes(id))) issues.push('choices: not_an_option');
+    const min = props.minSelected ?? 1;
+    const max = props.maxSelected ?? props.options.length;
+    if (chosen.length < min) issues.push('choices: too_few');
+    if (chosen.length > max) issues.push('choices: too_many');
+    return issues;
+  }
+  if ('choices' in answer) return ['choices: multi_only'];
+  return ids.includes(answer.choice) ? [] : ['choice: not_an_option'];
+}
 
 export const askChoiceSpec: WidgetSpec<AskChoiceProps, AskChoiceAnswer> = {
   name: 'askChoice',
-  version: 1,
+  version: 2,
   description:
-    'Ask the Board user to pick exactly one of 2 to 10 options in the chat and wait for the choice. ' +
-    'The answer is the chosen option id. Optionally mark one option as recommended or preselected.',
+    'Ask the Board user to pick one or more of 2 to 10 options in the chat and wait for the choice. ' +
+    'Single-select answers { choice }; set multiSelect: true for "pick any/all that apply" (answer { choices: [optionId, ...] }, ' +
+    'with optional minSelected/maxSelected bounds, minSelected: 0 allows an empty submit). ' +
+    'Never emulate multi-select with one single-select card or toggle per option - use multiSelect in one card. ' +
+    'Optionally mark options as recommended (highlighted, not preselected).',
   propsSchema: askChoiceProps,
   answerSchema: askChoiceAnswer,
   frontendTool: true,
-  checkAnswer: (props, answer) => (props.options.some((o) => o.id === answer.choice) ? [] : ['choice: not_an_option']),
+  checkAnswer: checkChoiceAnswer,
 };
 
+/**
+ * WID-MS: the v2 rules registered under version 1 as well. Calls that pin `widgetVersion: 1` or omit
+ * it (the default version is 1) must still resolve to a card; without this entry they would fall back.
+ */
+export const askChoiceSpecV1: WidgetSpec<AskChoiceProps, AskChoiceAnswer> = { ...askChoiceSpec, version: 1 };
+
 // ---------------------------------------------------------------------------------------------
-// askForm: several fields (text / number / select).
+// askForm: several fields (text / number / select / multiSelect).
 // ---------------------------------------------------------------------------------------------
 
 export const FORM_MAX_FIELDS = 12;
 export const FORM_TEXT_MAX = 2000;
+export const FORM_MAX_OPTIONS = 20;
 
 const fieldName = z.string().regex(/^[a-z][A-Za-z0-9_]{0,39}$/);
 
 const formField = z.strictObject({
   name: fieldName.describe('Key of this value in the answer (camelCase).'),
   label: text(200),
-  type: z.enum(['text', 'number', 'select']),
+  type: z.enum(['text', 'number', 'select', 'multiSelect']),
   required: z.boolean().optional().describe('Default true.'),
   help: optionalText(300),
   placeholder: optionalText(200),
@@ -207,7 +257,9 @@ const formField = z.strictObject({
     .min(1)
     .max(20)
     .optional()
-    .describe('select only.'),
+    .describe('select or multiSelect only.'),
+  minSelected: z.number().int().min(0).optional().describe('multiSelect only: fewest options the user must tick (default 1).'),
+  maxSelected: z.number().int().min(1).max(20).optional().describe('multiSelect only: most options the user may tick (default: all options).'),
 });
 export type AskFormField = z.infer<typeof formField>;
 
@@ -231,7 +283,7 @@ export const askFormProps = z
         [at('placeholder'), f.placeholder, true],
         ...(f.options ?? []).map((o, j): [Array<string | number>, string, boolean] => [['fields', i, 'options', j, 'label'], o.label, false]),
       ]);
-      if (f.type === 'select') {
+      if (f.type === 'select' || f.type === 'multiSelect') {
         if (!f.options) ctx.addIssue({ code: 'custom', path: at('options'), message: 'required_for_select' });
         else if (new Set(f.options.map((o) => o.value)).size !== f.options.length) {
           ctx.addIssue({ code: 'custom', path: at('options'), message: 'duplicate_value' });
@@ -243,15 +295,28 @@ export const askFormProps = z
       if (f.type !== 'text' && (f.maxLength !== undefined || f.multiline !== undefined)) {
         ctx.addIssue({ code: 'custom', path: at('type'), message: 'text_only' });
       }
+      if (f.type !== 'multiSelect' && (f.minSelected !== undefined || f.maxSelected !== undefined)) {
+        ctx.addIssue({ code: 'custom', path: at('type'), message: 'multi_select_only' });
+      }
       if (f.min !== undefined && f.max !== undefined && f.min > f.max) {
         ctx.addIssue({ code: 'custom', path: at('min'), message: 'min_above_max' });
+      }
+      if (f.type === 'multiSelect' && f.options) {
+        const maxTicks = f.maxSelected ?? f.options.length;
+        if (f.minSelected !== undefined && f.minSelected > maxTicks) {
+          ctx.addIssue({ code: 'custom', path: at('minSelected'), message: 'min_above_max' });
+        }
+        if (f.options.length > 0 && maxTicks > f.options.length) {
+          ctx.addIssue({ code: 'custom', path: at('maxSelected'), message: 'max_above_options' });
+        }
       }
     });
   });
 export type AskFormProps = z.infer<typeof askFormProps>;
 
+/** WID-MS: a multiSelect field's value is a `string[]` of option values (unique, and all offered). */
 export const askFormAnswer = z.strictObject({
-  values: z.record(fieldName, z.union([z.string().max(FORM_TEXT_MAX), z.number(), z.null()])),
+  values: z.record(fieldName, z.union([z.string().max(FORM_TEXT_MAX), z.number(), z.array(optionId).max(FORM_MAX_OPTIONS), z.null()])),
 });
 export type AskFormAnswer = z.infer<typeof askFormAnswer>;
 export type AskFormValue = AskFormAnswer['values'][string];
@@ -260,7 +325,8 @@ export type AskFormValue = AskFormAnswer['values'][string];
 export function formFieldIssues(field: AskFormField, value: AskFormValue | undefined): string[] {
   const at = `values.${field.name}`;
   const required = field.required !== false;
-  const empty = value === undefined || value === null || (typeof value === 'string' && value.trim() === '');
+  const empty =
+    value === undefined || value === null || (typeof value === 'string' && value.trim() === '') || (Array.isArray(value) && value.length === 0);
   if (empty) return required ? [`${at}: required`] : [];
   switch (field.type) {
     case 'text':
@@ -276,6 +342,17 @@ export function formFieldIssues(field: AskFormField, value: AskFormValue | undef
     case 'select':
       if (typeof value !== 'string') return [`${at}: invalid_type`];
       return field.options?.some((o) => o.value === value) ? [] : [`${at}: not_an_option`];
+    case 'multiSelect': {
+      if (!Array.isArray(value)) return [`${at}: invalid_type`];
+      const offered = field.options?.map((o) => o.value) ?? [];
+      if (new Set(value).size !== value.length) return [`${at}: duplicate_value`];
+      if (value.some((v) => !offered.includes(v))) return [`${at}: not_an_option`];
+      const min = field.minSelected ?? 1;
+      const max = field.maxSelected ?? offered.length;
+      if (value.length < min) return [`${at}: too_few`];
+      if (value.length > max) return [`${at}: too_many`];
+      return [];
+    }
   }
 }
 
@@ -291,8 +368,9 @@ export const askFormSpec: WidgetSpec<AskFormProps, AskFormAnswer> = {
   name: 'askForm',
   version: 1,
   description:
-    'Ask the Board user to fill in a short form (1 to 12 fields: text, number or select) in the chat and wait for ' +
-    'the values. The answer is { values: { <field name>: value } }; an empty optional field is null. ' +
+    'Ask the Board user to fill in a short form (1 to 12 fields: text, number, select or multiSelect) in the chat and wait for ' +
+    'the values. The answer is { values: { <field name>: value } }; an empty optional field is null, and a multiSelect field ' +
+    'answers with a string[] of option values (use multiSelect for "pick any/all that apply" - never a toggle or single-select per option). ' +
     'Never ask for passwords, tokens, keys or other secrets.',
   propsSchema: askFormProps,
   answerSchema: askFormAnswer,
@@ -342,5 +420,5 @@ export const askConfirmSpec: WidgetSpec<AskConfirmProps, AskConfirmAnswer> = {
   },
 };
 
-/** The WID-3 chat cards, in registry order. */
-export const chatCardSpecs = [askQuestionSpec, askChoiceSpec, askFormSpec, askConfirmSpec] as const;
+/** The WID-3 chat cards, in registry order. WID-MS: askChoice is registered at v1 and v2 (identical rules; v2 is what the model is offered). */
+export const chatCardSpecs = [askQuestionSpec, askChoiceSpecV1, askChoiceSpec, askFormSpec, askConfirmSpec] as const;
