@@ -25,10 +25,31 @@ export interface AguiThreadRef {
   created: boolean;
   /** Slice B: the agent's OM mode, when the server sent it (not on a by-id reopen). */
   observationalMemory?: AssistantOmSummary;
+  /**
+   * DM-2: when the answer carries it, the time this conversation started (ISO). Client-side
+   * only: it is the cut-off for showing DM chips in the transcript (see agent-chat.tsx).
+   */
+  threadCreatedAt?: string;
 }
 
 function withOm(ref: AguiThreadRef, body: Record<string, unknown>): AguiThreadRef {
-  return isAssistantOmSummary(body.observationalMemory) ? { ...ref, observationalMemory: body.observationalMemory } : ref;
+  return isAssistantOmSummary(body.observationalMemory)
+    ? { ...ref, ...threadStartOf(body, ref.threadId), observationalMemory: body.observationalMemory }
+    : { ...ref, ...threadStartOf(body, ref.threadId) };
+}
+
+/** DM-2: the start time of `threadId` as the answer carries it (a `thread` object or the `threads` list). */
+function threadStartOf(body: Record<string, unknown>, threadId: string): { threadCreatedAt?: string } {
+  const one = body.thread as { id?: unknown; createdAt?: unknown } | undefined;
+  if (one && one.id === threadId && typeof one.createdAt === 'string' && one.createdAt) {
+    return { threadCreatedAt: one.createdAt };
+  }
+  if (Array.isArray(body.threads)) {
+    for (const t of body.threads as { id?: unknown; createdAt?: unknown }[]) {
+      if (t && t.id === threadId && typeof t.createdAt === 'string' && t.createdAt) return { threadCreatedAt: t.createdAt };
+    }
+  }
+  return {};
 }
 
 export class AguiThreadBootstrapError extends Error {
@@ -81,8 +102,9 @@ export async function openAguiThread(opts: {
     if (!isUsableAguiId(opts.threadId)) throw new AguiThreadBootstrapError('Thread not found', 404);
     const res = await f(`${base}/${encodeURIComponent(opts.threadId)}`, { method: 'GET', signal: opts.signal });
     if (!res.ok) throw await failure(res, 'Could not open this chat');
-    if (threadIdOf(await readJson(res)) !== opts.threadId) throw new AguiThreadBootstrapError('Could not open this chat');
-    return { threadId: opts.threadId, created: false };
+    const body = await readJson(res);
+    if (threadIdOf(body) !== opts.threadId) throw new AguiThreadBootstrapError('Could not open this chat', 404);
+    return { threadId: opts.threadId, created: false, ...threadStartOf(body, opts.threadId) };
   }
 
   const listRes = await f(base, { method: 'GET', signal: opts.signal });

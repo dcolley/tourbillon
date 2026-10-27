@@ -5,6 +5,7 @@ import {
   applyRunEvent,
   endRun,
   initialAgentChatState,
+  liveItemAt,
   markDroppedFollowUps,
   mergeHistory,
   mergeHistoryPage,
@@ -15,6 +16,10 @@ import {
   type AgentChatState,
   type UserMessageDelivery,
 } from './chat-state';
+
+const T1 = Date.parse('2026-10-25T10:00:00Z');
+const T2 = Date.parse('2026-10-25T10:00:05Z');
+const T3 = Date.parse('2026-10-25T10:00:09Z');
 
 const user = (id: string, mode: 'run' | 'followUp' | 'steer', delivery: UserMessageDelivery): AgentChatItem => ({
   kind: 'user',
@@ -45,6 +50,23 @@ describe('AGUI-1b chat state', () => {
     assert.deepEqual(deliveries(s), ['delivered']);
   });
 
+  it('DM-2 (B1): live items are stamped at creation (event timestamp, else client clock); a replayed START keeps the stamp', () => {
+    assert.equal(liveItemAt({ timestamp: T1 }), new Date(T1).toISOString());
+    assert.equal(liveItemAt({}, () => T2), new Date(T2).toISOString());
+    assert.equal(liveItemAt({ timestamp: 'x' }, () => T3), new Date(T3).toISOString());
+    assert.equal(liveItemAt(undefined, () => T3), new Date(T3).toISOString());
+    const before = Date.now();
+    const s = apply(withItems([]), { type: 'TEXT_MESSAGE_START', messageId: 'a' }, { type: 'TOOL_CALL_START', toolCallId: 't', toolCallName: 'x' });
+    for (const it of s.items) {
+      const t = Date.parse(it.at ?? '');
+      assert.ok(t >= before && t <= Date.now(), `${it.kind} stamped from the client clock`);
+    }
+    // STREAM-1 replay: a re-attached run streams the message again from its START; its place in time stays.
+    const stamped = apply(withItems([]), { type: 'TEXT_MESSAGE_START', messageId: 'a', timestamp: T1 });
+    const replayed = apply(stamped, { type: 'TEXT_MESSAGE_START', messageId: 'a', timestamp: T3 });
+    assert.equal(replayed.items[0].at, new Date(T1).toISOString());
+  });
+
   it('RUN_STARTED keeps a pending stop', () => {
     assert.equal(apply(withItems([], { status: 'stopping' }), { type: 'RUN_STARTED' }).status, 'stopping');
   });
@@ -52,26 +74,27 @@ describe('AGUI-1b chat state', () => {
   it('text and reasoning accumulate per message id; content without a start still shows', () => {
     const s = apply(
       withItems([]),
-      { type: 'REASONING_MESSAGE_START', messageId: 'r' },
-      { type: 'REASONING_MESSAGE_CONTENT', messageId: 'r', delta: 'think' },
+      { type: 'REASONING_MESSAGE_START', messageId: 'r', timestamp: T1 },
+      { type: 'REASONING_MESSAGE_CONTENT', messageId: 'r', delta: 'think', timestamp: T2 },
       { type: 'REASONING_MESSAGE_END', messageId: 'r' },
-      { type: 'TEXT_MESSAGE_CONTENT', messageId: 'a', delta: 'Hi' },
-      { type: 'TEXT_MESSAGE_CONTENT', messageId: 'a', delta: ' you' },
+      { type: 'TEXT_MESSAGE_CONTENT', messageId: 'a', delta: 'Hi', timestamp: T2 },
+      { type: 'TEXT_MESSAGE_CONTENT', messageId: 'a', delta: ' you', timestamp: T3 },
     );
+    // DM-2 (B1): each live item is stamped once, when it is created (START, or first content).
     assert.deepEqual(s.items, [
-      { kind: 'reasoning', id: 'r', text: 'think', streaming: false },
-      { kind: 'assistant', id: 'a', text: 'Hi you', streaming: true },
+      { kind: 'reasoning', id: 'r', text: 'think', streaming: false, at: new Date(T1).toISOString() },
+      { kind: 'assistant', id: 'a', text: 'Hi you', streaming: true, at: new Date(T2).toISOString() },
     ]);
   });
 
   it('tool calls: args stream, end → running, result → done / error / denied, pending decision cleared', () => {
     let s = apply(
       withItems([]),
-      { type: 'TOOL_CALL_START', toolCallId: 't', toolCallName: 'echo', parentMessageId: 'm' },
+      { type: 'TOOL_CALL_START', toolCallId: 't', toolCallName: 'echo', parentMessageId: 'm', timestamp: T1 },
       { type: 'TOOL_CALL_ARGS', toolCallId: 't', delta: '{"a":' },
       { type: 'TOOL_CALL_ARGS', toolCallId: 't', delta: '1}' },
     );
-    assert.deepEqual(s.items[0], { kind: 'tool', id: 't', name: 'echo', argsText: '{"a":1}', status: 'streaming_args', parentMessageId: 'm' });
+    assert.deepEqual(s.items[0], { kind: 'tool', id: 't', name: 'echo', argsText: '{"a":1}', status: 'streaming_args', parentMessageId: 'm', at: new Date(T1).toISOString() });
     s = apply(s, { type: 'TOOL_CALL_END', toolCallId: 't' });
     assert.equal((s.items[0] as { status: string }).status, 'running');
     s = apply(s, { type: 'CUSTOM', name: 'tourbillon.tool_approval_required', value: { toolCallId: 't', toolName: 'echo', args: { a: 1 } } });

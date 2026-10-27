@@ -46,10 +46,14 @@ export type ToolCallStatus =
   /** Approved after the run had ended: this client is not connected to the continued run, so no result will arrive here. */
   | 'detached';
 
+/**
+ * DM-2: `at` is a client-side display timestamp (a reloaded message's stored `createdAt`). It only
+ * positions DM chips in the transcript; it never joins a message sent to the model.
+ */
 export type AgentChatItem =
-  | { kind: 'user'; id: string; text: string; mode: 'run' | 'followUp' | 'steer'; delivery: UserMessageDelivery }
-  | { kind: 'assistant'; id: string; text: string; streaming: boolean }
-  | { kind: 'reasoning'; id: string; text: string; streaming: boolean }
+  | { kind: 'user'; id: string; text: string; mode: 'run' | 'followUp' | 'steer'; delivery: UserMessageDelivery; at?: string }
+  | { kind: 'assistant'; id: string; text: string; streaming: boolean; at?: string }
+  | { kind: 'reasoning'; id: string; text: string; streaming: boolean; at?: string }
   | {
       kind: 'tool';
       id: string;
@@ -58,6 +62,7 @@ export type AgentChatItem =
       status: ToolCallStatus;
       result?: string;
       parentMessageId?: string;
+      at?: string;
       /**
        * WID-3: a widget answer or dismissal sent from this client for this call: `sending` while the
        * request is out, `sent` once the endpoint resumed the run (the card stays locked until the tool
@@ -188,6 +193,17 @@ function str(v: unknown): string | undefined {
   return typeof v === 'string' && v.length > 0 ? v : undefined;
 }
 
+/**
+ * DM-2 (B1): the display timestamp of a live item, stamped once when it is created in this page
+ * session: the run event's own `timestamp` (epoch ms) when it has one, else the client clock. Lets
+ * DM chips interleave with the live tail (mergeDmTranscriptTimeline) instead of timing it as `now`.
+ */
+export function liveItemAt(event?: Readonly<Record<string, unknown>> | null, now: () => number = Date.now): string {
+  const ts = event?.timestamp;
+  const ms = typeof ts === 'number' && Number.isFinite(ts) && ts > 0 ? ts : now();
+  return new Date(ms).toISOString();
+}
+
 function updateItem(
   state: AgentChatState,
   id: string,
@@ -217,7 +233,12 @@ function restartItem(state: AgentChatState, item: AgentChatItem): AgentChatState
   if (i < 0) return { ...state, items: [...state.items, item] };
   const items = state.items.slice();
   const prev = items[i] as AgentChatItem & { widgetSend?: unknown };
-  items[i] = { ...item, ...(prev.kind === 'tool' && prev.widgetSend ? { widgetSend: prev.widgetSend } : {}) } as AgentChatItem;
+  items[i] = {
+    ...item,
+    // DM-2 (B1): stamped once; a replayed START keeps the item's original place in time.
+    ...(prev.at ? { at: prev.at } : {}),
+    ...(prev.kind === 'tool' && prev.widgetSend ? { widgetSend: prev.widgetSend } : {}),
+  } as AgentChatItem;
   return { ...state, items };
 }
 
@@ -304,13 +325,13 @@ export function applyRunEvent(state: AgentChatState, event: AguiClientEvent): Ag
       // STREAM-1: a START for an item already shown (a re-attached run replays from RUN_STARTED, so
       // the message streams again from its start) restarts it instead of appending a second copy.
       const id = str(event.messageId);
-      return id ? restartItem(state, { kind: 'assistant', id, text: '', streaming: true }) : state;
+      return id ? restartItem(state, { kind: 'assistant', id, text: '', streaming: true, at: liveItemAt(event) }) : state;
     }
     case 'TEXT_MESSAGE_CONTENT': {
       const id = str(event.messageId);
       const delta = typeof event.delta === 'string' ? event.delta : '';
       if (!id || !delta) return state;
-      const s = upsertItem(state, { kind: 'assistant', id, text: '', streaming: true });
+      const s = upsertItem(state, { kind: 'assistant', id, text: '', streaming: true, at: liveItemAt(event) });
       return updateItem(s, id, 'assistant', (it) => ({ ...it, text: it.text + delta }));
     }
     case 'TEXT_MESSAGE_END': {
@@ -319,13 +340,13 @@ export function applyRunEvent(state: AgentChatState, event: AguiClientEvent): Ag
     }
     case 'REASONING_MESSAGE_START': {
       const id = str(event.messageId);
-      return id ? restartItem(state, { kind: 'reasoning', id, text: '', streaming: true }) : state;
+      return id ? restartItem(state, { kind: 'reasoning', id, text: '', streaming: true, at: liveItemAt(event) }) : state;
     }
     case 'REASONING_MESSAGE_CONTENT': {
       const id = str(event.messageId);
       const delta = typeof event.delta === 'string' ? event.delta : '';
       if (!id || !delta) return state;
-      const s = upsertItem(state, { kind: 'reasoning', id, text: '', streaming: true });
+      const s = upsertItem(state, { kind: 'reasoning', id, text: '', streaming: true, at: liveItemAt(event) });
       return updateItem(s, id, 'reasoning', (it) => ({ ...it, text: it.text + delta }));
     }
     case 'REASONING_MESSAGE_END': {
@@ -343,6 +364,7 @@ export function applyRunEvent(state: AgentChatState, event: AguiClientEvent): Ag
         argsText: '',
         status: 'streaming_args',
         ...(parentMessageId ? { parentMessageId } : {}),
+        at: liveItemAt(event),
       });
     }
     case 'TOOL_CALL_ARGS': {

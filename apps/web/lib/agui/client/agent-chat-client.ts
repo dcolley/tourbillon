@@ -44,6 +44,7 @@ import {
   applyRunEvent,
   endRun,
   initialAgentChatState,
+  liveItemAt,
   markDroppedFollowUps,
   mergeHistoryPage,
   parkedWidgetFromBody,
@@ -232,7 +233,7 @@ export class AgentChatClient {
       ...s,
       status: 'starting',
       error: null,
-      items: [...s.items, { kind: 'user', id: itemId, text: message, mode: 'run', delivery: 'sending' }],
+      items: [...s.items, { kind: 'user', id: itemId, text: message, mode: 'run', delivery: 'sending', at: liveItemAt() }],
     }));
     const start = (async (): Promise<AgentChatResult> => {
       try {
@@ -664,7 +665,7 @@ export class AgentChatClient {
       const mode = action === 'steer' ? 'steer' : 'followUp';
       this.update((s) => ({
         ...s,
-        items: [...s.items, { kind: 'user', id: itemId, text: message, mode, delivery: 'sending' }],
+        items: [...s.items, { kind: 'user', id: itemId, text: message, mode, delivery: 'sending', at: liveItemAt() }],
       }));
     }
     let decision: Decision;

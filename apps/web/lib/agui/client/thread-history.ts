@@ -151,27 +151,32 @@ const isUserTurn = (m: StoredThreadMessage) => m.role === 'user' || m.role === '
  * Persisted thread messages (oldest first) → assistant chat items: user turns (dashboard context block
  * removed), assistant text, reasoning and tool calls. System / tool-role messages are not shown.
  * A tool call stored twice (call, then result) keeps one item with the latest state.
+ *
+ * DM-2: each item carries the message's `createdAt` as a display-only `at` (see chat-state.ts), so
+ * the chat can position DM chips around it in the transcript.
  */
 export function chatItemsFromStoredMessages(messages: readonly StoredThreadMessage[]): AgentChatItem[] {
   const items: AgentChatItem[] = [];
   const seen = new Map<string, number>();
-  const push = (item: AgentChatItem) => {
+  const push = (item: AgentChatItem, at: string | undefined) => {
     const key = `${item.kind}\u0000${item.id}`;
-    const at = seen.get(key);
-    if (at === undefined) {
+    const stamped: AgentChatItem =
+      at !== undefined && !Number.isNaN(Date.parse(at)) ? { ...item, at } : item;
+    const at2 = seen.get(key);
+    if (at2 === undefined) {
       seen.set(key, items.length);
-      items.push(item);
-    } else if (item.kind === 'tool' && (item.status === 'done' || (items[at] as { status?: string }).status !== 'done')) {
-      items[at] = item;
+      items.push(stamped);
+    } else if (stamped.kind === 'tool' && (stamped.status === 'done' || (items[at2] as { status?: string }).status !== 'done')) {
+      items[at2] = stamped;
     }
   };
   for (const message of messages) {
     if (!message || typeof message.id !== 'string') continue;
     if (isUserTurn(message)) {
       const text = stripDashboardContext(userText(message));
-      if (text.trim()) push({ kind: 'user', id: message.id, text, mode: 'run', delivery: 'delivered' });
+      if (text.trim()) push({ kind: 'user', id: message.id, text, mode: 'run', delivery: 'delivered' }, message.createdAt);
     } else if (message.role === 'assistant') {
-      for (const item of assistantItems(message)) push(item);
+      for (const item of assistantItems(message)) push(item, message.createdAt);
     }
   }
   return items;
