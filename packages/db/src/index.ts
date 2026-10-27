@@ -9,3 +9,5 @@ export * from './checkout-lock';
 export * from './checkout-activity';
 export * from './heartbeat-run-reconcile';
 export * from './observability-queries';
+
+export * from './chat-task-queries';

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
+import { resolveChatRequestUser } from '@/lib/chat/request-user';
 import {
   getOrCreateChatController,
   createChatRequestContext,
@@ -32,7 +33,10 @@ export async function POST(
       resourceId,
       scope: sessionScope,
     });
-    const requestContext = createChatRequestContext(agent);
+    const requestContext = createChatRequestContext(agent, {
+      threadId: session.thread.getId(),
+      requestingUser: await resolveChatRequestUser(req.headers),
+    });
     session.respondToToolApproval({
       toolCallId: body.toolCallId,
       decision: body.approved ? 'approve' : 'decline',
