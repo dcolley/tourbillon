@@ -69,6 +69,20 @@ function parseHitlyGateSettings(raw: unknown): HitlyGateSettings | undefined {
   };
 }
 
+function parseConciergeModelSettings(raw: unknown): CompanySettings['conciergeModel'] | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const record = raw as Record<string, unknown>;
+  const providerId =
+    typeof record.providerId === 'string' ? record.providerId.trim() || undefined : undefined;
+  const modelId =
+    typeof record.modelId === 'string' ? record.modelId.trim() || undefined : undefined;
+  if (!providerId && !modelId) return undefined;
+  return {
+    ...(providerId ? { providerId } : {}),
+    ...(modelId ? { modelId } : {}),
+  };
+}
+
 export function parseCompanySettings(raw: unknown): CompanySettings {
   if (!raw || typeof raw !== 'object') return {};
   const record = raw as Record<string, unknown>;
@@ -79,6 +93,7 @@ export function parseCompanySettings(raw: unknown): CompanySettings {
       typeof record.searxngApiKey === 'string' ? record.searxngApiKey.trim() || undefined : undefined,
     tavilyApiKey:
       typeof record.tavilyApiKey === 'string' ? record.tavilyApiKey.trim() || undefined : undefined,
+    conciergeModel: parseConciergeModelSettings(record.conciergeModel),
     observationalMemory: parseObservationalMemorySettings(record.observationalMemory),
     hitlyGate: parseHitlyGateSettings(record.hitlyGate),
     ...(typeof record.wakeContextV2 === 'boolean' ? { wakeContextV2: record.wakeContextV2 } : {}),
@@ -124,6 +139,16 @@ export function mergeCompanySettings(
       delete next.mcpCredentials;
     }
   }
+  if (patch.conciergeModel !== undefined) {
+    const cm = patch.conciergeModel;
+    const providerId = cm.providerId?.trim();
+    const modelId = cm.modelId?.trim();
+    if (providerId && modelId) {
+      next.conciergeModel = { providerId, modelId };
+    } else {
+      delete next.conciergeModel;
+    }
+  }
   if (patch.observationalMemory !== undefined) {
     const om = patch.observationalMemory;
     next.observationalMemory = {
@@ -167,6 +192,21 @@ export function isObservationalMemoryConfigured(
   companySettings?: CompanySettings | null,
 ): boolean {
   return resolveObservationalMemoryModel(companySettings) !== null;
+}
+
+/**
+ * CONCIERGE-MODEL-1: the configured company concierge pair (providerId + modelId), or null when
+ * unset/incomplete (blank or only one half set = unset). Availability of the provider is checked
+ * by the caller — this only reports what the company configured.
+ */
+export function resolveConciergeModel(
+  companySettings?: CompanySettings | null,
+): { providerId: string; modelId: string } | null {
+  const cm = companySettings?.conciergeModel;
+  const providerId = cm?.providerId?.trim();
+  const modelId = cm?.modelId?.trim();
+  if (!providerId || !modelId) return null;
+  return { providerId, modelId };
 }
 
 /** OM defaults (min 1024, min 8000, min 8000). */

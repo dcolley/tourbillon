@@ -233,12 +233,26 @@ export interface HitlyGateSettings {
   types?: string[];
 }
 
+/**
+ * CONCIERGE-MODEL-1: the company's chat-model pair (the "concierge" model).
+ * Set = Assistant free-chat (AgentController) runs use this pair for agents without an
+ * explicit model choice; unset (or provider unavailable) = each agent keeps its own model.
+ */
+export interface ConciergeModelSettings {
+  /** Registry provider id (llm_providers.id); chosen from the providers on for the company. */
+  providerId?: string;
+  /** Model id served by that provider. Never a pinned default baked into code. */
+  modelId?: string;
+}
+
 /** Company-level integration settings stored in companies.settings jsonb. */
 export interface CompanySettings {
   mcpCredentials?: Record<string, string>;
   searxngUrl?: string;
   searxngApiKey?: string;
   tavilyApiKey?: string;
+  /** CONCIERGE-MODEL-1: company-level concierge (front-desk) chat model; per-agent model when unset. */
+  conciergeModel?: ConciergeModelSettings;
   observationalMemory?: ObservationalMemorySettings;
   hitlyGate?: HitlyGateSettings;
   /** Wake compression (WC1–6): live-state header + compacted comments. Overrides the env default. */

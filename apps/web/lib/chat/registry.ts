@@ -1,4 +1,4 @@
-import { db, agents, companies, type Agent } from '@tourbillon/db';
+import { db, agents, companies, type Agent, type Company } from '@tourbillon/db';
 // Relative import avoids Next resolving `@tourbillon/mastra/chat` through the package
 // main barrel (`index.ts`), which previously pulled harness-event-writer into the web graph.
 import {
@@ -15,6 +15,7 @@ import {
 } from '../../../../packages/mastra/src/chat';
 import { parseCompanySettings, type AgentRuntimeConfig } from '@tourbillon/shared';
 import { and, eq } from 'drizzle-orm';
+import { hasExplicitChatModel, resolveChatModelOptions } from './concierge-model';
 import type { ChatRequestUser } from './request-user';
 import { getActiveCompany } from '@/lib/company';
 import { buildChatScopedApiKey, validateChatToken } from '@/lib/auth/chat-token';
@@ -161,26 +162,51 @@ export class ChatAgentError extends Error {
  * Controllers are long-lived across chat requests (not destroyed after each message).
  * CHAT-5: a thread's model choice (model, provider, effort) gets its own controller, keyed by
  * chatModelOverrideKey; a model-only override keeps the existing key.
+ * CONCIERGE-MODEL-1: without an explicit override the company's concierge model (when set and
+ * its provider is on) becomes the chat model. Resolved per request and part of the cache key,
+ * so changing or clearing the company setting (or switching the provider off) takes effect on
+ * the next request instead of reusing a controller built for the old model.
  */
 export async function getOrCreateChatController(
   agentRecord: Agent,
   opts?: ChatModelOverrideOptions,
 ): Promise<TourbillonChatController> {
   const cache = controllerCache();
-  const cacheKey = chatControllerCacheKey(agentRecord.id, chatModelOverrideKey(opts));
+
+  // CONCIERGE-MODEL-1: an explicit override (thread choice or `?modelId=`) wins; otherwise a
+  // configured company pair is applied when its provider is available (disabled or missing
+  // provider → the agent's own model, never a silent third provider or a refusal).
+  let company: Company | undefined;
+  let modelOpts = opts;
+  if (!hasExplicitChatModel(opts)) {
+    company = await db.query.companies.findFirst({
+      where: eq(companies.id, agentRecord.companyId),
+    });
+    modelOpts = await resolveChatModelOptions(
+      agentRecord.companyId,
+      parseCompanySettings(company?.settings),
+      opts,
+    );
+  }
+
+  const cacheKey = chatControllerCacheKey(agentRecord.id, chatModelOverrideKey(modelOpts));
   const existing = cache.get(cacheKey);
   if (existing) return existing;
 
   const pending = (async () => {
-    const company = await db.query.companies.findFirst({
-      where: eq(companies.id, agentRecord.companyId),
-    });
+    const companyRow =
+      company ??
+      (await db.query.companies.findFirst({
+        where: eq(companies.id, agentRecord.companyId),
+      }));
     const controller = await createChatController(agentRecord, {
-      allowedMcpServerIds: company?.allowedMcpServerIds ?? [],
-      companySettings: parseCompanySettings(company?.settings),
-      modelIdOverride: opts?.modelIdOverride,
-      ...(opts?.providerIdOverride ? { providerIdOverride: opts.providerIdOverride } : {}),
-      ...(opts?.reasoningLevelOverride ? { reasoningLevelOverride: opts.reasoningLevelOverride } : {}),
+      allowedMcpServerIds: companyRow?.allowedMcpServerIds ?? [],
+      companySettings: parseCompanySettings(companyRow?.settings),
+      modelIdOverride: modelOpts?.modelIdOverride,
+      ...(modelOpts?.providerIdOverride ? { providerIdOverride: modelOpts.providerIdOverride } : {}),
+      ...(modelOpts?.reasoningLevelOverride
+        ? { reasoningLevelOverride: modelOpts.reasoningLevelOverride }
+        : {}),
     });
     await controller.init();
     return controller;

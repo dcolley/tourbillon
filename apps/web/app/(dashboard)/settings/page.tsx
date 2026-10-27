@@ -5,6 +5,7 @@ import {
   updateCompanyIntegrations,
   updateCompanyObservationalMemory,
   updateCompanyHitlyGate,
+  updateCompanyConciergeModel,
   requireBoardSession,
 } from '@/lib/company';
 import { getVaultCredentialStatus } from '@/lib/vault';
@@ -17,10 +18,12 @@ import {
   isTavilyConfigured,
   isHitlyGateConfigured,
   resolveObservationalMemoryModel,
+  resolveConciergeModel,
 } from '@tourbillon/shared';
 import { LlmProvidersSettings } from '@/components/llm-providers-settings';
 import { PasswordInput } from '@/components/ui/password-input';
 import { ObservationalMemorySettingsForm } from '@/components/observational-memory-settings-form';
+import { ConciergeModelSettingsForm } from '@/components/concierge-model-settings-form';
 import { listLlmProvidersForCompanyPicker } from '@/lib/llm-providers';
 import { actionError, actionSuccess, type ActionResult } from '@/lib/action-result';
 import { CompanySettingsTabs } from './company-settings-tabs';
@@ -167,16 +170,48 @@ function isConfigured(value: string | undefined, envFallback?: string): boolean 
   return Boolean(value?.trim() || envFallback?.trim());
 }
 
+async function saveConciergeModel(
+  _prev: ActionResult | null,
+  formData: FormData,
+): Promise<ActionResult> {
+  'use server';
+  await requireBoardSession();
+
+  const company = await getActiveCompany();
+
+  try {
+    const providerId = ((formData.get('providerId') as string | null) ?? '').trim();
+    const modelId = ((formData.get('modelId') as string | null) ?? '').trim();
+    if (Boolean(providerId) !== Boolean(modelId)) {
+      return actionError('Pick both a provider and a model, or choose "No concierge model".');
+    }
+    await updateCompanyConciergeModel(company.id, {
+      providerId: providerId || undefined,
+      modelId: modelId || undefined,
+    });
+    return actionSuccess(
+      providerId
+        ? 'Concierge model saved.'
+        : 'Concierge model cleared — Assistant uses each agent\'s own model.',
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to save the concierge model.';
+    return actionError(message);
+  }
+}
+
 export default async function SettingsPage() {
   const company = await getActiveCompanyOrNull();
   if (!company) return null;
   const integrationSettings = parseCompanySettings(company.settings);
   const omResolved = resolveObservationalMemoryModel(integrationSettings);
   // PRV-1: pickers on this page offer the providers switched on for this company.
-  const providers = await listLlmProvidersForCompanyPicker(
-    company.id,
-    integrationSettings.observationalMemory?.providerId ?? null,
-  );
+  // The concierge picker also keeps its current (even switched-off) provider listed so an
+  // existing selection can be corrected instead of silently reverting to the agent model.
+  const providers = await listLlmProvidersForCompanyPicker(company.id, [
+    integrationSettings.observationalMemory?.providerId,
+    integrationSettings.conciergeModel?.providerId,
+  ]);
 
   const llm = resolveModelProviderConfig();
 
@@ -253,6 +288,13 @@ export default async function SettingsPage() {
             omResolved={omResolved}
             providers={providers}
             saveObservationalMemory={saveObservationalMemory}
+          />
+        }
+        concierge={
+          <ConciergeModelTab
+            integrationSettings={integrationSettings}
+            providers={providers}
+            saveConciergeModel={saveConciergeModel}
           />
         }
         runtime={<RuntimeTab envSettings={envSettings} />}
@@ -609,6 +651,46 @@ function ObservationalMemoryTab({
           initialTemperature={integrationSettings.observationalMemory?.temperature}
           providers={providers}
           saveAction={saveObservationalMemory}
+        />
+      </div>
+    </section>
+  );
+}
+
+function ConciergeModelTab({
+  integrationSettings,
+  providers,
+  saveConciergeModel,
+}: {
+  integrationSettings: any;
+  providers: any[];
+  saveConciergeModel: (prev: ActionResult | null, formData: FormData) => Promise<ActionResult>;
+}) {
+  const concierge = resolveConciergeModel(integrationSettings);
+  return (
+    <section className="space-y-4">
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="text-lg font-semibold">Concierge model</h2>
+        <span
+          className={`text-xs rounded px-2 py-0.5 ${concierge ? 'bg-green-100 text-green-800' : 'bg-muted text-muted-foreground'}`}
+        >
+          {concierge ? 'On' : 'Off'}
+        </span>
+      </div>
+      <p className="text-sm text-muted-foreground">
+        Picks the provider + model used for Assistant free-chat (AgentController) runs when the
+        thread carries no model choice and the request no `?modelId=` override. Snappy
+        front-desk models fit here (todos, lookups, progress Q&amp;A, delegation); heavy worker
+        agents keep their own models for assignments and wakes. Wake/heartbeat models and tool
+        providers are untouched. Off (default) means today&apos;s behaviour: the agent&apos;s
+        own model.
+      </p>
+      <div className="border rounded-lg p-4">
+        <ConciergeModelSettingsForm
+          initialProviderId={concierge?.providerId ?? ''}
+          initialModelId={concierge?.modelId ?? ''}
+          providers={providers}
+          saveAction={saveConciergeModel}
         />
       </div>
     </section>

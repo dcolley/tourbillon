@@ -4,13 +4,14 @@ import { useSearchParams, useRouter } from 'next/navigation';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import type { ReactNode } from 'react';
 
-type TabId = 'company' | 'integrations' | 'hitly' | 'om' | 'runtime' | 'providers';
+type TabId = 'company' | 'integrations' | 'hitly' | 'om' | 'concierge' | 'runtime' | 'providers';
 
 export function CompanySettingsTabs({
   company,
   integrations,
   hitly,
   om,
+  concierge,
   runtime,
   providers,
 }: {
@@ -18,6 +19,7 @@ export function CompanySettingsTabs({
   integrations: ReactNode;
   hitly: ReactNode;
   om: ReactNode;
+  concierge: ReactNode;
   runtime: ReactNode;
   providers: ReactNode;
 }) {
@@ -38,6 +40,7 @@ export function CompanySettingsTabs({
         <TabsTrigger value="integrations">Integrations</TabsTrigger>
         <TabsTrigger value="hitly">HITLy</TabsTrigger>
         <TabsTrigger value="om">Observational Memory</TabsTrigger>
+        <TabsTrigger value="concierge">Concierge</TabsTrigger>
         <TabsTrigger value="runtime">Runtime</TabsTrigger>
         <TabsTrigger value="providers">Providers</TabsTrigger>
       </TabsList>
@@ -52,6 +55,9 @@ export function CompanySettingsTabs({
       </TabsContent>
       <TabsContent value="om" className="mt-6 space-y-4">
         {om}
+      </TabsContent>
+      <TabsContent value="concierge" className="mt-6 space-y-4">
+        {concierge}
       </TabsContent>
       <TabsContent value="runtime" className="mt-6 space-y-4">
         {runtime}

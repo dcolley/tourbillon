@@ -3,6 +3,7 @@ import { db, companies, type Company } from '@tourbillon/db';
 import { ensureCompanyWorkspace, mergeCompanySettings, parseCompanySettings, type CompanySettings } from '@tourbillon/shared';
 import { asc, eq } from 'drizzle-orm';
 import { deriveIssuePrefix, slugifyCompanySlug } from './company-utils';
+import { isThreadProviderAvailable } from './chat/thread-model';
 import { BOARD_SESSION_COOKIE, hasAgentToken, verifyBoardSessionToken } from './board-auth';
 
 export const ACTIVE_COMPANY_COOKIE = 'active_company_id';
@@ -257,6 +258,48 @@ export async function updateCompanyIntegrations(
   }
 
   const settings = mergeCompanySettings(company.settings, patch);
+
+  const [updated] = await db
+    .update(companies)
+    .set({ settings, updatedAt: new Date() })
+    .where(eq(companies.id, companyId))
+    .returning();
+
+  if (!updated) throw new Error('Company not found.');
+  return updated;
+}
+
+/**
+ * CONCIERGE-MODEL-1: set or clear the company concierge (front-desk) model pair.
+ * Empty providerId/modelId clears it — Assistant then falls back to each agent's own model.
+ * A pair may only be stored while the provider exists and is on for the company: a disabled or
+ * missing provider falls back to the agent model at runtime (never a refusal), so storing that
+ * pair would be dead config and is refused here instead.
+ */
+export async function updateCompanyConciergeModel(
+  companyId: string,
+  input: { providerId?: string; modelId?: string },
+): Promise<Company> {
+  const company = await db.query.companies.findFirst({ where: eq(companies.id, companyId) });
+  if (!company) throw new Error('Company not found.');
+
+  const providerId = input.providerId?.trim();
+  const modelId = input.modelId?.trim();
+
+  if (providerId && !modelId) {
+    throw new Error('Model ID is required when a concierge provider is chosen.');
+  }
+  if (modelId && !providerId) {
+    throw new Error('Provider is required when a concierge model ID is set.');
+  }
+
+  if (providerId && modelId && !(await isThreadProviderAvailable(companyId, providerId))) {
+    throw new Error('Provider is not available for this company (it is switched off or does not exist).');
+  }
+
+  const settings = mergeCompanySettings(company.settings, {
+    conciergeModel: providerId && modelId ? { providerId, modelId } : {},
+  });
 
   const [updated] = await db
     .update(companies)
