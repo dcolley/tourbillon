@@ -152,6 +152,13 @@ describe('DM-1/DM-2 DM strip, conversation panes and chips', () => {
     assert.match(html, /<strong>it<\/strong>/); // body renders as markdown
     assert.match(html, /reply to: <a href="#dm-m1" data-dm-jump="m1"/); // jumps to the parent when loaded
     assert.doesNotMatch(html, /textarea|Send/i); // read-only: no composer
+    // DM-2 (B2): the message a chip opened is tagged and visibly styled; its neighbours are not.
+    const focused = renderToStaticMarkup(React.createElement(DmThreadPane, { agentId: ceo.id, conversation: conv, focusMessageId: 'm2' }));
+    const liFor = (h: string, id: string) => h.match(new RegExp(`<li[^>]*data-dm="${id}"[^>]*>`))?.[0] ?? '';
+    assert.match(liFor(focused, 'm2'), /data-dm-highlight="true"/);
+    assert.match(liFor(focused, 'm2'), /bg-accent/);
+    assert.match(liFor(focused, 'm2'), /ring-primary/);
+    assert.doesNotMatch(liFor(focused, 'm1'), /bg-accent|data-dm-highlight/);
     const empty = renderToStaticMarkup(React.createElement(DmThreadPane, { agentId: ceo.id, conversation: null }));
     assert.match(empty, /No DMs to show here yet\./);
   });

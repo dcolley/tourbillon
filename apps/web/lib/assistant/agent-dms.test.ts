@@ -175,6 +175,33 @@ describe('DM-2 conversation view', () => {
     assert.deepEqual(mergeDmTranscriptTimeline(items, []).map((r) => r.kind), ['item', 'item', 'item']);
   });
 
+  it('DM-2 (B1): the live tail interleaves with chips once stamped; an unstamped tail times as now', () => {
+    const chip = dm('d1', cto.id, ceo.id, '2026-10-26T00:30:00Z');
+    const now = Date.parse('2026-10-26T00:31:00Z');
+    const keys = (rows: ReturnType<typeof mergeDmTranscriptTimeline>) =>
+      rows.map((r) => (r.kind === 'dm' ? `dm:${r.mail.id}` : `${r.item.kind}:${r.item.id}`));
+    // Unstamped live tail (Test's probe): nothing to place it by, so it times as `now` and the chip goes first.
+    const unstamped = [
+      { kind: 'user' as const, id: 'u1', text: 'hi', mode: 'run' as const, delivery: 'delivered' as const },
+      { kind: 'assistant' as const, id: 'a1', text: 'hello', streaming: false },
+    ];
+    assert.deepEqual(keys(mergeDmTranscriptTimeline(unstamped, [chip], { now })), ['dm:d1', 'user:u1', 'assistant:a1']);
+    // Live items stamped at creation (chat-state) interleave by time: before, between, after the chip.
+    const live = [
+      { ...unstamped[0], at: '2026-10-26T00:29:00Z' },
+      { ...unstamped[1], at: '2026-10-26T00:29:30Z' },
+      { kind: 'user' as const, id: 'u2', text: 'more', mode: 'run' as const, delivery: 'delivered' as const, at: '2026-10-26T00:30:40Z' },
+      // still streaming / tool with no stamp sits with the next stamped message, else `now`
+      { kind: 'tool' as const, id: 't1', name: 'search', argsText: '', status: 'running' as const },
+    ];
+    assert.deepEqual(keys(mergeDmTranscriptTimeline(live, [chip], { now })), ['user:u1', 'assistant:a1', 'dm:d1', 'user:u2', 'tool:t1']);
+    // After Clear (empty transcript) a stamped live turn still sorts against the chip by time.
+    const afterClear = [{ ...unstamped[0], at: '2026-10-26T00:30:50Z' }];
+    assert.deepEqual(keys(mergeDmTranscriptTimeline(afterClear, [chip], { now })), ['dm:d1', 'user:u1']);
+    const earlyAfterClear = [{ ...unstamped[0], at: '2026-10-26T00:20:00Z' }];
+    assert.deepEqual(keys(mergeDmTranscriptTimeline(earlyAfterClear, [chip], { now })), ['user:u1', 'dm:d1']);
+  });
+
   it('client-only unread: last-seen per pair, bad entries read as never-seen', () => {
     const convs = buildConversations(mails, ceo.id);
     const storage = mapStore();

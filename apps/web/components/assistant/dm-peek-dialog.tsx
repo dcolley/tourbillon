@@ -156,7 +156,7 @@ export function DmThreadPane({
           <li
             key={mail.id}
             id={`dm-${mail.id}`}
-            className={cn('space-y-1 text-sm', self && 'text-right')}
+            className={cn('space-y-1 rounded-md text-sm', self && 'text-right', mail.id === focusMessageId && 'bg-accent ring-1 ring-primary')}
             data-dm={mail.id}
             data-dm-direction={dir}
             data-dm-highlight={mail.id === focusMessageId ? 'true' : undefined}
@@ -240,6 +240,13 @@ export function DmConversationModal({
     setSelectedPeer(peerId);
     setView('thread');
   };
+
+  // S1: the pair shown on open (focused peer, else the most recent) is being read too: mark it, as a
+  // select does. After render (effect), best-effort; later picks are marked by the select handler.
+  const shownPeerId = open && view === 'thread' ? selected?.peerId : undefined;
+  React.useEffect(() => {
+    if (shownPeerId) markDmSeen(storage, agentId, shownPeerId);
+  }, [storage, agentId, shownPeerId]);
 
   const paneRef = React.useRef<HTMLElement | null>(null);
   React.useEffect(() => {
