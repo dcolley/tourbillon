@@ -2,11 +2,16 @@
  * WID-3: pure helpers behind the chat cards (chat-cards.tsx): turn what the user typed or picked into
  * an answer, or say what is missing. The answer is then validated again by the registry and the
  * server with the spec's own checks (chat-card-specs.ts); these helpers only drive the card's UI.
+ *
+ * WID-MS: multi-select drafts. A multi-select choice card and a multiSelect form field both hold a
+ * `string[]` in the draft; answers carry `{ choices }` / a `string[]` value, so thread-history
+ * replay and parked widgets round-trip the array unchanged.
  */
 import {
   CONFIRM_REASON_MAX,
   formFieldIssues,
   QUESTION_MAX_ANSWER,
+  type AskChoiceAnswer,
   type AskChoiceProps,
   type AskConfirmAnswer,
   type AskConfirmProps,
@@ -18,8 +23,11 @@ import {
 
 export type DraftResult<A> = { ok: true; answer: A } | { ok: false; errors: Record<string, string> };
 
+/** Field bounds used by `issueMessage` (undefined falls back to the generic message). */
+type FieldBounds = Pick<AskFormField, 'min' | 'max' | 'maxLength'> & { minSelected?: number; maxSelected?: number };
+
 /** Message for an issue code (from formFieldIssues and the card checks); never echoes values. */
-export function issueMessage(code: string, field?: Pick<AskFormField, 'min' | 'max' | 'maxLength'>): string {
+export function issueMessage(code: string, field?: FieldBounds): string {
   switch (code) {
     case 'required':
       return 'Required.';
@@ -29,12 +37,19 @@ export function issueMessage(code: string, field?: Pick<AskFormField, 'min' | 'm
       return field?.min !== undefined ? `At least ${field.min}.` : 'Too small.';
     case 'too_big':
       return field?.max !== undefined ? `At most ${field.max}.` : 'Too big.';
+    case 'too_few':
+      return field?.minSelected !== undefined ? `Choose at least ${field.minSelected} options.` : 'Choose more options.';
+    case 'too_many':
+      return field?.maxSelected !== undefined ? `Choose at most ${field.maxSelected} options.` : 'Choose fewer options.';
     case 'not_integer':
       return 'Enter a whole number.';
     case 'invalid_type':
       return 'Enter a valid value.';
     case 'not_an_option':
       return 'Pick one of the options.';
+    case 'duplicate_id':
+    case 'duplicate_value':
+      return 'These options have already been picked.';
     default:
       return 'Not valid.';
   }
@@ -51,16 +66,61 @@ export function questionDraft(text: string, maxLength = QUESTION_MAX_ANSWER): Dr
 
 // ---- choice ----
 
-/** The option selected when the card opens: the default option, if any. */
+/** The option selected when the card opens: the default option, if any (single-select only). */
 export function initialChoice(props: AskChoiceProps): string | undefined {
   return props.defaultOption;
 }
 
-export function choiceDraft(props: AskChoiceProps, selected: string | undefined): DraftResult<{ choice: string }> {
-  if (selected === undefined || !props.options.some((o) => o.id === selected)) {
-    return { ok: false, errors: { choice: 'Pick one option.' } };
+/** What the choice card holds: one option id (single) or the ticked ids (multi-select). */
+export type ChoiceDraft = string | string[] | undefined;
+
+/** The option ids ticked when the multi-select card opens (none: `recommended` is a hint, not a preselection). */
+export function initialChoiceDraft(props: AskChoiceProps): ChoiceDraft {
+  return props.multiSelect === true ? [] : props.defaultOption;
+}
+
+/** Bounds a multi-select card enforces in its UI (same defaults as `checkChoiceAnswer`). */
+export function choiceBounds(props: AskChoiceProps): { min: number; max: number } {
+  return { min: props.minSelected ?? 1, max: props.maxSelected ?? props.options.length };
+}
+
+/**
+ * Builds `{ choice }` or (WID-MS) `{ choices }` from the card's selection. Multi-select also checks
+ * count bounds, de-duplication and membership, so the UI refuses what the server would refuse.
+ */
+export function choiceDraft(props: AskChoiceProps, selected: ChoiceDraft): DraftResult<{ choice: string } | { choices: string[] }> {
+  const ids = props.options.map((o) => o.id);
+  if (props.multiSelect === true) {
+    const chosen = Array.isArray(selected) ? Array.from(new Set(selected)) : selected === undefined ? [] : [selected];
+    const { min, max } = choiceBounds(props);
+    if (chosen.length < min) return { ok: false, errors: { choices: `Choose at least ${min} option${min === 1 ? '' : 's'}.` } };
+    if (chosen.length > max) return { ok: false, errors: { choices: `Choose at most ${max} options.` } };
+    if (chosen.some((id) => !ids.includes(id))) return { ok: false, errors: { choices: 'Pick options from the list.' } };
+    return { ok: true, answer: { choices: chosen } };
   }
-  return { ok: true, answer: { choice: selected } };
+  const single = Array.isArray(selected) ? selected[0] : selected;
+  if (single === undefined || !ids.includes(single)) return { ok: false, errors: { choice: 'Pick one option.' } };
+  return { ok: true, answer: { choice: single } };
+}
+
+/** The option ids a draft holds, as a list (single-select: zero or one id). */
+export function draftChoiceIds(selected: ChoiceDraft): string[] {
+  return Array.isArray(selected) ? selected : selected === undefined ? [] : [selected];
+}
+
+/**
+ * The option ids the choice card shows checked. An answered card shows the stored answer
+ * (`{ choice }` or `{ choices }`), so thread-history replay ticks what was actually chosen rather than
+ * the card's fresh draft (default option / nothing); only a card that is not answered shows the draft.
+ */
+export function checkedChoiceIds(status: string, answer: AskChoiceAnswer | undefined, selected: ChoiceDraft): string[] {
+  if (status === 'answered') {
+    if (answer === undefined) return [];
+    if ('choices' in answer) return [...answer.choices];
+    if ('choice' in answer) return [answer.choice];
+    return [];
+  }
+  return draftChoiceIds(selected);
 }
 
 /** Label of the chosen option (for the answered card), or undefined. */
@@ -68,23 +128,32 @@ export function choiceLabel(props: AskChoiceProps, choice: string | undefined): 
   return props.options.find((o) => o.id === choice)?.label;
 }
 
-// ---- form ----
-
-/** What the form inputs hold: text for every field (select: the option value, '' for none). */
-export type FormDraft = Record<string, string>;
-
-export function initialFormDraft(props: AskFormProps): FormDraft {
-  return Object.fromEntries(props.fields.map((f) => [f.name, '']));
+/** Labels of the chosen options (answered multi-select card); ids stand in for unknown ones. */
+export function choiceLabels(props: AskChoiceProps, choices: string[] | undefined): string {
+  return (choices ?? []).map((id) => props.options.find((o) => o.id === id)?.label ?? id).join(', ');
 }
 
-function fieldValue(field: AskFormField, raw: string | undefined): AskFormValue {
+// ---- form ----
+
+/** What the form inputs hold: text for every field (select: the option value, '' for none; multiSelect: the ticked values). */
+export type FormDraft = Record<string, string | string[]>;
+
+export function initialFormDraft(props: AskFormProps): FormDraft {
+  return Object.fromEntries(props.fields.map((f) => [f.name, f.type === 'multiSelect' ? [] : '']));
+}
+
+function fieldValue(field: AskFormField, raw: string | string[] | undefined): AskFormValue {
+  if (Array.isArray(raw)) {
+    const chosen = Array.from(new Set(raw));
+    return chosen.length === 0 ? null : chosen;
+  }
   const text = (raw ?? '').trim();
   if (text === '') return null;
   if (field.type === 'number') {
     const n = Number(text);
     return Number.isFinite(n) ? n : text; // a non-number stays text and fails as invalid_type
   }
-  return field.type === 'text' ? (raw ?? '').trim() : text;
+  return text;
 }
 
 /** Builds `{ values }` from the inputs, with a message per field that does not fit. */
@@ -104,6 +173,10 @@ export function formDraft(props: AskFormProps, draft: FormDraft): DraftResult<As
 export function formValueText(field: AskFormField, value: AskFormValue | undefined): string {
   if (value === null || value === undefined || value === '') return '—';
   if (field.type === 'select') return field.options?.find((o) => o.value === value)?.label ?? String(value);
+  if (field.type === 'multiSelect' && Array.isArray(value)) {
+    const labels = value.map((v) => field.options?.find((o) => o.value === v)?.label ?? v);
+    return labels.length > 0 ? labels.join(', ') : '—';
+  }
   return String(value);
 }
 
