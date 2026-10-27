@@ -64,6 +64,7 @@ describe('WID-1 registry lookup', () => {
     assert.deepEqual(assistantWidgetRegistry.list().map((d) => `${d.name}@${d.version}`), [
       'approvalCard@1',
       'askChoice@1',
+      'askChoice@2',
       'askConfirm@1',
       'askForm@1',
       'askQuestion@1',
@@ -215,5 +216,46 @@ describe('WID-1 answers', () => {
     const r = reg.resolve(call('statusNote', { text: 'hi' }));
     assert.ok(r.ok);
     assert.equal(reg.acceptAnswer(r, 'x').ok, false);
+  });
+});
+
+
+describe('WID-MS multi-select registration', () => {
+  const multiProps = {
+    question: 'Pick any',
+    options: [
+      { id: 'a', label: 'A' },
+      { id: 'b', label: 'B' },
+      { id: 'c', label: 'C' },
+    ],
+    multiSelect: true,
+    minSelected: 1,
+    maxSelected: 2,
+  };
+
+  it('askChoice stays registered at v1 (default and pinned calls) and its latest is v2', () => {
+    // parseWidgetToolCall defaults to version 1 and model calls routinely omit widgetVersion: without the
+    // v1 registration a default-version askChoice call would fall back (no card, and the run parks on it).
+    assert.ok(assistantWidgetRegistry.get('askChoice', 1) !== undefined);
+    assert.ok(assistantWidgetRegistry.get('askChoice', 2) !== undefined);
+    assert.equal(assistantWidgetRegistry.latest('askChoice')!.version, 2);
+    assert.ok(assistantWidgetRegistry.resolve(call('askChoice', multiProps)).ok); // default: version 1
+    assert.ok(assistantWidgetRegistry.resolve(call('askChoice', { ...multiProps, widgetVersion: 2 })).ok);
+    assert.deepEqual(assistantWidgetRegistry.frontendTools().map((t) => t.name), ['askChoice', 'askConfirm', 'askForm', 'askQuestion']); // one tool per name (latest)
+  });
+
+  it('one card answers with a choices list: empty, too-many, duplicate and unknown picks are refused (client = server)', () => {
+    const r = assistantWidgetRegistry.resolve(call('askChoice', multiProps, 'call-ms'));
+    assert.ok(r.ok);
+    assert.ok(assistantWidgetRegistry.acceptAnswer(r, { choices: ['a', 'c'] }).ok); // in bounds and unique
+    const refused = (answer: unknown) => {
+      const res = assistantWidgetRegistry.acceptAnswer(r, answer);
+      return !res.ok && res.issues;
+    };
+    assert.deepEqual(refused({ choices: [] }), ['choices: too_few']);
+    assert.deepEqual(refused({ choices: ['a', 'b', 'c'] }), ['choices: too_many']);
+    assert.deepEqual(refused({ choices: ['a', 'a'] }), ['choices: duplicate_id']);
+    assert.deepEqual(refused({ choices: ['gold'] }), ['choices: not_an_option']);
+    assert.deepEqual(refused({ choice: 'a' }), ['choices: invalid_type']); // a multi-select card takes a list, never a single choice
   });
 });

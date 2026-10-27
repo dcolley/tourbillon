@@ -226,7 +226,7 @@ describe('WID-3 chat cards over AG-UI', () => {
       const events = await readSse(await post(resumeBody(`wc-${name}`, [answerEntry(card.answer)])));
       const result = events.find((e) => e.type === 'TOOL_CALL_RESULT');
       assert.equal(result?.toolCallId, CALL);
-      assert.deepEqual(JSON.parse(result!.content), { widget: name, version: 1, answer: card.answer });
+      assert.deepEqual(JSON.parse(result!.content), { widget: name, version: name === 'askChoice' ? 2 : 1, answer: card.answer });
       assert.equal(events.filter((e) => e.type === 'TEXT_MESSAGE_CONTENT').map((e) => e.delta).join(''), 'Thanks, noted.');
       assert.equal(stub.modelCalls, 2);
       const stored = await listWidgetAnswers(assistantWidgetSpecIndex, owner(), `wc-${name}`, OWNER);
@@ -254,11 +254,65 @@ describe('WID-3 chat cards over AG-UI', () => {
       await askCard(`wc-dis-${name}`, name);
       const events = await readSse(await post(resumeBody(`wc-dis-${name}`, [{ interruptId: CALL, status: 'cancelled' }])));
       const result = events.find((e) => e.type === 'TOOL_CALL_RESULT');
-      assert.deepEqual(JSON.parse(result!.content), { widget: name, version: 1, dismissed: true });
+      assert.deepEqual(JSON.parse(result!.content), { widget: name, version: name === 'askChoice' ? 2 : 1, dismissed: true });
       assert.ok(!pending());
       assert.deepEqual(await listWidgetAnswers(assistantWidgetSpecIndex, owner(), `wc-dis-${name}`, OWNER), []);
     });
   }
+
+  const MULTI = {
+    question: 'Which extras?',
+    options: [
+      { id: 'a', label: 'A' },
+      { id: 'b', label: 'B' },
+      { id: 'c', label: 'C' },
+    ],
+    multiSelect: true,
+    minSelected: 1,
+    maxSelected: 2,
+    widgetVersion: 2,
+  };
+
+  it('askChoice multiSelect: choices[] goes in as one card answer and comes back stored and replayed', async () => {
+    await askCard('wc-multi', 'askChoice', MULTI);
+    // In-bounds list: resumed as one tool result; every id survives the round trip.
+    const events = await readSse(await post(resumeBody('wc-multi', [answerEntry({ choices: ['a', 'c'] })])));
+    const result = events.find((e) => e.type === 'TOOL_CALL_RESULT');
+    assert.deepEqual(JSON.parse(result!.content), { widget: 'askChoice', version: 2, answer: { choices: ['a', 'c'] } });
+    const stored = await listWidgetAnswers(assistantWidgetSpecIndex, owner(), 'wc-multi', OWNER);
+    assert.deepEqual(stored.map((a) => [a.widget, a.answer]), [['askChoice', { choices: ['a', 'c'] }]]);
+  });
+
+  it('askChoice multiSelect bounds: too_many, duplicate ids and an unknown id are refused before the run resumes', async () => {
+    await askCard('wc-multi-bad', 'askChoice', MULTI);
+    for (const [choices, issue] of [
+      [['a', 'b', 'c'], 'choices: too_many'],
+      [['a', 'a'], 'choices: duplicate_id'],
+      [['q'], 'choices: not_an_option'],
+      [[], 'choices: too_few'],
+    ] as const) {
+      const res = await post(resumeBody('wc-multi-bad', [answerEntry({ choices: [...choices] })]));
+      assert.equal(res.status, 400, issue);
+      assert.ok((await res.json()).issues.includes(`answer.${issue}`), issue);
+    }
+    assert.deepEqual(await listWidgetAnswers(assistantWidgetSpecIndex, owner(), 'wc-multi-bad', OWNER), []);
+    // The same card still takes a valid list.
+    const ok = await readSse(await post(resumeBody('wc-multi-bad', [answerEntry({ choices: ['a', 'b'] })])));
+    assert.deepEqual(JSON.parse(ok.find((e) => e.type === 'TOOL_CALL_RESULT')!.content).answer, { choices: ['a', 'b'] });
+  });
+
+  it('askForm multiSelect: string[] values round-trip through resume and replay', async () => {
+    const multiForm = {
+      title: 'Scope',
+      fields: [{ name: 'tags', label: 'Tags', type: 'multiSelect', options: [{ value: 'x', label: 'X' }, { value: 'y', label: 'Y' }, { value: 'z', label: 'Z' }] }],
+    };
+    await askCard('wc-form-multi', 'askForm', multiForm);
+    const events = await readSse(await post(resumeBody('wc-form-multi', [answerEntry({ values: { tags: ['x', 'y'] } })])));
+    const result = events.find((e) => e.type === 'TOOL_CALL_RESULT');
+    assert.deepEqual(JSON.parse(result!.content), { widget: 'askForm', version: 1, answer: { values: { tags: ['x', 'y'] } } });
+    const stored = await listWidgetAnswers(assistantWidgetSpecIndex, owner(), 'wc-form-multi', OWNER);
+    assert.deepEqual(stored.map((a) => [a.widget, a.answer]), [['askForm', { values: { tags: ['x', 'y'] } }]]);
+  });
 
   it('form: unknown fields, a missing required field and a value that is not an option are each refused', async () => {
     await askCard('wc-form-bad', 'askForm');

@@ -149,6 +149,29 @@ describe('WID-3 chat cards in the assistant chat view', () => {
     assert.deepEqual(widgetOutcome(toolItem({ status: 'error', result: 'boom' }) as never), { dismissed: false });
   });
 
+  it('multiSelect (WID-MS): one card renders one checkbox group, and a choices[] result replays with every chosen label', () => {
+    const multiArgs = JSON.stringify({
+      question: 'Which extras?',
+      options: [{ id: 'a', label: 'Plan A' }, { id: 'b', label: 'Plan B' }],
+      multiSelect: true,
+      maxSelected: 1,
+    });
+    const multiSuspended = {
+      items: [toolItem({ argsText: multiArgs })],
+      pendingTools: [{ toolCallId: CALL, toolName: 'askChoice', reason: 'tool_suspended' as const, args: null }],
+    };
+    const pending = renderToStaticMarkup(React.createElement(AgentChatView, props(multiSuspended, { onWidgetAnswer: noop })));
+    assert.match(pending, /data-card="choice"/);
+    assert.equal(pending.match(/type="checkbox"/g)?.length, 2); // one card of checkboxes, not one toggle per item
+    assert.match(pending, /0 of 1 selected/);
+
+    const answered = toolItem({ argsText: multiArgs, status: 'done', result: JSON.stringify({ widget: 'askChoice', version: 2, answer: { choices: ['a', 'b'] } }) });
+    assert.deepEqual(widgetOutcome(answered as never), { answer: { choices: ['a', 'b'] }, dismissed: false });
+    const html = renderToStaticMarkup(React.createElement(AgentChatView, props({ items: [answered] }, { onWidgetAnswer: noop })));
+    assert.match(html, /Chosen: Plan A, Plan B/);
+    assert.doesNotMatch(html, />Choose</);
+  });
+
   it('a parked card is named in a notice with Dismiss card and Stop, and the status says it waits for an answer', () => {
     const stops: number[] = [];
     const dismissed: string[] = [];

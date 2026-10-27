@@ -12,6 +12,7 @@ import * as React from 'react';
 import { Button } from '@/components/ui/button';
 import {
   askChoiceSpec,
+  askChoiceSpecV1,
   askConfirmSpec,
   askFormSpec,
   askQuestionSpec,
@@ -26,14 +27,19 @@ import {
   type AskQuestionProps,
 } from './chat-card-specs';
 import {
+  checkedChoiceIds,
+  choiceBounds,
   choiceDraft,
   choiceLabel,
+  choiceLabels,
   confirmDraft,
+  draftChoiceIds,
   formDraft,
   formValueText,
-  initialChoice,
+  initialChoiceDraft,
   initialFormDraft,
   questionDraft,
+  type ChoiceDraft,
   type FormDraft,
 } from './chat-card-drafts';
 import type { WidgetComponentProps, WidgetDefinition, WidgetStatus } from './widget-types';
@@ -165,19 +171,33 @@ export function QuestionCard({ props, status, answer, onAnswer, onDismiss, busy 
 // ---------------------------------------------------------------------------------------------
 
 export function ChoiceCard({ props, status, answer, onAnswer, onDismiss, busy }: WidgetComponentProps<AskChoiceProps, AskChoiceAnswer>) {
-  const [selected, setSelected] = React.useState<string | undefined>(() => initialChoice(props));
+  const multi = props.multiSelect === true;
+  const [selected, setSelected] = React.useState<ChoiceDraft>(() => initialChoiceDraft(props));
   const [error, setError] = React.useState<string | undefined>();
   const name = React.useId();
   const locked = !onAnswer || status !== 'pending';
-  const current = status === 'answered' ? answer?.choice : selected;
+  const bounds = choiceBounds(props);
+  const chosen = draftChoiceIds(selected);
+  // B1: answered cards (incl. history replay) tick the stored answer; the draft only drives a pending card.
+  const checked = checkedChoiceIds(status, answer, selected);
+  const inBounds = multi ? chosen.length >= bounds.min && chosen.length <= bounds.max : chosen.length === 1;
+  const recommendedIds = Array.isArray(props.recommended) ? props.recommended : props.recommended === undefined ? [] : [props.recommended];
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!onAnswer) return;
     const draft = choiceDraft(props, selected);
-    if (!draft.ok) return setError(draft.errors.choice);
+    if (!draft.ok) return setError(draft.errors.choices ?? draft.errors.choice);
     setError(undefined);
     onAnswer(draft.answer);
   };
+  const answeredText =
+    answer === undefined
+      ? undefined
+      : multi && 'choices' in answer
+        ? `Chosen: ${choiceLabels(props, answer.choices)}`
+        : 'choice' in answer
+          ? `Chosen: ${choiceLabel(props, answer.choice) ?? answer.choice}`
+          : undefined;
   return (
     <CardFrame kind="choice" title={props.question} detail={props.detail} status={status} busy={busy} onDismiss={onDismiss}>
       <form className="space-y-2" onSubmit={submit}>
@@ -188,20 +208,33 @@ export function ChoiceCard({ props, status, answer, onAnswer, onDismiss, busy }:
               key={option.id}
               className="flex cursor-pointer items-start gap-2 rounded-md border px-2 py-1.5 has-[:checked]:border-primary"
               data-option={option.id}
-              data-recommended={option.id === props.recommended ? 'true' : undefined}
+              data-recommended={recommendedIds.includes(option.id) ? 'true' : undefined}
             >
-              <input
-                type="radio"
-                name={name}
-                value={option.id}
-                checked={current === option.id}
-                onChange={() => setSelected(option.id)}
-                className="mt-0.5"
-              />
+              {multi ? (
+                <input
+                  type="checkbox"
+                  name={`${name}-multi`}
+                  value={option.id}
+                  checked={checked.includes(option.id)}
+                  onChange={(e) => setSelected(e.target.checked ? [...chosen, option.id] : chosen.filter((id) => id !== option.id))}
+                  className="mt-0.5"
+                  aria-invalid={error ? true : undefined}
+                />
+              ) : (
+                <input
+                  type="radio"
+                  name={name}
+                  value={option.id}
+                  checked={checked.includes(option.id)}
+                  onChange={() => setSelected(option.id)}
+                  className="mt-0.5"
+                  aria-invalid={error ? true : undefined}
+                />
+              )}
               <span className="flex flex-col">
                 <span>
                   {option.label}
-                  {option.id === props.recommended && (
+                  {recommendedIds.includes(option.id) && (
                     <span className="ml-2 rounded bg-muted px-1.5 text-xs text-muted-foreground">Recommended</span>
                   )}
                 </span>
@@ -212,13 +245,20 @@ export function ChoiceCard({ props, status, answer, onAnswer, onDismiss, busy }:
         </fieldset>
         <FieldError id={`${name}-error`} message={error} />
         {status === 'pending' && (
-          <Button type="submit" size="sm" disabled={locked || selected === undefined}>
-            Choose
-          </Button>
+          <div className="space-y-1">
+            {multi && (
+              <p className="text-xs text-muted-foreground" data-choice-counter>
+                {`${chosen.length} of ${bounds.max} selected`}
+              </p>
+            )}
+            <Button type="submit" size="sm" disabled={locked || !inBounds}>
+              Choose
+            </Button>
+          </div>
         )}
-        {status === 'answered' && answer && (
+        {status === 'answered' && answeredText !== undefined && (
           <p className="text-xs text-muted-foreground" data-card-answer>
-            Chosen: {choiceLabel(props, answer.choice) ?? answer.choice}
+            {answeredText}
           </p>
         )}
       </form>
@@ -236,16 +276,18 @@ function FormFieldInput({
   onChange,
 }: {
   field: AskFormField;
-  value: string;
+  value: string | string[];
   error?: string;
   disabled: boolean;
-  onChange: (value: string) => void;
+  onChange: (value: string | string[]) => void;
 }) {
   const id = React.useId();
   const errorId = `${id}-error`;
   const helpId = `${id}-help`;
   const required = field.required !== false;
   const describedBy = [field.help ? helpId : '', error ? errorId : ''].filter(Boolean).join(' ') || undefined;
+  const ticks = Array.isArray(value) ? value : [];
+  const textValue = typeof value === 'string' ? value : '';
   const common = {
     id,
     name: field.name,
@@ -257,50 +299,85 @@ function FormFieldInput({
   } as const;
   return (
     <div className="space-y-1" data-field={field.name} data-field-type={field.type}>
-      <label htmlFor={id} className="text-xs font-medium">
-        {field.label}
-        {!required && <span className="ml-1 text-muted-foreground">(optional)</span>}
-      </label>
-      {field.type === 'select' ? (
-        <select {...common} value={value} onChange={(e) => onChange(e.target.value)}>
-          <option value="">Choose…</option>
+      {field.type === 'multiSelect' ? (
+        <fieldset
+          className="space-y-1"
+          disabled={disabled}
+          data-field-group={field.name}
+          aria-invalid={error ? true : undefined}
+          aria-describedby={describedBy}
+        >
+          <legend className="text-xs font-medium">
+            {field.label}
+            {!required && <span className="ml-1 text-muted-foreground">(optional)</span>}
+          </legend>
           {field.options?.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
+            <label
+              key={o.value}
+              className="flex cursor-pointer items-start gap-2 rounded-md border px-2 py-1.5 has-[:checked]:border-primary"
+              data-option={o.value}
+            >
+              <input
+                type="checkbox"
+                name={`${field.name}.${o.value}`}
+                value={o.value}
+                checked={ticks.includes(o.value)}
+                aria-invalid={error ? true : undefined}
+                onChange={(e) => onChange(e.target.checked ? [...ticks, o.value] : ticks.filter((v) => v !== o.value))}
+                className="mt-0.5"
+              />
+              <span>{o.label}</span>
+            </label>
           ))}
-        </select>
-      ) : field.type === 'number' ? (
-        <input
-          {...common}
-          type="number"
-          inputMode={field.integer ? 'numeric' : 'decimal'}
-          min={field.min}
-          max={field.max}
-          step={field.integer ? 1 : 'any'}
-          placeholder={field.placeholder}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-        />
-      ) : field.multiline ? (
-        <textarea
-          {...common}
-          className={`${inputClass} min-h-16`}
-          maxLength={field.maxLength}
-          placeholder={field.placeholder}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-        />
+        </fieldset>
       ) : (
-        <input
-          {...common}
-          type="text"
-          autoComplete="off"
-          maxLength={field.maxLength}
-          placeholder={field.placeholder}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-        />
+        <>
+          <label htmlFor={id} className="text-xs font-medium">
+            {field.label}
+            {!required && <span className="ml-1 text-muted-foreground">(optional)</span>}
+          </label>
+          {field.type === 'select' ? (
+            <select {...common} value={typeof value === 'string' ? value : ''} onChange={(e) => onChange(e.target.value)}>
+              <option value="">Choose…</option>
+              {field.options?.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          ) : field.type === 'number' ? (
+            <input
+              {...common}
+              type="number"
+              inputMode={field.integer ? 'numeric' : 'decimal'}
+              min={field.min}
+              max={field.max}
+              step={field.integer ? 1 : 'any'}
+              placeholder={field.placeholder}
+              value={textValue}
+              onChange={(e) => onChange(e.target.value)}
+            />
+          ) : field.multiline ? (
+            <textarea
+              {...common}
+              className={`${inputClass} min-h-16`}
+              maxLength={field.maxLength}
+              placeholder={field.placeholder}
+              value={textValue}
+              onChange={(e) => onChange(e.target.value)}
+            />
+          ) : (
+            <input
+              {...common}
+              type="text"
+              autoComplete="off"
+              maxLength={field.maxLength}
+              placeholder={field.placeholder}
+              value={textValue}
+              onChange={(e) => onChange(e.target.value)}
+            />
+          )}
+        </>
       )}
       {field.help && (
         <p id={helpId} className="text-xs text-muted-foreground">
@@ -341,7 +418,7 @@ export function FormCard({ props, status, answer, onAnswer, onDismiss, busy }: W
             <FormFieldInput
               key={field.name}
               field={field}
-              value={draft[field.name] ?? ''}
+              value={draft[field.name] ?? (field.type === 'multiSelect' ? [] : '')}
               error={errors[field.name]}
               disabled={locked}
               onChange={(value) => setDraft((d) => ({ ...d, [field.name]: value }))}
@@ -421,6 +498,7 @@ export function ConfirmCard({ props, status, answer, onAnswer, onDismiss, busy }
 /** WID-3 card definitions for the assistant registry (same order as chatCardSpecs). */
 export const chatCardDefinitions: WidgetDefinition[] = [
   { ...askQuestionSpec, component: QuestionCard },
+  { ...askChoiceSpecV1, component: ChoiceCard },
   { ...askChoiceSpec, component: ChoiceCard },
   { ...askFormSpec, component: FormCard },
   { ...askConfirmSpec, component: ConfirmCard },
