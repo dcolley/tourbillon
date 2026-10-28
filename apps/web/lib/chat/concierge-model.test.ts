@@ -94,3 +94,37 @@ describe('CONCIERGE-MODEL-1 — hasExplicitChatModel', () => {
     assert.equal(hasExplicitChatModel({ providerIdOverride: 'p' }), true);
   });
 });
+
+describe('CONCIERGE-PARAMS — params flow into the chat model options', () => {
+  const pairWithParams = {
+    providerId: 'prov-qwen',
+    modelId: 'qwen/qwen3.6-35b-a3b',
+    params: { maxContextTokens: 65_536, maxOutputTokens: 2_048 },
+  };
+
+  it('carries the pair params into the controller options', async () => {
+    const opts = await resolveChatModelOptions(
+      COMPANY,
+      { conciergeModel: pairWithParams },
+      undefined,
+      deps(true),
+    );
+    assert.deepEqual(opts, {
+      modelIdOverride: 'qwen/qwen3.6-35b-a3b',
+      providerIdOverride: 'prov-qwen',
+      params: { maxContextTokens: 65_536, maxOutputTokens: 2_048 },
+    });
+  });
+
+  it('drops the pair when its provider is off, params and all', async () => {
+    assert.equal(
+      await resolveChatModelOptions(COMPANY, { conciergeModel: pairWithParams }, undefined, deps(false)),
+      undefined,
+    );
+  });
+
+  it('omits params from the options when the pair has none', async () => {
+    const opts = await resolveChatModelOptions(COMPANY, { conciergeModel: pair }, undefined, deps(true));
+    assert.deepEqual(Object.keys(opts!), ['modelIdOverride', 'providerIdOverride']);
+  });
+});

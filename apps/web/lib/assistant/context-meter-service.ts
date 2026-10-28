@@ -16,6 +16,7 @@ import {
   type AgentRuntimeConfig,
   type CompanySettings,
 } from '@tourbillon/shared';
+import type { AgentModelSettings } from '@tourbillon/shared/model-settings';
 import { threadModelChoiceFromMetadata, type ThreadModelChoice } from './thread-model';
 import { buildThreadContextMeter, type ContextMeterMessage, type ThreadContextMeter } from './context-meter';
 
@@ -57,23 +58,52 @@ export async function threadContextMeter(
 /** Production deps: provider registry + company switches (PRV-1), company OM settings. */
 export const defaultContextMeterDeps: ContextMeterDeps = {
   async resolveBudget(agent, choice) {
-    const [{ resolveAgentContextBudget, chatEffectiveRecord }, { resolveCompanyLlmProviderRow }, { toLlmProviderRecord }, { resolveThreadRunModel }] =
-      await Promise.all([
-        import('../../../../packages/mastra/src/chat'),
-        import('@tourbillon/db'),
-        import('@tourbillon/shared/model-provider'),
-        import('@/lib/chat/thread-model'),
-      ]);
+    const [
+      { resolveAgentContextBudget, chatEffectiveRecord },
+      { db, companies, resolveCompanyLlmProviderRow },
+      { toLlmProviderRecord },
+      { resolveThreadRunModel, isThreadProviderAvailable },
+      { parseCompanySettings, resolveConciergeModel },
+      { eq },
+    ] = await Promise.all([
+      import('../../../../packages/mastra/src/chat'),
+      import('@tourbillon/db'),
+      import('@tourbillon/shared/model-provider'),
+      import('@/lib/chat/thread-model'),
+      import('@tourbillon/shared'),
+      import('drizzle-orm'),
+    ]);
     const run = await resolveThreadRunModel(agent.companyId, choice);
     // Same record the chat controller builds from (a refused thread choice runs nothing; show the agent's).
-    const effective = run.source === 'thread' && run.allowed ? chatEffectiveRecord(agent, run.opts) : agent;
+    let effective = run.source === 'thread' && run.allowed ? chatEffectiveRecord(agent, run.opts) : agent;
+    // CONCIERGE-PARAMS: free chat (no thread model choice) with a company concierge pair uses that
+    // pair while its provider is on — same resolution as registry.getOrCreateChatController and
+    // resolveChatModelOptions, so the meter shows the budget the run actually gets (pair params
+    // beat the provider default; an off/missing pair provider falls back to the agent's model).
+    let params: AgentModelSettings | undefined;
+    if (run.source === 'agent') {
+      const company = await db.query.companies.findFirst({ where: eq(companies.id, agent.companyId) });
+      const pair = resolveConciergeModel(parseCompanySettings(company?.settings));
+      if (pair && (await isThreadProviderAvailable(agent.companyId, pair.providerId))) {
+        effective = chatEffectiveRecord(agent, {
+          modelIdOverride: pair.modelId,
+          providerIdOverride: pair.providerId,
+        });
+        params = pair.params;
+      }
+    }
     let row: Parameters<typeof toLlmProviderRecord>[0] | null = null;
     try {
       row = (await resolveCompanyLlmProviderRow(agent.companyId, effective.providerId)).row;
     } catch {
       row = null; // nothing on for the company: env budget
     }
-    return resolveAgentContextBudget(effective as never, row ? toLlmProviderRecord(row) : null, 'chat');
+    return resolveAgentContextBudget(
+      effective as never,
+      row ? toLlmProviderRecord(row) : null,
+      'chat',
+      params,
+    );
   },
   async observeAfterTokens(agent) {
     const [{ db, companies }, { eq }, { parseCompanySettings }] = await Promise.all([

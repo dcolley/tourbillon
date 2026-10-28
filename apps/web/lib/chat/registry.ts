@@ -207,6 +207,8 @@ export async function getOrCreateChatController(
       ...(modelOpts?.reasoningLevelOverride
         ? { reasoningLevelOverride: modelOpts.reasoningLevelOverride }
         : {}),
+      // CONCIERGE-PARAMS: params are resolved per request and part of the cache key.
+      ...(modelOpts?.params ? { params: modelOpts.params } : {}),
     });
     await controller.init();
     return controller;

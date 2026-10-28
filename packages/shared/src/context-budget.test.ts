@@ -136,3 +136,22 @@ describe('createContextBudgetSnapshot', () => {
     assert.ok(snapshot.estimatedToolSchemaTokens > 0);
   });
 });
+
+describe('CONCIERGE-PARAMS — chat budget from model params', () => {
+  it('uses the configured model window (params beat the env limit)', () => {
+    const budget = resolveContextBudget({
+      maxContextTokens: 65_536,
+      kind: 'chat',
+      envLimit: 128_000,
+    });
+    assert.equal(budget.contextTokens, 65_536);
+    assert.equal(budget.outputReserve, 2_048);
+    assert.equal(budget.limiterLimit, 55_488); // 65_536 − 2_048 output − 8_000 chat schema reserve
+  });
+
+  it('falls back to the env limit when params are unset', () => {
+    const budget = resolveContextBudget({ kind: 'chat', envLimit: 128_000 });
+    assert.equal(budget.contextTokens, null);
+    assert.equal(budget.limiterLimit, 128_000);
+  });
+});

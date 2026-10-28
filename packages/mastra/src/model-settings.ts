@@ -29,10 +29,16 @@ export function resolveAgentModelSettings(
 export function resolveMergedAgentModelSettings(
   agentRecord: AgentRecord,
   providerRecord?: LlmProviderRecord | null,
+  paramsOverride?: AgentModelSettings | null,
 ): AgentModelSettings {
   const runtimeConfig = agentRecord.runtimeConfig as AgentRuntimeConfig;
+  // CONCIERGE-PARAMS: paramsOverride (the active chat model's params, e.g. the company
+  // concierge pair) wins over the agent overrides, which win over the provider defaults.
   return applyContextWindowDefaults(
-    resolveModelSettings(providerRecord?.defaultModelSettings, runtimeConfig.model),
+    resolveModelSettings(
+      resolveModelSettings(providerRecord?.defaultModelSettings, runtimeConfig.model),
+      paramsOverride,
+    ),
   );
 }
 
@@ -40,8 +46,9 @@ export function resolveAgentContextBudget(
   agentRecord: AgentRecord,
   providerRecord: LlmProviderRecord | null | undefined,
   kind: ContextBudgetKind,
+  paramsOverride?: AgentModelSettings | null,
 ): ContextBudget {
-  const merged = resolveMergedAgentModelSettings(agentRecord, providerRecord);
+  const merged = resolveMergedAgentModelSettings(agentRecord, providerRecord, paramsOverride);
   return resolveContextBudget({
     maxContextTokens: merged.maxContextTokens,
     maxOutputTokens: merged.maxOutputTokens,
@@ -53,9 +60,10 @@ export function resolveAgentContextBudget(
 export function resolveAgentGenerationOptions(
   agentRecord: AgentRecord,
   providerRecord?: LlmProviderRecord | null,
+  paramsOverride?: AgentModelSettings | null,
 ): AgentGenerationOptions {
   const runtimeConfig = agentRecord.runtimeConfig as AgentRuntimeConfig;
-  const merged = resolveMergedAgentModelSettings(agentRecord, providerRecord);
+  const merged = resolveMergedAgentModelSettings(agentRecord, providerRecord, paramsOverride);
   const reasoningLevel = runtimeConfig.model?.reasoningLevel;
 
   const { reasoningLevel: _ignored, ...numericMerged } = merged;

@@ -243,6 +243,13 @@ export interface ConciergeModelSettings {
   providerId?: string;
   /** Model id served by that provider. Never a pinned default baked into code. */
   modelId?: string;
+  /**
+   * CONCIERGE-PARAMS: model params that apply to the concierge pair (same shape as the agent's
+   * `runtimeConfig.model`). `maxContextTokens` / `maxOutputTokens` size the free-chat TokenLimiter
+   * and CTX meter budget — set them to the model's REAL window (e.g. 65536) when the provider
+   * default is larger, so long chats trim before the provider rejects the prompt.
+   */
+  params?: AgentModelSettings;
 }
 
 /** Company-level integration settings stored in companies.settings jsonb. */
