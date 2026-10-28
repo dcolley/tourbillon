@@ -5,7 +5,7 @@ import { bootMastraSchedules } from './schedule-boot';
 import { startTaskRunnerPolling } from './task-runner';
 import { describeDatabaseTarget, probeDatabase } from '@tourbillon/db';
 import { DEFAULT_DB_ATTEMPT_TIMEOUT_MS, waitForDb, type Logger } from './startup';
-import { sweepOrphanedRunsOnStartup } from './startup-sweep';
+import { sweepOrphanedRunsOnStartup, reconcileChatTaskRunsOnStartup } from './startup-sweep';
 
 export async function main(logger: Logger): Promise<void> {
   const bootTime = new Date();
@@ -22,6 +22,9 @@ export async function main(logger: Logger): Promise<void> {
     },
   );
   const orphanedRunsFailed = await sweepOrphanedRunsOnStartup(bootTime);
+  // S2 (#196 follow-up): heartbeat rows are failed by the sweep above, so settle the chat_tasks
+  // rows their Run Task wakes died with — otherwise they stay in_progress forever.
+  const taskRunsReconciled = await reconcileChatTaskRunsOnStartup(bootTime);
   // Defence-in-depth: unlink dead egress proxy socks left by prior crashes.
   // Live listeners are connect-probed and never removed.
   await sweepStaleEgressSockets().catch(() => undefined);
@@ -53,6 +56,8 @@ export async function main(logger: Logger): Promise<void> {
     wakePort: process.env.SCHEDULER_WAKE_PORT ?? '3003',
     dbAttempts,
     orphanedRunsFailed,
+    taskRunsRequeued: taskRunsReconciled.requeued,
+    taskRunsParked: taskRunsReconciled.parked,
     observabilityEnabled: isObservabilityEnabled(),
     phoenixCollectorEnabled: isPhoenixCollectorEnabled(),
   });

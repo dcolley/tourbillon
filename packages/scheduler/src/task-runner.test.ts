@@ -11,6 +11,8 @@ import {
   buildTaskRunWake,
   freeTaskRunSlots,
   pollTaskRunner,
+  resolveMaxConcurrentRuns,
+  startTaskRunnerPolling,
   taskRunSettleStatus,
   type TaskRunPollSummary,
   type TaskRunSlotState,
@@ -45,6 +47,8 @@ function row(over: Partial<RunnableChatTaskRow> = {}): RunnableChatTaskRow {
 interface Fakes {
   deps: TaskRunnerDeps;
   claims: Array<{ taskId: string; runId: string }>;
+  /** Claim calls with the per-group attempt budget the poller resolved (S1). */
+  claimBudgets: Array<{ taskId: string; maxAttempts: number }>;
   jobs: HeartbeatJobData[];
   settles: Array<{ taskId: string; status: string }>;
   progress: string[];
@@ -58,6 +62,7 @@ function fakes(opts: {
   const f: Fakes = {
     deps: null as unknown as TaskRunnerDeps,
     claims: [],
+    claimBudgets: [],
     jobs: [],
     settles: [],
     progress: [],
@@ -66,8 +71,9 @@ function fakes(opts: {
     db: null as unknown as TaskRunnerDeps['db'],
     listRunnable: async () => opts.rows,
     countActiveRuns: async () => opts.slots ?? { total: 0, task: 0 },
-    claim: async (taskId, runId) => {
+    claim: async (taskId, runId, maxAttempts) => {
       f.claims.push({ taskId, runId });
+      f.claimBudgets.push({ taskId, maxAttempts });
       return true;
     },
     startWake: async (job) => {
@@ -200,4 +206,114 @@ test('a task wake carries the task message, not the heartbeat T1 header, and lin
     {},
   );
   assert.ok(!heartbeat.message.includes('Run Task'));
+});
+
+// ─── S1 (#196 follow-up): companies.settings.taskRunner is LIVE ───────────────
+// enabled / maxConcurrentTasks / maxAttemptsPerTask are resolved per company by the poller
+// (resolveTaskRunnerSettings), never dead config. TASK_RUNNER_MAX_CONCURRENT_RUNS=0 is the
+// global kill switch.
+
+test('S1: company taskRunner.enabled=false rows skip the queue BEFORE claim (B1 discipline)', async () => {
+  // Free slots — the ONLY thing stopping t-off is the company switch. It must not even be
+  // claimed (claim burns runner_attempts; a disabled company's rows stay untouched pending).
+  const rows = [
+    row({ taskId: 't-off', companySettings: { taskRunner: { enabled: false } } }),
+    row({ taskId: 't-on', position: 1 }),
+  ];
+  const f = fakes({ rows, slots: { total: 0, task: 0 } });
+  const s = await pollTaskRunner(f.deps, {});
+  assert.equal(s.polled, 2);
+  assert.equal(s.skippedDisabled, 1);
+  assert.equal(s.skippedInactive, 0); // disabled is its own bucket, not "inactive"
+  assert.deepEqual(f.claims.map((c) => c.taskId), ['t-on']);
+  await drain(s);
+  assert.deepEqual(f.settles, [{ taskId: 't-on', status: 'done' }]);
+});
+
+test('S1: a garbage settings block falls back to defaults (enabled, cap 2, attempts 2)', async () => {
+  // jsonb is free-form: strings, arrays, nonsense — the poller must treat it as "not disabled".
+  const rows = [row({ taskId: 't-garbage', companySettings: 'not-an-object' }), row({ taskId: 't-null', companySettings: null })];
+  const f = fakes({ rows, slots: { total: 0, task: 0 } });
+  const s = await pollTaskRunner(f.deps, {});
+  assert.equal(s.skippedDisabled, 0);
+  assert.deepEqual(f.claims.map((c) => c.taskId), ['t-garbage', 't-null']);
+  assert.deepEqual(f.claimBudgets.map((b) => b.maxAttempts), [2, 2]);
+  await drain(s);
+});
+
+test('S1: company maxConcurrentTasks caps task runs per agent inside the shared budget', async () => {
+  // Budget has room for 4, but the company capped itself at 1 concurrent task per agent.
+  const rows = [
+    row({ taskId: 't1', position: 0, companySettings: { taskRunner: { maxConcurrentTasks: 1 } } }),
+    row({ taskId: 't2', position: 1, companySettings: { taskRunner: { maxConcurrentTasks: 1 } } }),
+    row({ taskId: 't3', position: 2, companySettings: { taskRunner: { maxConcurrentTasks: 1 } } }),
+  ];
+  const f = fakes({ rows, slots: { total: 0, task: 0 } });
+  const s = await pollTaskRunner(f.deps, { maxConcurrentRuns: 4 }); // no opts.taskCap → company wins
+  assert.equal(s.started.length, 1);
+  assert.equal(f.jobs[0]!.chatTaskId, 't1'); // claim order preserved
+  assert.equal(s.skippedFull, 0); // cap ≠ full budget — this is a company clamp, not a deferral
+  await drain(s);
+});
+
+test('S1: opts.taskCap / opts.maxAttempts overrides win over company settings', async () => {
+  const rows = [
+    row({ taskId: 't1', position: 0, companySettings: { taskRunner: { maxConcurrentTasks: 8 } } }),
+    row({ taskId: 't2', position: 1, companySettings: { taskRunner: { maxConcurrentTasks: 8 } } }),
+  ];
+  const f = fakes({ rows, slots: { total: 0, task: 0 } });
+  const s = await pollTaskRunner(f.deps, { maxConcurrentRuns: 8, taskCap: 1, maxAttempts: 1 });
+  assert.equal(s.started.length, 1);
+  assert.deepEqual(f.claimBudgets.map((b) => b.maxAttempts), [1]);
+  await drain(s);
+});
+
+test('S1: company maxAttemptsPerTask drives the claim budget and the park decision', async () => {
+  const fail = (job: HeartbeatJobData) =>
+    Promise.resolve({ runId: job.runId ?? '', status: 'failed' as const, errorText: 'boom' });
+
+  // attempts=2 used. Default budget (2) parks after the next failure; budget 4 re-queues.
+  const strict = fakes({ rows: [row({ taskId: 't-strict', attempts: 2 })], wake: fail });
+  const s1 = await pollTaskRunner(strict.deps, {});
+  await drain(s1);
+  assert.deepEqual(strict.settles, [{ taskId: 't-strict', status: 'waiting_on_user' }]);
+
+  const generous = fakes({
+    rows: [row({ taskId: 't-gen', attempts: 2, companySettings: { taskRunner: { maxAttemptsPerTask: 4 } } })],
+    wake: fail,
+  });
+  const s2 = await pollTaskRunner(generous.deps, {});
+  await drain(s2);
+  assert.deepEqual(generous.claimBudgets, [{ taskId: 't-gen', maxAttempts: 4 }]);
+  assert.deepEqual(generous.settles, [{ taskId: 't-gen', status: 'pending' }]); // 3 < 4 → fresh attempt
+});
+
+test('S1: resolveMaxConcurrentRuns — 0 is the kill switch, garbage falls back to 2', () => {
+  assert.equal(resolveMaxConcurrentRuns('0'), 0); // explicit kill switch
+  assert.equal(resolveMaxConcurrentRuns('2'), 2);
+  assert.equal(resolveMaxConcurrentRuns('3.7'), 3);
+  assert.equal(resolveMaxConcurrentRuns(undefined), 2);
+  assert.equal(resolveMaxConcurrentRuns(''), 2); // blank ≠ 0 — blank is "unset"
+  assert.equal(resolveMaxConcurrentRuns('   '), 2);
+  assert.equal(resolveMaxConcurrentRuns('abc'), 2);
+  assert.equal(resolveMaxConcurrentRuns('-1'), 2); // negative is garbage, NOT the switch
+});
+
+test('S1: maxConcurrentRuns=0 stops the poller BEFORE it polls', async () => {
+  let listed = 0;
+  const base = fakes({ rows: [row({ taskId: 't1' })] });
+  const logs: string[] = [];
+  const deps: TaskRunnerDeps = {
+    ...base.deps,
+    listRunnable: async () => {
+      listed += 1;
+      return [];
+    },
+    log: { info: (msg) => logs.push(msg) },
+  };
+  const poller = startTaskRunnerPolling(deps, { maxConcurrentRuns: 0 });
+  poller.stop(); // stop() must be safe on a poller that never started
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(listed, 0, 'kill switch: not even one listRunnable call');
+  assert.deepEqual(logs, ['task-run poller disabled (max concurrent runs = 0)']);
 });

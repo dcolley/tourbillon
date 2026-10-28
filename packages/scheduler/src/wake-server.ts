@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import { createTraceLogger, type HeartbeatJobData } from '@tourbillon/shared';
 import { syncAgentTimerSchedule, syncRoutineSchedule, deleteRoutineSchedule } from '@tourbillon/mastra';
 import { startWake, sweepStaleHeartbeatRuns, forceKillHeartbeat } from './wake-runner';
+import { sweepStaleChatTaskRuns } from './task-runner';
 
 const tracer = createTraceLogger('wake-server', {});
 
@@ -184,8 +185,14 @@ export function startStaleSweepInterval(): ReturnType<typeof setInterval> {
   const intervalMs = 30_000;
   const handle = setInterval(() => {
     void sweepStaleHeartbeatRuns()
-      .then((n) => {
+      .then(async (n) => {
         if (n > 0) tracer.info('swept stale heartbeat runs', { count: n });
+        // S2 (#196 follow-up): heartbeat rows failed above free the budget; now settle the
+        // chat_tasks rows whose Run Task wake died with them (same liveness rule).
+        const rec = await sweepStaleChatTaskRuns();
+        if (rec.requeued + rec.parked > 0) {
+          tracer.info('reconciled stale Run Task rows', { requeued: rec.requeued, parked: rec.parked });
+        }
       })
       .catch((err) => {
         tracer.error('stale sweep failed', {

@@ -297,33 +297,32 @@ export interface CompanySettings {
   taskRunner?: TaskRunnerSettings;
 }
 
-/** TASK-RUNNER settings (companies.settings.taskRunner). */
+/**
+ * TASK-RUNNER settings (companies.settings.taskRunner). Resolved per company by the scheduler
+ * poller (packages/scheduler/src/task-runner.ts) on every tick — fields here are live, not
+ * aspirational. The global cadence is env (TASK_RUNNER_POLL_INTERVAL_SEC); the global kill
+ * switch is env TASK_RUNNER_MAX_CONCURRENT_RUNS=0 (poller never starts).
+ */
 export interface TaskRunnerSettings {
   /** Master switch for the whole company (default: true). false = no task run is ever enqueued. */
   enabled?: boolean;
   /**
    * Max concurrent Run Task runs per agent WITHIN the shared scheduler run budget
-   * (default 2). Clamped to the agent's run-slot capacity, so task runs can never
-   * push total inference concurrency above the existing heartbeat limits.
+   * (default 2, clamped 1..8). Task runs can never push total inference concurrency above
+   * the shared budget (TASK_RUNNER_MAX_CONCURRENT_RUNS) — this is a cap inside it.
    */
   maxConcurrentTasks?: number;
-  /** Max task runs one agent may keep in the scheduler pipeline at once (default 4). */
-  maxQueuedTasks?: number;
   /**
-   * Task runs started per task before it is parked to `waiting_on_user` (default 2).
-   * A failed run re-queues the task to `pending` while budget remains.
+   * Task runs started per task before it is parked to `waiting_on_user` (default 2,
+   * clamped 1..5). A failed run re-queues the task to `pending` while budget remains.
    */
   maxAttemptsPerTask?: number;
-  /** Task-runner poll cadence in seconds (default 30; clamped to 5..600). */
-  pollIntervalSec?: number;
 }
 
 export interface ResolvedTaskRunnerSettings {
   enabled: boolean;
   maxConcurrentTasks: number;
-  maxQueuedTasks: number;
   maxAttemptsPerTask: number;
-  pollIntervalSec: number;
 }
 
 /** Defaults + bounds for the task runner; every override is clamped, never trusted raw. */
@@ -334,9 +333,7 @@ export function resolveTaskRunnerSettings(settings: Pick<CompanySettings, 'taskR
   return {
     enabled: t.enabled !== false,
     maxConcurrentTasks: clamp(t.maxConcurrentTasks, 1, 8, 2),
-    maxQueuedTasks: clamp(t.maxQueuedTasks, 1, 16, 4),
     maxAttemptsPerTask: clamp(t.maxAttemptsPerTask, 1, 5, 2),
-    pollIntervalSec: clamp(t.pollIntervalSec, 5, 600, 30),
   };
 }
 
@@ -379,7 +376,15 @@ export type SSEEventType =
   | 'heartbeat.started'
   | 'heartbeat.completed'
   | 'heartbeat.failed'
-  | 'task_run_update'
+  /**
+   * S4 (#196 follow-up): the scheduler's task-runner publishes `{ type: 'chat_task_progress',
+   * ...ChatTaskProgressEvent }` on `sse:{companyId}` — this enum member matches the wire
+   * value EXACTLY. Consumer: apps/web/lib/assistant/task-progress-bridge.ts (+ the
+   * TASK_PROGRESS_SSE_TYPE constant in task-progress-signals.ts, landed with QUEUE-SIGNAL
+   * #197). If either side renames, that string plus this member are the contract; the old
+   * dead 'task_run_update' member must not come back.
+   */
+  | 'chat_task_progress'
   | 'agent.budget_exceeded'
   | 'issue.status_changed'
   | 'issue.assigned'

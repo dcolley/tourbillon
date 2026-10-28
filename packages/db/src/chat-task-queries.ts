@@ -16,11 +16,11 @@
  * Same shape as company-llm-provider-queries: `database` is injectable (the app pool by default,
  * an in-memory PGlite database in tests).
  */
-import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNotNull, lt, sql } from 'drizzle-orm';
 import type { PgDatabase, PgQueryResultHKT } from 'drizzle-orm/pg-core';
 import { db } from './client';
 import type * as schema from './schema/index';
-import { agents, companies } from './schema/index';
+import { agents, companies, heartbeatRuns } from './schema/index';
 import { CHAT_TASK_OPEN_STATUSES, chatTasks, type ChatTask, type ChatTaskStatus } from './schema/chat-tasks';
 
 /** Any Drizzle Postgres database over this schema (the app pool, or an in-memory one in tests). */
@@ -225,6 +225,11 @@ export interface RunnableChatTaskRow {
   agentUrlKey: string;
   agentStatus: string;
   companyStatus: string;
+  /**
+   * Raw companies.settings jsonb. The poller reads `settings.taskRunner` through
+   * resolveTaskRunnerSettings (enabled / maxConcurrentTasks / maxAttemptsPerTask, S1).
+   */
+  companySettings: unknown;
 }
 
 /**
@@ -252,6 +257,7 @@ export async function listRunnableChatTasks(
       agentUrlKey: agents.urlKey,
       agentStatus: agents.status,
       companyStatus: companies.status,
+      companySettings: companies.settings,
     })
     .from(chatTasks)
     .innerJoin(agents, eq(agents.id, chatTasks.agentId))
@@ -328,6 +334,108 @@ export async function finishChatTaskRun(
     .where(and(eq(chatTasks.id, input.taskId), eq(chatTasks.status, 'in_progress')))
     .returning();
   return row ?? null;
+}
+
+// ─── TASK-RUNNER reconcile (S2, #196 follow-up) ──────────────────────────────
+// If the scheduler dies mid-Run-Task, the in-memory poll loop that would have called
+// finishChatTaskRun is gone: the chat_tasks row can stay `in_progress` forever while its
+// heartbeat_runs row is failed (startup sweep), stale (interval sweep), or never inserted
+// (crash between claim and wake). These reads settle exactly those runner-owned rows back to
+// a sane state, mirroring the heartbeat sweep's liveness rule.
+
+export interface StaleChatTaskRunRow {
+  taskId: string;
+  companyId: string;
+  agentId: string;
+  title: string;
+  /** runner_attempts at read time (the same budget claim/finish use). */
+  attempts: number;
+  runnerLastRunId: string;
+}
+
+/**
+ * Runner-claimed `in_progress` rows whose linked Run Task wake can no longer settle them:
+ * the linked heartbeat_runs row is terminal, missing, or stale (`last_seen_at` older than
+ * `staleCutoff` — the same liveness definition `sweepStaleHeartbeatRuns` and
+ * `countActiveRuns` use; a live-status row with a null `last_seen_at` counts as live, like
+ * the budget read). `runner_last_run_id IS NOT NULL` keeps human-set `in_progress` rows
+ * (setChatTaskStatus, never claimed) off-limits, and the `updated_at < staleCutoff` grace
+ * keeps the reconciler from racing a fresh claim whose heartbeat_runs row is not inserted
+ * yet (claim → insert is not atomic).
+ */
+export async function listStaleChatTaskRuns(
+  database: ChatTaskDb,
+  opts: { staleCutoff: Date; limit?: number },
+): Promise<StaleChatTaskRunRow[]> {
+  const deadRun = sql`not exists (
+    select 1 from ${heartbeatRuns} live
+    where live.id = ${chatTasks.runnerLastRunId}
+      and live.status in ('queued', 'running')
+      and (live.last_seen_at is null or live.last_seen_at >= ${opts.staleCutoff})
+  )`;
+  // isNotNull() guards the WHERE; Drizzle cannot narrow the column type, so the cast is the
+  // only way to hand back a non-null runnerLastRunId (the filter makes it safe).
+  const rows = (await database
+    .select({
+      taskId: chatTasks.id,
+      companyId: chatTasks.companyId,
+      agentId: chatTasks.agentId,
+      title: chatTasks.title,
+      attempts: chatTasks.runnerAttempts,
+      runnerLastRunId: chatTasks.runnerLastRunId,
+    })
+    .from(chatTasks)
+    .where(
+      and(
+        eq(chatTasks.status, 'in_progress'),
+        isNotNull(chatTasks.runnerLastRunId),
+        lt(chatTasks.updatedAt, opts.staleCutoff),
+        deadRun,
+      ),
+    )
+    .orderBy(asc(chatTasks.updatedAt))
+    .limit(opts.limit ?? 50)) as StaleChatTaskRunRow[];
+  return rows;
+}
+
+export interface ChatTaskReconcileResult {
+  requeued: number;
+  parked: number;
+  /** The rows settled this pass, for logging/tests. */
+  reconciled: StaleChatTaskRunRow[];
+}
+
+/**
+ * Settle crashed/stale Run Task rows: attempts left → `pending` (the poller picks it up as a
+ * fresh attempt), budget exhausted → `waiting_on_user` (parked for the human), with a short
+ * note appended to `notes`. Goes through finishChatTaskRun, so the in_progress guard still
+ * applies — a run that settles normally between the read and the write is left alone.
+ * Callers pass `staleCutoff = now - HEARTBEAT_STALE_SEC` (interval sweep) or `bootTime`
+ * (startup reconcile, where nothing claimed before boot can still be live).
+ */
+export async function reconcileStaleChatTaskRuns(
+  database: ChatTaskDb,
+  opts: { staleCutoff: Date; maxAttempts?: number; now?: Date; limit?: number },
+): Promise<ChatTaskReconcileResult> {
+  const maxAttempts = opts.maxAttempts ?? 2;
+  const stale = await listStaleChatTaskRuns(database, opts);
+  const result: ChatTaskReconcileResult = { requeued: 0, parked: 0, reconciled: [] };
+  for (const row of stale) {
+    const requeue = row.attempts < maxAttempts;
+    const settled = await finishChatTaskRun(database, {
+      taskId: row.taskId,
+      status: requeue ? 'pending' : 'waiting_on_user',
+      note: requeue
+        ? '[runner] Run Task lost (worker died or run row missing); re-queued for a fresh attempt.'
+        : '[runner] Run Task lost (worker died or run row missing); attempt budget exhausted — parked.',
+    });
+    if (settled) {
+      if (requeue) result.requeued += 1;
+      else result.parked += 1;
+      result.reconciled.push(row);
+    }
+  }
+  return result;
 }
 
 /** Task-runner pause/resume: a paused task skips enqueue until resumed. */
