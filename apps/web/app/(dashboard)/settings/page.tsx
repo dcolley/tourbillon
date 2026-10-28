@@ -654,6 +654,10 @@ function ObservationalMemoryTab({
         ceiling. Applies to harness on-demand idle threads as well as issue threads. Uses the
         selected provider/model for Observer and Reflector (not the agent&apos;s chat model).
         Does not shrink system prompt or tool schemas.
+        <br />
+        The switch below gates <strong>heartbeats only</strong>: Assistant free-chat always runs
+        OM while an observer model is resolvable (this company OM model, else the concierge
+        model) — turning it off here does not disable OM in chat.
       </p>
       <div className="border rounded-lg p-4">
         <ObservationalMemorySettingsForm

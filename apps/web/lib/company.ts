@@ -2,7 +2,7 @@ import { cookies, headers } from 'next/headers';
 import { db, companies, type Company } from '@tourbillon/db';
 import { ensureCompanyWorkspace, mergeCompanySettings, parseCompanySettings, type AgentModelSettings, type CompanySettings } from '@tourbillon/shared';
 import { asc, eq } from 'drizzle-orm';
-import { deriveIssuePrefix, slugifyCompanySlug } from './company-utils';
+import { deriveIssuePrefix, mergeConciergeModelSettings, slugifyCompanySlug } from './company-utils';
 import { isThreadProviderAvailable } from './chat/thread-model';
 import { BOARD_SESSION_COOKIE, hasAgentToken, verifyBoardSessionToken } from './board-auth';
 
@@ -297,9 +297,9 @@ export async function updateCompanyConciergeModel(
     throw new Error('Provider is not available for this company (it is switched off or does not exist).');
   }
 
-  const settings = mergeCompanySettings(company.settings, {
-    conciergeModel: providerId && modelId ? { providerId, modelId, params: input.params } : {},
-  });
+  // CONCIERGE-PARAMS S1: the merge (params included) lives in the pure, tested
+  // mergeConciergeModelSettings — persistence mutants die there.
+  const settings = mergeConciergeModelSettings(company.settings, input);
 
   const [updated] = await db
     .update(companies)
