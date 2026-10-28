@@ -234,6 +234,7 @@ const CARD_KIND: Record<string, string> = {
   askChoice: 'choice',
   askForm: 'form',
   askConfirm: 'confirmation',
+  showTaskList: 'task list',
 };
 
 function cardLabel(argsText: string | undefined, args?: unknown): string | undefined {

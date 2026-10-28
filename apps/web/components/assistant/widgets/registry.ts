@@ -12,6 +12,7 @@ import {
 } from '@tourbillon/shared/widgets';
 import type { FrontendToolDefinition, WidgetDefinition, WidgetResolution, WidgetWarn } from './widget-types';
 import { chatCardDefinitions } from './chat-cards';
+import { taskListDefinitions } from './task-list-card';
 import { approvalCardSpec } from './specs';
 import { ApprovalCardWidget } from './approval-card';
 
@@ -99,8 +100,8 @@ export function createWidgetRegistry(
 }
 
 /**
- * The assistant's widget registry: the WID-2 approval card and the WID-3 question, choice, form and
- * confirm cards. Any other tool call renders the fallback card.
+ * The assistant's widget registry: the WID-2 approval card, the WID-3 question, choice, form and
+ * confirm cards, and the TASK-LIST-WID task list card. Any other tool call renders the fallback card.
  *
  * Each definition is `{ ...spec, component }` for a spec in `assistantWidgetSpecs` (./specs), the
  * component-free list the AG-UI route uses to offer widget tools and validate answers. The two
@@ -109,4 +110,5 @@ export function createWidgetRegistry(
 export const assistantWidgetRegistry: WidgetRegistry = createWidgetRegistry([
   { ...approvalCardSpec, component: ApprovalCardWidget },
   ...chatCardDefinitions,
+  ...taskListDefinitions,
 ]);
