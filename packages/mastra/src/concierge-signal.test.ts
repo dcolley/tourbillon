@@ -201,6 +201,8 @@ test('progress: started → one short line naming the task', () => {
   const payload = taskProgressSignalPayload(progress());
   assert.equal(payload.tagName, 'task-progress');
   assert.match(payload.contents, /^Background task started: "Ship the runbook"\./);
+  // S6 (soft-pack): system-signal voice, not the agent speaking in first person.
+  assert.doesNotMatch(payload.contents, /I will|I'll|report back/);
   assert.deepEqual(payload.attributes, {
     taskId: 'task-1',
     runId: 'run-1',

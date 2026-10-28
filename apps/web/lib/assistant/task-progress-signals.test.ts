@@ -9,13 +9,15 @@ import {
   handleTaskProgressEvent,
   parseTaskProgressMessage,
   queueTaskProgressSignal,
+  taskProgressClaimKey,
+  type TaskProgressAgentRecord,
   type TaskProgressBridgeDeps,
   type TaskProgressEvent,
 } from './task-progress-signals';
 import {
   cancelQueuedConciergeSignals,
   type TaskProgressSignalPayload,
-} from '../../../../packages/mastra/src/concierge-signal';
+} from '@tourbillon/mastra/concierge-signal';
 
 function event(over: Partial<TaskProgressEvent> = {}): TaskProgressEvent {
   return {
@@ -50,25 +52,45 @@ test('parse: non-JSON, other types, bad stage/status and missing fields return n
 // ─── handleTaskProgressEvent routing ─────────────────────────────────────────
 
 interface Harness {
-  deps: TaskProgressBridgeDeps<{ id: string; companyId: string }>;
+  deps: TaskProgressBridgeDeps<TaskProgressAgentRecord>;
   delivered: Array<{ agentId: string; threadId: string; payload: TaskProgressSignalPayload }>;
+  claimed: string[];
+  warnings: Array<{ msg: string; data?: Record<string, unknown> }>;
 }
 
 function harness(opts: {
-  agent?: { id: string; companyId: string } | null;
+  agent?: TaskProgressAgentRecord | null;
   threadId?: string | null;
   deliverOk?: boolean;
+  /** Shared across harnesses to emulate several replicas seeing one event (S2). */
+  claimStore?: Set<string>;
 } = {}): Harness {
   const delivered: Harness['delivered'] = [];
+  const claimed: string[] = [];
+  const warnings: Harness['warnings'] = [];
   return {
     delivered,
+    claimed,
+    warnings,
     deps: {
-      getAgent: async () => ('agent' in opts ? (opts.agent ?? null) : { id: 'agent-1', companyId: 'company-1' }),
+      getAgent: async () =>
+        'agent' in opts
+          ? (opts.agent ?? null)
+          : { id: 'agent-1', companyId: 'company-1', status: 'active', companyStatus: 'active' },
       getActiveThreadId: async () => ('threadId' in opts ? (opts.threadId ?? null) : 'thread-42'),
       deliver: async (agent, threadId, payload) => {
         delivered.push({ agentId: agent.id, threadId, payload });
         return opts.deliverOk !== false;
       },
+      claimEvent: async (event) => {
+        const key = taskProgressClaimKey(event);
+        claimed.push(key);
+        if (!opts.claimStore) return true;
+        if (opts.claimStore.has(key)) return false;
+        opts.claimStore.add(key);
+        return true;
+      },
+      log: { warn: (msg, data) => warnings.push({ msg, data }) },
     },
   };
 }
@@ -109,7 +131,9 @@ test('handle: unknown agent is skipped (no signal anywhere)', async () => {
 });
 
 test('handle: agent from another company is skipped', async () => {
-  const h = harness({ agent: { id: 'agent-1', companyId: 'company-OTHER' } });
+  const h = harness({
+    agent: { id: 'agent-1', companyId: 'company-OTHER', status: 'active', companyStatus: 'active' },
+  });
   assert.equal(await handleTaskProgressEvent(h.deps, event()), 'skipped:company-mismatch');
   assert.equal(h.delivered.length, 0);
 });
@@ -205,13 +229,14 @@ test('deliver: idle session wakes now; a live chat run waits, then gets the type
 
 test('deliver: handleTaskProgressEvent end-to-end onto the fake chat session', async () => {
   const session = new FakeChatSession();
-  const deps: TaskProgressBridgeDeps<{ id: string; companyId: string }> = {
-    getAgent: async () => ({ id: 'agent-1', companyId: 'company-1' }),
+  const deps: TaskProgressBridgeDeps<TaskProgressAgentRecord> = {
+    getAgent: async () => ({ id: 'agent-1', companyId: 'company-1', status: 'active', companyStatus: 'active' }),
     getActiveThreadId: async () => 'thread-42',
     deliver: async (_agent, _thread, payload) => {
       await queueTaskProgressSignal(session, payload);
       return true;
     },
+    claimEvent: async () => true,
   };
   assert.equal(await handleTaskProgressEvent(deps, event()), 'queued');
   assert.equal(await handleTaskProgressEvent(deps, event({ stage: 'done', status: 'succeeded' })), 'queued');
@@ -220,4 +245,94 @@ test('deliver: handleTaskProgressEvent end-to-end onto the fake chat session', a
     session.delivered.map((s) => s.attributes!.stage),
     ['started', 'done'],
   );
+});
+
+// ─── S2: single-consumer claim across web replicas ──────────────────────────
+
+test('claim: every replica sees the event; only the first claimer delivers', async () => {
+  const claimStore = new Set<string>();
+  const raw = JSON.stringify({ type: 'chat_task_progress', ...event() });
+  const parsed = parseTaskProgressMessage(raw)!;
+
+  const replicaA = harness({ claimStore });
+  const replicaB = harness({ claimStore });
+  assert.equal(await handleTaskProgressEvent(replicaA.deps, parsed), 'queued');
+  assert.equal(await handleTaskProgressEvent(replicaB.deps, parsed), 'skipped:duplicate');
+  assert.equal(replicaA.delivered.length, 1);
+  assert.equal(replicaB.delivered.length, 0, 'the second replica must NOT queue a duplicate signal');
+  // A different stage of the same run is a different notification — not a duplicate.
+  assert.equal(
+    await handleTaskProgressEvent(replicaB.deps, event({ stage: 'done', status: 'succeeded' })),
+    'queued',
+  );
+});
+
+test('claim: the key pins (companyId, chatTaskId, runId, stage) — stable across replicas', () => {
+  assert.equal(
+    taskProgressClaimKey(event()),
+    'concierge-signal:seen:company-1:task-1:run-1:started',
+  );
+  // Same transition, differently-derived event → same key (that is the whole point).
+  const parsed = parseTaskProgressMessage(JSON.stringify({ type: 'chat_task_progress', ...event() }))!;
+  assert.equal(taskProgressClaimKey(parsed), taskProgressClaimKey(event()));
+  // Any component differs → different key.
+  assert.notEqual(taskProgressClaimKey(event({ runId: 'run-2' })), taskProgressClaimKey(event()));
+  assert.notEqual(
+    taskProgressClaimKey(event({ stage: 'done', status: 'succeeded' })),
+    taskProgressClaimKey(event()),
+  );
+});
+
+test('claim: claimed before any db work (getAgent untouched on duplicate)', async () => {
+  const claimStore = new Set<string>([taskProgressClaimKey(event())]);
+  let agentLookups = 0;
+  const h = harness({ claimStore });
+  const orig = h.deps.getAgent;
+  const deps: TaskProgressBridgeDeps<TaskProgressAgentRecord> = {
+    ...h.deps,
+    getAgent: (id) => {
+      agentLookups += 1;
+      return orig(id);
+    },
+  };
+  assert.equal(await handleTaskProgressEvent(deps, event()), 'skipped:duplicate');
+  assert.equal(agentLookups, 0);
+});
+
+// ─── S4: paused/archived agents and companies must not be woken ─────────────
+
+test('inactive: paused, archived and pending_approval agents are skipped (S4, #196-B1 class)', async () => {
+  for (const status of ['paused', 'archived', 'pending_approval']) {
+    const h = harness({ agent: { id: 'agent-1', companyId: 'company-1', status, companyStatus: 'active' } });
+    assert.equal(await handleTaskProgressEvent(h.deps, event()), 'skipped:inactive', status);
+    assert.equal(h.delivered.length, 0);
+    assert.equal(h.warnings.length, 1);
+    assert.match(h.warnings[0]!.msg, /inactive/);
+  }
+});
+
+test('inactive: paused/archived company skips even for an active agent', async () => {
+  for (const companyStatus of ['paused', 'archived']) {
+    const h = harness({ agent: { id: 'agent-1', companyId: 'company-1', status: 'active', companyStatus } });
+    assert.equal(await handleTaskProgressEvent(h.deps, event()), 'skipped:inactive', companyStatus);
+    assert.equal(h.delivered.length, 0);
+  }
+});
+
+// ─── S3: documented behaviour — `started` on an idle thread wakes a full turn ──────────────
+
+test('S3 pin: every transition (including started) queues via queueSignal; idle = immediate wake', async () => {
+  // Current, deliberate behaviour: Mastra 1.78 queueSignal has no queue-without-wake option,
+  // so even the low-information `started` line wakes an idle thread for one concierge turn.
+  // TODO(#197 soft-pack S3): if the queue grows a non-waking enqueue, `started` should be
+  // parked for the NEXT human-initiated turn instead — this test is the pin to update then.
+  const idleSession = new FakeChatSession();
+  await queueTaskProgressSignal(idleSession, {
+    tagName: 'task-progress',
+    attributes: { taskId: 'task-1', runId: 'run-1', stage: 'started', status: 'running' },
+    contents: 'Background task started: "Ship the runbook". Progress updates will follow.',
+  });
+  assert.equal(idleSession.delivered.length, 1, 'idle thread gets the signal at once (the wake)');
+  assert.equal(idleSession.queued.length, 0);
+  assert.deepEqual(idleSession.interrupts, [], 'still no mid-token interrupt path used');
 });

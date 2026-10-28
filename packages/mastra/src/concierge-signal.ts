@@ -103,6 +103,10 @@ export async function queueConciergeSignal(
 /**
  * Cancel queued concierge signals by id (user dismissed / paused the task before delivery).
  * No-op returning [] when the agent cannot cancel (older Mastra, or nothing queued).
+ *
+ * NOTE (#197 soft-pack S5): no production caller yet, and the bridge does not persist the
+ * generated signal ids — wiring this needs a dismiss/pause UX first (deliberately not
+ * invented here). Kept + tested so that hook-up is one call away when the UX lands.
  */
 export async function cancelQueuedConciergeSignals(
   agent: QueuedSignalCancelAgent,
@@ -151,7 +155,9 @@ export function taskProgressSignalPayload(event: TaskProgressEventShape): TaskPr
   let contents: string;
   switch (event.stage) {
     case 'started':
-      contents = `Background task started: "${title}". I will report back when it finishes.`;
+      // Neutral system voice (soft-pack S6): the signal is tagged context, not the agent's
+      // own sentence — no "I will report back".
+      contents = `Background task started: "${title}". Progress updates will follow.`;
       break;
     case 'done':
       contents = `Background task done: "${title}".`;
