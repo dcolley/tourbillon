@@ -29,6 +29,15 @@ import {
 } from '@/lib/assistant/agent-dms';
 import { cn } from '@/lib/utils';
 
+/**
+ * DM-MODAL-WID S1: the DialogContent width contract, exported so tests can pin it without
+ * rendering through the Radix portal. Phone gutter (`max-w-[calc(100%-2rem)]`, overrides the
+ * shared DialogContent base so phones get a 1rem gutter instead of full-bleed) + desktop cap
+ * (`sm:max-w-[min(90vw,72rem)]`, no space: Tailwind arbitrary values break on one).
+ */
+export const DM_DIALOG_CONTENT_CLASS =
+  'flex max-h-[85vh] max-w-[calc(100%-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-[min(90vw,72rem)]';
+
 function DmTime({ iso }: { iso: string }) {
   const d = new Date(iso);
   return <time dateTime={iso}>{Number.isNaN(d.getTime()) ? iso : d.toLocaleString()}</time>;
@@ -257,7 +266,7 @@ export function DmConversationModal({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="flex max-h-[85vh] max-w-[calc(100%-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-[min(90vw,72rem)]"
+        className={DM_DIALOG_CONTENT_CLASS}
         data-dm-dialog
         data-dm-conversation-picker
         data-dm-view={view}
