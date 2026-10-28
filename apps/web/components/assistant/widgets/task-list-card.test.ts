@@ -61,6 +61,22 @@ describe('TASK-LIST-WID task list spec', () => {
     assert.equal(taskListPropsSafe({ ...MULTI, maxSelected: 3 }), false); // more than offered
   });
 
+  // S4: the duplicate-task-id props check pinned on its own. The fixture carries every other
+  // required field (title, valid ids/titles/statuses) and only the duplicate id is wrong, and the
+  // near-identical unique-id fixture parses true — so removing the superRefine dup check (mutant
+  // M21) fails this test, not just fixtures that fail for unrelated reasons.
+  it('props reject duplicate task ids on an otherwise-valid fixture (S4)', () => {
+    const withDupes = { title: 'Dupe check', mode: 'display', tasks: [{ id: 't-1', title: 'A' }, { id: 't-1', title: 'B' }] };
+    assert.equal(taskListPropsSafe(withDupes), false);
+    const parsed = taskListSpec.propsSchema.safeParse(withDupes);
+    assert.equal(parsed.success, false);
+    if (!parsed.success) {
+      assert.ok(parsed.error.issues.some((i) => i.message === 'duplicate_id' && i.path.join('.') === 'tasks'));
+    }
+    assert.equal(taskListPropsSafe({ ...withDupes, tasks: [{ id: 't-1', title: 'A' }, { id: 't-2', title: 'B' }] }), true); // same fixture, unique ids
+    assert.equal(taskListPropsSafe({ ...withDupes, mode: 'multiSelect' }), false); // dupes fail in multiSelect too
+  });
+
   it('modes enforce the answer shape (client check === server check)', () => {
     // display: read-only; an ack is accepted, a selection is refused.
     assert.equal(check(DISPLAY, { ack: true }), 'ok');
@@ -97,6 +113,15 @@ describe('TASK-LIST-WID task list spec', () => {
     assert.deepEqual(taskListBounds(MULTI), { min: 1, max: 2 });
     assert.equal(taskLabel(DISPLAY, 't-2'), 'Check the restore backup');
     assert.equal(taskLabels(DISPLAY, ['t-1', 't-2']), 'Draft the runbook, Check the restore backup');
+  });
+
+  // S3: the picker branch's membership check pinned. An unknown id must be refused by the client
+  // draft BEFORE submit (not just by the server), and an offered id must pass — so deleting the
+  // `!ids.includes(single)` check (mutant M19) fails this test.
+  it('the picker draft refuses task ids outside the offered list (S3)', () => {
+    assert.deepEqual(taskListDraft(PICKER, 't-9'), { ok: false, errors: { taskId: 'Pick one task.' } });
+    assert.deepEqual(taskListDraft(PICKER, ['t-9']), { ok: false, errors: { taskId: 'Pick one task.' } }); // array-shaped draft too
+    assert.deepEqual(taskListDraft(PICKER, 't-2'), { ok: true, answer: { taskId: 't-2' } });
   });
 
   it('an answered card replays the stored answer, not the draft', () => {
@@ -141,6 +166,52 @@ describe('TASK-LIST-WID task list card', () => {
     const multi = card(MULTI, 'pending');
     assert.match(multi, /type="checkbox"/);
     assert.match(multi, /0 of 2 selected/);
+  });
+
+  // S2: the Submit gate `disabled={locked || !inBounds}` pinned from the card. A pending card whose
+  // draft is out of bounds must render Choose disabled (kills a mutant that drops `|| !inBounds`,
+  // and one that changes the multiSelect min default); a pending multiSelect with minSelected: 0 is
+  // in bounds with an empty draft and must render Choose ENABLED (kills "always disabled" and
+  // `>=`→`>` mutants); and a locked pending card (no onAnswer) renders Choose disabled even when
+  // its draft is in bounds (pins the `locked` half of the gate).
+  const chooseButtonTag = (html: string) => (html.match(/<button[^>]*>Choose<\/button>/) ?? [undefined])[0];
+  it('Submit stays disabled until the selection is in bounds, and enabled once it is (S2)', () => {
+    const pickerPending = chooseButtonTag(card(PICKER, 'pending')); // picker: nothing picked -> out of bounds
+    assert.ok(pickerPending, 'pending picker renders Choose');
+    assert.match(pickerPending!, /\sdisabled=""/); // the attribute, not the word: the Button class also contains 'disabled:'
+    const multiPending = chooseButtonTag(card(MULTI, 'pending')); // multiSelect: 0 < default min 1 -> out of bounds
+    assert.ok(multiPending, 'pending multiSelect renders Choose');
+    assert.match(multiPending!, /\sdisabled=""/);
+    const inBounds = chooseButtonTag(card({ ...MULTI, minSelected: 0 }, 'pending')); // 0 >= min 0, 0 <= max -> in bounds
+    assert.ok(inBounds, 'in-bounds multiSelect renders Choose');
+    assert.doesNotMatch(inBounds!, /\sdisabled=""/);
+    const lockedInBounds = ((): string | undefined => {
+      const html = renderToStaticMarkup(
+        React.createElement(TaskListCard, { toolCallId: 'c1', props: { ...MULTI, minSelected: 0 }, status: 'pending', onDismiss: () => undefined }),
+      );
+      return chooseButtonTag(html);
+    })(); // in bounds but locked (no onAnswer)
+    assert.ok(lockedInBounds, 'locked pending card still renders Choose');
+    assert.match(lockedInBounds!, /\sdisabled=""/);
+  });
+
+  // S5 (a11y): the picker radios must be ONE radio group — a single shared name across the rows
+  // (ChoiceCard's pattern), not the old per-row `${task.id}-one`. Also pins the multiSelect
+  // checkboxes onto the shared `-multi` name.
+  it('picker radios share one radio-group name; checkboxes share one name (S5)', () => {
+    const inputNames = (html: string, type: string): string[] =>
+      [...html.matchAll(/<input([^>]*?)>/g)]
+        .map((m) => m[1])
+        .filter((attrs) => attrs.includes(`type="${type}"`))
+        .map((attrs) => /name="([^"]*)"/.exec(attrs)?.[1] ?? '');
+    const radios = inputNames(card(PICKER, 'pending'), 'radio');
+    assert.equal(radios.length, 2);
+    assert.equal(new Set(radios).size, 1); // one group: both rows carry the same name
+    assert.ok(radios[0]!.length > 0 && !radios[0]!.includes('t-1') && !radios[0]!.includes('t-2')); // shared, not per-row
+    const boxes = inputNames(card(MULTI, 'pending'), 'checkbox');
+    assert.equal(boxes.length, 2);
+    assert.equal(new Set(boxes).size, 1);
+    assert.ok(boxes[0]!.endsWith('-multi')); // same naming convention as ChoiceCard
   });
 
   it('an answered card locks and replays the chosen tasks; a dismissed card says so', () => {
