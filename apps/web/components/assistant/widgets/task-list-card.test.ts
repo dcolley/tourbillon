@@ -77,6 +77,31 @@ describe('TASK-LIST-WID task list spec', () => {
     assert.equal(taskListPropsSafe({ ...withDupes, mode: 'multiSelect' }), false); // dupes fail in multiSelect too
   });
 
+  // S6 (#193): `tasks.min(1)` is the wall - the card can never show an empty list, so the tool
+  // description must send the agent to a text answer instead of a doomed call (listMyTasks side is
+  // pinned in packages/mastra chat-task-tools.test.ts).
+  it('S6: the spec description sends an empty list to a text answer (tasks.min(1) is the wall)', () => {
+    assert.match(taskListSpec.description, /at least one task/);
+    assert.match(taskListSpec.description, /if listMyTasks returns no tasks, do not call it/);
+    assert.match(taskListSpec.description, /answer in plain text/);
+    assert.equal(taskListPropsSafe({ ...DISPLAY, tasks: [] }), false); // the card really cannot take an empty list
+  });
+
+  // S7 (#193, askForm WID-MS pattern): selection bounds belong to multiSelect; display and picker
+  // cards refuse minSelected/maxSelected instead of accepting them silently.
+  it('S7: display and picker cards refuse minSelected/maxSelected (mode: multi_select_only)', () => {
+    const issueStrings = (props: unknown) => {
+      const parsed = taskListSpec.propsSchema.safeParse(props);
+      return parsed.success ? [] : parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`);
+    };
+    assert.deepEqual(issueStrings({ ...DISPLAY, minSelected: 1 }), ['mode: multi_select_only']);
+    assert.deepEqual(issueStrings({ ...PICKER, maxSelected: 2 }), ['mode: multi_select_only']);
+    assert.deepEqual(issueStrings({ ...PICKER, minSelected: 0, maxSelected: 2 }), ['mode: multi_select_only']);
+    assert.equal(taskListPropsSafe({ ...DISPLAY, minSelected: 1 }), false);
+    assert.deepEqual(issueStrings({ ...MULTI, minSelected: 1, maxSelected: 2 }), []); // bounds stay fine on multiSelect
+    assert.equal(taskListPropsSafe(PICKER), true); // a picker without bounds is untouched
+  });
+
   it('modes enforce the answer shape (client check === server check)', () => {
     // display: read-only; an ack is accepted, a selection is refused.
     assert.equal(check(DISPLAY, { ack: true }), 'ok');
