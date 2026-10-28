@@ -1,10 +1,11 @@
 /**
- * CONCIERGE-QUEUE-SIGNAL bridge wiring tests (soft-pack S1, softs S10–S12): the deliver
- * policy (session lookup, idle-thread retarget, busy-skip, signal lands on the created
+ * CONCIERGE-QUEUE-SIGNAL bridge wiring tests (soft-pack S1, softs S10–S12, S13–S14): the
+ * deliver policy (session lookup, idle-thread retarget, busy-skip, signal lands on the created
  * session), the subscriber loop (startTaskProgressSignalBridge: channel/type filtering,
  * single-consumer claim wiring, error swallowing, per-process idempotence), the db-backed
- * getAgent company join (S10) and the fail-open redis claim (S11) — all against fakes, no
- * real redis/db/chat imports.
+ * getAgent company join (S10) with column-pinned `eq` assertions (S13), the paused-agent
+ * status mapping (S14) and the fail-open redis claim (S11) — all against fakes, no real
+ * redis/db/chat imports.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -21,6 +22,7 @@ import {
   type DeliverSession,
   type RedisClaimCommands,
   type TaskProgressDbQuery,
+  type TaskProgressDbTables,
   type TaskProgressOrm,
 } from './task-progress-bridge';
 import {
@@ -295,12 +297,13 @@ test('bridge: a rejected deliver is swallowed with a warn — the subscriber loo
   }
 });
 
-// ─── getAgent: the REAL db-backed company join (softs S10) ──────────────────────────────
+// ─── getAgent: the REAL db-backed company join (softs S10, S13, S14) ─────────────────────
 //
 // The pure core already skips inactive tenants, but until now the db-backed `getAgent` was
 // never exercised: hard-coding `companyStatus: 'active'` in its mapper kept every test green.
-// These inject a fake db query + orm so the join, the company lookup BY THE AGENT'S companyId,
-// and the companyStatus mapping itself are load-bearing.
+// These inject a fake db query + orm — and, since S13, DISTINCT fake table objects — so the
+// join, the company lookup BY THE AGENT'S companyId, WHICH column each `eq` constrains, and
+// the status/companyStatus mappings themselves are all load-bearing.
 
 function fakeOrm(): { orm: TaskProgressOrm; where: unknown[] } {
   const where: unknown[] = [];
@@ -342,13 +345,28 @@ function fakeDb(opts: {
   };
 }
 
+/**
+ * S13: two table objects that CANNOT be confused for each other. With these injected, a
+ * swapped join — `eq(agents.id, row.companyId)` instead of `eq(companies.id, row.companyId)`
+ * — lands the wrong sentinel in the recorded `where` and the assertion below fails. (The old
+ * injected path substituted `{}` for both tables, so every column read back as `undefined`
+ * and such a swap was invisible.)
+ */
+function fakeTables(): TaskProgressDbTables {
+  return {
+    agents: { id: { table: 'agents', column: 'id' } },
+    companies: { id: { table: 'companies', column: 'id' } },
+  };
+}
+
 test('getAgent (db-backed, S10): joins the company row and maps companyStatus through — NOT hard-coded active', async () => {
+  const tables = fakeTables();
   const db = fakeDb({
     agent: { id: 'agent-1', companyId: 'company-9', status: 'active' },
     company: { status: 'paused' },
   });
   const orm = fakeOrm();
-  const rec = await getAgent('agent-1', { db, orm: orm.orm });
+  const rec = await getAgent('agent-1', { db, orm: orm.orm, tables });
   // companyStatus is the JOINED company row's status. Flip the mapper to
   // `companyStatus: 'active'` and this fails even though the pure core still skips later —
   // the bridge must see the real tenant state, not a stubbed one.
@@ -356,24 +374,54 @@ test('getAgent (db-backed, S10): joins the company row and maps companyStatus th
   // The company is looked up BY THE AGENT'S companyId (real join), not the requested id.
   assert.equal(db.agentLookups.length, 1, 'one agent lookup');
   assert.equal(db.companyLookups.length, 1, 'one company lookup (the join)');
+  // S13: the injected DISTINCT table sentinels pin WHICH column each `eq` constrains —
+  // `eq(agents.id, row.companyId)` for the join would put the agents sentinel here and fail.
   assert.deepEqual(orm.where, [
-    { column: undefined, value: 'agent-1' }, // eq(agents.id, agentId)
-    { column: undefined, value: 'company-9' }, // eq(companies.id, row.companyId)
+    { column: { table: 'agents', column: 'id' }, value: 'agent-1' }, // eq(agents.id, agentId)
+    { column: { table: 'companies', column: 'id' }, value: 'company-9' }, // eq(companies.id, row.companyId)
   ]);
 });
 
 test('getAgent (db-backed, S10): missing agent row → null, company join never runs', async () => {
   const db = fakeDb({ company: { status: 'active' } });
   const orm = fakeOrm();
-  assert.equal(await getAgent('ghost', { db, orm: orm.orm }), null);
+  assert.equal(await getAgent('ghost', { db, orm: orm.orm, tables: fakeTables() }), null);
   assert.deepEqual(db.companyLookups, [], 'no company join for a missing agent');
 });
 
 test('getAgent (db-backed, S10): missing company row → null (no tenant to deliver into)', async () => {
   const db = fakeDb({ agent: { id: 'agent-1', companyId: 'company-9', status: 'active' } });
   const orm = fakeOrm();
-  assert.equal(await getAgent('agent-1', { db, orm: orm.orm }), null);
+  assert.equal(await getAgent('agent-1', { db, orm: orm.orm, tables: fakeTables() }), null);
   assert.equal(db.companyLookups.length, 1, 'the company was looked up before deciding');
+});
+
+test('getAgent (db-backed, S14): a PAUSED agent maps status through row.status — NOT hard-coded active', async () => {
+  // The mapper's `status: row.status` was uncovered: hard-coding `status: 'active'` kept every
+  // prior test green (the pure core had its own inactive skip, so the wrong record never
+  // surfaced). A paused agent row must come back paused from getAgent itself.
+  const db = fakeDb({
+    agent: { id: 'agent-1', companyId: 'company-1', status: 'paused' },
+    company: { status: 'active' },
+  });
+  const orm = fakeOrm();
+  const rec = await getAgent('agent-1', { db, orm: orm.orm, tables: fakeTables() });
+  assert.deepEqual(rec, { id: 'agent-1', companyId: 'company-1', status: 'paused', companyStatus: 'active' });
+  // End-to-end through the bridge: the paused agent is skipped before deliver, so the wrong
+  // mapping can't hide behind the pure core's skip either way.
+  let delivered = 0;
+  const deps = buildTaskProgressBridgeDeps({
+    claimClient: { claim: async () => true },
+    getAgent: (agentId) => getAgent(agentId, { db, orm: orm.orm, tables: fakeTables() }),
+    getActiveThreadId: async () => 'thread-42',
+    deliver: async () => {
+      delivered += 1;
+      return true;
+    },
+    log: { warn: () => {} },
+  });
+  assert.equal(await handleTaskProgressEvent(deps, progressEvent()), 'skipped:inactive');
+  assert.equal(delivered, 0, 'a paused agent must not be woken into an LLM turn');
 });
 
 test('getAgent (db-backed, S10): through buildTaskProgressBridgeDeps — a paused tenant never reaches deliver', async () => {
@@ -387,7 +435,7 @@ test('getAgent (db-backed, S10): through buildTaskProgressBridgeDeps — a pause
   let delivered = 0;
   const deps = buildTaskProgressBridgeDeps({
     claimClient: { claim: async () => true },
-    getAgent: (agentId) => getAgent(agentId, { db, orm: orm.orm }),
+    getAgent: (agentId) => getAgent(agentId, { db, orm: orm.orm, tables: fakeTables() }),
     getActiveThreadId: async () => 'thread-42',
     deliver: async () => {
       delivered += 1;

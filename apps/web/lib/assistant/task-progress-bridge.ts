@@ -44,28 +44,42 @@ export interface TaskProgressOrm {
   eq(column: unknown, value: unknown): unknown;
 }
 
+/**
+ * The `@tourbillon/db` table-object slice getAgent passes to `eq` (softs S13). Injectable so
+ * tests hand in DISTINCT sentinels per table — then the fake `eq` can pin WHICH column each
+ * lookup constrains on. Without this the injected path used `{}` for both tables, so e.g.
+ * `eq(agents.id, row.companyId)` for the company join stayed invisible.
+ */
+export interface TaskProgressDbTables {
+  agents: { id: unknown };
+  companies: { id: unknown };
+}
+
 /** A seen-transition claim outlives any plausible SSE redelivery window (pub/sub has none). */
 export const TASK_PROGRESS_CLAIM_TTL_SECONDS = 900;
 
 // ─── agent + company lookup (S4: inactive tenants are skipped by the pure core) ───────────
 
 /**
- * Agent row + its tenant row joined into the bridge's record slice. `orm` / `db` are
- * injectable (softs S10) so the REAL company join and `companyStatus` mapping are exercised
- * against a fake query — the lazy `import()` stays the default production path.
+ * Agent row + its tenant row joined into the bridge's record slice. `orm` / `db` / `tables`
+ * are injectable (softs S10, S13) so the REAL company join, `companyStatus` mapping and the
+ * columns behind each `eq` are exercised against fakes — the lazy `import()` stays the default
+ * production path. `tables` is only consulted on the injected-`db` path (production supplies
+ * the real drizzle table objects from the same module import).
  */
 export async function getAgent(
   agentId: string,
-  sources: { db?: { query: TaskProgressDbQuery }; orm?: TaskProgressOrm } = {},
+  sources: {
+    db?: { query: TaskProgressDbQuery };
+    orm?: TaskProgressOrm;
+    tables?: TaskProgressDbTables;
+  } = {},
 ): Promise<TaskProgressAgentRecord | null> {
   // Lazy: keeps this module importable (and its pure wiring testable) without db/env.
-  const { db, agents, companies } = (sources.db
-    ? { db: sources.db, agents: {}, companies: {} }
-    : await import('@tourbillon/db')) as unknown as {
-    db: { query: TaskProgressDbQuery };
-    agents: Record<string, unknown>;
-    companies: Record<string, unknown>;
-  };
+  const real = sources.db ? undefined : ((await import('@tourbillon/db')) as unknown as Record<string, unknown>);
+  const db = (sources.db ?? real) as { query: TaskProgressDbQuery };
+  const agents = (sources.tables?.agents ?? real?.agents ?? {}) as Record<string, unknown>;
+  const companies = (sources.tables?.companies ?? real?.companies ?? {}) as Record<string, unknown>;
   const { eq } = sources.orm ?? ((await import('drizzle-orm')) as unknown as TaskProgressOrm);
   const row = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
   if (!row) return null;
