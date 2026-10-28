@@ -26,7 +26,7 @@ const AGENTS = [
 ];
 const RESOURCE_A = 'company-company-a:chat:free';
 
-let activeCompany: { id: string } | null = { id: 'company-a' };
+let activeCompany: { id: string; settings?: unknown } | null = { id: 'company-a' };
 let controller: any;
 let sessions: Map<string, any>;
 const sessionCalls: Array<{
@@ -637,9 +637,18 @@ describe('UI-2 assistant sidebar API', () => {
 
     it('list and create report the agent’s Observational Memory mode', async () => {
       const listed = await list('alice');
-      assert.deepEqual(listed.body.observationalMemory, { mode: 'inherit', active: false });
+      assert.deepEqual(listed.body.observationalMemory, { mode: 'inherit', active: false, heartbeatActive: false });
       const created = await post('alice');
-      assert.deepEqual(created.body.observationalMemory, { mode: 'inherit', active: false });
+      assert.deepEqual(created.body.observationalMemory, { mode: 'inherit', active: false, heartbeatActive: false });
+      // CONCIERGE-OM B1: chat resolves through resolveChatObservationalMemory, so an observer
+      // model on the company means OM runs in chat even when heartbeats have it off.
+      // Regressing the route to the heartbeat resolver flips `active` back to false here.
+      activeCompany = {
+        id: 'company-a',
+        settings: { observationalMemory: { enabled: false, providerId: 'p1', modelId: 'om-model' } },
+      };
+      const forced = await list('alice');
+      assert.deepEqual(forced.body.observationalMemory, { mode: 'inherit', active: true, heartbeatActive: false });
     });
   });
 
