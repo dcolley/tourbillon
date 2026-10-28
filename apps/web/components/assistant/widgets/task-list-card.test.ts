@@ -149,7 +149,36 @@ describe('TASK-LIST-WID task list card', () => {
     const dismissed = card(DISPLAY, 'dismissed');
     assert.match(dismissed, /Dismissed without an answer\./);
     assert.doesNotMatch(dismissed, /data-action="close"/); // Close renders only while pending
-    assert.doesNotMatch(dismissed, /type="radio"|type="checkbox"/); // a replayed dismissed card is locked (disabled fieldset)
+    assert.doesNotMatch(dismissed, /type="radio"|type="checkbox"/); // display mode renders no inputs at all
+  });
+
+  // B1: picker/multiSelect inputs still render (so the replayed selection shows) but the fieldset is disabled
+  // once the card is answered or dismissed; a pending card with a handler stays interactive.
+  const fieldsetDisabled = (html: string) => /<fieldset[^>]*\sdisabled=""/.test(html);
+  it('picker and multiSelect lock their fieldset when answered or dismissed (pending stays enabled)', () => {
+    assert.equal(fieldsetDisabled(card(PICKER, 'pending')), false);
+    assert.equal(fieldsetDisabled(card(MULTI, 'pending')), false);
+
+    const pickerAnswered = card(PICKER, 'answered', { taskId: 't-2' });
+    assert.equal(fieldsetDisabled(pickerAnswered), true);
+    assert.match(pickerAnswered, /<input type="radio"[^>]*checked=""[^>]*value="t-2"/); // replayed selection still shown
+    const pickerDismissed = card(PICKER, 'dismissed');
+    assert.equal(fieldsetDisabled(pickerDismissed), true);
+    assert.match(pickerDismissed, /type="radio"/);
+
+    const multiAnswered = card({ ...MULTI, minSelected: 1, maxSelected: 2 }, 'answered', { taskIds: ['t-1', 't-2'] });
+    assert.equal(fieldsetDisabled(multiAnswered), true);
+    assert.equal((multiAnswered.match(/type="checkbox"[^>]*checked=""/g) ?? []).length, 2);
+    const multiDismissed = card(MULTI, 'dismissed');
+    assert.equal(fieldsetDisabled(multiDismissed), true);
+    assert.match(multiDismissed, /type="checkbox"/);
+  });
+
+  it('a pending picker with no answer handler is locked too', () => {
+    const html = renderToStaticMarkup(
+      React.createElement(TaskListCard, { toolCallId: 'c1', props: PICKER, status: 'pending', onDismiss: () => undefined }),
+    );
+    assert.equal(fieldsetDisabled(html), true);
   });
 
   it('a showTaskList tool call renders the card, not the fallback', () => {

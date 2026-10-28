@@ -20,6 +20,7 @@ export function TaskListRows({
   props,
   selected,
   selectable,
+  locked,
   errorId,
   error,
   onToggle,
@@ -27,13 +28,15 @@ export function TaskListRows({
   props: TaskListProps;
   selected: string[];
   selectable: boolean;
+  /** Answered, dismissed or no answer handler: inputs still render (replayed selection) but are inert. */
+  locked: boolean;
   errorId: string;
   error?: string;
   onToggle: (id: string, on: boolean) => void;
 }) {
   const multi = props.mode === 'multiSelect';
   return (
-    <fieldset className="space-y-1" disabled={!selectable}>
+    <fieldset className="space-y-1" disabled={!selectable || locked}>
       <legend className="sr-only">Tasks</legend>
       {props.tasks.map((task) => (
         <label
@@ -103,7 +106,7 @@ export function TaskListCard({ props, status, answer, onAnswer, onDismiss, busy 
   return (
     <CardFrame kind="task-list" title={props.title} detail={props.detail} status={status} busy={busy} onDismiss={onDismiss}>
       <form className="space-y-2" onSubmit={submit}>
-        <TaskListRows props={props} selected={selected} selectable={selectable} errorId={errorId} error={error} onToggle={toggle} />
+        <TaskListRows props={props} selected={selected} selectable={selectable} locked={locked} errorId={errorId} error={error} onToggle={toggle} />
         <FieldError id={errorId} message={error} />
         {status === 'pending' && (
           <div className="space-y-1">
