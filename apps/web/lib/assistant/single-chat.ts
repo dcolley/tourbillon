@@ -14,12 +14,8 @@
  * The resource id stays the company's free-chat resource.
  */
 import { assistantAgentPath } from './sidebar';
-import {
-  resolveAgentObservationalMemory,
-  resolveChatObservationalMemory,
-  type AgentRuntimeConfig,
-  type CompanySettings,
-} from '@tourbillon/shared';
+import { resolveAgentObservationalMemory, resolveChatObservationalMemory } from '@tourbillon/shared/company-settings';
+import type { AgentRuntimeConfig, CompanySettings } from '@tourbillon/shared';
 
 /** The agent's chat (its one conversation). */
 export function agentChatPath(agentUrlKey: string): string {
