@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { hasExplicitChatModel, resolveChatModelOptions } from './concierge-model';
+import { buildChatControllerOptions, hasExplicitChatModel, resolveChatModelOptions } from './concierge-model';
 import type { ThreadProviderDeps } from './thread-model';
 
 /**
@@ -126,5 +126,56 @@ describe('CONCIERGE-PARAMS — params flow into the chat model options', () => {
   it('omits params from the options when the pair has none', async () => {
     const opts = await resolveChatModelOptions(COMPANY, { conciergeModel: pair }, undefined, deps(true));
     assert.deepEqual(Object.keys(opts!), ['modelIdOverride', 'providerIdOverride']);
+  });
+});
+
+/**
+ * CONCIERGE-PARAMS S1 (gate #195): the params pass-through at the two wiring sites the earlier
+ * gates left untested — resolveChatModelOptions (pair params → controller options) and the
+ * registry's createChatController options build (buildChatControllerOptions). Dropping params at
+ * either site silently reverts the chat controller to the provider-default window.
+ */
+const PAIR_WITH_PARAMS = {
+  providerId: 'prov-1',
+  modelId: 'snappy-mini',
+  params: { maxContextTokens: 65_536, maxOutputTokens: 2_048 },
+};
+
+describe('CONCIERGE-PARAMS S1 — params pass-through', () => {
+  it('resolveChatModelOptions carries the pair params onto the controller options', async () => {
+    const opts = await resolveChatModelOptions(COMPANY, { conciergeModel: PAIR_WITH_PARAMS }, undefined, deps(true));
+    assert.deepEqual(opts, {
+      modelIdOverride: 'snappy-mini',
+      providerIdOverride: 'prov-1',
+      params: { maxContextTokens: 65_536, maxOutputTokens: 2_048 },
+    }, 'params must ride along (drop-params mutant → pair without params)');
+  });
+
+  it('an off provider still drops the params too (no partial pair)', async () => {
+    const opts = await resolveChatModelOptions(COMPANY, { conciergeModel: PAIR_WITH_PARAMS }, undefined, deps(false));
+    assert.equal(opts, undefined);
+  });
+
+  it('buildChatControllerOptions passes params, provider, effort and MCP ids to createChatController', () => {
+    const o = buildChatControllerOptions(
+      { allowedMcpServerIds: ['mcp-1'], settings: { conciergeModel: PAIR_WITH_PARAMS } },
+      {
+        modelIdOverride: 'snappy-mini',
+        providerIdOverride: 'prov-1',
+        reasoningLevelOverride: 'low' as never,
+        params: PAIR_WITH_PARAMS.params,
+      },
+    );
+    assert.deepEqual(o.params, { maxContextTokens: 65_536, maxOutputTokens: 2_048 }, 'the registry pass-through keeps params');
+    assert.deepEqual(o.allowedMcpServerIds, ['mcp-1']);
+    assert.deepEqual(o.companySettings?.conciergeModel, PAIR_WITH_PARAMS, 'company settings parsed for the controller');
+    assert.equal(o.modelIdOverride, 'snappy-mini');
+    assert.equal(o.providerIdOverride, 'prov-1');
+    assert.equal(o.reasoningLevelOverride, 'low');
+  });
+
+  it('unset optionals are omitted (model-only override keeps the legacy shape)', () => {
+    const o = buildChatControllerOptions(undefined, { modelIdOverride: 'legacy/model' });
+    assert.deepEqual(o, { allowedMcpServerIds: [], companySettings: {}, modelIdOverride: 'legacy/model' });
   });
 });

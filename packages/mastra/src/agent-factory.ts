@@ -14,6 +14,7 @@ import {
   resolveObservationalMemorySettings,
   type AgentRuntimeConfig,
   type CompanySettings,
+  type ResolvedObservationalMemoryConfig,
   isSearxngConfigured,
   isTavilyConfigured,
   isCodeExecutionAvailable,
@@ -55,6 +56,52 @@ const globalForMastra = globalThis as unknown as {
   mastraMemoryByKey?: Map<string, Memory>;
 };
 
+/** The four shared OM helpers the memory scope binding needs (injectable for wiring tests). */
+export interface AgentMemoryResolvers {
+  memoryCacheKeyForAgent: (
+    companySettings?: CompanySettings | null,
+    agentRuntime?: AgentRuntimeConfig | null,
+  ) => string;
+  resolveAgentObservationalMemory: (
+    companySettings?: CompanySettings | null,
+    agentRuntime?: AgentRuntimeConfig | null,
+  ) => ResolvedObservationalMemoryConfig | null;
+  memoryCacheKeyForChat: (
+    companySettings?: CompanySettings | null,
+    agentRuntime?: AgentRuntimeConfig | null,
+  ) => string;
+  resolveChatObservationalMemory: (
+    companySettings?: CompanySettings | null,
+    agentRuntime?: AgentRuntimeConfig | null,
+  ) => ResolvedObservationalMemoryConfig | null;
+}
+
+/**
+ * CONCIERGE-OM wiring contract (pinned by agent-factory.memory-wiring.test.ts): the
+ * memoryScope picks BOTH the cache key and the OM resolver as a pair — 'chat' must use
+ * memoryCacheKeyForChat + resolveChatObservationalMemory (forced-on), 'heartbeat'/default
+ * must use memoryCacheKeyForAgent + resolveAgentObservationalMemory (optional OM).
+ * Swapping either half of a pair gives chat a heartbeat-keyed Memory (shared instance,
+ * OM silently off) or flips heartbeats to forced-on — both must fail the test.
+ */
+export function selectAgentMemoryResolution(
+  resolvers: AgentMemoryResolvers,
+  memoryScope: 'heartbeat' | 'chat' | undefined,
+  companySettings?: CompanySettings | null,
+  agentRuntime?: AgentRuntimeConfig | null,
+): { key: string; resolved: ResolvedObservationalMemoryConfig | null } {
+  const chatScope = memoryScope === 'chat';
+  return chatScope
+    ? {
+        key: resolvers.memoryCacheKeyForChat(companySettings, agentRuntime),
+        resolved: resolvers.resolveChatObservationalMemory(companySettings, agentRuntime),
+      }
+    : {
+        key: resolvers.memoryCacheKeyForAgent(companySettings, agentRuntime),
+        resolved: resolvers.resolveAgentObservationalMemory(companySettings, agentRuntime),
+      };
+}
+
 /**
  * Shared Mastra Memory for durable Agent and harness AgentController.
  * When agent or company Observational Memory is configured, returns a Memory with OM
@@ -71,29 +118,35 @@ export async function getAgentMemory(
    * the existing optional-OM semantics unchanged.
    */
   memoryScope?: 'heartbeat' | 'chat',
+  /** Test seam: swap the OM observer model factory (default hits the provider registry via DB). */
+  deps?: { omModelFor?: typeof getLanguageModelForProviderRecord },
 ): Promise<Memory> {
   if (!globalForMastra.mastraMemoryByKey) {
     globalForMastra.mastraMemoryByKey = new Map();
   }
-  const chatScope = memoryScope === 'chat';
   const {
     memoryCacheKeyForAgent,
     resolveAgentObservationalMemory,
     memoryCacheKeyForChat,
     resolveChatObservationalMemory,
   } = await import('@tourbillon/shared/company-settings');
-  const key = chatScope
-    ? memoryCacheKeyForChat(companySettings, agentRuntime)
-    : memoryCacheKeyForAgent(companySettings, agentRuntime);
+  const { key, resolved } = selectAgentMemoryResolution(
+    {
+      memoryCacheKeyForAgent,
+      resolveAgentObservationalMemory,
+      memoryCacheKeyForChat,
+      resolveChatObservationalMemory,
+    },
+    memoryScope,
+    companySettings,
+    agentRuntime,
+  );
   const cached = globalForMastra.mastraMemoryByKey.get(key);
   if (cached) return cached;
 
   const connectionString = requireDatabaseUrl('agent memory storage');
   const semanticRecallEnabled = process.env.MEMORY_SEMANTIC_RECALL === 'true';
   const embeddingModel = process.env.MEMORY_EMBEDDING_MODEL;
-  const resolved = chatScope
-    ? resolveChatObservationalMemory(companySettings, agentRuntime)
-    : resolveAgentObservationalMemory(companySettings, agentRuntime);
 
   const config: ConstructorParameters<typeof Memory>[0] = {
     storage: new PostgresStore({ id: 'tourbillon-memory', connectionString }),
@@ -112,7 +165,10 @@ export async function getAgentMemory(
   };
 
   if (resolved) {
-    const omModel = await getLanguageModelForProviderRecord(resolved.providerId, resolved.modelId);
+    const omModel = await (deps?.omModelFor ?? getLanguageModelForProviderRecord)(
+      resolved.providerId,
+      resolved.modelId,
+    );
     config.options = {
       ...config.options,
       observationalMemory: {

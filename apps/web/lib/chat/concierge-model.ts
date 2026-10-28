@@ -12,7 +12,7 @@
  * distinguishes it (chatModelOverrideKey); clearing the setting therefore restores the agent
  * model on the next request (different cache key → fresh controller).
  */
-import { resolveConciergeModel, type CompanySettings } from '@tourbillon/shared';
+import { parseCompanySettings, resolveConciergeModel, type CompanySettings } from '@tourbillon/shared';
 import type { ChatModelOverrideOptions } from '../../../../packages/mastra/src/chat';
 import { defaultThreadProviderDeps, type ThreadProviderDeps } from './thread-model';
 
@@ -50,5 +50,34 @@ export async function resolveChatModelOptions(
     modelIdOverride: pair.modelId,
     providerIdOverride: pair.providerId,
     ...(pair.params ? { params: pair.params } : {}),
+  };
+}
+
+/** The options object `registry.getOrCreateChatController` hands `createChatController`. */
+export interface ChatControllerBuildOptions extends ChatModelOverrideOptions {
+  allowedMcpServerIds: string[];
+  companySettings: CompanySettings | null;
+}
+
+/**
+ * CONCIERGE-PARAMS S1 (gate #195): build the createChatController options from the company row +
+ * the per-request resolved model options. The `params` spread is the registry pass-through that
+ * survived the gates untested — dropping it here silently reverts the chat controller to the
+ * provider-default window while the cache key still claims params.
+ */
+export function buildChatControllerOptions(
+  companyRow: { allowedMcpServerIds?: string[] | null; settings?: unknown } | undefined,
+  modelOpts?: ChatModelOverrideOptions,
+): ChatControllerBuildOptions {
+  return {
+    allowedMcpServerIds: companyRow?.allowedMcpServerIds ?? [],
+    companySettings: parseCompanySettings(companyRow?.settings),
+    modelIdOverride: modelOpts?.modelIdOverride,
+    ...(modelOpts?.providerIdOverride ? { providerIdOverride: modelOpts.providerIdOverride } : {}),
+    ...(modelOpts?.reasoningLevelOverride
+      ? { reasoningLevelOverride: modelOpts.reasoningLevelOverride }
+      : {}),
+    // CONCIERGE-PARAMS: params are resolved per request and part of the cache key.
+    ...(modelOpts?.params ? { params: modelOpts.params } : {}),
   };
 }

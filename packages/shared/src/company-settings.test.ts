@@ -555,7 +555,7 @@ describe('resolveChatObservationalMemory (CONCIERGE-OM)', () => {
     const chat = resolveChatObservationalMemory(companyOff, {
       observationalMemory: { mode: 'inherit' },
     });
-    assert.ok(chat);
+    assert.ok(chat, 'chat must force OM on when the company OM model exists, even with enabled:false');
     assert.equal(chat.providerId, 'provider-company');
     assert.equal(chat.modelId, 'model-company');
     assert.equal(chat.maxOutputTokens, 4096);
@@ -576,7 +576,7 @@ describe('resolveChatObservationalMemory (CONCIERGE-OM)', () => {
     const chat = resolveChatObservationalMemory(companyOn, {
       observationalMemory: { mode: 'off' },
     });
-    assert.ok(chat);
+    assert.ok(chat, "agent mode:'off' must not kill chat OM (that switch gates heartbeats only)");
     assert.equal(chat.modelId, 'm-om');
     // Defaults apply when company left thresholds unset.
     assert.equal(chat.maxOutputTokens, 8192);
@@ -590,7 +590,7 @@ describe('resolveChatObservationalMemory (CONCIERGE-OM)', () => {
       conciergeModel: { providerId: 'provider-concierge', modelId: 'model-concierge' },
     };
     const resolved = resolveChatObservationalMemory(settings, null);
-    assert.ok(resolved);
+    assert.ok(resolved, 'chat OM must fall back to the concierge model when the company OM model is unset');
     assert.equal(resolved.providerId, 'provider-concierge');
     assert.equal(resolved.modelId, 'model-concierge');
     assert.equal(resolved.observeAfterTokens, 30000);
@@ -603,7 +603,7 @@ describe('resolveChatObservationalMemory (CONCIERGE-OM)', () => {
       conciergeModel: { providerId: 'p-concierge', modelId: 'm-concierge' },
     };
     const resolved = resolveChatObservationalMemory(settings, null);
-    assert.ok(resolved);
+    assert.ok(resolved, 'a configured company OM model must resolve for chat even with enabled:false');
     assert.equal(resolved.providerId, 'p-om');
     assert.equal(resolved.modelId, 'm-om');
   });

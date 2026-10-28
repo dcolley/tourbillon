@@ -1167,6 +1167,7 @@ export default async function AgentDetailPage({
                   <h2 className="text-sm font-semibold">Observational Memory</h2>
                   <p className="text-xs text-muted-foreground mt-1">
                     Observer + Reflector compaction settings. When enabled, long threads auto-compress observations into reflections.
+                    Mode Off applies to heartbeats only — Assistant free-chat always runs OM while an observer model is resolvable.
                   </p>
                 </div>
                 <AgentOmSettingsForm

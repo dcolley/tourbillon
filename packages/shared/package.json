@@ -47,6 +47,7 @@
     "./iregexp": "./src/iregexp.ts"
   },
   "dependencies": {
+    "@tourbillon/db": "workspace:*",
     "croner": "^10.0.1",
     "drizzle-orm": "catalog:",
     "zod": "catalog:"
