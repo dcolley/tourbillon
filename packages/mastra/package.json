@@ -9,6 +9,7 @@
     "./chat": "./src/chat.ts",
     "./mcp-tools": "./src/tools/mcp-tools.ts",
     "./first-frame-capture": "./src/first-frame-capture.ts",
+    "./concierge-signal": "./src/concierge-signal.ts",
     "./widget-tools": "./src/tools/widget-tools.ts"
   },
   "scripts": {
