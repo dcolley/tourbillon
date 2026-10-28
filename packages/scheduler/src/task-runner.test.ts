@@ -137,6 +137,30 @@ test('paused tasks skip the queue even when slots are free', async () => {
   assert.deepEqual(f.jobs, []);
 });
 
+test('B1: paused/archived agents and companies are skipped BEFORE claim — never claimed, never parked', async () => {
+  // Free slots, so the ONLY thing that may stop these rows is the status gate. Claiming an
+  // inactive agent's task burns runner_attempts and the skipped wake parks it to
+  // waiting_on_user — the poller must not touch it at all (stays pending, attempts unchanged).
+  const rows = [
+    row({ taskId: 't-paused-agent', agentStatus: 'paused' }),
+    row({ taskId: 't-archived-agent', agentStatus: 'archived' }),
+    row({ taskId: 't-pending-agent', agentStatus: 'pending_approval' }),
+    row({ taskId: 't-archived-company', companyStatus: 'archived' }),
+    row({ taskId: 't-paused-company', companyStatus: 'paused' }),
+    row({ taskId: 't-active', position: 9 }), // the control: active agent + active company runs
+  ];
+  const f = fakes({ rows, slots: { total: 0, task: 0 } });
+  const s = await pollTaskRunner(f.deps, {});
+  assert.equal(s.polled, 6);
+  assert.equal(s.skippedInactive, 5);
+  assert.equal(s.skippedFull, 0); // inactive rows are NOT counted as a budget deferral
+  // Only the active row was claimed (claim is what mutates attempts — no claim, no burn).
+  assert.deepEqual(f.claims.map((c) => c.taskId), ['t-active']);
+  assert.deepEqual(f.jobs.map((j) => j.chatTaskId), ['t-active']);
+  await drain(s);
+  assert.deepEqual(f.settles, [{ taskId: 't-active', status: 'done' }]); // inactive rows never settle
+});
+
 test('a failed run re-queues to pending while attempts remain, then parks itself', async () => {
   const fail = (job: HeartbeatJobData) =>
     Promise.resolve({ runId: job.runId ?? '', status: 'failed' as const, errorText: 'boom' });

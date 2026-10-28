@@ -8,3 +8,4 @@
 ALTER TABLE "chat_tasks" DROP COLUMN IF EXISTS "paused";
 ALTER TABLE "chat_tasks" DROP COLUMN IF EXISTS "runner_attempts";
 ALTER TABLE "chat_tasks" DROP COLUMN IF EXISTS "runner_last_run_id";
+DELETE FROM "drizzle"."__drizzle_migrations" WHERE "created_at" = 1793108400000;

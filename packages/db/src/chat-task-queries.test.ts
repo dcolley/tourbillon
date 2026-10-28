@@ -16,27 +16,34 @@ import { readMigrationFiles } from 'drizzle-orm/migrator';
 import * as schema from './schema/index';
 import {
   addChatTask,
+  claimChatTaskRun,
   countOpenChatTasks,
+  finishChatTaskRun,
   listChatTasks,
+  listRunnableChatTasks,
+  setChatTaskPaused,
   setChatTaskStatus,
   updateChatTask,
 } from './chat-task-queries';
 
 const MIGRATIONS = path.join(__dirname, 'migrations');
-const WHEN_0023 = (
+const JOURNAL = (
   JSON.parse(readFileSync(path.join(MIGRATIONS, 'meta', '_journal.json'), 'utf8')) as {
     entries: { tag: string; when: number }[];
   }
-).entries.find((e) => e.tag === '0023_chat_tasks')!.when;
+).entries;
+/** Latest migration in the journal (TASK-RUNNER bumped the schema at 0024 — the runner
+ *  columns paused/runner_attempts/runner_last_run_id must exist before any addChatTask). */
+const WHEN_LATEST = JOURNAL[JOURNAL.length - 1]!.when;
 
-/** Apply every migration through 0023 (same rule as drizzle's migrator). */
+/** Apply every migration in the journal (same rule as drizzle's migrator). */
 async function migrateUp(client: PGlite): Promise<void> {
   await client.exec(`
     create schema if not exists drizzle;
     create table if not exists drizzle.__drizzle_migrations (id serial primary key, hash text not null, created_at bigint);
   `);
   for (const m of readMigrationFiles({ migrationsFolder: MIGRATIONS })) {
-    if (m.folderMillis > WHEN_0023) break;
+    if (m.folderMillis > WHEN_LATEST) break;
     for (const chunk of m.sql) {
       if (chunk.trim()) await client.exec(chunk);
     }
@@ -189,6 +196,162 @@ describe('chat-task query layer', () => {
       // Unknown ids miss cleanly instead of throwing.
       assert.equal(await updateChatTask(A1, { id: 'nope', status: 'done' }, db), null);
       assert.equal(await setChatTaskStatus(A1, { id: 'nope', status: 'done' }, db), null);
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+// ─── TASK-RUNNER query layer (B3, PR #196 hold) ──────────────────────────────
+// The scheduler poller's DB contract: listRunnable finds pending/unpaused/budgeted rows
+// (and carries agent/company status so the poller can skip inactive agents BEFORE claiming),
+// claim is a conditional one-shot (pending + unpaused + attempts left), finish only settles
+// in_progress rows, and pause/resume is scope-checked.
+
+async function setRunnerAttempts(client: PGlite, id: string, attempts: number): Promise<void> {
+  await client.query('update chat_tasks set runner_attempts = $1 where id = $2', [attempts, id]);
+}
+
+describe('chat-task runner queries (listRunnable / claim / finish / pause)', () => {
+  it('listRunnableChatTasks returns pending, unpaused, budgeted rows in claim order with status columns', async () => {
+    const { client, db } = await freshDb();
+    try {
+      const t1 = await addChatTask(A1, { title: 'First' }, db);
+      const t2 = await addChatTask(A1, { title: 'Second', notes: 'ctx' }, db);
+      const t3 = await addChatTask(A1, { title: 'Paused one' }, db);
+      const t4 = await addChatTask(A1, { title: 'Out of attempts' }, db);
+      const running = await addChatTask(A1, { title: 'In progress' }, db);
+      const tForeign = await addChatTask(A2, { title: 'Other agent tail' }, db);
+      await setChatTaskPaused(A1, { id: t3.id, paused: true }, db);
+      await setRunnerAttempts(client, t4.id, 2);
+      await setChatTaskStatus(A1, { id: running.id, status: 'in_progress' }, db); // claimed elsewhere
+
+      const listed = await listRunnableChatTasks(db, { maxAttempts: 2 });
+      // Claim order: agentId → position → createdAt; paused, attempt-exhausted and
+      // non-pending rows are excluded by the query itself.
+      assert.deepEqual(listed.map((r) => r.taskId), [t1.id, t2.id, tForeign.id]);
+      const first = listed[0]!;
+      assert.equal(first.title, 'First');
+      assert.equal(first.attempts, 0);
+      assert.equal(first.paused, false);
+      assert.equal(first.agentName, 'Assistant');
+      assert.equal(first.agentUrlKey, 'assistant');
+      assert.equal(first.agentStatus, 'active');
+      assert.equal(first.companyStatus, 'active');
+
+      // The poller's B1 skip depends on the status columns being real: pause the AGENT and
+      // archive its COMPANY and the row still surfaces (caller decides, never the row).
+      await client.exec(`update agents set status = 'paused' where id = 'a2'; update companies set status = 'archived' where id = 'c1';`);
+      const withInactive = await listRunnableChatTasks(db, { maxAttempts: 2 });
+      const foreignRow = withInactive.find((r) => r.taskId === tForeign.id)!;
+      assert.equal(foreignRow.agentStatus, 'paused');
+      const a1Row = withInactive.find((r) => r.taskId === t1.id)!;
+      assert.equal(a1Row.companyStatus, 'archived');
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('claimChatTaskRun claims once (pending + unpaused + budget) and burns one attempt per claim', async () => {
+    const { client, db } = await freshDb();
+    try {
+      const pending = await addChatTask(A1, { title: 'Claim me' }, db);
+      const claimed = await claimChatTaskRun(db, { taskId: pending.id, runId: 'run-1' });
+      assert.equal(claimed?.status, 'in_progress');
+      assert.equal(claimed?.runnerAttempts, 1);
+      assert.equal(claimed?.runnerLastRunId, 'run-1');
+
+      // A second claim races itself: no longer pending → null, attempts unchanged.
+      assert.equal(await claimChatTaskRun(db, { taskId: pending.id, runId: 'run-2' }), null);
+
+      // A paused task never claims (this is the DB-side twin of the poller's paused skip).
+      const paused = await addChatTask(A1, { title: 'Paused' }, db);
+      await setChatTaskPaused(A1, { id: paused.id, paused: true }, db);
+      assert.equal(await claimChatTaskRun(db, { taskId: paused.id, runId: 'run-3' }), null);
+
+      // Attempt budget exhausted → null (the row stays pending for a human, not claimable).
+      const spent = await addChatTask(A1, { title: 'Spent' }, db);
+      await setRunnerAttempts(client, spent.id, 2);
+      assert.equal(await claimChatTaskRun(db, { taskId: spent.id, runId: 'run-4' }), null);
+      // ...while a higher budget admits it (maxAttempts is the caller's, not hard-coded).
+      const admitted = await claimChatTaskRun(db, { taskId: spent.id, runId: 'run-5', attemptBudget: 3 });
+      assert.equal(admitted?.runnerAttempts, 3);
+
+      // Unknown id misses cleanly.
+      assert.equal(await claimChatTaskRun(db, { taskId: 'nope', runId: 'run-6' }), null);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('finishChatTaskRun settles ONLY in_progress rows and appends the note', async () => {
+    const { client, db } = await freshDb();
+    try {
+      // A pending task is not "running" — finishing it is a no-op, never a resurrection.
+      const pending = await addChatTask(A1, { title: 'Never claimed', notes: 'ctx' }, db);
+      assert.equal(await finishChatTaskRun(db, { taskId: pending.id, status: 'done' }), null);
+
+      const claimed = await claimChatTaskRun(db, { taskId: pending.id, runId: 'run-1' });
+      assert.ok(claimed);
+      const done = await finishChatTaskRun(db, { taskId: pending.id, status: 'done', note: 'Shipped.' });
+      assert.equal(done?.status, 'done');
+      assert.equal(done?.notes, 'ctx\nShipped.');
+      assert.ok(done?.completedAt, 'done stamps completedAt');
+      // Settled rows are not re-settleable (a late duplicate finish must not clobber).
+      assert.equal(await finishChatTaskRun(db, { taskId: pending.id, status: 'pending' }), null);
+
+      // Retry path on a SEPARATE task (a done row is not claimable again): claim → re-queue
+      // to pending, completedAt cleared, note appended.
+      const retry = await addChatTask(A1, { title: 'Fail then retry', notes: 'ctx2' }, db);
+      const claimed2 = await claimChatTaskRun(db, { taskId: retry.id, runId: 'run-2' });
+      assert.equal(claimed2?.status, 'in_progress');
+      const requeued = await finishChatTaskRun(db, { taskId: retry.id, status: 'pending', note: 'boom' });
+      assert.equal(requeued?.status, 'pending');
+      assert.equal(requeued?.completedAt, null);
+      assert.equal(requeued?.notes, 'ctx2\nboom');
+      // ...and it is claimable once more while the budget lasts (attempt 2 of 2).
+      const claimed3 = await claimChatTaskRun(db, { taskId: retry.id, runId: 'run-2b' });
+      assert.equal(claimed3?.runnerAttempts, 2);
+      assert.equal(await claimChatTaskRun(db, { taskId: retry.id, runId: 'run-2c' }), null); // budget spent
+      // A done row is never resurrected by the retry path either.
+      assert.equal(await claimChatTaskRun(db, { taskId: pending.id, runId: 'run-2d' }), null);
+
+      // Park path + unknown id.
+      const other = await claimChatTaskRun(db, { taskId: (await addChatTask(A1, { title: 'Park me' }, db)).id, runId: 'run-3' });
+      assert.equal((await finishChatTaskRun(db, { taskId: other!.id, status: 'waiting_on_user' }))?.status, 'waiting_on_user');
+      assert.equal(await finishChatTaskRun(db, { taskId: 'nope', status: 'done' }), null);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('setChatTaskPaused toggles within scope, refuses cross-scope, and gates the runnable list', async () => {
+    const { client, db } = await freshDb();
+    try {
+      const mine = await addChatTask(A1, { title: 'Mine' }, db);
+      const theirs = await addChatTask(A2, { title: 'Theirs' }, db);
+
+      // Cross-scope (same company, other agent / other company) is a no-op, not a write.
+      assert.equal(await setChatTaskPaused(A2, { id: mine.id, paused: true }, db), null);
+      assert.equal(await setChatTaskPaused(B1, { id: mine.id, paused: true }, db), null);
+      assert.equal(await setChatTaskPaused(A1, { id: theirs.id, paused: true }, db), null);
+      assert.equal((await listChatTasks(A1, {}, db))[0].paused, false, 'foreign pause attempts did not stick');
+
+      // Correct scope pauses, and the task leaves the runnable queue immediately
+      // (the other agent's task stays runnable — the pause is per-row, not per-agent).
+      const paused = await setChatTaskPaused(A1, { id: mine.id, paused: true }, db);
+      assert.equal(paused?.paused, true);
+      const whilePaused = (await listRunnableChatTasks(db, {})).map((r) => r.taskId);
+      assert.ok(!whilePaused.includes(mine.id), 'paused task left the runnable queue');
+      assert.ok(whilePaused.includes(theirs.id), 'the other agent keeps its queue');
+
+      // Resume puts it back.
+      const resumed = await setChatTaskPaused(A1, { id: mine.id, paused: false }, db);
+      assert.equal(resumed?.paused, false);
+      assert.ok((await listRunnableChatTasks(db, {})).map((r) => r.taskId).includes(mine.id));
+
+      // Unknown id misses cleanly.
+      assert.equal(await setChatTaskPaused(A1, { id: 'nope', paused: true }, db), null);
     } finally {
       await client.close();
     }
