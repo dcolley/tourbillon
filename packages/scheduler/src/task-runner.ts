@@ -53,6 +53,11 @@ export const TASK_RUNNER_DEFAULT_MAX_CONCURRENT_RUNS = 2;
 /**
  * Parse TASK_RUNNER_MAX_CONCURRENT_RUNS: unset/blank/garbage → default 2; an explicit 0 is
  * VALID and is the global kill switch (the poller never starts — heartbeats unaffected).
+ *
+ * S3 edge case (documented behaviour, not a bug): with an explicit budget of 1 there is no
+ * task capacity left after the heartbeat reservation — defaultTaskCapPerAgent(1) = 0 — so
+ * Run Tasks never start even though the poller runs. Use 0 for the kill switch; anything
+ * that should also run tasks needs a budget of at least 2.
  */
 export function resolveMaxConcurrentRuns(
   raw: string | undefined = process.env.TASK_RUNNER_MAX_CONCURRENT_RUNS,
