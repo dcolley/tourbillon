@@ -55,17 +55,41 @@ export interface TaskProgressDbTables {
   companies: { id: unknown };
 }
 
+/**
+ * The lazy `@tourbillon/db` module slice getAgent consumes on the DEFAULT path (softs S15):
+ * the drizzle instance behind `db.query.*` plus the table objects handed to `eq`. Injectable
+ * so a test can assert the DEFAULT path actually queries the module's `db` EXPORT — the B1
+ * regression (passing the module namespace itself, which has no `query`) fails against an
+ * object identity the fake module controls, without a live Postgres.
+ */
+export interface TaskProgressDbModule {
+  db: { query: TaskProgressDbQuery };
+  agents: TaskProgressDbTables['agents'];
+  companies: TaskProgressDbTables['companies'];
+}
+
 /** A seen-transition claim outlives any plausible SSE redelivery window (pub/sub has none). */
 export const TASK_PROGRESS_CLAIM_TTL_SECONDS = 900;
 
 // ─── agent + company lookup (S4: inactive tenants are skipped by the pure core) ───────────
 
 /**
+ * Default lazy loader for the `@tourbillon/db` module (softs S15). Kept as a named export so
+ * it can be swapped — and so the seam `loadDb` below is the ONLY place the module namespace
+ * is touched.
+ */
+export async function loadRealDbModule(): Promise<TaskProgressDbModule> {
+  return (await import('@tourbillon/db')) as unknown as TaskProgressDbModule;
+}
+
+/**
  * Agent row + its tenant row joined into the bridge's record slice. `orm` / `db` / `tables`
  * are injectable (softs S10, S13) so the REAL company join, `companyStatus` mapping and the
  * columns behind each `eq` are exercised against fakes — the lazy `import()` stays the default
  * production path. `tables` is only consulted on the injected-`db` path (production supplies
- * the real drizzle table objects from the same module import).
+ * the real drizzle table objects from the same module import). `loadDb` replaces the lazy
+ * import on the default path (softs S15) so a test can pin that the module's `db` EXPORT —
+ * not the module namespace (B1) — is what receives the queries.
  */
 export async function getAgent(
   agentId: string,
@@ -73,11 +97,23 @@ export async function getAgent(
     db?: { query: TaskProgressDbQuery };
     orm?: TaskProgressOrm;
     tables?: TaskProgressDbTables;
+    loadDb?: () => Promise<TaskProgressDbModule>;
   } = {},
 ): Promise<TaskProgressAgentRecord | null> {
   // Lazy: keeps this module importable (and its pure wiring testable) without db/env.
-  const real = sources.db ? undefined : ((await import('@tourbillon/db')) as unknown as Record<string, unknown>);
-  const db = (sources.db ?? real) as { query: TaskProgressDbQuery };
+  const real = sources.db ? undefined : await (sources.loadDb ?? loadRealDbModule)();
+  // B1: the module NAMESPACE has no `query` export — the default path must use the module's
+  // `db` export (and its `agents`/`companies` table exports below).
+  const db = (sources.db ?? real?.db) as { query: TaskProgressDbQuery };
+  if (sources.db && !sources.tables) {
+    // S16: an injected db with no tables would silently fall back to `{}` — the exact blind
+    // spot S13 closed (every `eq` would record column:undefined and a swapped join stayed
+    // invisible). Fail loudly instead of quietly degrading the assertions.
+    throw new Error(
+      'getAgent: an injected `sources.db` requires `sources.tables` — without distinct ' +
+        'agents/companies table objects the eq() column pinning (S13) is silently lost.',
+    );
+  }
   const agents = (sources.tables?.agents ?? real?.agents ?? {}) as Record<string, unknown>;
   const companies = (sources.tables?.companies ?? real?.companies ?? {}) as Record<string, unknown>;
   const { eq } = sources.orm ?? ((await import('drizzle-orm')) as unknown as TaskProgressOrm);

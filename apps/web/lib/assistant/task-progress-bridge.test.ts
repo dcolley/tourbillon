@@ -1,10 +1,12 @@
 /**
- * CONCIERGE-QUEUE-SIGNAL bridge wiring tests (soft-pack S1, softs S10–S12, S13–S14): the
+ * CONCIERGE-QUEUE-SIGNAL bridge wiring tests (soft-pack S1, softs S10–S16): the
  * deliver policy (session lookup, idle-thread retarget, busy-skip, signal lands on the created
  * session), the subscriber loop (startTaskProgressSignalBridge: channel/type filtering,
  * single-consumer claim wiring, error swallowing, per-process idempotence), the db-backed
  * getAgent company join (S10) with column-pinned `eq` assertions (S13), the paused-agent
- * status mapping (S14) and the fail-open redis claim (S11) — all against fakes, no real
+ * status mapping (S14), the DEFAULT (un-injected) getAgent path pinning that the module `db`
+ * EXPORT is queried — the B1 namespace regression (S15), the loud injected-db-without-tables
+ * failure (S16), and the fail-open redis claim (S11) — all against fakes, no real
  * redis/db/chat imports.
  */
 import test from 'node:test';
@@ -22,6 +24,7 @@ import {
   type DeliverSession,
   type RedisClaimCommands,
   type TaskProgressDbQuery,
+  type TaskProgressDbModule,
   type TaskProgressDbTables,
   type TaskProgressOrm,
 } from './task-progress-bridge';
@@ -446,6 +449,130 @@ test('getAgent (db-backed, S10): through buildTaskProgressBridgeDeps — a pause
   assert.equal(await handleTaskProgressEvent(deps, progressEvent()), 'skipped:inactive');
   assert.equal(delivered, 0, 'an archived tenant must not be woken into an LLM turn');
   assert.equal(db.companyLookups.length, 1);
+});
+
+// ─── getAgent DEFAULT path: the module `db` export is what gets queried (softs S15) ──────
+//
+// B1: the lazy-import refactor passed the `@tourbillon/db` MODULE NAMESPACE as `db` — no
+// `query` export → every production getAgent threw TypeError before any query, and the bridge
+// swallowed it, so CONCIERGE-QUEUE-SIGNAL died silently in prod. The `as` cast hid it from tsc
+// and no test covered the un-injected path. These pin, through the `loadDb` seam, that the
+// default path queries the module's `db` EXPORT (identity-checked) and joins on the module's
+// `agents`/`companies` table exports. Revert `real?.db` to `real` and the first test goes red.
+
+/**
+ * A fake `@tourbillon/db` module where `db`, `agents` and `companies` are mutually
+ * distinguishable identities: `db` itself has NO `query` property beyond the one the tests
+ * record, and the namespace wrapper has none of the table exports — so a mutant that passes
+ * the namespace (or drops `.db`) fails on identity/assertion, not by accident.
+ */
+function fakeDbModule(opts: {
+  agent?: { id: string; companyId: string; status: string };
+  company?: { status: string };
+}) {
+  const agentLookups: unknown[] = [];
+  const companyLookups: unknown[] = [];
+  const dbExport = {
+    query: {
+      agents: {
+        findFirst: async (args: unknown) => {
+          agentLookups.push(args);
+          return opts.agent;
+        },
+      },
+      companies: {
+        findFirst: async (args: unknown) => {
+          companyLookups.push(args);
+          return opts.company;
+        },
+      },
+    },
+  };
+  const fakeModule: TaskProgressDbModule = {
+    db: dbExport,
+    agents: { id: { table: 'agents', column: 'id', origin: 'module-export' } },
+    companies: { id: { table: 'companies', column: 'id', origin: 'module-export' } },
+  };
+  let loadCalls = 0;
+  return {
+    module: fakeModule,
+    dbExport,
+    agentLookups,
+    companyLookups,
+    loadDb: async () => {
+      loadCalls += 1;
+      return fakeModule;
+    },
+    get loadCalls() {
+      return loadCalls;
+    },
+  };
+}
+
+test('getAgent (default path, S15/B1): queries the module `db` EXPORT — not the module namespace', async () => {
+  const mod = fakeDbModule({
+    agent: { id: 'agent-1', companyId: 'company-9', status: 'active' },
+    company: { status: 'paused' },
+  });
+  const orm = fakeOrm();
+  const rec = await getAgent('agent-1', { orm: orm.orm, loadDb: mod.loadDb });
+  assert.equal(mod.loadCalls, 1, 'the seam is the only db loader on the default path');
+  // B1 guard: the queries must have run against THE module's `db` export object. If `db` were
+  // the module namespace (B1) findFirst would throw before any lookup was recorded; if the
+  // lookups came from anywhere else, the recorded `where` markers would not carry the
+  // module-export table identities asserted below.
+  assert.equal(mod.agentLookups.length, 1, 'the agent lookup ran through module db.query');
+  assert.equal(mod.companyLookups.length, 1, 'the company join ran through module db.query');
+  // The tables handed to eq are the module's OWN agents/companies exports (identity-checked
+  // via the origin sentinel) — pins `real?.agents` / `real?.companies` on the default path.
+  assert.deepEqual(orm.where, [
+    { column: { table: 'agents', column: 'id', origin: 'module-export' }, value: 'agent-1' },
+    { column: { table: 'companies', column: 'id', origin: 'module-export' }, value: 'company-9' },
+  ]);
+  assert.deepEqual(rec, { id: 'agent-1', companyId: 'company-9', status: 'active', companyStatus: 'paused' });
+});
+
+test('getAgent (default path, S15/B1): the db passed to lookups is === the module db export, never the namespace', async () => {
+  const mod = fakeDbModule({
+    agent: { id: 'agent-1', companyId: 'company-1', status: 'active' },
+    company: { status: 'active' },
+  });
+  const queried: unknown[] = [];
+  const recordingModule: TaskProgressDbModule = {
+    ...mod.module,
+    db: new Proxy(mod.dbExport, {
+      get(target, prop) {
+        queried.push(prop);
+        return Reflect.get(target, prop);
+      },
+    }),
+  };
+  const orm = fakeOrm();
+  await getAgent('agent-1', {
+    orm: orm.orm,
+    loadDb: async () => recordingModule,
+  });
+  // The property accesses recorded THROUGH the db object handed to the lookups: must be
+  // `query` reads on the export, and the namespace (agents/companies export names) must never
+  // have been queried as if it were a db.
+  assert.ok(queried.includes('query'), 'db.query was accessed on the module db export');
+  assert.ok(!queried.includes('agents') && !queried.includes('companies'),
+    'the module namespace was never used as the db (B1)');
+});
+
+test('getAgent (S16): injected db WITHOUT tables fails loudly instead of silently using {}', async () => {
+  const db = fakeDb({
+    agent: { id: 'agent-1', companyId: 'company-1', status: 'active' },
+    company: { status: 'active' },
+  });
+  const orm = fakeOrm();
+  await assert.rejects(
+    () => getAgent('agent-1', { db, orm: orm.orm }),
+    /injected `sources\.db` requires `sources\.tables`/,
+    'an injected db with no tables must NOT degrade to {} (the S13 blind spot)',
+  );
+  assert.deepEqual(db.agentLookups, [], 'the lookup never runs — the failure is up-front');
+  assert.deepEqual(orm.where, [], 'no eq was recorded against blind {} tables');
 });
 
 // ─── redisClaimClient: fail-open on redis errors (softs S11) ─────────────────────────────
