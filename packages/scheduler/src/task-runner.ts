@@ -10,7 +10,7 @@
  *
  * The per-agent shared budget (what the scheduler can run at once, heartbeats included):
  *   freeByBudget = maxConcurrentRuns - activeRuns(agent)      // heartbeat rows count too
- *   freeByCap    = taskCap - activeTaskRuns(agent)            // default 2, never above budget
+ *   freeByCap    = taskCap - activeTaskRuns(agent)            // default min(2, budget-1), never above budget
  *   free         = max(0, min(freeByBudget, freeByCap))
  * `activeRuns` is read from `heartbeat_runs` (queued/running rows whose lastSeenAt is not
  * stale — the same staleness definition as the sweep), so heartbeats and Run Tasks draw from
@@ -36,11 +36,16 @@ import {
   type RunnableChatTaskRow,
 } from '@tourbillon/db';
 import type { HeartbeatJobData, ResolvedTaskRunnerSettings, TaskRunnerSettings } from '@tourbillon/shared';
-import { createTraceLogger, resolveHeartbeatLivenessConfig, resolveTaskRunnerSettings } from '@tourbillon/shared';
+import {
+  createTraceLogger,
+  resolveHeartbeatLivenessConfig,
+  resolveTaskRunnerSettings,
+  TASK_PROGRESS_SSE_TYPE,
+} from '@tourbillon/shared';
 import { randomUUID } from 'crypto';
 import type { WakeResult } from './wake-runner';
 
-/** Default per-agent Run Task concurrency cap — inside maxConcurrentRuns, never above it. */
+/** Ceiling for the per-agent Run Task concurrency cap — inside maxConcurrentRuns, never above it. */
 export const RUN_TASK_CAP_PER_AGENT = 2;
 /** Shared run budget (heartbeat + task) when nothing overrides it. */
 export const TASK_RUNNER_DEFAULT_MAX_CONCURRENT_RUNS = 2;
@@ -48,6 +53,11 @@ export const TASK_RUNNER_DEFAULT_MAX_CONCURRENT_RUNS = 2;
 /**
  * Parse TASK_RUNNER_MAX_CONCURRENT_RUNS: unset/blank/garbage → default 2; an explicit 0 is
  * VALID and is the global kill switch (the poller never starts — heartbeats unaffected).
+ *
+ * S3 edge case (documented behaviour, not a bug): with an explicit budget of 1 there is no
+ * task capacity left after the heartbeat reservation — defaultTaskCapPerAgent(1) = 0 — so
+ * Run Tasks never start even though the poller runs. Use 0 for the kill switch; anything
+ * that should also run tasks needs a budget of at least 2.
  */
 export function resolveMaxConcurrentRuns(
   raw: string | undefined = process.env.TASK_RUNNER_MAX_CONCURRENT_RUNS,
@@ -60,6 +70,19 @@ export function resolveMaxConcurrentRuns(
 
 /** Default shared run budget (heartbeat + task) when nothing overrides it. 0 = kill switch. */
 export const DEFAULT_MAX_CONCURRENT_RUNS = resolveMaxConcurrentRuns();
+
+/**
+ * S3 (#196): the effective default task cap reserves ONE slot of the shared budget for the
+ * heartbeat side. Task wakes deliberately bypass the per-agent heartbeat single-flight gate and
+ * heartbeats never consult the task-runner slots before firing, so a task cap equal to the full
+ * budget let defaults stack 2 task runs + 1 heartbeat = 3 live runs on one budget of 2. With the
+ * reservation, tasks never exceed budget-1 and heartbeats never exceed 1 (agentLocks), so total
+ * live (task + heartbeat) respects the shared budget WITHOUT touching the heartbeat path. An
+ * explicit `taskCap` opt still overrides this default.
+ */
+export function defaultTaskCapPerAgent(maxConcurrentRuns: number): number {
+  return Math.max(0, Math.min(RUN_TASK_CAP_PER_AGENT, maxConcurrentRuns - 1));
+}
 
 export interface TaskRunSlotState {
   /** Runs (heartbeat + task) currently occupying the agent's slot budget. */
@@ -100,7 +123,7 @@ export interface ChatTaskProgressEvent {
 export function freeTaskRunSlots(
   slot: TaskRunSlotState,
   maxConcurrentRuns = DEFAULT_MAX_CONCURRENT_RUNS,
-  taskCap = RUN_TASK_CAP_PER_AGENT,
+  taskCap = defaultTaskCapPerAgent(maxConcurrentRuns),
 ): number {
   return Math.max(0, Math.min(maxConcurrentRuns - slot.total, taskCap - slot.task));
 }
@@ -211,7 +234,12 @@ export async function pollTaskRunner(
     // opts overrides win (tests + explicit callers); otherwise the resolved company settings
     // clamp per agent. Defaults land on the historic 2/2 values.
     const maxAttempts = opts.maxAttempts ?? settings.maxAttemptsPerTask;
-    const taskCap = opts.taskCap ?? settings.maxConcurrentTasks;
+    // S3 (#196) x S1 (#202): the default task cap honours BOTH the company's per-company
+    // maxConcurrentTasks AND the heartbeat-slot reservation — tasks never exceed either the
+    // company budget or budget-1 (one slot stays free for the heartbeat side). An explicit
+    // opts.taskCap still overrides.
+    const taskCap =
+      opts.taskCap ?? Math.min(settings.maxConcurrentTasks, defaultTaskCapPerAgent(maxConcurrent));
     const slot = await deps.countActiveRuns(agentId);
     const free = freeTaskRunSlots(slot, maxConcurrent, taskCap);
     if (free <= 0) {
@@ -327,11 +355,13 @@ export function createDefaultTaskRunnerDeps(
       options.emitProgress ??
       ((event) => {
         // Minimal parent-chat bridge: one SSE event per stage. No tool transcript, no replies.
+        // S4 (#196): the type is the shared pinned constant, so the enum, the publisher and the
+        // web parser can no longer drift apart (the old `task_run_update`/`chat_task_progress` gap).
         void import('./redis-pub')
           .then(({ redisPub }) =>
             redisPub.publish(
               `sse:${event.companyId}`,
-              JSON.stringify({ type: 'chat_task_progress', ...event }),
+              JSON.stringify({ type: TASK_PROGRESS_SSE_TYPE, ...event }),
             ),
           )
           .catch(() => undefined);

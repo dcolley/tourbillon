@@ -29,6 +29,8 @@
     "zod": "catalog:"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.11",
+    "drizzle-orm": "catalog:",
     "tsx": "^4.23.1",
     "typescript": "catalog:"
   }

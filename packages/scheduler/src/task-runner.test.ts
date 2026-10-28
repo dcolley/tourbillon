@@ -12,6 +12,7 @@ import {
   buildTaskRunWake,
   countActiveRuns,
   createDefaultTaskRunnerDeps,
+  defaultTaskCapPerAgent,
   freeTaskRunSlots,
   pollTaskRunner,
   resolveMaxConcurrentRuns,
@@ -241,7 +242,11 @@ test('S1: a garbage settings block falls back to defaults (enabled, cap 2, attem
   // jsonb is free-form: strings, arrays, nonsense — the poller must treat it as "not disabled".
   const rows = [row({ taskId: 't-garbage', companySettings: 'not-an-object' }), row({ taskId: 't-null', companySettings: null })];
   const f = fakes({ rows, slots: { total: 0, task: 0 } });
-  const s = await pollTaskRunner(f.deps, {});
+  // Budget 4: with no opts.taskCap the combined cap is min(company 2, budget-1) — at the
+  // default budget of 2 the S3 heartbeat reservation would allow only ONE task run (see the
+  // S3 reservation tests), which would mask what this test actually asserts: a garbage/null
+  // settings block falls back to enabled with attempts 2.
+  const s = await pollTaskRunner(f.deps, { maxConcurrentRuns: 4 });
   assert.equal(s.skippedDisabled, 0);
   assert.deepEqual(f.claims.map((c) => c.taskId), ['t-garbage', 't-null']);
   assert.deepEqual(f.claimBudgets.map((b) => b.maxAttempts), [2, 2]);
@@ -412,4 +417,103 @@ test('createDefaultTaskRunnerDeps: production deps carry a log so silent poll fa
   }
   assert.equal(lines.length, 1);
   assert.match(lines[0]!, /\[trace:task-run\].*task-run poll failed.*boom/);
+});
+
+// ─── S3 (#196 soft-pack): the heartbeat side keeps one slot of the budget ───
+// Heartbeats never consult the task-runner slots and task wakes bypass agentLocks, so the
+// OLD default (taskCap = RUN_TASK_CAP_PER_AGENT = 2 on budget 2) could stack 2 live task
+// runs + 1 heartbeat = 3 concurrent runs on one agent. The fix reserves one budget slot:
+// the default task cap is min(RUN_TASK_CAP_PER_AGENT, budget-1).
+
+test('S3: defaultTaskCapPerAgent reserves one slot for the heartbeat side', () => {
+  assert.equal(defaultTaskCapPerAgent(2), 1); // defaults: budget 2 → ONE task at a time
+  assert.equal(defaultTaskCapPerAgent(3), 2); // budget 3 → the full ceiling of 2
+  assert.equal(defaultTaskCapPerAgent(10), 2); // never above RUN_TASK_CAP_PER_AGENT
+  assert.equal(defaultTaskCapPerAgent(1), 0); // all of one slot belongs to the heartbeat side
+  assert.equal(defaultTaskCapPerAgent(0), 0); // the off switch stays off
+  // freeTaskRunSlots defaults follow the same derivation (no explicit taskCap).
+  assert.equal(freeTaskRunSlots({ total: 0, task: 0 }, 2), 1);
+  assert.equal(freeTaskRunSlots({ total: 0, task: 0 }, 4), 2);
+  assert.equal(freeTaskRunSlots({ total: 1, task: 0 }, 2), 1); // heartbeat busy → ONE task may fill the budget
+  assert.equal(freeTaskRunSlots({ total: 2, task: 1 }, 2), 0); // budget filled → the rest waits
+});
+
+test('S3: defaults never stack 2 task runs + 1 heartbeat on a budget of 2', async () => {
+  // Idle agent, three queued tasks: one poll tick may start at most budget-1 = 1 task run.
+  const rows = [row({ taskId: 't1', position: 0 }), row({ taskId: 't2', position: 1 }), row({ taskId: 't3', position: 2 })];
+  const idle = fakes({ rows, slots: { total: 0, task: 0 } });
+  const s1 = await pollTaskRunner(idle.deps, {});
+  assert.equal(s1.started.length, 1, 'one tick starts at most budget-1 task runs by default');
+  await drain(s1);
+
+  // One task run + one heartbeat now live (total 2 of 2): the next tick starts nothing —
+  // this is exactly the 3-concurrent hole the reservation closes.
+  const busy = fakes({ rows: [row({ taskId: 't2', position: 1 })], slots: { total: 2, task: 1 } });
+  const s2 = await pollTaskRunner(busy.deps, {});
+  assert.equal(s2.started.length, 0);
+  assert.equal(s2.skippedFull, 1);
+  assert.deepEqual(busy.claims, [], 'no claim → no attempt budget burned while the budget is full');
+});
+
+test('S3: an explicit taskCap still overrides the reservation', async () => {
+  const rows = [row({ taskId: 't1', position: 0 }), row({ taskId: 't2', position: 1 }), row({ taskId: 't3', position: 2 })];
+  const f = fakes({ rows, slots: { total: 0, task: 0 } });
+  const s = await pollTaskRunner(f.deps, { maxConcurrentRuns: 4, taskCap: 2 });
+  assert.equal(s.started.length, 2);
+  await drain(s);
+  assert.equal(f.settles.length, 2);
+});
+
+// ─── S7 (#196 soft-pack): mutants M6 and M10 ─────────────────────────────────
+
+/** Drizzle-over-postgres-js fake: returns SELECT-ordered raw rows and rejects non-primitive params. */
+function fakeRowDb(rows: unknown[][]) {
+  const client = {
+    options: { parsers: {}, serializers: {}, types: {} },
+    PostgresError: class PostgresError extends Error {},
+    END: {},
+    listen: () => () => {},
+    unsafe(query: string, params: unknown[]) {
+      for (const p of params ?? []) {
+        if (p !== null && !(typeof p === 'string' || typeof p === 'number' || typeof p === 'boolean')) {
+          const err: Error & { code?: string } = new TypeError('non-primitive bind param reached the driver');
+          err.code = 'ERR_INVALID_ARG_TYPE';
+          throw err;
+        }
+      }
+      const promise = Promise.resolve(rows) as Promise<unknown> & { values: () => Promise<unknown> };
+      promise.values = () => Promise.resolve(rows);
+      return promise;
+    },
+  };
+  return drizzle(client as never, { schema: {} as never }) as unknown as ChatTaskDb;
+}
+
+test('M6: countActiveRuns counts TASK rows apart from total (kill the task-counter mutant)', async () => {
+  // All-task rows: task must equal total (mutant: drop the invocationSource branch → task 0).
+  const allTask = await countActiveRuns(fakeRowDb([['task'], ['task'], ['task']]), A);
+  assert.deepEqual(allTask, { total: 3, task: 3 });
+  // No task rows: task must be 0 while total counts the heartbeats (mutant: count everything
+  // as task → a heartbeat-only agent would freeze its task queue behind a fake cap).
+  const noTask = await countActiveRuns(fakeRowDb([['timer'], ['assignment'], ['approval']]), A);
+  assert.deepEqual(noTask, { total: 3, task: 0 });
+  // Mixed: only 'task' rows count toward the per-agent task cap.
+  const mixed = await countActiveRuns(fakeRowDb([['task'], ['timer'], ['task'], ['timer']]), A);
+  assert.deepEqual(mixed, { total: 4, task: 2 });
+});
+
+test('M10: a false claim result stops the task — no wake, no progress, no settle (kill the ignore-claim mutant)', async () => {
+  const f = fakes({ rows: [row({ taskId: 't1', position: 0 }), row({ taskId: 't2', position: 1 })], slots: { total: 0, task: 0 } });
+  const claimed: string[] = [];
+  f.deps.claim = async (taskId) => {
+    claimed.push(taskId);
+    return taskId === 't2'; // t1 lost the race (paused / cancelled / re-prioritised mid-tick)
+  };
+  const s = await pollTaskRunner(f.deps, { maxConcurrentRuns: 4, taskCap: 2 });
+  assert.deepEqual(claimed, ['t1', 't2'], 'every batch candidate is offered a claim');
+  assert.deepEqual(s.started.map((x) => x.taskId), ['t2'], 'an unclaimed task never enters started');
+  await drain(s);
+  assert.deepEqual(f.jobs.map((j) => j.chatTaskId), ['t2'], 'no Run Task wake may fire for an unclaimed task');
+  assert.deepEqual(f.settles, [{ taskId: 't2', status: 'done' }], 'only the claimed task settles');
+  assert.deepEqual(f.progress, ['started:running', 'done:succeeded'], 'no progress events for the loser');
 });

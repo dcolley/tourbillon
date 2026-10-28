@@ -1,5 +1,5 @@
-import { db, heartbeatRuns, type HeartbeatStatus } from '@tourbillon/db';
-import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { db, heartbeatRuns } from '@tourbillon/db';
+import { desc, eq, sql } from 'drizzle-orm';
 import { getActiveCompanyOrNull } from './company';
 import { getHeartbeatRun, getHeartbeatTaskId } from './heartbeats';
 
@@ -128,56 +128,10 @@ export async function getQueueOverview(): Promise<{ queues: QueueOverviewItem[];
   };
 }
 
-export async function getQueueJobs(
-  _queueName: string,
-  state: string,
-  page = 0,
-  pageSize = 50,
-): Promise<{ jobs: JobSummary[]; total: number }> {
-  const company = await getActiveCompanyOrNull();
-  if (!company) return { jobs: [], total: 0 };
-  const statusByState: Record<string, HeartbeatStatus[]> = {
-    waiting: ['queued'],
-    active: ['running'],
-    completed: ['succeeded'],
-    failed: ['failed'],
-  };
-  const statuses: HeartbeatStatus[] = statusByState[state] ?? ['queued', 'running', 'succeeded', 'failed'];
-  const rows = await db
-    .select({
-      id: heartbeatRuns.id,
-      agentId: heartbeatRuns.agentId,
-      status: heartbeatRuns.status,
-      invocationSource: heartbeatRuns.invocationSource,
-      startedAt: heartbeatRuns.startedAt,
-      finishedAt: heartbeatRuns.finishedAt,
-    })
-    .from(heartbeatRuns)
-    .where(and(eq(heartbeatRuns.companyId, company.id), inArray(heartbeatRuns.status, statuses)))
-    .orderBy(desc(heartbeatRuns.startedAt))
-    .limit(pageSize)
-    .offset(page * pageSize);
-  return {
-    jobs: rows.map((run) => ({
-      id: run.id,
-      // A private Run Task is labelled apart from a heartbeat wake (task: vs wake: prefix).
-      name: `${run.invocationSource === 'task' ? 'task' : 'wake'}:${run.agentId}`,
-      state:
-        run.status === 'running'
-          ? 'active'
-          : run.status === 'failed'
-            ? 'failed'
-            : run.status === 'queued'
-              ? 'waiting'
-              : 'completed',
-      timestamp: run.startedAt.getTime(),
-      processedOn: run.startedAt.getTime(),
-      finishedOn: run.finishedAt?.getTime() ?? null,
-      attemptsMade: 1,
-    })),
-    total: rows.length,
-  };
-}
+// S5 (#196): `getQueueJobs` removed — it had ZERO callers (the /jobs page uses
+// getQueueOverview; /api/jobs/heartbeat/list uses lib/heartbeats' getHeartbeatList, which
+// pages correctly) and its `total: rows.length` was wrong for paging anyway. Dead BullMQ-era
+// surface; re-add with a real COUNT total if a job-list caller ever needs it.
 
 export async function getJobDetail(_queueName: string, jobId: string): Promise<JobDetail | null> {
   const linked = await getHeartbeatRun(jobId);

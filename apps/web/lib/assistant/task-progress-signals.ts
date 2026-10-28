@@ -32,8 +32,11 @@ import {
   type TaskProgressEventShape,
   type TaskProgressSignalPayload,
 } from '@tourbillon/mastra/concierge-signal';
+import type { SSEEventType } from '@tourbillon/shared';
 
-export const TASK_PROGRESS_SSE_TYPE = 'chat_task_progress';
+// S4 (#196): type-level pin against the shared SSE enum — if `chat_task_progress` ever stops
+// being a member of SSEEventType (the old `task_run_update` drift), this line fails the build.
+export const TASK_PROGRESS_SSE_TYPE = 'chat_task_progress' satisfies SSEEventType;
 
 export type TaskProgressEvent = TaskProgressEventShape;
 
