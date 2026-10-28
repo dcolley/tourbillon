@@ -23,6 +23,7 @@ export function TaskListRows({
   locked,
   errorId,
   error,
+  name,
   onToggle,
 }: {
   props: TaskListProps;
@@ -32,6 +33,8 @@ export function TaskListRows({
   locked: boolean;
   errorId: string;
   error?: string;
+  /** S5: one shared input name for the whole group (like ChoiceCard), so the picker radios are one radio group. */
+  name: string;
   onToggle: (id: string, on: boolean) => void;
 }) {
   const multi = props.mode === 'multiSelect';
@@ -47,7 +50,7 @@ export function TaskListRows({
           {selectable && (
             <input
               type={multi ? 'checkbox' : 'radio'}
-              name={`${task.id}-${multi ? 'multi' : 'one'}`}
+              name={multi ? `${name}-multi` : name}
               value={task.id}
               checked={selected.includes(task.id)}
               onChange={(e) => onToggle(task.id, e.target.checked)}
@@ -106,7 +109,7 @@ export function TaskListCard({ props, status, answer, onAnswer, onDismiss, busy 
   return (
     <CardFrame kind="task-list" title={props.title} detail={props.detail} status={status} busy={busy} onDismiss={onDismiss}>
       <form className="space-y-2" onSubmit={submit}>
-        <TaskListRows props={props} selected={selected} selectable={selectable} locked={locked} errorId={errorId} error={error} onToggle={toggle} />
+        <TaskListRows props={props} selected={selected} selectable={selectable} locked={locked} errorId={errorId} error={error} name={listId} onToggle={toggle} />
         <FieldError id={errorId} message={error} />
         {status === 'pending' && (
           <div className="space-y-1">
