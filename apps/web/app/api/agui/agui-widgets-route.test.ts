@@ -474,13 +474,17 @@ describe('WID-1 widgets over AG-UI (round trip)', () => {
   it("the owner's answer is refused while another response holds the widget (suspension claim), and frees the run claim", async () => {
     await askWidget('wt-held');
     const owner = sessions.get(SESSION_KEY);
-    assert.equal(owner.claimToolResponse(WIDGET_CALL), true);
+    // Mastra 1.78: the answer claim is keyed by the suspension address, not the tool call id —
+    // a contending response holds exactly what `claimToolSuspension` claims (its claimKey).
+    const parked = owner.suspensions.get({ toolCallId: WIDGET_CALL });
+    const held = owner.claimToolSuspension(parked.toolCallId, parked.runId);
+    assert.equal(held.accepted, true, JSON.stringify(held));
     try {
       const res = await post(resumeBody('wt-held', answerEntry('No')));
       assert.equal(res.status, 409);
       assert.match((await res.json()).error, /no longer waiting/);
     } finally {
-      owner.releaseToolResponse(WIDGET_CALL);
+      owner.releaseToolResponse(held.claimKey);
     }
     // The run claim taken for the refused request was released: the owner can answer now.
     await ownerStillAnswers('wt-held');

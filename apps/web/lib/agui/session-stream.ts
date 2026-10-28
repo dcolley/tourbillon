@@ -13,7 +13,7 @@
  */
 import { EventType, type BaseEvent } from '@ag-ui/core';
 import { EventEncoder } from '@ag-ui/encoder';
-import { AGUI_CUSTOM, createAguiEventMapper, type AguiSourceEvent } from './session-events';
+import { AGUI_CUSTOM, createAguiEventMapper, errorMessage, type AguiSourceEvent } from './session-events';
 
 /** The parts of an AgentController session this module uses (Mastra `Session` satisfies it). */
 export interface AguiSession {
@@ -87,6 +87,13 @@ export interface AguiRunStreamOptions {
   droppedQueuedTurns?: () => number;
   /** Tool calls resumed by this run (announced by an earlier run); see AguiEventMapperOptions. */
   resumedToolCallIds?: readonly string[];
+  /**
+   * Mastra 1.78: `respondToToolSuspension` no longer throws when the resume fails on the session's
+   * active thread — it emits a session `error` event instead. Set on a resume run so that event ends
+   * the AG-UI run (through the normal finish path, honouring `publicRunError`) instead of the stream
+   * waiting for an `agent_end` that never comes and closing as RUN_FINISHED.
+   */
+  errorIsTerminal?: boolean;
   /**
    * When set, RUN_ERROR carries this message instead of the engine's error text; the original text
    * is logged server-side (truncated).
@@ -175,6 +182,8 @@ export function aguiRunStream(opts: AguiRunStreamOptions): ReadableStream<Uint8A
   let sawAgentStart = false;
   let running = false;
   let queuedFollowUps = 0;
+  /** errorIsTerminal: message of the last session `error` event seen before the turn started. */
+  let startError: string | undefined;
 
   /** STREAM-1: attached response bodies (the first request's, plus any re-attached ones). */
   type Sink = { ctrl: ReadableStreamDefaultController<Uint8Array>; detach: () => void };
@@ -287,11 +296,11 @@ export function aguiRunStream(opts: AguiRunStreamOptions): ReadableStream<Uint8A
     teardown();
   };
 
-  const scheduleFinish = (delayMs: number) => {
+  const scheduleFinish = (delayMs: number, override?: () => Parameters<typeof mapper.finish>[0]) => {
     clearFinishTimer();
     finishTimer = setTimeout(() => {
       finishTimer = undefined;
-      if (!running) finish();
+      if (!running) finish(override?.());
     }, delayMs);
   };
 
@@ -355,8 +364,12 @@ export function aguiRunStream(opts: AguiRunStreamOptions): ReadableStream<Uint8A
       if (event.type === 'agent_start') {
         sawAgentStart = true;
         running = true;
+        startError = undefined;
         clearFinishTimer();
         takeContinuation(session);
+      } else if (event.type === 'error' && opts.errorIsTerminal && !sawAgentStart) {
+        // 1.78 resume failure: the session emits `error` instead of rejecting; the run never starts.
+        startError = errorMessage(event.error) ?? 'Agent run failed';
       } else if (event.type === 'follow_up_queued') {
         queuedFollowUps = typeof event.count === 'number' ? event.count : 0;
       } else if (event.type === 'agent_end') {
@@ -399,7 +412,12 @@ export function aguiRunStream(opts: AguiRunStreamOptions): ReadableStream<Uint8A
     opts.start().then(
       () => {
         // Turn reported done. If no agent_start was seen the turn never ran (nothing to stream).
-        if (!sawAgentStart && !closed) scheduleFinish(settleMs);
+        // errorIsTerminal: a recorded session `error` (1.78 resume failure) ends the run as
+        // RUN_ERROR (mapped through publicRunError) rather than a silent RUN_FINISHED. A late
+        // agent_start clears the error and cancels this finish, as a restart would.
+        if (!sawAgentStart && !closed) {
+          scheduleFinish(settleMs, () => (startError ? { error: startError } : undefined));
+        }
       },
       (err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
