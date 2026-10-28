@@ -15,7 +15,7 @@
  * The resource id stays the company's free-chat resource (`company-<id>:chat:free`); with
  * thread-scoped OM the OM record is keyed by (that resource, the active thread).
  */
-import { parseCompanySettings, resolveAgentObservationalMemory, type AgentRuntimeConfig } from '@tourbillon/shared';
+import { parseCompanySettings, type AgentRuntimeConfig } from '@tourbillon/shared';
 import { getActiveCompany } from '@/lib/company';
 import { listCachedChatControllersForAgent, type TourbillonChatSession } from '@/lib/chat';
 import { aguiSessionScope } from '@/lib/agui/run-input';
@@ -27,7 +27,7 @@ import {
 } from '@/lib/assistant/thread-store';
 import { assistantResourceId, isAssistantThreadInScope } from './threads';
 import { pickInitialThread, type AssistantThread } from './sidebar';
-import type { AssistantOmSummary } from './single-chat';
+import { chatOmSummary, type AssistantOmSummary } from './single-chat';
 
 type AgentLike = { id: string; companyId: string; runtimeConfig?: unknown };
 
@@ -92,7 +92,6 @@ export async function retargetAgentChatSessions(agent: AgentLike, threadId: stri
 /** The agent's Observational Memory mode for the chat ⋯ menu (editing stays in Control Pane). */
 export async function assistantOmSummary(agent: AgentLike): Promise<AssistantOmSummary> {
   const runtime = (agent.runtimeConfig ?? null) as AgentRuntimeConfig | null;
-  const mode = runtime?.observationalMemory?.mode ?? 'inherit';
   let settings = null;
   try {
     const company = await getActiveCompany();
@@ -100,5 +99,7 @@ export async function assistantOmSummary(agent: AgentLike): Promise<AssistantOmS
   } catch {
     /* no active company: resolve without company settings */
   }
-  return { mode, active: resolveAgentObservationalMemory(settings, runtime) !== null };
+  // B1: chat resolves OM through the CHAT resolver (free-chat forces OM on), never the
+  // heartbeat resolver — the menu must match what chat actually runs.
+  return chatOmSummary(settings, runtime);
 }

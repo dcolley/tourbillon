@@ -14,6 +14,8 @@
  * The resource id stays the company's free-chat resource.
  */
 import { assistantAgentPath } from './sidebar';
+import { resolveAgentObservationalMemory, resolveChatObservationalMemory } from '@tourbillon/shared/company-settings';
+import type { AgentRuntimeConfig, CompanySettings } from '@tourbillon/shared';
 
 /** The agent's chat (its one conversation). */
 export function agentChatPath(agentUrlKey: string): string {
@@ -31,6 +33,29 @@ export interface AssistantOmSummary {
   mode: 'inherit' | 'on' | 'off';
   /** Whether OM actually runs for the agent (mode resolved against company settings, model configured). */
   active: boolean;
+  /**
+   * CONCIERGE-OM B1: whether OM runs for HEARTBEATS (resolveAgentObservationalMemory). Chat
+   * forces OM on (`resolveChatObservationalMemory`), so `active` can be true while heartbeats
+   * are off — the menu label says so instead of "Off" / "Inherit (off)". Absent on older payloads.
+   */
+  heartbeatActive?: boolean;
+}
+
+/**
+ * CONCIERGE-OM B1: build the chat ⋯ menu summary. `active` MUST come from the CHAT resolver
+ * (free-chat always attempts OM), never the heartbeat resolver — that mismatch was B1.
+ * `heartbeatActive` keeps the honest copy when chat runs OM but heartbeats don't.
+ */
+export function chatOmSummary(
+  companySettings: CompanySettings | null | undefined,
+  agentRuntime: AgentRuntimeConfig | null | undefined,
+): AssistantOmSummary {
+  const mode = agentRuntime?.observationalMemory?.mode ?? 'inherit';
+  return {
+    mode,
+    active: resolveChatObservationalMemory(companySettings, agentRuntime) !== null,
+    heartbeatActive: resolveAgentObservationalMemory(companySettings, agentRuntime) !== null,
+  };
 }
 
 export function isAssistantOmSummary(value: unknown): value is AssistantOmSummary {
@@ -38,10 +63,13 @@ export function isAssistantOmSummary(value: unknown): value is AssistantOmSummar
   return Boolean(v) && (v!.mode === 'inherit' || v!.mode === 'on' || v!.mode === 'off') && typeof v!.active === 'boolean';
 }
 
-/** "Observational Memory: On", "… Off", "… Inherit (on)", "… On (not configured)". */
+/** "Observational Memory: On", "… Off", "… Inherit (on)", "… On (not configured)", "… On in chat · heartbeats Off". */
 export function agentOmMenuLabel(om: AssistantOmSummary | null | undefined): string {
   const base = 'Observational Memory';
   if (!om) return base;
+  // CONCIERGE-OM B1: chat forces OM on, so "active" is the CHAT state. When chat runs OM but
+  // heartbeats don't, say so — "Off" / "Inherit (off)" here would contradict the running chat.
+  if (om.active && om.heartbeatActive === false) return `${base}: On in chat · heartbeats Off`;
   if (om.mode === 'off') return `${base}: Off`;
   if (om.mode === 'on') return `${base}: ${om.active ? 'On' : 'On (not configured)'}`;
   return `${base}: Inherit (${om.active ? 'on' : 'off'})`;

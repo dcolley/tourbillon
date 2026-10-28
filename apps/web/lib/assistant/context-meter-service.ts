@@ -11,6 +11,11 @@ import {
   toolSchemaReserveForKind,
   type ContextBudget,
 } from '@tourbillon/shared/context-budget';
+import {
+  resolveChatObservationalMemory,
+  type AgentRuntimeConfig,
+  type CompanySettings,
+} from '@tourbillon/shared';
 import { threadModelChoiceFromMetadata, type ThreadModelChoice } from './thread-model';
 import { buildThreadContextMeter, type ContextMeterMessage, type ThreadContextMeter } from './context-meter';
 
@@ -71,17 +76,26 @@ export const defaultContextMeterDeps: ContextMeterDeps = {
     return resolveAgentContextBudget(effective as never, row ? toLlmProviderRecord(row) : null, 'chat');
   },
   async observeAfterTokens(agent) {
-    const [{ db, companies }, { eq }, { parseCompanySettings }, { resolveAgentObservationalMemory }] = await Promise.all([
+    const [{ db, companies }, { eq }, { parseCompanySettings }] = await Promise.all([
       import('@tourbillon/db'),
       import('drizzle-orm'),
       import('@tourbillon/shared'),
-      import('@tourbillon/shared/company-settings'),
     ]);
     const company = await db.query.companies.findFirst({ where: eq(companies.id, agent.companyId) });
-    const resolved = resolveAgentObservationalMemory(
-      parseCompanySettings(company?.settings),
-      (agent.runtimeConfig ?? null) as never,
-    );
-    return resolved?.observeAfterTokens ?? null;
+    // B1: the meter's compaction point must match what chat actually runs — free-chat forces OM
+    // on (resolveChatObservationalMemory); the heartbeat resolver would return null here.
+    return chatObserveAfterTokens(parseCompanySettings(company?.settings), (agent.runtimeConfig ?? null) as never);
   },
 };
+
+/**
+ * CONCIERGE-OM B1: the OM observation threshold for the CHAT path, or null when no observer
+ * model is resolvable. Uses resolveChatObservationalMemory (chat forces OM on), never the
+ * heartbeat resolver — a regression to it makes this return null whenever heartbeats are off.
+ */
+export function chatObserveAfterTokens(
+  companySettings: CompanySettings | null | undefined,
+  agentRuntime?: AgentRuntimeConfig | null,
+): number | null {
+  return resolveChatObservationalMemory(companySettings, agentRuntime)?.observeAfterTokens ?? null;
+}

@@ -6,7 +6,8 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { resolveAgentContextBudget } from '../../../../packages/mastra/src/model-settings';
 import { toolSchemaReserveForKind } from '@tourbillon/shared/context-budget';
-import { threadContextMeter, type ContextMeterAgent, type ContextMeterDeps } from './context-meter-service';
+import { threadContextMeter, chatObserveAfterTokens, type ContextMeterAgent, type ContextMeterDeps } from './context-meter-service';
+import type { AgentRuntimeConfig } from '@tourbillon/shared';
 import { ASSISTANT_THREAD_MODEL_KEY, type ThreadModelChoice } from './thread-model';
 
 const agent: ContextMeterAgent & { runtimeConfig: unknown } = {
@@ -65,5 +66,28 @@ describe('threadContextMeter', () => {
     assert.equal(withOm.observeAfterTokens, 30_000);
     const failed = await threadContextMeter(agent, {}, [], deps([], new Error('db down')));
     assert.equal(failed.observeAfterTokens, null);
+  });
+});
+
+/**
+ * CONCIERGE-OM B1: defaultContextMeterDeps.observeAfterTokens must resolve through the CHAT
+ * resolver (free-chat forces OM on), not the heartbeat one. Every case below yields null under
+ * the heartbeat resolver — the meter would then ignore the OM compaction point chat actually runs.
+ */
+describe('chatObserveAfterTokens (CONCIERGE-OM B1)', () => {
+  it('has a chat compaction point even when heartbeats have OM off', () => {
+    assert.equal(
+      chatObserveAfterTokens({ observationalMemory: { enabled: false, providerId: 'p1', modelId: 'm1' } }, { observationalMemory: { mode: 'off' } } as AgentRuntimeConfig),
+      30_000,
+    );
+    assert.equal(
+      chatObserveAfterTokens({ observationalMemory: { enabled: false, providerId: 'p1', modelId: 'm1', observeAfterTokens: 12_000 } }, null),
+      12_000,
+    );
+  });
+
+  it('null only when no observer model is resolvable at all', () => {
+    assert.equal(chatObserveAfterTokens({}, null), null);
+    assert.equal(chatObserveAfterTokens(null, undefined), null);
   });
 });

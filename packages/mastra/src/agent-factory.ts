@@ -63,21 +63,37 @@ const globalForMastra = globalThis as unknown as {
 export async function getAgentMemory(
   companySettings?: CompanySettings | null,
   agentRuntime?: AgentRuntimeConfig | null,
+  /**
+   * CONCIERGE-OM: 'chat' forces the chat OM resolution (OM always attempted,
+   * company `enabled:false` / agent `mode:'off'` ignored) and uses a separate
+   * cache-key namespace so a chat controller never reuses a heartbeat-scoped
+   * Memory instance whose OM resolved differently. 'heartbeat' (default) keeps
+   * the existing optional-OM semantics unchanged.
+   */
+  memoryScope?: 'heartbeat' | 'chat',
 ): Promise<Memory> {
   if (!globalForMastra.mastraMemoryByKey) {
     globalForMastra.mastraMemoryByKey = new Map();
   }
-  const { memoryCacheKeyForAgent, resolveAgentObservationalMemory } = await import(
-    '@tourbillon/shared/company-settings'
-  );
-  const key = memoryCacheKeyForAgent(companySettings, agentRuntime);
+  const chatScope = memoryScope === 'chat';
+  const {
+    memoryCacheKeyForAgent,
+    resolveAgentObservationalMemory,
+    memoryCacheKeyForChat,
+    resolveChatObservationalMemory,
+  } = await import('@tourbillon/shared/company-settings');
+  const key = chatScope
+    ? memoryCacheKeyForChat(companySettings, agentRuntime)
+    : memoryCacheKeyForAgent(companySettings, agentRuntime);
   const cached = globalForMastra.mastraMemoryByKey.get(key);
   if (cached) return cached;
 
   const connectionString = requireDatabaseUrl('agent memory storage');
   const semanticRecallEnabled = process.env.MEMORY_SEMANTIC_RECALL === 'true';
   const embeddingModel = process.env.MEMORY_EMBEDDING_MODEL;
-  const resolved = resolveAgentObservationalMemory(companySettings, agentRuntime);
+  const resolved = chatScope
+    ? resolveChatObservationalMemory(companySettings, agentRuntime)
+    : resolveAgentObservationalMemory(companySettings, agentRuntime);
 
   const config: ConstructorParameters<typeof Memory>[0] = {
     storage: new PostgresStore({ id: 'tourbillon-memory', connectionString }),
