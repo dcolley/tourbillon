@@ -1,6 +1,6 @@
 import { cookies, headers } from 'next/headers';
 import { db, companies, type Company } from '@tourbillon/db';
-import { ensureCompanyWorkspace, mergeCompanySettings, parseCompanySettings, type CompanySettings } from '@tourbillon/shared';
+import { ensureCompanyWorkspace, mergeCompanySettings, parseCompanySettings, type AgentModelSettings, type CompanySettings } from '@tourbillon/shared';
 import { asc, eq } from 'drizzle-orm';
 import { deriveIssuePrefix, slugifyCompanySlug } from './company-utils';
 import { isThreadProviderAvailable } from './chat/thread-model';
@@ -278,7 +278,7 @@ export async function updateCompanyIntegrations(
  */
 export async function updateCompanyConciergeModel(
   companyId: string,
-  input: { providerId?: string; modelId?: string },
+  input: { providerId?: string; modelId?: string; params?: AgentModelSettings },
 ): Promise<Company> {
   const company = await db.query.companies.findFirst({ where: eq(companies.id, companyId) });
   if (!company) throw new Error('Company not found.');
@@ -298,7 +298,7 @@ export async function updateCompanyConciergeModel(
   }
 
   const settings = mergeCompanySettings(company.settings, {
-    conciergeModel: providerId && modelId ? { providerId, modelId } : {},
+    conciergeModel: providerId && modelId ? { providerId, modelId, params: input.params } : {},
   });
 
   const [updated] = await db

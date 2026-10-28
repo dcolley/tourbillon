@@ -16,7 +16,6 @@ import {
   formatTrace,
   modelProviderOverridesFromAgent,
   resolveModelProviderConfig,
-  resolveObservationalMemoryModel,
   isMastraTracingEnabled,
   type CompanySettings,
   type AgentRuntimeConfig,
@@ -221,9 +220,9 @@ export async function createChatAgentWithSkills(
     effectiveRecord.modelId,
     providerRecord,
   );
-  const generationOptions = resolveAgentGenerationOptions(effectiveRecord, providerRecord);
+  const generationOptions = resolveAgentGenerationOptions(effectiveRecord, providerRecord, options?.params);
   if (options?.reasoningLevelOverride) generationOptions.reasoning = options.reasoningLevelOverride;
-  const contextBudget = resolveAgentContextBudget(effectiveRecord, providerRecord, 'chat');
+  const contextBudget = resolveAgentContextBudget(effectiveRecord, providerRecord, 'chat', options?.params);
 
   // Same Responses-API history sanitization as heartbeats (reasoning + tool-loop monologue).
   const inputProcessors = buildHeartbeatInputProcessors({ limit: contextBudget.limiterLimit });
@@ -258,7 +257,10 @@ export async function createChatAgentWithSkills(
       apiModeOverride: chatApiMode,
     }),
     tools: tools as never,
-    memory: await getAgentMemory(options?.companySettings ?? null, effectiveRecord.runtimeConfig as AgentRuntimeConfig),
+    // CONCIERGE-OM: chat Agent gets the chat-scoped Memory (forced OM when a
+    // model is resolvable) — same instance as the chat controller, not the
+    // heartbeat-resolution Memory cache.
+    memory: await getAgentMemory(options?.companySettings ?? null, effectiveRecord.runtimeConfig as AgentRuntimeConfig, 'chat'),
     inputProcessors,
     ...toMastraDefaultOptions(generationOptions),
   });
@@ -306,15 +308,22 @@ export async function createChatController(
     },
   ];
 
-  const { resolveAgentObservationalMemory } = await import('@tourbillon/shared/company-settings');
-  const resolved = resolveAgentObservationalMemory(
+  const { resolveChatObservationalMemory } = await import('@tourbillon/shared/company-settings');
+  // CONCIERGE-OM: free-chat always attempts OM when an observer model is resolvable
+  // (company OM model → concierge model → none). Company `enabled:false` and agent
+  // `mode:'off'` do NOT disable it here; heartbeats still honour both switches.
+  const resolved = resolveChatObservationalMemory(
     options?.companySettings ?? null,
     agentRecord.runtimeConfig as AgentRuntimeConfig,
   );
-  const memory = await getAgentMemory(options?.companySettings ?? null, agentRecord.runtimeConfig as AgentRuntimeConfig);
+  const memory = await getAgentMemory(
+    options?.companySettings ?? null,
+    agentRecord.runtimeConfig as AgentRuntimeConfig,
+    'chat',
+  );
   const { row: providerRow } = await resolveAgentProviderRow(effectiveRecord, { context: 'chat' });
   const providerRecord = providerRow ? llmProviderRowToRecord(providerRow) : null;
-  const contextBudget = resolveAgentContextBudget(effectiveRecord, providerRecord, 'chat');
+  const contextBudget = resolveAgentContextBudget(effectiveRecord, providerRecord, 'chat', options?.params);
 
   // Session always requires a Workspace instance (Mastra AgentController contract).
   // Chat uses a tools-disabled workspace so sandbox schemas do not inflate context.

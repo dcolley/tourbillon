@@ -6,7 +6,8 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { resolveAgentContextBudget } from '../../../../packages/mastra/src/model-settings';
 import { toolSchemaReserveForKind } from '@tourbillon/shared/context-budget';
-import { threadContextMeter, type ContextMeterAgent, type ContextMeterDeps } from './context-meter-service';
+import { threadContextMeter, chatObserveAfterTokens, type ContextMeterAgent, type ContextMeterDeps } from './context-meter-service';
+import type { AgentRuntimeConfig } from '@tourbillon/shared';
 import { ASSISTANT_THREAD_MODEL_KEY, type ThreadModelChoice } from './thread-model';
 
 const agent: ContextMeterAgent & { runtimeConfig: unknown } = {
@@ -65,5 +66,61 @@ describe('threadContextMeter', () => {
     assert.equal(withOm.observeAfterTokens, 30_000);
     const failed = await threadContextMeter(agent, {}, [], deps([], new Error('db down')));
     assert.equal(failed.observeAfterTokens, null);
+  });
+});
+
+/**
+ * CONCIERGE-OM B1: defaultContextMeterDeps.observeAfterTokens must resolve through the CHAT
+ * resolver (free-chat forces OM on), not the heartbeat one. Every case below yields null under
+ * the heartbeat resolver — the meter would then ignore the OM compaction point chat actually runs.
+ */
+describe('chatObserveAfterTokens (CONCIERGE-OM B1)', () => {
+  it('has a chat compaction point even when heartbeats have OM off', () => {
+    assert.equal(
+      chatObserveAfterTokens({ observationalMemory: { enabled: false, providerId: 'p1', modelId: 'm1' } }, { observationalMemory: { mode: 'off' } } as AgentRuntimeConfig),
+      30_000,
+    );
+    assert.equal(
+      chatObserveAfterTokens({ observationalMemory: { enabled: false, providerId: 'p1', modelId: 'm1', observeAfterTokens: 12_000 } }, null),
+      12_000,
+    );
+  });
+
+  it('null only when no observer model is resolvable at all', () => {
+    assert.equal(chatObserveAfterTokens({}, null), null);
+    assert.equal(chatObserveAfterTokens(null, undefined), null);
+  });
+});
+
+describe('CONCIERGE-PARAMS — params-sized budget in the meter', () => {
+  it('shows the params window instead of the provider default and clamps used under it', async () => {
+    const qwenAgent = { ...agent, modelId: 'qwen/qwen3.6-35b-a3b', providerId: 'p-qwen', runtimeConfig: {} };
+    const qwenProvider = { defaultModelSettings: { maxContextTokens: 132_000 } };
+    const budget = resolveAgentContextBudget(
+      qwenAgent as never,
+      qwenProvider as never,
+      'chat',
+      { maxContextTokens: 65_536, maxOutputTokens: 2_048 },
+    );
+    assert.equal(budget.contextTokens, 65_536);
+    assert.equal(budget.limiterLimit, 55_488);
+
+    const huge = [{ role: 'user', content: 'x'.repeat(4_000_000) }];
+    const meter = await threadContextMeter(qwenAgent, {}, huge, {
+      resolveBudget: async () => budget,
+      observeAfterTokens: async () => null,
+    });
+    assert.equal(meter.limitTokens, 65_536, 'the limit shown is the params window, not the provider default');
+    assert.ok(meter.usedTokens <= meter.limitTokens, 'used stays clamped to the budget (single number)');
+    assert.equal(meter.level, 'over');
+  });
+
+  it('unset params keep the provider default budget', () => {
+    const budget = resolveAgentContextBudget(
+      { ...agent, runtimeConfig: {} } as never,
+      { defaultModelSettings: { maxContextTokens: 132_000 } } as never,
+      'chat',
+    );
+    assert.equal(budget.contextTokens, 132_000);
   });
 });

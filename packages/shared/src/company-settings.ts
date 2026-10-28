@@ -4,6 +4,7 @@ import type {
   HitlyGateSettings,
   ObservationalMemorySettings,
 } from './types';
+import { parseAgentModelSettings, type AgentModelSettings } from './model-settings';
 
 function trimRecord(values: unknown): Record<string, string> | undefined {
   if (!values || typeof values !== 'object') return undefined;
@@ -77,9 +78,17 @@ function parseConciergeModelSettings(raw: unknown): CompanySettings['conciergeMo
   const modelId =
     typeof record.modelId === 'string' ? record.modelId.trim() || undefined : undefined;
   if (!providerId && !modelId) return undefined;
+  // CONCIERGE-PARAMS: tolerant read — malformed stored params are dropped, never thrown.
+  let params: AgentModelSettings | undefined;
+  try {
+    params = parseAgentModelSettings(record.params);
+  } catch {
+    params = undefined;
+  }
   return {
     ...(providerId ? { providerId } : {}),
     ...(modelId ? { modelId } : {}),
+    ...(params && Object.keys(params).length > 0 ? { params } : {}),
   };
 }
 
@@ -144,7 +153,19 @@ export function mergeCompanySettings(
     const providerId = cm.providerId?.trim();
     const modelId = cm.modelId?.trim();
     if (providerId && modelId) {
-      next.conciergeModel = { providerId, modelId };
+      // CONCIERGE-PARAMS: the pair may carry model params (maxContextTokens …); invalid
+      // values are dropped rather than stored.
+      let params: AgentModelSettings | undefined;
+      try {
+        params = parseAgentModelSettings(cm.params);
+      } catch {
+        params = undefined;
+      }
+      next.conciergeModel = {
+        providerId,
+        modelId,
+        ...(params && Object.keys(params).length > 0 ? { params } : {}),
+      };
     } else {
       delete next.conciergeModel;
     }
@@ -201,12 +222,18 @@ export function isObservationalMemoryConfigured(
  */
 export function resolveConciergeModel(
   companySettings?: CompanySettings | null,
-): { providerId: string; modelId: string } | null {
+): { providerId: string; modelId: string; params?: AgentModelSettings } | null {
   const cm = companySettings?.conciergeModel;
   const providerId = cm?.providerId?.trim();
   const modelId = cm?.modelId?.trim();
   if (!providerId || !modelId) return null;
-  return { providerId, modelId };
+  // CONCIERGE-PARAMS: pass the stored params through when non-empty (budget/limiter inputs).
+  const params = cm?.params;
+  return {
+    providerId,
+    modelId,
+    ...(params && Object.keys(params).length > 0 ? { params } : {}),
+  };
 }
 
 /** OM defaults (min 1024, min 8000, min 8000). */
@@ -331,6 +358,43 @@ export function resolveAgentObservationalMemory(
 }
 
 /**
+ * CONCIERGE-OM: chat-scoped Observational Memory resolution.
+ *
+ * Free-chat (Assistant free-chat / chat AgentController) always attempts OM —
+ * company `observationalMemory.enabled: false` and agent `mode: 'off'` are
+ * IGNORED here (they still gate heartbeats via resolveAgentObservationalMemory).
+ *
+ * Model resolution order (never the Gemini default):
+ * 1. Company OM providerId + modelId (used even when `enabled` is false)
+ * 2. Company Concierge providerId + modelId (CONCIERGE-MODEL-1)
+ * 3. null — fail soft: chat runs with lastMessages only, no OM.
+ *
+ * `agentRuntime` is accepted for call-site symmetry with
+ * resolveAgentObservationalMemory but deliberately ignored: chat does not let
+ * per-agent mode disable OM.
+ */
+export function resolveChatObservationalMemory(
+  companySettings?: CompanySettings | null,
+  _agentRuntime?: { observationalMemory?: AgentRuntimeConfig['observationalMemory'] } | null,
+): ResolvedObservationalMemoryConfig | null {
+  const companyOm = companySettings?.observationalMemory;
+  const settings = resolveObservationalMemorySettings(companySettings);
+
+  const providerId = companyOm?.providerId?.trim();
+  const modelId = companyOm?.modelId?.trim();
+  if (providerId && modelId) {
+    return { providerId, modelId, ...settings };
+  }
+
+  const concierge = resolveConciergeModel(companySettings);
+  if (concierge) {
+    return { ...concierge, ...settings };
+  }
+
+  return null;
+}
+
+/**
  * Stable cache key for Memory instances keyed by resolved OM config.
  * When OM is off or unconfigured, returns 'base'.
  * When OM is on, returns 'om:{providerId}:{modelId}:{maxOutputTokens}:{observeAfterTokens}:{reflectAfterTokens}[:{temperature}]'.
@@ -344,6 +408,24 @@ export function memoryCacheKeyForAgent(
   if (!resolved) return 'base';
   const tempPart = resolved.temperature !== undefined ? `:${resolved.temperature}` : '';
   return `om:${resolved.providerId}:${resolved.modelId}:${resolved.maxOutputTokens}:${resolved.observeAfterTokens}:${resolved.reflectAfterTokens}${tempPart}`;
+}
+
+/**
+ * CONCIERGE-OM: Memory cache key for the chat path (chat-forced OM).
+ * Prefixed `chat-om:` so a chat controller that forces OM ON can never share a
+ * Memory instance with a heartbeat resolution that is OFF (both would otherwise
+ * key as 'base' or 'om:…' and hand the chat controller a non-OM Memory).
+ * Returns 'base' when no observer model is resolvable (same as heartbeat —
+ * sharing a plain lastMessages-only Memory there is harmless and intended).
+ */
+export function memoryCacheKeyForChat(
+  companySettings?: CompanySettings | null,
+  agentRuntime?: { observationalMemory?: AgentRuntimeConfig['observationalMemory'] } | null,
+): string {
+  const resolved = resolveChatObservationalMemory(companySettings, agentRuntime);
+  if (!resolved) return 'base';
+  const tempPart = resolved.temperature !== undefined ? `:${resolved.temperature}` : '';
+  return `chat-om:${resolved.providerId}:${resolved.modelId}:${resolved.maxOutputTokens}:${resolved.observeAfterTokens}:${resolved.reflectAfterTokens}${tempPart}`;
 }
 
 /**

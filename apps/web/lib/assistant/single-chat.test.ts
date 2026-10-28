@@ -4,7 +4,8 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { agentChatMenuItems, agentChatPath, agentOmMenuLabel, agentOmSettingsHref, clearAgentChat, isAssistantOmSummary } from './single-chat';
+import { agentChatMenuItems, agentChatPath, agentOmMenuLabel, agentOmSettingsHref, chatOmSummary, clearAgentChat, isAssistantOmSummary } from './single-chat';
+import type { AgentRuntimeConfig, CompanySettings } from '@tourbillon/shared';
 
 const respond = (status: number, body: unknown) =>
   (async (url: string, init?: RequestInit) => {
@@ -87,5 +88,42 @@ describe('ASYNC-0 single agent chat', () => {
     assert.equal(isAssistantOmSummary({ mode: 'off', active: false }), true);
     assert.equal(isAssistantOmSummary({ mode: 'off' }), false);
     assert.equal(isAssistantOmSummary(null), false);
+  });
+});
+
+/**
+ * CONCIERGE-OM B1: free-chat forces OM on (resolveChatObservationalMemory), so the menu must be
+ * built from the CHAT resolver. Regressing assistantOmSummary/agentOmMenuLabel to the heartbeat
+ * resolver makes these fail (chat runs OM while the menu claims "Off" / "Inherit (off)").
+ */
+describe('chatOmSummary + agentOmMenuLabel (CONCIERGE-OM B1: menu shows the CHAT OM state)', () => {
+  const OFF_MODEL: CompanySettings = {
+    observationalMemory: { enabled: false, providerId: 'p1', modelId: 'om-model' },
+  };
+
+  it('heartbeats off, chat on: active=true, heartbeatActive=false (heartbeat resolver would say inactive)', () => {
+    const s = chatOmSummary(OFF_MODEL, { observationalMemory: { mode: 'off' } } as AgentRuntimeConfig);
+    assert.deepEqual(s, { mode: 'off', active: true, heartbeatActive: false });
+    assert.equal(agentOmMenuLabel(s), 'Observational Memory: On in chat · heartbeats Off');
+  });
+
+  it('inherit + company OM disabled: still on in chat via the concierge model', () => {
+    const s = chatOmSummary({ conciergeModel: { providerId: 'p1', modelId: 'front-desk' } }, null);
+    assert.deepEqual(s, { mode: 'inherit', active: true, heartbeatActive: false });
+    assert.equal(agentOmMenuLabel(s), 'Observational Memory: On in chat · heartbeats Off');
+  });
+
+  it('no observer model anywhere: honest off labels (unchanged copy)', () => {
+    assert.equal(agentOmMenuLabel(chatOmSummary({}, { observationalMemory: { mode: 'off' } } as AgentRuntimeConfig)), 'Observational Memory: Off');
+    assert.equal(agentOmMenuLabel(chatOmSummary({}, { observationalMemory: { mode: 'inherit' } } as AgentRuntimeConfig)), 'Observational Memory: Inherit (off)');
+  });
+
+  it('heartbeats on too: plain On/Inherit (on) labels — no chat-only copy', () => {
+    const s = chatOmSummary(
+      { observationalMemory: { enabled: true, providerId: 'p1', modelId: 'om-model' } },
+      { observationalMemory: { mode: 'inherit' } } as AgentRuntimeConfig,
+    );
+    assert.deepEqual(s, { mode: 'inherit', active: true, heartbeatActive: true });
+    assert.equal(agentOmMenuLabel(s), 'Observational Memory: Inherit (on)');
   });
 });

@@ -5,7 +5,9 @@ import {
   resolveObservationalMemorySettings,
   mergeCompanySettings,
   resolveAgentObservationalMemory,
+  resolveChatObservationalMemory,
   memoryCacheKeyForAgent,
+  memoryCacheKeyForChat,
   isAgentObservationalMemoryConfigured,
   type ResolvedObservationalMemoryConfig,
 } from './company-settings';
@@ -534,6 +536,117 @@ describe('memoryCacheKeyForAgent', () => {
     assert.notEqual(key1, key2);
     assert.ok(!key1.includes(':0.7'));
     assert.ok(key2.includes(':0.7'));
+  });
+});
+
+describe('resolveChatObservationalMemory (CONCIERGE-OM)', () => {
+  it('chat OM on when company OM is DISABLED but model configured (heartbeat still off)', () => {
+    const companyOff: CompanySettings = {
+      observationalMemory: {
+        enabled: false,
+        providerId: 'provider-company',
+        modelId: 'model-company',
+        maxOutputTokens: 4096,
+        observeAfterTokens: 20000,
+        reflectAfterTokens: 35000,
+        temperature: 0.7,
+      },
+    };
+    const chat = resolveChatObservationalMemory(companyOff, {
+      observationalMemory: { mode: 'inherit' },
+    });
+    assert.ok(chat);
+    assert.equal(chat.providerId, 'provider-company');
+    assert.equal(chat.modelId, 'model-company');
+    assert.equal(chat.maxOutputTokens, 4096);
+    assert.equal(chat.observeAfterTokens, 20000);
+    assert.equal(chat.reflectAfterTokens, 35000);
+    assert.equal(chat.temperature, 0.7);
+    // Heartbeat resolution unchanged: disabled company OM stays off there.
+    assert.equal(
+      resolveAgentObservationalMemory(companyOff, { observationalMemory: { mode: 'inherit' } }),
+      null,
+    );
+  });
+
+  it('agent mode=off does not kill chat OM (heartbeat still honours mode=off)', () => {
+    const companyOn: CompanySettings = {
+      observationalMemory: { enabled: true, providerId: 'p-om', modelId: 'm-om' },
+    };
+    const chat = resolveChatObservationalMemory(companyOn, {
+      observationalMemory: { mode: 'off' },
+    });
+    assert.ok(chat);
+    assert.equal(chat.modelId, 'm-om');
+    // Defaults apply when company left thresholds unset.
+    assert.equal(chat.maxOutputTokens, 8192);
+    assert.equal(chat.observeAfterTokens, 30000);
+    assert.equal(chat.reflectAfterTokens, 40000);
+    assert.equal(resolveAgentObservationalMemory(companyOn, { observationalMemory: { mode: 'off' } }), null);
+  });
+
+  it('falls back to concierge model when company OM model unset', () => {
+    const settings: CompanySettings = {
+      conciergeModel: { providerId: 'provider-concierge', modelId: 'model-concierge' },
+    };
+    const resolved = resolveChatObservationalMemory(settings, null);
+    assert.ok(resolved);
+    assert.equal(resolved.providerId, 'provider-concierge');
+    assert.equal(resolved.modelId, 'model-concierge');
+    assert.equal(resolved.observeAfterTokens, 30000);
+    assert.equal(resolved.reflectAfterTokens, 40000);
+  });
+
+  it('company OM model wins over concierge model', () => {
+    const settings: CompanySettings = {
+      observationalMemory: { enabled: false, providerId: 'p-om', modelId: 'm-om' },
+      conciergeModel: { providerId: 'p-concierge', modelId: 'm-concierge' },
+    };
+    const resolved = resolveChatObservationalMemory(settings, null);
+    assert.ok(resolved);
+    assert.equal(resolved.providerId, 'p-om');
+    assert.equal(resolved.modelId, 'm-om');
+  });
+
+  it('both unset → no OM (fail soft, lastMessages only)', () => {
+    assert.equal(resolveChatObservationalMemory({}, { observationalMemory: { mode: 'off' } }), null);
+    assert.equal(resolveChatObservationalMemory(null, null), null);
+    // Half a concierge pair is not a model either.
+    assert.equal(
+      resolveChatObservationalMemory({ conciergeModel: { modelId: 'm-only' } }, null),
+      null,
+    );
+  });
+});
+
+describe('memoryCacheKeyForChat (CONCIERGE-OM)', () => {
+  const companyOffWithModel: CompanySettings = {
+    observationalMemory: {
+      enabled: false,
+      providerId: 'p1',
+      modelId: 'm1',
+      temperature: 0.7,
+    },
+  };
+
+  it('chat-forced OM never shares a Memory cache key with the heartbeat-off resolution', () => {
+    const heartbeatKey = memoryCacheKeyForAgent(companyOffWithModel, {
+      observationalMemory: { mode: 'off' },
+    });
+    const chatKey = memoryCacheKeyForChat(companyOffWithModel, {
+      observationalMemory: { mode: 'off' },
+    });
+    assert.equal(heartbeatKey, 'base');
+    assert.equal(chatKey, 'chat-om:p1:m1:8192:30000:40000:0.7');
+    assert.notEqual(chatKey, heartbeatKey);
+  });
+
+  it('returns base when no observer model is resolvable', () => {
+    assert.equal(memoryCacheKeyForChat({}, null), 'base');
+    assert.equal(
+      memoryCacheKeyForChat({ conciergeModel: { providerId: 'p', modelId: 'm' } }, null),
+      'chat-om:p:m:8192:30000:40000',
+    );
   });
 });
 
