@@ -125,6 +125,8 @@ export interface TaskRunPollSummary {
   started: Array<{ agentId: string; taskId: string; runId: string; done: Promise<void> }>;
   /** Agents that had pending tasks but no free slot (or no attempt budget) this tick. */
   skippedFull: number;
+  /** Rows skipped because their agent or company is not active (never claimed, B1). */
+  skippedInactive: number;
 }
 
 /**
@@ -141,13 +143,22 @@ export async function pollTaskRunner(
   const taskCap = opts.taskCap ?? RUN_TASK_CAP_PER_AGENT;
 
   const rows = await deps.listRunnable();
-  const summary: TaskRunPollSummary = { polled: rows.length, started: [], skippedFull: 0 };
+  const summary: TaskRunPollSummary = { polled: rows.length, started: [], skippedFull: 0, skippedInactive: 0 };
   if (rows.length === 0) return summary;
 
   // Group in claim order (the query already orders by agentId → position → createdAt).
   const byAgent = new Map<string, RunnableChatTaskRow[]>();
   for (const row of rows) {
     if (row.paused === true) continue; // paused skips enqueue (product lock)
+    // B1 (PR #196 hold): a paused/archived agent or company must NEVER be claimed — claiming
+    // burns runner_attempts and runWake's `skipped` parks the task to waiting_on_user, so on
+    // first boot every inactive agent's to-dos would be silently parked. Skip before the slot
+    // check and before the claim; the row stays pending (attempts untouched) until the agent
+    // is active again. Not `skippedFull` — this is not a budget deferral.
+    if (row.agentStatus !== 'active' || row.companyStatus !== 'active') {
+      summary.skippedInactive += 1;
+      continue;
+    }
     const group = byAgent.get(row.agentId);
     if (group) group.push(row);
     else byAgent.set(row.agentId, [row]);
@@ -305,6 +316,7 @@ export function startTaskRunnerPolling(
             polled: summary.polled,
             started: summary.started.length,
             deferred: summary.skippedFull,
+            inactive: summary.skippedInactive,
           });
         }
       })
