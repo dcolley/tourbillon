@@ -33,15 +33,40 @@ import {
   type TaskProgressBridgeDeps,
 } from './task-progress-signals';
 
+/** The `@tourbillon/db` slice getAgent reads (softs S10: injectable fake in tests). */
+export interface TaskProgressDbQuery {
+  agents: { findFirst(args: unknown): Promise<{ id: string; companyId: string; status: string } | undefined> };
+  companies: { findFirst(args: unknown): Promise<{ status: string } | undefined> };
+}
+
+/** The `drizzle-orm` slice getAgent uses — only `eq` — kept structural for the same reason. */
+export interface TaskProgressOrm {
+  eq(column: unknown, value: unknown): unknown;
+}
+
 /** A seen-transition claim outlives any plausible SSE redelivery window (pub/sub has none). */
 export const TASK_PROGRESS_CLAIM_TTL_SECONDS = 900;
 
 // ─── agent + company lookup (S4: inactive tenants are skipped by the pure core) ───────────
 
-async function getAgent(agentId: string): Promise<TaskProgressAgentRecord | null> {
+/**
+ * Agent row + its tenant row joined into the bridge's record slice. `orm` / `db` are
+ * injectable (softs S10) so the REAL company join and `companyStatus` mapping are exercised
+ * against a fake query — the lazy `import()` stays the default production path.
+ */
+export async function getAgent(
+  agentId: string,
+  sources: { db?: { query: TaskProgressDbQuery }; orm?: TaskProgressOrm } = {},
+): Promise<TaskProgressAgentRecord | null> {
   // Lazy: keeps this module importable (and its pure wiring testable) without db/env.
-  const { db, agents, companies } = await import('@tourbillon/db');
-  const { eq } = await import('drizzle-orm');
+  const { db, agents, companies } = (sources.db
+    ? { db: sources.db, agents: {}, companies: {} }
+    : await import('@tourbillon/db')) as unknown as {
+    db: { query: TaskProgressDbQuery };
+    agents: Record<string, unknown>;
+    companies: Record<string, unknown>;
+  };
+  const { eq } = sources.orm ?? ((await import('drizzle-orm')) as unknown as TaskProgressOrm);
   const row = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
   if (!row) return null;
   const company = await db.query.companies.findFirst({ where: eq(companies.id, row.companyId) });
@@ -121,11 +146,15 @@ export interface ClaimClient {
   claim(key: string, ttlSeconds: number): Promise<boolean>;
 }
 
-function redisClaimClient(): ClaimClient {
+/** The ioredis slice the claim client drives (softs S11: fake-IORedis in tests). */
+export interface RedisClaimCommands {
+  set(key: string, value: string, mode: 'EX', ttlSeconds: number, nx: 'NX'): Promise<string | null>;
+}
+
+export function redisClaimClient(client: RedisClaimCommands = new IORedis(process.env.REDIS_URL ?? 'redis://localhost:6379', {
   // Separate from the subscriber connection: a pub/sub connection cannot issue commands.
-  const client = new IORedis(process.env.REDIS_URL ?? 'redis://localhost:6379', {
-    maxRetriesPerRequest: null,
-  });
+  maxRetriesPerRequest: null,
+})): ClaimClient {
   return {
     async claim(key, ttlSeconds) {
       try {
