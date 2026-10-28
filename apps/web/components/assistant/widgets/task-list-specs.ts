@@ -67,6 +67,10 @@ export const taskListProps = z.strictObject({
 }).superRefine((p, ctx) => {
   const ids = p.tasks.map((t) => t.id);
   if (new Set(ids).size !== ids.length) ctx.addIssue({ code: 'custom', path: ['tasks'], message: 'duplicate_id' });
+  // S7 (askForm WID-MS pattern): selection bounds are multiSelect props - refuse them on display/picker.
+  if (p.mode !== 'multiSelect' && (p.minSelected !== undefined || p.maxSelected !== undefined)) {
+    ctx.addIssue({ code: 'custom', path: ['mode'], message: 'multi_select_only' });
+  }
   if (p.mode === 'multiSelect') {
     const max = p.maxSelected ?? p.tasks.length;
     const min = p.minSelected ?? 1;
@@ -122,7 +126,8 @@ export const taskListSpec: WidgetSpec<TaskListProps, TaskListAnswer> = {
   version: 1,
   description:
     'Show your private chat task list in the chat as a card and wait for the answer. Call listMyTasks first, then pass those rows ' +
-    'verbatim (id, title, status, notes). Modes: "display" for a read-only status list (the user closes it; it never asks for a ' +
+    'verbatim (id, title, status, notes). The card needs at least one task: if listMyTasks returns no tasks, do not call it - ' +
+    'answer in plain text instead. Modes: "display" for a read-only status list (the user closes it; it never asks for a ' +
     'selection); "picker" to have the user pick exactly one task (answer { taskId }); "multiSelect" to pick several (answer ' +
     '{ taskIds }, optional minSelected/maxSelected, minSelected: 0 allows an empty submit). ' +
     'Use it for your chat to-dos (chat_tasks), never for company issues; to change a task use updateMyTask/completeMyTask/cancelMyTask, ' +

@@ -224,6 +224,11 @@ describe('WID-3 chat cards in the assistant chat view', () => {
       'form card (“Setup”)',
     );
     assert.equal(pendingCardDescription({ threadId: 't', toolCallId: 'c', toolName: 'unknownTool', elsewhere: false }), 'widget card');
+    // S8 (#193): the client label for the task list card, kept in step with lib/agui/parked-widgets.ts.
+    assert.equal(
+      pendingCardDescription({ threadId: 't', toolCallId: 'c', toolName: 'showTaskList', label: 'What I am working on', elsewhere: false }),
+      'task list card (“What I am working on”)',
+    );
   });
 
   it('a card whose parked run was stopped renders locked with a note', () => {

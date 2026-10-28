@@ -114,7 +114,8 @@ export const listMyTasksTool = createTool({
     'This is NOT company issues or assignments — for assigned company ISSUES use getInbox instead. ' +
     'Call this FIRST whenever the human asks what is left, what you are working on, your status, ' +
     'what you promised, or whether something got done — then answer in plain language from the result. ' +
-    'Never invent items: if the list is empty, say so.',
+    'Never invent items: if the list is empty, answer in plain text instead; do not call showTaskList for it ' +
+    '(the card needs at least one task).',
   inputSchema: z.object({
     includeClosed: z.boolean().optional().describe('Also return done and cancelled tasks (default false).'),
   }),
