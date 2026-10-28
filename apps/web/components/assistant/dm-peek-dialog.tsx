@@ -257,7 +257,7 @@ export function DmConversationModal({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="flex max-h-[85vh] max-w-2xl flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl"
+        className="flex max-h-[85vh] max-w-[calc(100%-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-[min(90vw,72rem)]"
         data-dm-dialog
         data-dm-conversation-picker
         data-dm-view={view}
