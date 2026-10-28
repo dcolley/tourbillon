@@ -544,6 +544,45 @@ describe('WID-1 widgets over AG-UI (round trip)', () => {
     }
   });
 
+  it('a failed resume frees the address claim (1.78 claimKey release) and passes the address through', async () => {
+    // S9 (#197 soft-pack): onClose must release responseClaim.claimKey — the ADDRESS claim.
+    // Regression guard: `session.releaseToolResponse(toolCallId)` passes every other assertion
+    // in this suite yet leaks the address claim, so the OWNER can never answer again (the
+    // re-claim below and ownerStillAnswers would both 409 with "no longer waiting").
+    await askWidget('wt-claim-free');
+    const owner = sessions.get(SESSION_KEY);
+    const parked = owner.suspensions.get({ toolCallId: WIDGET_CALL });
+    assert.ok(parked, 'widget parked before the failing resume');
+    const realRespond = owner.respondToToolSuspension;
+    let seenAddress: { toolCallId?: string; threadId?: string; resourceId?: string; runId?: string } | undefined;
+    owner.respondToToolSuspension = async (args: { address?: typeof seenAddress }) => {
+      seenAddress = args.address;
+      throw new Error('resume exploded');
+    };
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      const events = await readSse(await post(resumeBody('wt-claim-free', answerEntry('No'))));
+      assert.ok(events.some((e) => e.type === 'RUN_ERROR'), JSON.stringify(types(events)));
+    } finally {
+      console.warn = warn;
+      owner.respondToToolSuspension = realRespond;
+    }
+    // 1.78 pass-through pin: respondToToolSuspension received the suspension ADDRESS, not just
+    // the tool call id (without it 1.78 resolves against the wrong parked run).
+    assert.ok(seenAddress, 'address must be passed to respondToToolSuspension');
+    assert.equal(seenAddress!.toolCallId, WIDGET_CALL);
+    assert.equal(seenAddress!.threadId, 'wt-claim-free');
+    assert.equal(seenAddress!.resourceId, RESOURCE);
+    // onClose pin: after the failed resume the ADDRESS claim set is empty again — the owner may
+    // claim the same suspension afresh. (Regression: held claim → accepted:false.)
+    const reclaim = owner.claimToolSuspension(WIDGET_CALL, parked.runId);
+    assert.equal(reclaim.accepted, true, `address claim leaked after close: ${JSON.stringify(reclaim)}`);
+    if (reclaim.accepted) owner.releaseToolResponse(reclaim.claimKey);
+    // And the full loop closes: the owner's next answer actually resumes the widget.
+    await ownerStillAnswers('wt-claim-free');
+  });
+
   it('owner gone (session collected) while the call is still parked in another session: refused, nothing resumes', async () => {
     const RealWeakRef = globalThis.WeakRef;
     const collected = new Set<object>();
