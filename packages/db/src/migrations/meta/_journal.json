@@ -169,6 +169,13 @@
       "when": 1793021932250,
       "tag": "0023_chat_tasks",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1793108400000,
+      "tag": "0024_chat_tasks_task_runner",
+      "breakpoints": true
     }
   ]
 }

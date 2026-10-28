@@ -20,6 +20,7 @@ import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import type { PgDatabase, PgQueryResultHKT } from 'drizzle-orm/pg-core';
 import { db } from './client';
 import type * as schema from './schema/index';
+import { agents, companies } from './schema/index';
 import { CHAT_TASK_OPEN_STATUSES, chatTasks, type ChatTask, type ChatTaskStatus } from './schema/chat-tasks';
 
 /** Any Drizzle Postgres database over this schema (the app pool, or an in-memory one in tests). */
@@ -196,6 +197,148 @@ export async function setChatTaskStatus(
       updatedAt: now,
       completedAt: input.status === 'done' ? now : null,
     })
+    .where(and(eq(chatTasks.id, input.id), ...scopeWhere(scope)))
+    .returning();
+  return row ?? null;
+}
+
+// ─── TASK-RUNNER ──────────────────────────────────────────────────────────────
+// The async Run Task queue shares the scheduler's per-agent run budget with
+// heartbeats: these reads/writes let the scheduler task-runner poller find
+// pending tasks, claim them ONLY when a budget slot frees, and record the
+// outcome. Paused items never appear in `listRunnableChatTasks` (paused skips
+// enqueue — product lock), and one-task attempt budget is bounded by
+// `maxAttempts` so a failing task parks itself to `waiting_on_user`.
+
+export interface RunnableChatTaskRow {
+  taskId: string;
+  companyId: string;
+  agentId: string;
+  title: string;
+  notes: string | null;
+  position: number;
+  attempts: number;
+  /** Always false in practice (the query filters paused rows); the task-runner double-checks it. */
+  paused: boolean;
+  sourceThreadId: string | null;
+  agentName: string;
+  agentUrlKey: string;
+  agentStatus: string;
+  companyStatus: string;
+}
+
+/**
+ * Pending, non-paused chat tasks with attempt budget left, in claim order
+ * (per agent, then position, then age). Joined against agents + companies so
+ * the caller can skip inactive agents/companies before burning a run slot.
+ */
+export async function listRunnableChatTasks(
+  database: ChatTaskDb,
+  opts: { limit?: number; maxAttempts?: number } = {},
+): Promise<RunnableChatTaskRow[]> {
+  const maxAttempts = opts.maxAttempts ?? 2;
+  return database
+    .select({
+      taskId: chatTasks.id,
+      companyId: chatTasks.companyId,
+      agentId: chatTasks.agentId,
+      title: chatTasks.title,
+      notes: chatTasks.notes,
+      position: chatTasks.position,
+      attempts: chatTasks.runnerAttempts,
+      paused: chatTasks.paused,
+      sourceThreadId: chatTasks.sourceThreadId,
+      agentName: agents.name,
+      agentUrlKey: agents.urlKey,
+      agentStatus: agents.status,
+      companyStatus: companies.status,
+    })
+    .from(chatTasks)
+    .innerJoin(agents, eq(agents.id, chatTasks.agentId))
+    .innerJoin(companies, eq(companies.id, chatTasks.companyId))
+    .where(
+      and(
+        eq(chatTasks.status, 'pending'),
+        eq(chatTasks.paused, false),
+        sql`${chatTasks.runnerAttempts} < ${maxAttempts}`,
+      ),
+    )
+    .orderBy(asc(chatTasks.agentId), asc(chatTasks.position), asc(chatTasks.createdAt))
+    .limit(opts.limit ?? 25);
+}
+
+/**
+ * Claim one task for a Run Task (conditional pending→in_progress). Returns the
+ * claimed row, or null when it is no longer claimable (paused, cancelled, or
+ * another worker got there first). The attempt count and run id are written in
+ * the same statement — a claim cannot double-fire, which is what keeps the
+ * shared run budget honest.
+ */
+export async function claimChatTaskRun(
+  database: ChatTaskDb,
+  input: { taskId: string; runId: string; attemptBudget?: number },
+): Promise<ChatTask | null> {
+  const maxAttempts = input.attemptBudget ?? 2;
+  const [row] = await database
+    .update(chatTasks)
+    .set({
+      status: 'in_progress',
+      runnerAttempts: sql`${chatTasks.runnerAttempts} + 1`,
+      runnerLastRunId: input.runId,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(chatTasks.id, input.taskId),
+        eq(chatTasks.status, 'pending'),
+        sql`NOT ${chatTasks.paused}`,
+        sql`${chatTasks.runnerAttempts} < ${maxAttempts}`,
+      ),
+    )
+    .returning();
+  return row ?? null;
+}
+
+/**
+ * End a claimed Run Task: back to `pending` (retry budget left), or to
+ * `waiting_on_user` / `done`. Only touches `in_progress` rows — a cancelled or
+ * re-prioritised task is never silently resurrected.
+ */
+export async function finishChatTaskRun(
+  database: ChatTaskDb,
+  input: { taskId: string; status: 'pending' | 'waiting_on_user' | 'done'; note?: string | null },
+): Promise<ChatTask | null> {
+  const [existing] = await database
+    .select()
+    .from(chatTasks)
+    .where(eq(chatTasks.id, input.taskId))
+    .limit(1);
+  if (!existing) return null;
+  const note = input.note?.trim();
+  const notes = note ? [existing.notes, note].filter(Boolean).join('\n') : existing.notes;
+  const now = new Date();
+  const [row] = await database
+    .update(chatTasks)
+    .set({
+      status: input.status,
+      notes,
+      updatedAt: now,
+      completedAt: input.status === 'done' ? now : null,
+    })
+    .where(and(eq(chatTasks.id, input.taskId), eq(chatTasks.status, 'in_progress')))
+    .returning();
+  return row ?? null;
+}
+
+/** Task-runner pause/resume: a paused task skips enqueue until resumed. */
+export async function setChatTaskPaused(
+  scope: ChatTaskScope,
+  input: { id: string; paused: boolean },
+  database: ChatTaskDb = defaultDb,
+): Promise<ChatTask | null> {
+  const [row] = await database
+    .update(chatTasks)
+    .set({ paused: input.paused, updatedAt: new Date() })
     .where(and(eq(chatTasks.id, input.id), ...scopeWhere(scope)))
     .returning();
   return row ?? null;

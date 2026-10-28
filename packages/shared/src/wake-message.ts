@@ -254,6 +254,11 @@ export function buildWakeMessageWithStats(
   opts: BuildWakeMessageOptions = {},
 ): { message: string; stats: WakeContextStats } {
   const budgets: WakeContextBudgets = { ...DEFAULT_WAKE_CONTEXT_BUDGETS, ...(opts.budgets ?? {}) };
+  if (data.kind === 'task') {
+    // TASK-RUNNER: a Run Task gets the task message — never the heartbeat T1/T2 headers.
+    const message = buildTaskRunWakeMessage(data);
+    return { message, stats: { ...emptyStats('t1'), totalChars: message.length } };
+  }
   if (opts.context && data.taskId && data.wakeReason !== 'agent_mail') {
     return buildV2(data, opts.context, budgets);
   }
@@ -262,4 +267,32 @@ export function buildWakeMessageWithStats(
 
 export function buildWakeMessage(data: HeartbeatJobData, opts: BuildWakeMessageOptions = {}): string {
   return buildWakeMessageWithStats(data, opts).message;
+}
+
+/**
+ * TASK-RUNNER: the wake message for a Run Task (HeartbeatJobData.kind === 'task').
+ * Deliberately short and high-level — the task's title + notes, not the thread it was
+ * promised in and not any tool transcript. A finished run completes the task (task-runner
+ * settle); if the agent needs a board decision it parks the task itself with updateMyTask
+ * (status `waiting_on_user`, the question in notes).
+ */
+export function buildTaskRunWakeMessage(data: HeartbeatJobData): string {
+  const parts = [
+    `# Run Task: ${data.chatTaskTitle?.trim() || 'Untitled task'}`,
+    '',
+    'You promised this to-do in a board chat. No run slot was free until now, so it is being ' +
+      'worked now — as a background task run on the agent, outside this chat.',
+    '',
+    `Task id: ${data.chatTaskId ?? '(unknown)'}`,
+  ];
+  if (data.chatTaskNotes?.trim()) parts.push(`Notes: ${cap500(data.chatTaskNotes.trim())}`);
+  parts.push(
+    '',
+    'Work the task to completion now, with the tools you have. If the notes name interested ' +
+      'parties, notify them once the work lands (best-effort).',
+    'If you genuinely need a decision from the board before you can continue, park the task with ' +
+      'updateMyTask (status `waiting_on_user`, the question in notes) and stop there.',
+    'Otherwise finish with a short, plain-language result: what you did and where the result lives.',
+  );
+  return parts.join('\n');
 }

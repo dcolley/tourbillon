@@ -1,5 +1,5 @@
-import { db, heartbeatRuns } from '@tourbillon/db';
-import { desc, eq, sql } from 'drizzle-orm';
+import { db, heartbeatRuns, type HeartbeatStatus } from '@tourbillon/db';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { getActiveCompanyOrNull } from './company';
 import { getHeartbeatRun, getHeartbeatTaskId } from './heartbeats';
 
@@ -93,7 +93,7 @@ export function getQueueMeta(name: string) {
     return {
       name: 'heartbeat',
       label: 'Heartbeat runs',
-      description: 'Agent wakes (DB heartbeat_runs — no BullMQ)',
+      description: 'Agent wakes (DB heartbeat_runs — Run Heartbeat + Run Task — no BullMQ)',
     };
   }
   return null;
@@ -121,7 +121,7 @@ export async function getQueueOverview(): Promise<{ queues: QueueOverviewItem[];
       {
         name: 'heartbeat',
         label: 'Heartbeat runs',
-        description: 'Agent wakes tracked in heartbeat_runs (WakeRunner — no BullMQ)',
+        description: 'Agent wakes tracked in heartbeat_runs (WakeRunner — Run Heartbeat + Run Task share one per-agent slot budget — no BullMQ)',
         counts,
       },
     ],
@@ -130,11 +130,53 @@ export async function getQueueOverview(): Promise<{ queues: QueueOverviewItem[];
 
 export async function getQueueJobs(
   _queueName: string,
-  _state: string,
-  _page = 0,
-  _pageSize = 50,
+  state: string,
+  page = 0,
+  pageSize = 50,
 ): Promise<{ jobs: JobSummary[]; total: number }> {
-  return { jobs: [], total: 0 };
+  const company = await getActiveCompanyOrNull();
+  if (!company) return { jobs: [], total: 0 };
+  const statusByState: Record<string, HeartbeatStatus[]> = {
+    waiting: ['queued'],
+    active: ['running'],
+    completed: ['succeeded'],
+    failed: ['failed'],
+  };
+  const statuses: HeartbeatStatus[] = statusByState[state] ?? ['queued', 'running', 'succeeded', 'failed'];
+  const rows = await db
+    .select({
+      id: heartbeatRuns.id,
+      agentId: heartbeatRuns.agentId,
+      status: heartbeatRuns.status,
+      invocationSource: heartbeatRuns.invocationSource,
+      startedAt: heartbeatRuns.startedAt,
+      finishedAt: heartbeatRuns.finishedAt,
+    })
+    .from(heartbeatRuns)
+    .where(and(eq(heartbeatRuns.companyId, company.id), inArray(heartbeatRuns.status, statuses)))
+    .orderBy(desc(heartbeatRuns.startedAt))
+    .limit(pageSize)
+    .offset(page * pageSize);
+  return {
+    jobs: rows.map((run) => ({
+      id: run.id,
+      // A private Run Task is labelled apart from a heartbeat wake (task: vs wake: prefix).
+      name: `${run.invocationSource === 'task' ? 'task' : 'wake'}:${run.agentId}`,
+      state:
+        run.status === 'running'
+          ? 'active'
+          : run.status === 'failed'
+            ? 'failed'
+            : run.status === 'queued'
+              ? 'waiting'
+              : 'completed',
+      timestamp: run.startedAt.getTime(),
+      processedOn: run.startedAt.getTime(),
+      finishedOn: run.finishedAt?.getTime() ?? null,
+      attemptsMade: 1,
+    })),
+    total: rows.length,
+  };
 }
 
 export async function getJobDetail(_queueName: string, jobId: string): Promise<JobDetail | null> {
@@ -143,7 +185,7 @@ export async function getJobDetail(_queueName: string, jobId: string): Promise<J
   const { run, agent } = linked;
   return {
     id: run.id,
-    name: `wake:${agent?.name ?? run.agentId}`,
+    name: `${run.invocationSource === 'task' ? 'task' : 'wake'}:${agent?.name ?? run.agentId}`,
     state: run.status === 'running' ? 'active' : run.status === 'failed' ? 'failed' : 'completed',
     timestamp: run.startedAt.getTime(),
     processedOn: run.startedAt.getTime(),

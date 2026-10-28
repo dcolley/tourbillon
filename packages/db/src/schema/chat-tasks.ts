@@ -1,4 +1,4 @@
-import { check, index, integer, pgTable, text, timestamp } from 'drizzle-orm/pg-core';
+import { check, index, integer, boolean, pgTable, text, timestamp } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { companies } from './companies';
 import { agents } from './agents';
@@ -35,6 +35,18 @@ export const chatTasks = pgTable(
     status: text('status').$type<ChatTaskStatus>().notNull().default('pending'),
     /** Manual ordering within one agent's list (lower = earlier). */
     position: integer('position').notNull().default(0),
+    /**
+     * TASK-RUNNER: paused items SKIP the task-runner enqueue — the concierge (or the human via
+     * the widget) parked this to-do; the runner must not auto-start a Run Task for it.
+     */
+    paused: boolean('paused').notNull().default(false),
+    /**
+     * TASK-RUNNER: Run Task runs claimed for this task (attempt budget; failures re-queue to
+     * `pending` until exhausted, then park to `waiting_on_user`).
+     */
+    runnerAttempts: integer('runner_attempts').notNull().default(0),
+    /** TASK-RUNNER: heartbeat_runs.id of the last Run Task claimed for this task (audit + kill link). */
+    runnerLastRunId: text('runner_last_run_id'),
     /**
      * The board (human) user who asked for this in chat, best-effort (Derek, 26 Oct): stamped
      * from the chat request's session user when one is resolvable, overridable via updateMyTask.

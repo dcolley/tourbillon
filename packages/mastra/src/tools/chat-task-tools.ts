@@ -1,5 +1,5 @@
 /**
- * TASK-1: the Assistant's private chat task list — the five AgentController tools.
+ * TASK-1: the Assistant's private chat task list — the seven AgentController tools (five list tools + TASK-RUNNER's pause/prioritise controls).
  *
  * One private, todo-style list per (company, agent), stored in `chat_tasks` (Tourbillon-owned,
  * not company issues). The agent uses these to track what it said it would do in chat; when the
@@ -9,8 +9,8 @@
  *
  * Scope comes ONLY from the chat request context (`agentId` + `companyId` via
  * `extractToolRuntimeContext`); there is no model-supplied agent/company parameter, and a call
- * without a context returns an error and writes nothing. Registered for dashboard chat only —
- * never in CONTROL_PLANE_TOOLS / ROLE_TOOLS / heartbeats / DurableAgent.
+ * without a context returns an error and writes nothing. Registered for dashboard chat and Run Task wakes (wake kind 'task') only —
+ * never in CONTROL_PLANE_TOOLS / ROLE_TOOLS / heartbeat runs.
  *
  * Transport: direct Postgres (`toolDb()` → the app pool, injectable in tests) through the
  * @tourbillon/db chat-task query layer. `source_thread_id` is stamped from the runtime context's
@@ -22,6 +22,7 @@ import {
   addChatTask,
   countOpenChatTasks,
   listChatTasks,
+  setChatTaskPaused,
   setChatTaskStatus,
   updateChatTask,
   CHAT_TASK_STATUSES,
@@ -34,13 +35,15 @@ import { extractToolRuntimeContext } from './api-client';
 import { getCurrentHeartbeatContext } from '../heartbeat-context';
 import { toolDb } from './tool-db';
 
-/** Ids of the five chat-task tools — used to keep them out of heartbeat/issue tool sets. */
+/** Ids of the seven chat-task tools — used to keep them out of heartbeat/issue tool sets. */
 export const CHAT_TASK_TOOL_IDS = [
   'listMyTasks',
   'addMyTask',
   'updateMyTask',
   'completeMyTask',
   'cancelMyTask',
+  'pauseMyTask',
+  'prioritizeMyTask',
 ] as const;
 
 /** Hard cap so the list stays a memory aid, not a backlog. */
@@ -269,13 +272,69 @@ export const cancelMyTaskTool = createTool({
   },
 });
 
-/** The five chat-task tools as one group (chat AgentController only — see chat-controller.ts). */
+export const pauseMyTaskTool = createTool({
+  id: 'pauseMyTask',
+  description:
+    'Pause or resume one of YOUR chat tasks (private chat list, NOT company issues). Paused tasks SKIP the ' +
+    'Run Task queue — no Run Task is auto-started for them until resumed. Use when the human says to hold ' +
+    'off on / park a to-do, or to pick a parked one back up.',
+  inputSchema: z.object({
+    id: z.string().min(1).describe('Chat task id (from listMyTasks).'),
+    paused: z
+      .boolean()
+      .optional()
+      .describe('true pauses (default), false resumes (lets Run Task start it again).'),
+  }),
+  execute: async (inputData, { requestContext }) => {
+    const scope = chatTaskScope(requestContext);
+    if (!scope) return missingScope();
+    const paused = inputData.paused ?? true;
+    const updated = await setChatTaskPaused(scope, { id: inputData.id, paused }, toolDb());
+    if (!updated) return notFound(inputData.id);
+    return {
+      ok: true,
+      message: `Task ${updated.id} ${paused ? 'paused — Run Task will skip it' : 'resumed — eligible for Run Task again'}.`,
+      task: row(updated),
+    };
+  },
+});
+
+export const prioritizeMyTaskTool = createTool({
+  id: 'prioritizeMyTask',
+  description:
+    'Move one of YOUR chat tasks up the list (private chat list, NOT company issues). Lower position = ' +
+    'picked up sooner by the Run Task queue. Use when the human reprioritises their to-dos.',
+  inputSchema: z.object({
+    id: z.string().min(1).describe('Chat task id (from listMyTasks).'),
+    position: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe('Target position in your list (default 0 = front, ahead of the rest).'),
+  }),
+  execute: async (inputData, { requestContext }) => {
+    const scope = chatTaskScope(requestContext);
+    if (!scope) return missingScope();
+    const updated = await updateChatTask(
+      scope,
+      { id: inputData.id, position: inputData.position ?? 0 },
+      toolDb(),
+    );
+    if (!updated) return notFound(inputData.id);
+    return { ok: true, message: `Task ${updated.id} moved to position ${updated.position}.`, task: row(updated) };
+  },
+});
+
+/** The seven chat-task tools as one group (chat AgentController + Run Task wakes — see chat-controller.ts). */
 export const CHAT_TASK_TOOLS = {
   listMyTasks: listMyTasksTool,
   addMyTask: addMyTaskTool,
   updateMyTask: updateMyTaskTool,
   completeMyTask: completeMyTaskTool,
   cancelMyTask: cancelMyTaskTool,
+  pauseMyTask: pauseMyTaskTool,
+  prioritizeMyTask: prioritizeMyTaskTool,
 };
 
 /** True for ids that belong to the private chat list (guards + toolset labelling). */

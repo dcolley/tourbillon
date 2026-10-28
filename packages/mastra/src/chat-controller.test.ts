@@ -216,9 +216,9 @@ describe('Chat ↔ Heartbeat Tool Parity', () => {
       const chatToolIds = new Set(Object.keys(chatAgent.tools || {}));
       const heartbeatToolIds = new Set(Object.keys(heartbeatTools));
 
-      // TASK-1: chat runs the heartbeat toolset PLUS the five private chat-task list tools.
+      // TASK-1: chat runs the heartbeat toolset PLUS the seven private chat-task list tools.
       // (The private list is chat-only — never company issues, never the heartbeat loop.)
-      const CHAT_TASK_TOOL_IDS = ['listMyTasks', 'addMyTask', 'updateMyTask', 'completeMyTask', 'cancelMyTask'];
+      const CHAT_TASK_TOOL_IDS = ['listMyTasks', 'addMyTask', 'updateMyTask', 'completeMyTask', 'cancelMyTask', 'pauseMyTask', 'prioritizeMyTask'];
       expect(chatToolIds.size).toBe(heartbeatToolIds.size + CHAT_TASK_TOOL_IDS.length);
 
       // All heartbeat tools should be in chat

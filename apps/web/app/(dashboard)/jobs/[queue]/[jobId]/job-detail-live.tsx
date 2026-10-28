@@ -178,7 +178,7 @@ function HeartbeatRunSection({ run }: { run: HeartbeatRunSnapshot }) {
 
       <div className="grid grid-cols-2 gap-px bg-border">
         <RunField label="Run status" value={run.status} />
-        <RunField label="Wake source" value={run.invocationSource.replace(/_/g, ' ')} />
+        <RunField label="Wake source" value={run.invocationSource === 'task' ? 'Run Task' : run.invocationSource.replace(/_/g, ' ')} />
         <RunField label="Started" value={new Date(run.startedAt).toLocaleString()} />
         <RunField
           label="Last seen"

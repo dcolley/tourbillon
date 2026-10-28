@@ -355,7 +355,7 @@ export async function buildRunWakeMessage(
   const config = resolveWakeContextConfig(parseCompanySettings(opts.companySettings));
   let context: Awaited<ReturnType<typeof buildWakeContext>> = null;
   let error: string | undefined;
-  if (config.enabled && wake.taskId && wake.wakeReason !== 'agent_mail') {
+  if (config.enabled && wake.taskId && wake.wakeReason !== 'agent_mail' && wake.kind !== 'task') {
     try {
       let commentBodies: string[] = [];
       if (wake.wakePayloadJson) {
