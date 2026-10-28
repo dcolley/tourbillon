@@ -104,21 +104,30 @@ async function limiterLimit(agent: object): Promise<number | undefined> {
 
 describe('buildChatRunConfig (CONCIERGE-PARAMS S1)', () => {
   it('params size the TokenLimiter trim limit and the generation settings', () => {
+    // #204 Soft C: maxOutputTokens must NOT equal DEFAULT_OUTPUT_TOKEN_RESERVE (2_048) here —
+    // with 2_048 the params-dropping mutant still lands on the 2_048 default and survives.
+    // 3_072 is off-default, so a dropped params reverts generation to 2_048 and this pin goes red.
+    const params = { maxContextTokens: 65_536, maxOutputTokens: 3_072 };
     const { contextBudget, generationOptions, inputProcessors } = buildChatRunConfig(
       baseRecord(),
       { defaultModelSettings: { maxContextTokens: 132_000 } } as never,
-      { params: CONCERGE_PARAMS },
+      { params },
     );
     assert.equal(contextBudget.contextTokens, 65_536, 'the params window beats the provider default');
-    assert.equal(contextBudget.limiterLimit, 55_488, 'hard context guard sized from params');
+    // 65_536 − max(3_072, 2_048) output reserve − 8_000 chat tool reserve.
+    assert.equal(contextBudget.limiterLimit, 54_464, 'hard context guard sized from params');
     // Same object the chat Agent receives as inputProcessors (call site spreads this return).
     assert.equal(inputProcessors[0]?.id, 'token-limiter', 'TokenLimiter is the chat trim processor');
     assert.equal(
       (inputProcessors[0] as unknown as { maxTokens?: number }).maxTokens,
-      55_488,
-      'dropping options.params at the chat call site reverts this to the provider default',
+      54_464,
+      'dropping options.params at the chat call site reverts this to the provider default (121_952)',
     );
-    assert.equal(generationOptions.modelSettings?.maxOutputTokens, 2_048, 'generation sized from params');
+    assert.equal(
+      generationOptions.modelSettings?.maxOutputTokens,
+      3_072,
+      'generation sized from params — off-default so the dropped-params mutant lands on 2_048 and fails',
+    );
   });
 
   it('without params the provider default window applies', () => {
@@ -128,8 +137,8 @@ describe('buildChatRunConfig (CONCIERGE-PARAMS S1)', () => {
     assert.equal(contextBudget.contextTokens, 132_000);
     assert.notEqual(
       (inputProcessors[0] as unknown as { maxTokens?: number }).maxTokens,
-      55_488,
-      'no params must NOT produce the params-sized limit',
+      54_464,
+      'no params must NOT produce the params-sized limit (65_536 − 3_072 − 8_000)',
     );
   });
 
@@ -208,11 +217,11 @@ describe('chat assembly call-site wiring (S1)', () => {
       ['chat'],
       "dropping 'chat' at either site (scope undefined = heartbeat) hands chat an OM-off Memory",
     );
-    // Best-effort: the controller keeps the chat-forced omConfig (heartbeat resolver → absent).
+    // #204 Soft A: was `if (om) { … }` — vacuous when omConfigPart is dropped (probe on the
+    // #204 tip proved `om` is set), so the `...omConfigPart` mutant survived. Hard-assert now.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const om = (controller as any).omConfig ?? (controller as any).config?.omConfig;
-    if (om) {
-      assert.equal(om.defaultObserverModelId, 'm-om', 'omConfig from the chat resolver, not heartbeat');
-    }
+    assert.ok(om, 'controller keeps the chat-forced omConfig (drop of ...omConfigPart lands here)');
+    assert.equal(om.defaultObserverModelId, 'm-om', 'omConfig from the chat resolver, not heartbeat');
   });
 });
