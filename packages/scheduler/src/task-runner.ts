@@ -24,7 +24,7 @@
  * All DB + wake I/O goes through TaskRunnerDeps so the poll logic is unit-testable with fakes
  * (and the production wiring is one `createDefaultTaskRunnerDeps()` away).
  */
-import { and, eq, or, isNull, sql } from 'drizzle-orm';
+import { and, eq, or, isNull, gte, sql } from 'drizzle-orm';
 import { db, heartbeatRuns } from '@tourbillon/db';
 import {
   listRunnableChatTasks,
@@ -281,7 +281,10 @@ export async function countActiveRuns(
         sql`${heartbeatRuns.status} in ('queued', 'running')`,
         // A dead run stops eating budget the same way the stale sweep defines it: stale means
         // lastSeenAt older than the liveness window. Fresh-or-null still counts (run in flight).
-        or(isNull(heartbeatRuns.lastSeenAt), sql`${heartbeatRuns.lastSeenAt} >= ${staleCutoff}`),
+        // HOTFIX (post-#196, TEST 28 Oct): a raw sql`${staleCutoff}` interpolates the Date into
+        // postgres.js and throws ERR_INVALID_ARG_TYPE every tick — use the drizzle gte operator
+        // (same style as wake-runner's lt(lastSeenAt, cutoff)) so it binds as a real parameter.
+        or(isNull(heartbeatRuns.lastSeenAt), gte(heartbeatRuns.lastSeenAt, staleCutoff)),
       ),
     );
   let task = 0;
@@ -316,7 +319,10 @@ export function createDefaultTaskRunnerDeps(
     startWake: options.startWake ?? ((job) => import('./wake-runner').then((m) => m.startTaskWake(job))),
     settle: (taskId, status, note) =>
       finishChatTaskRun(database, { taskId, status, note }).then(() => undefined),
-    log: options.log,
+    // HOTFIX (post-#196): production called startTaskRunnerPolling() with no log, so every
+    // poll failure (e.g. the countActiveRuns Date crash) was silent. Default to the scheduler
+    // trace logger so failures surface in scheduler logs.
+    log: options.log ?? createTraceLogger('task-run', {}),
     emitProgress:
       options.emitProgress ??
       ((event) => {

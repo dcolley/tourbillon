@@ -7,8 +7,11 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { drizzle } from 'drizzle-orm/postgres-js';
 import {
   buildTaskRunWake,
+  countActiveRuns,
+  createDefaultTaskRunnerDeps,
   freeTaskRunSlots,
   pollTaskRunner,
   resolveMaxConcurrentRuns,
@@ -20,8 +23,12 @@ import {
 } from './task-runner';
 import { buildWakeMessageWithStats } from '@tourbillon/shared';
 import type { RunnableChatTaskRow } from '@tourbillon/db';
+import type { ChatTaskDb } from '@tourbillon/db';
 import type { HeartbeatJobData } from '@tourbillon/shared';
 import type { WakeResult } from './wake-runner';
+
+// task-runner.ts imports @tourbillon/db at module load, which validates DATABASE_URL eagerly.
+process.env.DATABASE_URL ??= 'postgres://unused@127.0.0.1:1/unused';
 
 const A = 'agent-1';
 const C = 'company-1';
@@ -316,4 +323,93 @@ test('S1: maxConcurrentRuns=0 stops the poller BEFORE it polls', async () => {
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(listed, 0, 'kill switch: not even one listRunnable call');
   assert.deepEqual(logs, ['task-run poller disabled (max concurrent runs = 0)']);
+});
+
+// HOTFIX regression (post-#196, TEST 28 Oct): countActiveRuns interpolated the staleCutoff Date
+// into a raw sql`... >= ${staleCutoff}` template. Because this repo's postgres-js client runs
+// with prepare:false, drizzle hands (sqlString, params) straight to client.unsafe() — and the
+// raw Date in params is what Node's string-argument check rejected with ERR_INVALID_ARG_TYPE on
+// every pollTaskRunner tick, so pending chat_tasks sat at pending / runner_attempts=0 forever.
+// The fix (drizzle gte, same style as wake-runner's lt(lastSeenAt, cutoff)) makes the column's
+// timestamp serializer emit an ISO string. This test drives the REAL drizzle→postgres-js
+// boundary with a fake client, replicating the driver's parameter type gate.
+test('countActiveRuns: driver boundary never sees a raw Date — cutoff arrives pre-serialised as a string', async () => {
+  const calls: Array<{ sql: string; params: unknown[] }> = [];
+  // drizzle mapResultRow reads row[columnIndex] — raw rows are arrays in SELECT order.
+  const rows = [['timer'], ['task']];
+  const fakePgClient = {
+    options: { parsers: {}, serializers: {}, types: {} },
+    PostgresError: class PostgresError extends Error {},
+    END: {},
+    listen: () => () => {},
+    // prepare:false (packages/db/src/client.ts) routes every drizzle query through unsafe().
+    unsafe(query: string, params: unknown[]) {
+      calls.push({ sql: query, params });
+      for (const p of params ?? []) {
+        if (p !== null && !(typeof p === 'string' || typeof p === 'number' || typeof p === 'boolean')) {
+          const err: any = new TypeError(
+            `The "string" argument must be of type string. Received ${p instanceof Date ? 'an instance Date' : 'an instance of ' + (p?.constructor?.name ?? typeof p)}`,
+          );
+          err.code = 'ERR_INVALID_ARG_TYPE';
+          throw err; // exactly what postgres.js + Node raised on TEST for the Date cutoff
+        }
+      }
+      const promise = Promise.resolve(rows) as Promise<unknown> & {
+        values: () => Promise<unknown>;
+      };
+      promise.values = () => Promise.resolve(rows);
+      return promise;
+    },
+  };
+  const database = drizzle(fakePgClient as never, { schema: {} as never }) as unknown as ChatTaskDb;
+
+  // The regression proper: the buggy raw-Date param used to throw here every tick.
+  const slot = await countActiveRuns(database, A);
+  assert.deepEqual(slot, { total: 2, task: 1 }); // both kinds count toward the shared budget
+
+  assert.equal(calls.length, 1);
+  const { sql: emitted, params } = calls[0]!;
+  // The fix: lastSeenAt goes through gte → a $n placeholder with a pre-serialised ISO string.
+  assert.match(
+    emitted,
+    /"heartbeat_runs"\."last_seen_at" is null or "heartbeat_runs"\."last_seen_at" >= \$\d+/,
+  );
+  assert.ok(
+    !/\bDate\b/.test(emitted),
+    `raw Date leaked into SQL text: ${emitted}`,
+  );
+  assert.ok(
+    params.every((p) => p === null || ['string', 'number', 'boolean'].includes(typeof p)),
+    `no bind param may reach the driver as a Date object, got: ${JSON.stringify(
+      params.map((p) => (p instanceof Date ? 'Date' : typeof p)),
+    )}`,
+  );
+  // The cutoff travels as a recent-timestamp bind parameter, not literal SQL.
+  assert.ok(
+    params.some((p) => {
+      const t = Date.parse(String(p));
+      return Number.isFinite(t) && Math.abs(t - Date.now()) < 10 * 60_000;
+    }),
+    `staleCutoff must be passed as a recent-timestamp bind parameter, got: ${JSON.stringify(params)}`,
+  );
+});
+
+test('createDefaultTaskRunnerDeps: production deps carry a log so silent poll failures surface', () => {
+  // The post-#196 incident was silent because createDefaultTaskRunnerDeps() passed log through
+  // as undefined — both the summary path and startTaskRunnerPolling's .catch were no-ops.
+  const deps = createDefaultTaskRunnerDeps({});
+  assert.ok(deps.log && typeof deps.log.info === 'function', 'default deps must default to a real logger');
+
+  const lines: string[] = [];
+  const original = console.log;
+  console.log = (...args: unknown[]) => {
+    lines.push(args.map(String).join(' '));
+  };
+  try {
+    deps.log!.info('task-run poll failed', { error: 'boom' });
+  } finally {
+    console.log = original;
+  }
+  assert.equal(lines.length, 1);
+  assert.match(lines[0]!, /\[trace:task-run\].*task-run poll failed.*boom/);
 });

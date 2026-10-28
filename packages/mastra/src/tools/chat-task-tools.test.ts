@@ -126,4 +126,12 @@ describe('CHAT_TASK_TOOLS — scope from the request context only (AC5)', () => 
     assert.ok(!('getInbox' in CHAT_TASK_TOOLS));
     assert.equal(typeof toolDb, 'function');
   });
+
+  // S6 (#193): the showTaskList card can never be asked with an empty list (`tasks.min(1)`), so the
+  // tool description must send the agent to a text answer instead of a doomed card call.
+  it('S6: an empty list answers in text - listMyTasks steers the agent off an empty showTaskList card', () => {
+    assert.match(listMyTasksTool.description, /if the list is empty, answer in plain text/);
+    assert.match(listMyTasksTool.description, /do not call showTaskList/);
+    assert.match(listMyTasksTool.description, /at least one task/);
+  });
 });

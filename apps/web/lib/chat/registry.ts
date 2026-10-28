@@ -15,7 +15,7 @@ import {
 } from '../../../../packages/mastra/src/chat';
 import { parseCompanySettings, type AgentRuntimeConfig } from '@tourbillon/shared';
 import { and, eq } from 'drizzle-orm';
-import { hasExplicitChatModel, resolveChatModelOptions } from './concierge-model';
+import { hasExplicitChatModel, resolveChatModelOptions, buildChatControllerOptions } from './concierge-model';
 import type { ChatRequestUser } from './request-user';
 import { getActiveCompany } from '@/lib/company';
 import { buildChatScopedApiKey, validateChatToken } from '@/lib/auth/chat-token';
@@ -199,17 +199,7 @@ export async function getOrCreateChatController(
       (await db.query.companies.findFirst({
         where: eq(companies.id, agentRecord.companyId),
       }));
-    const controller = await createChatController(agentRecord, {
-      allowedMcpServerIds: companyRow?.allowedMcpServerIds ?? [],
-      companySettings: parseCompanySettings(companyRow?.settings),
-      modelIdOverride: modelOpts?.modelIdOverride,
-      ...(modelOpts?.providerIdOverride ? { providerIdOverride: modelOpts.providerIdOverride } : {}),
-      ...(modelOpts?.reasoningLevelOverride
-        ? { reasoningLevelOverride: modelOpts.reasoningLevelOverride }
-        : {}),
-      // CONCIERGE-PARAMS: params are resolved per request and part of the cache key.
-      ...(modelOpts?.params ? { params: modelOpts.params } : {}),
-    });
+    const controller = await createChatController(agentRecord, buildChatControllerOptions(companyRow, modelOpts));
     await controller.init();
     return controller;
   })();

@@ -57,6 +57,7 @@ const CARD_KIND: Record<string, string> = {
   askChoice: 'choice',
   askForm: 'form',
   askConfirm: 'confirmation',
+  showTaskList: 'task list',
 };
 
 /** Plain name of a card kind ("question card"), for messages. */

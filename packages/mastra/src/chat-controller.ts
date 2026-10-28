@@ -182,11 +182,75 @@ function assembleChatSystemPrompt(
 }
 
 /**
+ * Test seam for the chat assembly wiring (see chat-controller.wiring.test.ts). Production
+ * callers omit it; tests inject recorders/stubs to pin the call sites that hand chat its
+ * chat-scoped Memory, provider resolution, params-sized budget and OM config.
+ */
+export interface ChatAssemblyDeps {
+  getMemory?: typeof getAgentMemory;
+  resolveProviderRow?: typeof resolveAgentProviderRow;
+}
+
+/**
+ * CONCIERGE-PARAMS wiring contract (pinned by chat-controller.wiring.test.ts): the chat run's
+ * TokenLimiter trim limit AND generation settings are sized from the active chat model's
+ * `params` (concierge pair) — dropping params at this site silently reverts the hard context
+ * guard to the provider default window.
+ */
+export function buildChatRunConfig(
+  effectiveRecord: AgentRecord,
+  providerRecord: Parameters<typeof resolveAgentContextBudget>[1],
+  options?: ChatModelOverrideOptions,
+): {
+  generationOptions: ReturnType<typeof resolveAgentGenerationOptions>;
+  contextBudget: ReturnType<typeof resolveAgentContextBudget>;
+  inputProcessors: ReturnType<typeof buildHeartbeatInputProcessors>;
+} {
+  const generationOptions = resolveAgentGenerationOptions(effectiveRecord, providerRecord, options?.params);
+  if (options?.reasoningLevelOverride) generationOptions.reasoning = options.reasoningLevelOverride;
+  const contextBudget = resolveAgentContextBudget(effectiveRecord, providerRecord, 'chat', options?.params);
+  return {
+    generationOptions,
+    contextBudget,
+    inputProcessors: buildHeartbeatInputProcessors({ limit: contextBudget.limiterLimit }),
+  };
+}
+
+/**
+ * CONCIERGE-OM wiring contract (pinned by chat-controller.wiring.test.ts): the chat
+ * AgentController's omConfig must come from resolveChatObservationalMemory (free-chat forces
+ * OM on when an observer model is resolvable), never the heartbeat resolver — that mismatch
+ * showed "Off" in the chat menu while OM ran (B1 on #194).
+ */
+export async function buildChatOmConfig(
+  companySettings: CompanySettings | null | undefined,
+  agentRuntime: AgentRuntimeConfig | null | undefined,
+): Promise<Record<string, never> | { omConfig: Record<string, unknown> }> {
+  const { resolveChatObservationalMemory } = await import('@tourbillon/shared/company-settings');
+  // CONCIERGE-OM: free-chat always attempts OM when an observer model is resolvable
+  // (company OM model → concierge model → none). Company `enabled:false` and agent
+  // `mode:'off'` do NOT disable it here; heartbeats still honour both switches.
+  const resolved = resolveChatObservationalMemory(companySettings, agentRuntime);
+  if (!resolved) return {} as Record<string, never>;
+  return {
+    omConfig: {
+      defaultObserverModelId: resolved.modelId,
+      defaultReflectorModelId: resolved.modelId,
+      defaultObservationThreshold: resolved.observeAfterTokens,
+      defaultReflectionThreshold: resolved.reflectAfterTokens,
+      ...(resolved.maxOutputTokens ? { defaultMaxOutputTokens: resolved.maxOutputTokens } : {}),
+      ...(resolved.temperature !== undefined ? { defaultTemperature: resolved.temperature } : {}),
+    },
+  };
+}
+
+/**
  * Mastra Agent for interactive chat — same identity/model/tools as heartbeat, no control-plane loop.
  */
 export async function createChatAgentWithSkills(
   agentRecord: AgentRecord,
   options?: AssembleAgentToolsOptions & ChatModelOverrideOptions,
+  deps?: ChatAssemblyDeps,
 ): Promise<Agent> {
   // CHAT-5: a thread may pick another model, provider and effort than the agent's.
   const effectiveRecord = chatEffectiveRecord(agentRecord, options);
@@ -208,10 +272,13 @@ export async function createChatAgentWithSkills(
   );
   // PRV-1: honour the company's provider switches; one activity warning per chat agent build.
   // CHAT-5: a provider the thread picked is used only while it is on for the company (no fallback).
-  const { row: providerRow, fallbackFrom } = await resolveAgentProviderRow(effectiveRecord, {
-    context: 'chat',
-    recordWarning: !options?.providerIdOverride,
-  });
+  const { row: providerRow, fallbackFrom } = await (deps?.resolveProviderRow ?? resolveAgentProviderRow)(
+    effectiveRecord,
+    {
+      context: 'chat',
+      recordWarning: !options?.providerIdOverride,
+    },
+  );
   if (options?.providerIdOverride && (!providerRow || fallbackFrom || providerRow.id !== options.providerIdOverride)) {
     throw new ChatProviderUnavailableError();
   }
@@ -221,12 +288,7 @@ export async function createChatAgentWithSkills(
     effectiveRecord.modelId,
     providerRecord,
   );
-  const generationOptions = resolveAgentGenerationOptions(effectiveRecord, providerRecord, options?.params);
-  if (options?.reasoningLevelOverride) generationOptions.reasoning = options.reasoningLevelOverride;
-  const contextBudget = resolveAgentContextBudget(effectiveRecord, providerRecord, 'chat', options?.params);
-
-  // Same Responses-API history sanitization as heartbeats (reasoning + tool-loop monologue).
-  const inputProcessors = buildHeartbeatInputProcessors({ limit: contextBudget.limiterLimit });
+  const { generationOptions, inputProcessors } = buildChatRunConfig(effectiveRecord, providerRecord, options);
 
   // Interactive chat is multi-turn. vLLM `/v1/responses` often crashes on replayed
   // assistant history (`AI_APICallError: 'role'`). Force chat-completions for chat only;
@@ -260,8 +322,13 @@ export async function createChatAgentWithSkills(
     tools: tools as never,
     // CONCIERGE-OM: chat Agent gets the chat-scoped Memory (forced OM when a
     // model is resolvable) — same instance as the chat controller, not the
-    // heartbeat-resolution Memory cache.
-    memory: await getAgentMemory(options?.companySettings ?? null, effectiveRecord.runtimeConfig as AgentRuntimeConfig, 'chat'),
+    // heartbeat-resolution Memory cache. The 'chat' scope argument is pinned by
+    // chat-controller.wiring.test.ts; dropping it hands chat a heartbeat-keyed Memory.
+    memory: await (deps?.getMemory ?? getAgentMemory)(
+      options?.companySettings ?? null,
+      effectiveRecord.runtimeConfig as AgentRuntimeConfig,
+      'chat',
+    ),
     inputProcessors,
     ...toMastraDefaultOptions(generationOptions),
   });
@@ -293,8 +360,9 @@ export async function createChatController(
     ChatModelOverrideOptions & {
       companySettings?: CompanySettings | null;
     },
+  deps?: ChatAssemblyDeps,
 ): Promise<AgentController<ChatControllerState>> {
-  const agent = await createChatAgentWithSkills(agentRecord, options);
+  const agent = await createChatAgentWithSkills(agentRecord, options, deps);
   const effectiveRecord = chatEffectiveRecord(agentRecord, options);
   const modes: AgentControllerMode[] = [
     {
@@ -309,20 +377,18 @@ export async function createChatController(
     },
   ];
 
-  const { resolveChatObservationalMemory } = await import('@tourbillon/shared/company-settings');
-  // CONCIERGE-OM: free-chat always attempts OM when an observer model is resolvable
-  // (company OM model → concierge model → none). Company `enabled:false` and agent
-  // `mode:'off'` do NOT disable it here; heartbeats still honour both switches.
-  const resolved = resolveChatObservationalMemory(
+  const omConfigPart = await buildChatOmConfig(
     options?.companySettings ?? null,
     agentRecord.runtimeConfig as AgentRuntimeConfig,
   );
-  const memory = await getAgentMemory(
+  const memory = await (deps?.getMemory ?? getAgentMemory)(
     options?.companySettings ?? null,
     agentRecord.runtimeConfig as AgentRuntimeConfig,
     'chat',
   );
-  const { row: providerRow } = await resolveAgentProviderRow(effectiveRecord, { context: 'chat' });
+  const { row: providerRow } = await (deps?.resolveProviderRow ?? resolveAgentProviderRow)(effectiveRecord, {
+    context: 'chat',
+  });
   const providerRecord = providerRow ? llmProviderRowToRecord(providerRow) : null;
   const contextBudget = resolveAgentContextBudget(effectiveRecord, providerRecord, 'chat', options?.params);
 
@@ -343,18 +409,7 @@ export async function createChatController(
     ...(isMastraTracingEnabled()
       ? { observability: getMastraInstance().observability }
       : {}),
-    ...(resolved
-      ? {
-          omConfig: {
-            defaultObserverModelId: resolved.modelId,
-            defaultReflectorModelId: resolved.modelId,
-            defaultObservationThreshold: resolved.observeAfterTokens,
-            defaultReflectionThreshold: resolved.reflectAfterTokens,
-            ...(resolved.maxOutputTokens ? { defaultMaxOutputTokens: resolved.maxOutputTokens } : {}),
-            ...(resolved.temperature !== undefined ? { defaultTemperature: resolved.temperature } : {}),
-          },
-        }
-      : {}),
+    ...omConfigPart,
     // TASK-1: Mastra's built-in task_* tools keep a per-THREAD list (dies on Clear,
     // no cancelled/waiting status). Chat gets the one private `chat_tasks` list instead —
     // keeping task_* on would give the agent two task lists.
