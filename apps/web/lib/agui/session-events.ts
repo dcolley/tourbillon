@@ -48,7 +48,7 @@ function str(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
-function errorMessage(value: unknown): string | undefined {
+export function errorMessage(value: unknown): string | undefined {
   if (value instanceof Error) return value.message;
   if (typeof value === 'string') return value;
   if (value && typeof value === 'object' && typeof (value as { message?: unknown }).message === 'string') {

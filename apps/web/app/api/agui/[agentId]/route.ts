@@ -374,12 +374,15 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
         }
         const claim = claimAguiRun(session, resourceId, input.threadId);
         if (!claim) throw new ChatAgentError('A run is open on this thread; retry shortly', 409);
+        // Mastra 1.78: the claim is keyed by the suspension ADDRESS (resourceId, threadId, runId,
+        // toolCallId), not the tool call id — the same claimKey must be released and is what
+        // interlocks a second concurrent answer of the same parked call.
         const responseClaim = session.claimToolSuspension(entry.toolCallId);
         if (!responseClaim.accepted) {
           claim.release();
           throw new ChatAgentError('This widget is no longer waiting for an answer', 409);
         }
-        const toolCallId = responseClaim.toolCallId;
+        const { toolCallId, address, claimKey } = responseClaim;
         const untrackWidgets = trackWidgetOwners(session, resourceId, input.threadId, isWidgetTool, controller);
         // The resumed tool must be in this run's toolsets even if the client did not re-declare it.
         setRequestWidgetSpecs(requestContext, [...offeredWidgets.filter((s) => s.name !== spec.name), spec]);
@@ -395,16 +398,21 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
           publicRunError: WIDGET_RUN_ERROR,
           onClose: () => {
             untrackWidgets();
-            session.releaseToolResponse(toolCallId);
+            // Release the ADDRESS claim taken above (releasing the toolCallId would leak it).
+            session.releaseToolResponse(claimKey);
             claim.release();
           },
           takeQueuedTurn: claim.takeQueuedTurn,
           droppedQueuedTurns: () => claim.droppedTurns() + claim.queuedTurns(),
+          // 1.78: a resume failure on the active thread surfaces as a session `error` event
+          // (respondToToolSuspension no longer throws) — end the run with the generic widget error.
+          errorIsTerminal: true,
           start: () =>
             runWithHeartbeatContext(heartbeat, () =>
               session.respondToToolSuspension({
                 resumeData: decision.resume,
                 toolCallId,
+                address,
                 requestContext: requestContext as never,
               }),
             ),
