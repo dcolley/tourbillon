@@ -13,7 +13,9 @@ export type WakeReason =
   | 'issue_blockers_resolved'
   | 'issue_children_completed'
   | 'approval_resolved'
-  | 'automation';
+  | 'automation'
+  /** TASK-RUNNER: a Run Task wake claimed from the agent's private chat_tasks list. */
+  | 'task';
 
 export const heartbeatRuns = pgTable('heartbeat_runs', {
   id: text('id').primaryKey().$defaultFn(createId),

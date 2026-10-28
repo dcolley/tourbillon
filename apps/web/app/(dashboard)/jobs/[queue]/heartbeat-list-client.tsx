@@ -343,7 +343,9 @@ export function HeartbeatListClient({ agents }: { agents: AgentOption[] }) {
                       )}
                     </td>
                     <td className="px-4 py-3 capitalize text-muted-foreground">
-                      {entry.invocationSource?.replace(/_/g, ' ') ?? '—'}
+                      {entry.invocationSource === 'task'
+                        ? 'Run Task'
+                        : (entry.invocationSource?.replace(/_/g, ' ') ?? '—')}
                     </td>
                     <td className="px-4 py-3">
                       {entry.runStatus ? (

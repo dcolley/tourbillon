@@ -58,6 +58,8 @@ export async function runWithHarness(
     allowedMcpServerIds: string[];
     companySettings?: CompanySettings | null;
     abortSignal?: AbortSignal;
+    /** TASK-RUNNER: Run Task wakes also get the private chat-task list tools. */
+    chatTaskTools?: boolean;
   },
 ): Promise<HarnessRunResult> {
   if (!isHarnessAdapter(agentRecord.adapterType)) {
@@ -72,6 +74,7 @@ export async function runWithHarness(
     allowedMcpServerIds: options.allowedMcpServerIds,
     companySettings: options.companySettings ?? null,
     cwd,
+    chatTaskTools: options.chatTaskTools ?? false,
   });
 
   await controller.init();

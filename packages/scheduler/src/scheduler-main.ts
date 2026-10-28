@@ -2,6 +2,7 @@ import { getMastraInstance, sweepStaleEgressSockets } from '@tourbillon/mastra';
 import { isObservabilityEnabled, isPhoenixCollectorEnabled } from '@tourbillon/shared';
 import { startWakeServer, startStaleSweepInterval } from './wake-server';
 import { bootMastraSchedules } from './schedule-boot';
+import { startTaskRunnerPolling } from './task-runner';
 import { describeDatabaseTarget, probeDatabase } from '@tourbillon/db';
 import { DEFAULT_DB_ATTEMPT_TIMEOUT_MS, waitForDb, type Logger } from './startup';
 import { sweepOrphanedRunsOnStartup } from './startup-sweep';
@@ -27,9 +28,12 @@ export async function main(logger: Logger): Promise<void> {
   const wakeServer = startWakeServer();
   const staleSweep = startStaleSweepInterval();
   await bootMastraSchedules();
+  // TASK-RUNNER: Run Task queue poller — gated through the shared per-agent run budget.
+  const taskRunner = startTaskRunnerPolling();
 
   async function shutdown(): Promise<void> {
     clearInterval(staleSweep);
+    taskRunner.stop();
     await getMastraInstance().stopWorkers();
     await new Promise<void>((resolve) => {
       wakeServer.close(() => resolve());

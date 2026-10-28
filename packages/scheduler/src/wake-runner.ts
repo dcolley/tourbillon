@@ -330,6 +330,22 @@ export async function startWake(wake: WakeRequest): Promise<StartWakeResult> {
   return { runId, status: 'started', done };
 }
 
+/**
+ * TASK-RUNNER: Run Task wake entry. Bypasses the per-agent heartbeat single-flight gate
+ * (agentLocks) — a private chat task must never coalesce behind a heartbeat. It stays bounded
+ * the other way round: the task-runner poller gates task runs through the SHARED per-agent
+ * run-slot budget (heartbeat + task rows draw on one pool, cap RUN_TASK_CAP_PER_AGENT tasks),
+ * so tasks wait when the slots are full instead of stacking a parallel unlimited runner.
+ */
+export async function startTaskWake(wake: WakeRequest): Promise<WakeResult> {
+  try {
+    return await runWake(wake, {});
+  } catch (err) {
+    const errorText = err instanceof Error ? err.message : String(err);
+    return { runId: wake.runId ?? '', status: 'failed' as const, errorText };
+  }
+}
+
 async function runWake(
   wake: WakeRequest,
   opts: { onRunCreated?: (runId: string) => void } = {},
@@ -414,7 +430,9 @@ async function runWake(
     });
   }
 
-  const runId = randomUUID();
+  // TASK-RUNNER: the task-runner pre-generates runId so chat_tasks.runner_last_run_id links
+  // to exactly this heartbeat_runs row; every other wake mints its own.
+  const runId = wake.runId?.trim() || randomUUID();
   const runTracer = agentTracer.child({ runId, taskId });
   const runStartedAt = new Date();
 
@@ -472,6 +490,9 @@ async function runWake(
       wakeReason,
       wakePayloadJson: wake.wakePayloadJson,
       wakeContext: wakeContextSnapshot,
+      // TASK-RUNNER: kind + chatTaskId make a Run Task row self-describing in the jobs list.
+      kind: wake.kind ?? 'heartbeat',
+      chatTaskId: wake.chatTaskId ?? null,
       taskId: wake.taskId,
       agentName: agentRecord.name,
       agentUrlKey: agentRecord.urlKey,
@@ -610,6 +631,8 @@ async function runWake(
               allowedMcpServerIds: company.allowedMcpServerIds ?? [],
               companySettings: parseCompanySettings(company.settings),
               abortSignal: abortController.signal,
+              // TASK-RUNNER: Run Task wakes also get the private chat-task list tools.
+              chatTaskTools: wake.kind === 'task',
             },
           );
 
@@ -955,6 +978,9 @@ export async function runDurableAgentWake(params: {
     allowedMcpServerIds: company?.allowedMcpServerIds ?? [],
     companySettings,
     maxSteps,
+    // TASK-RUNNER: a Run Task additionally gets the private chat-task list tools (to park or
+    // complete itself); a Run Heartbeat never does (chat-only invariant — chat-controller.test).
+    chatTaskTools: params.wake.kind === 'task',
   });
 
   const runtimeContext = createHeartbeatRuntimeContext({
