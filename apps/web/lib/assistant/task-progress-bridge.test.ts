@@ -1,20 +1,27 @@
 /**
- * CONCIERGE-QUEUE-SIGNAL bridge wiring tests (soft-pack S1): the deliver policy (session
- * lookup, idle-thread retarget, busy-skip) and the subscriber loop
- * (startTaskProgressSignalBridge: channel/type filtering, single-consumer claim wiring,
- * error swallowing, per-process idempotence) — all against fakes, no redis/db/chat imports.
+ * CONCIERGE-QUEUE-SIGNAL bridge wiring tests (soft-pack S1, softs S10–S12): the deliver
+ * policy (session lookup, idle-thread retarget, busy-skip, signal lands on the created
+ * session), the subscriber loop (startTaskProgressSignalBridge: channel/type filtering,
+ * single-consumer claim wiring, error swallowing, per-process idempotence), the db-backed
+ * getAgent company join (S10) and the fail-open redis claim (S11) — all against fakes, no
+ * real redis/db/chat imports.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildTaskProgressBridgeDeps,
   createDeliver,
+  getAgent,
+  redisClaimClient,
   startTaskProgressSignalBridge,
   __resetTaskProgressSignalBridgeForTests,
   TASK_PROGRESS_CLAIM_TTL_SECONDS,
   type BridgeSubscriber,
   type DeliverDeps,
   type DeliverSession,
+  type RedisClaimCommands,
+  type TaskProgressDbQuery,
+  type TaskProgressOrm,
 } from './task-progress-bridge';
 import {
   handleTaskProgressEvent,
@@ -82,6 +89,7 @@ class FakeSession implements DeliverSession {
 
 function deliverHarness(opts: { existing?: FakeSession | null } = {}) {
   const created: Array<{ resourceId: string; scope: string; threadId: string }> = [];
+  const createdSessions: FakeSession[] = [];
   const lookups: Array<{ resourceId: string; scope: string }> = [];
   const deps: DeliverDeps = {
     resourceId: (agent) => `res:${agent.companyId}`,
@@ -93,10 +101,12 @@ function deliverHarness(opts: { existing?: FakeSession | null } = {}) {
     }),
     getChatSession: async (_controller, _agent, o) => {
       created.push(o);
-      return new FakeSession(o.threadId);
+      const session = new FakeSession(o.threadId);
+      createdSessions.push(session);
+      return session;
     },
   };
-  return { deliver: createDeliver(deps), created, lookups };
+  return { deliver: createDeliver(deps), created, createdSessions, lookups };
 }
 
 test('deliver: no session on the resource → created on the pinned free-chat thread and queued', async () => {
@@ -104,7 +114,17 @@ test('deliver: no session on the resource → created on the pinned free-chat th
   assert.equal(await h.deliver(AGENT, 'thread-42', PAYLOAD), true);
   assert.deepEqual(h.lookups, [{ resourceId: 'res:company-1', scope: 'agui:agent-1' }]);
   assert.deepEqual(h.created, [{ resourceId: 'res:company-1', scope: 'agui:agent-1', threadId: 'thread-42' }]);
-  // The signal reached the freshly created session as a typed reactive signal.
+  // S12: the signal must provably reach the FRESHLY CREATED session, not just be "queued".
+  assert.equal(h.createdSessions.length, 1, 'exactly one session created');
+  const session = h.createdSessions[0]!;
+  assert.equal(session.signals.length, 1, 'the typed signal reached the created session');
+  const signal = session.signals[0] as Record<string, unknown>;
+  assert.equal(signal.type, 'reactive');
+  assert.equal(signal.tagName, 'task-progress');
+  assert.equal(signal.contents, PAYLOAD.contents);
+  assert.deepEqual(signal.attributes, PAYLOAD.attributes);
+  assert.equal(typeof signal.id, 'string', 'queueConciergeSignal assigns a cancel-able id');
+  assert.equal(session.thread.getId(), 'thread-42', 'the created session is on the pinned thread');
 });
 
 test('deliver: session already on the pinned thread → queued in place (no create, no switch)', async () => {
@@ -273,6 +293,197 @@ test('bridge: a rejected deliver is swallowed with a warn — the subscriber loo
   } finally {
     console.warn = warn;
   }
+});
+
+// ─── getAgent: the REAL db-backed company join (softs S10) ──────────────────────────────
+//
+// The pure core already skips inactive tenants, but until now the db-backed `getAgent` was
+// never exercised: hard-coding `companyStatus: 'active'` in its mapper kept every test green.
+// These inject a fake db query + orm so the join, the company lookup BY THE AGENT'S companyId,
+// and the companyStatus mapping itself are load-bearing.
+
+function fakeOrm(): { orm: TaskProgressOrm; where: unknown[] } {
+  const where: unknown[] = [];
+  return {
+    orm: {
+      eq: (column, value) => {
+        const marker = { column, value };
+        where.push(marker);
+        return marker;
+      },
+    },
+    where,
+  };
+}
+
+function fakeDb(opts: {
+  agent?: { id: string; companyId: string; status: string };
+  company?: { status: string };
+}): { query: TaskProgressDbQuery; agentLookups: unknown[]; companyLookups: unknown[] } {
+  const agentLookups: unknown[] = [];
+  const companyLookups: unknown[] = [];
+  return {
+    agentLookups,
+    companyLookups,
+    query: {
+      agents: {
+        findFirst: async (args) => {
+          agentLookups.push(args);
+          return opts.agent;
+        },
+      },
+      companies: {
+        findFirst: async (args) => {
+          companyLookups.push(args);
+          return opts.company;
+        },
+      },
+    },
+  };
+}
+
+test('getAgent (db-backed, S10): joins the company row and maps companyStatus through — NOT hard-coded active', async () => {
+  const db = fakeDb({
+    agent: { id: 'agent-1', companyId: 'company-9', status: 'active' },
+    company: { status: 'paused' },
+  });
+  const orm = fakeOrm();
+  const rec = await getAgent('agent-1', { db, orm: orm.orm });
+  // companyStatus is the JOINED company row's status. Flip the mapper to
+  // `companyStatus: 'active'` and this fails even though the pure core still skips later —
+  // the bridge must see the real tenant state, not a stubbed one.
+  assert.deepEqual(rec, { id: 'agent-1', companyId: 'company-9', status: 'active', companyStatus: 'paused' });
+  // The company is looked up BY THE AGENT'S companyId (real join), not the requested id.
+  assert.equal(db.agentLookups.length, 1, 'one agent lookup');
+  assert.equal(db.companyLookups.length, 1, 'one company lookup (the join)');
+  assert.deepEqual(orm.where, [
+    { column: undefined, value: 'agent-1' }, // eq(agents.id, agentId)
+    { column: undefined, value: 'company-9' }, // eq(companies.id, row.companyId)
+  ]);
+});
+
+test('getAgent (db-backed, S10): missing agent row → null, company join never runs', async () => {
+  const db = fakeDb({ company: { status: 'active' } });
+  const orm = fakeOrm();
+  assert.equal(await getAgent('ghost', { db, orm: orm.orm }), null);
+  assert.deepEqual(db.companyLookups, [], 'no company join for a missing agent');
+});
+
+test('getAgent (db-backed, S10): missing company row → null (no tenant to deliver into)', async () => {
+  const db = fakeDb({ agent: { id: 'agent-1', companyId: 'company-9', status: 'active' } });
+  const orm = fakeOrm();
+  assert.equal(await getAgent('agent-1', { db, orm: orm.orm }), null);
+  assert.equal(db.companyLookups.length, 1, 'the company was looked up before deciding');
+});
+
+test('getAgent (db-backed, S10): through buildTaskProgressBridgeDeps — a paused tenant never reaches deliver', async () => {
+  // Full-bridge proof with the REAL getAgent (default wiring path): only the injected db
+  // differs from production. Stubbing companyStatus:'active' here would flip this to 'queued'.
+  const db = fakeDb({
+    agent: { id: 'agent-1', companyId: 'company-1', status: 'active' },
+    company: { status: 'archived' },
+  });
+  const orm = fakeOrm();
+  let delivered = 0;
+  const deps = buildTaskProgressBridgeDeps({
+    claimClient: { claim: async () => true },
+    getAgent: (agentId) => getAgent(agentId, { db, orm: orm.orm }),
+    getActiveThreadId: async () => 'thread-42',
+    deliver: async () => {
+      delivered += 1;
+      return true;
+    },
+    log: { warn: () => {} },
+  });
+  assert.equal(await handleTaskProgressEvent(deps, progressEvent()), 'skipped:inactive');
+  assert.equal(delivered, 0, 'an archived tenant must not be woken into an LLM turn');
+  assert.equal(db.companyLookups.length, 1);
+});
+
+// ─── redisClaimClient: fail-open on redis errors (softs S11) ─────────────────────────────
+//
+// The claim is at-least-once by design: a redis failure must NOT drop the notification on
+// every replica. Flip the catch to `return false` (fail closed) and these fail.
+
+function fakeClaimClient(behaviour: { results?: Array<'OK' | null>; error?: Error }): RedisClaimCommands & {
+  calls: Array<{ key: string; value: string; ttl: number; mode: string; nx: string }>;
+} {
+  const calls: Array<{ key: string; value: string; ttl: number; mode: string; nx: string }> = [];
+  let i = 0;
+  return {
+    calls,
+    set: async (key, value, mode, ttl, nx) => {
+      calls.push({ key, value, ttl, mode, nx });
+      if (behaviour.error) throw behaviour.error;
+      const results = behaviour.results ?? ['OK'];
+      return results[Math.min(i++, results.length - 1)] ?? null;
+    },
+  };
+}
+
+async function captureWarns<T>(run: () => Promise<T>): Promise<{ result: T; logged: Array<{ msg: string; data?: unknown }> }> {
+  const original = console.warn;
+  const logged: Array<{ msg: string; data?: unknown }> = [];
+  console.warn = (msg?: unknown, data?: unknown) => {
+    logged.push({ msg: String(msg), data });
+  };
+  try {
+    const result = await run();
+    return { result, logged };
+  } finally {
+    console.warn = original;
+  }
+}
+
+test('redisClaimClient: SET NX EX contract — first claim true, key already held false (S11)', async () => {
+  const client = fakeClaimClient({ results: ['OK', null] });
+  const claim = redisClaimClient(client);
+  assert.equal(await claim.claim('k1', 900), true);
+  assert.equal(await claim.claim('k1', 900), false, 'SET NX returns nil when another replica holds the key');
+  assert.deepEqual(client.calls, [
+    { key: 'k1', value: '1', ttl: 900, mode: 'EX', nx: 'NX' },
+    { key: 'k1', value: '1', ttl: 900, mode: 'EX', nx: 'NX' },
+  ]);
+});
+
+test('redisClaimClient: a rejected SET fails OPEN (claim true + warn), never drops (S11)', async () => {
+  const client = fakeClaimClient({ error: new Error('ECONNREFUSED') });
+  const claim = redisClaimClient(client);
+  const { result, logged } = await captureWarns(() =>
+    claim.claim(taskProgressClaimKey(progressEvent()), TASK_PROGRESS_CLAIM_TTL_SECONDS),
+  );
+  assert.equal(result, true, 'fail OPEN: redis down must not silence every replica');
+  assert.equal(logged.length, 1, 'the fallback is loud, not silent');
+  assert.match(logged[0]!.msg, /claim failed; delivering anyway/);
+  assert.deepEqual(logged[0]!.data, {
+    key: 'concierge-signal:seen:company-1:task-1:run-1:started',
+    error: 'ECONNREFUSED',
+  });
+});
+
+test('redisClaimClient: redis down end-to-end — the event is still claimed AND delivered (S11)', async () => {
+  // The bridge's real failure mode: redis unreachable → every replica must still deliver
+  // (at-least-once), not collectively drop the notification. Fail-closed catch → 'skipped:duplicate'.
+  const client = fakeClaimClient({ error: new Error('READONLY You can’t write against a read only replica.') });
+  const delivered: string[] = [];
+  const deps = buildTaskProgressBridgeDeps({
+    claimClient: redisClaimClient(client),
+    getAgent: async () => AGENT,
+    getActiveThreadId: async () => 'thread-42',
+    deliver: async (_a, threadId) => {
+      delivered.push(threadId);
+      return true;
+    },
+    log: { warn: () => {} },
+  });
+  const { result: outcome, logged } = await captureWarns(() => handleTaskProgressEvent(deps, progressEvent()));
+  assert.equal(outcome, 'queued', 'a redis outage must not drop the notification (fail open)');
+  assert.deepEqual(delivered, ['thread-42'], 'the signal still reaches deliver');
+  assert.equal(client.calls.length, 1);
+  assert.ok(
+    logged.some((w) => /claim failed; delivering anyway/.test(w.msg)),
+    'the fail-open fallback was logged',
+  );
 });
 
 test('bridge: idempotent per process; the reset hook restarts it (S1)', async () => {
