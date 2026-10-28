@@ -28,6 +28,7 @@ import { and, eq, or, isNull, gte, sql } from 'drizzle-orm';
 import { db, heartbeatRuns } from '@tourbillon/db';
 import {
   listRunnableChatTasks,
+  listPendingChatTaskCompanySettings,
   claimChatTaskRun,
   finishChatTaskRun,
   reconcileStaleChatTaskRuns,
@@ -336,7 +337,19 @@ export function createDefaultTaskRunnerDeps(
   const database = options.database ?? (db as unknown as ChatTaskDb);
   return {
     db: database,
-    listRunnable: () => listRunnableChatTasks(database, { limit: 25, maxAttempts: 5 }),
+    // S3 (#202 ACCEPT softs): list against each company's RESOLVED maxAttemptsPerTask, not a
+    // fixed 5. Without this, pending rows whose attempts already spent a lowered company
+    // budget were listed every tick and refused by the claim every tick — permanently. The
+    // caps come from the same resolver the poller/claim/sweep use (one budget, one source).
+    listRunnable: async () => {
+      const pendingCompanies = await listPendingChatTaskCompanySettings(database);
+      const maxAttemptsByCompany: Record<string, number> = {};
+      for (const c of pendingCompanies) {
+        maxAttemptsByCompany[c.companyId] = resolveTaskRunnerSettingsForCompany(c.companySettings)
+          .maxAttemptsPerTask;
+      }
+      return listRunnableChatTasks(database, { limit: 25, maxAttemptsByCompany });
+    },
     countActiveRuns: (agentId) => countActiveRuns(database, agentId),
     claim: (taskId, runId, maxAttempts) =>
       claimChatTaskRun(database, { taskId, runId, attemptBudget: maxAttempts }).then(

@@ -262,14 +262,40 @@ const runnableProjection = {
  */
 export async function listRunnableChatTasks(
   database: ChatTaskDb,
-  opts: { limit?: number; maxAttempts?: number; perAgentLimit?: number } = {},
+  opts: {
+    limit?: number;
+    maxAttempts?: number;
+    perAgentLimit?: number;
+    /**
+     * S3 (#202 ACCEPT softs): per-company RESOLVED attempt caps (the company's
+     * settings.taskRunner.maxAttemptsPerTask, clamped — the caller resolves it, the db layer
+     * stays settings-blind). A pending row whose attempts already spent its OWN company's
+     * budget drops out of the listing entirely, instead of being listed and refused by the
+     * claim every tick (the old fixed `maxAttempts` bound listed rows over a lowered company
+     * budget forever). Companies absent from the map fall back to the historic listing bound
+     * (5 — the pre-fix fixed cap) so an unknown company never starves behind the CASE.
+     */
+    maxAttemptsByCompany?: Record<string, number>;
+  } = {},
 ): Promise<RunnableChatTaskRow[]> {
-  const maxAttempts = opts.maxAttempts ?? 2;
+  const entries = Object.entries(opts.maxAttemptsByCompany ?? {});
+  const defaultCap = opts.maxAttempts ?? (entries.length ? 5 : 2);
+  // Searched CASE: one cap per company, bind params throughout (no inlined SQL). The
+  // ::int casts matter — Postgres cannot infer an untyped CASE parameter's type and would
+  // compare `integer < text` (PGlite raises; same class of bind-typing bug as #199/#202).
+  const attemptsFilter = entries.length
+    ? sql`${chatTasks.runnerAttempts} < (case ${sql.join(
+        entries.map(
+          ([companyId, cap]) => sql`when ${chatTasks.companyId} = ${companyId} then ${Math.trunc(cap)}::int`,
+        ),
+        sql` `,
+      )} else ${defaultCap}::int end)`
+    : sql`${chatTasks.runnerAttempts} < ${defaultCap}`;
   const limit = opts.limit ?? 25;
   const runnableWhere = and(
     eq(chatTasks.status, 'pending'),
     eq(chatTasks.paused, false),
-    sql`${chatTasks.runnerAttempts} < ${maxAttempts}`,
+    attemptsFilter,
   );
 
   const agentRows = await database
@@ -326,6 +352,26 @@ export async function prioritizeChatTask(
     position = Number(head?.min ?? 0) - 1;
   }
   return updateChatTask(scope, { id: input.id, position }, database);
+}
+
+/**
+ * S3 (#202 ACCEPT softs): the (companyId, settings) pairs that currently HAVE runnable work —
+ * one row per company with at least one pending, unpaused chat task. The scheduler resolves
+ * each company's maxAttemptsPerTask from this and feeds `listRunnableChatTasks` a per-company
+ * cap, so over-budget pending rows never re-enter the listing. Grouped, not joined to tasks:
+ * this is a small company-level read that precedes the (capped) task listing.
+ */
+export async function listPendingChatTaskCompanySettings(
+  database: ChatTaskDb,
+  opts: { limit?: number } = {},
+): Promise<Array<{ companyId: string; companySettings: unknown }>> {
+  return database
+    .select({ companyId: chatTasks.companyId, companySettings: companies.settings })
+    .from(chatTasks)
+    .innerJoin(companies, eq(companies.id, chatTasks.companyId))
+    .where(and(eq(chatTasks.status, 'pending'), eq(chatTasks.paused, false)))
+    .groupBy(chatTasks.companyId, companies.settings)
+    .limit(opts.limit ?? 100);
 }
 
 /**
