@@ -10,10 +10,12 @@ import {
   parseTaskProgressMessage,
   queueTaskProgressSignal,
   taskProgressClaimKey,
+  TASK_PROGRESS_SSE_TYPE,
   type TaskProgressAgentRecord,
   type TaskProgressBridgeDeps,
   type TaskProgressEvent,
 } from './task-progress-signals';
+import { TASK_PROGRESS_SSE_TYPE as SHARED_TASK_PROGRESS_SSE_TYPE } from '@tourbillon/shared/types';
 import {
   cancelQueuedConciergeSignals,
   type TaskProgressSignalPayload,
@@ -335,4 +337,20 @@ test('S3 pin: every transition (including started) queues via queueSignal; idle 
   assert.equal(idleSession.delivered.length, 1, 'idle thread gets the signal at once (the wake)');
   assert.equal(idleSession.queued.length, 0);
   assert.deepEqual(idleSession.interrupts, [], 'still no mid-token interrupt path used');
+});
+
+// ─── S4 (#205 softs): one source for the wire type ───────────────────────────────────────
+
+test('S4: the bridge re-exports the SHARED constant — publisher and parser cannot drift', () => {
+  // #205 soft S4: web used to define its own `satisfies`-pinned literal of 'chat_task_progress'
+  // next to the shared one — two pinned copies, single-sourced nowhere. The bridge now imports
+  // the shared binding; this pins the identity so a future re-fork into a local literal copy
+  // (or any value drift between the two packages) goes red.
+  assert.equal(TASK_PROGRESS_SSE_TYPE, SHARED_TASK_PROGRESS_SSE_TYPE);
+  assert.equal(TASK_PROGRESS_SSE_TYPE, 'chat_task_progress');
+  // And the parser actually routes on it (a payload typed with the shared constant parses).
+  assert.deepEqual(
+    parseTaskProgressMessage(JSON.stringify({ type: SHARED_TASK_PROGRESS_SSE_TYPE, ...event() })),
+    event(),
+  );
 });

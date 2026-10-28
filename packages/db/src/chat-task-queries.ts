@@ -309,11 +309,12 @@ export async function listRunnableChatTasks(
   // Fair share per agent; ceil so small agent counts still fill the global limit, max(1,·) so
   // an agent is never left out purely because there are more agents than slots this tick.
   const fairShare = Math.max(1, Math.min(opts.perAgentLimit ?? limit, Math.ceil(limit / agentIds.length)));
+  // Caller's per-agent ceiling — backfill never hands one agent more than it asked for.
+  const perAgentCeiling = opts.perAgentLimit ?? Number.POSITIVE_INFINITY;
 
   const picked: RunnableChatTaskRow[] = [];
-  for (const agentId of agentIds) {
-    const remaining = limit - picked.length;
-    if (remaining <= 0) break;
+  const fetchedByAgent = new Map<string, number>();
+  const fetchChunk = async (agentId: string, offset: number, cap: number): Promise<RunnableChatTaskRow[]> => {
     const rows = await database
       .select(runnableProjection)
       .from(chatTasks)
@@ -321,8 +322,33 @@ export async function listRunnableChatTasks(
       .innerJoin(companies, eq(companies.id, chatTasks.companyId))
       .where(and(runnableWhere, eq(chatTasks.agentId, agentId)))
       .orderBy(asc(chatTasks.position), asc(chatTasks.createdAt))
-      .limit(Math.min(fairShare, remaining));
-    picked.push(...rows);
+      .offset(offset)
+      .limit(cap);
+    fetchedByAgent.set(agentId, (fetchedByAgent.get(agentId) ?? 0) + rows.length);
+    return rows;
+  };
+
+  for (const agentId of agentIds) {
+    const remaining = limit - picked.length;
+    if (remaining <= 0) break;
+    picked.push(...(await fetchChunk(agentId, 0, Math.min(fairShare, remaining))));
+  }
+
+  // S7 (#205 softs) backfill: fair share UNDER-fills the global limit when an agent has fewer
+  // rows than its share (A: 30 rows, B: 1, limit 25 → old code returned 14, wasting 11 idle
+  // slots this tick — slots are gated per agent downstream anyway, so B's unused share cannot be
+  // borrowed by anyone). One extra pass tops up from the agents that FILLED their share (they
+  // may have more rows); agents that returned fewer than fairShare are exhausted, so they are
+  // never re-queried. Bounded: at most one further chunk per agent, per-agent ceiling honoured,
+  // claim order (position, then age) preserved inside each agent.
+  for (const agentId of agentIds) {
+    const remaining = limit - picked.length;
+    if (remaining <= 0) break;
+    const already = fetchedByAgent.get(agentId) ?? 0;
+    if (already < fairShare || already >= perAgentCeiling) continue;
+    const cap = Math.min(fairShare, remaining, perAgentCeiling - already);
+    if (cap <= 0) continue;
+    picked.push(...(await fetchChunk(agentId, already, cap)));
   }
   return picked;
 }
