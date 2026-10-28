@@ -20,6 +20,7 @@ import {
   countOpenChatTasks,
   finishChatTaskRun,
   listChatTasks,
+  listPendingChatTaskCompanySettings,
   listRunnableChatTasks,
   prioritizeChatTask,
   setChatTaskPaused,
@@ -353,6 +354,97 @@ describe('chat-task runner queries (listRunnable / claim / finish / pause)', () 
 
       // Unknown id misses cleanly.
       assert.equal(await setChatTaskPaused(A1, { id: 'nope', paused: true }, db), null);
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+// ─── S3 (PR #202 ACCEPT softs): per-company listing caps ─────────────────────
+// The scheduler lists Run Task candidates with each company's RESOLVED maxAttemptsPerTask
+// (settings.taskRunner.maxAttemptsPerTask, clamped — resolved by the caller, the db layer
+// stays settings-blind). Before this, the listing used one fixed bound (5), so a pending row
+// whose attempts already spent a LOWERED company budget was listed every tick and refused by
+// the claim every tick — permanently.
+
+describe('listRunnableChatTasks per-company caps (S3, PR #202 ACCEPT softs)', () => {
+  it('stops listing a pending row whose attempts already spent its own company budget', async () => {
+    const { client, db } = await freshDb();
+    try {
+      await client.query(
+        `update companies set settings = '{"taskRunner":{"maxAttemptsPerTask":1}}'::jsonb where id = 'c1'`,
+      );
+      const over = await addChatTask(A1, { title: 'Over budget' }, db);
+      await setRunnerAttempts(client, over.id, 1); // attempts == budget (1) → over budget
+      const healthy = await addChatTask(A2, { title: 'Healthy' }, db); // attempts 0 < 1
+
+      const capped = (await listRunnableChatTasks(db, { maxAttemptsByCompany: { c1: 1 } })).map((r) => r.taskId);
+      assert.ok(!capped.includes(over.id), 'row at its own company budget must NOT be listed');
+      assert.ok(capped.includes(healthy.id), 'a sibling under the same cap still lists (per-row, not per-company starvation)');
+
+      // The CAP is the filter, not the row: the same row lists again under a generous cap.
+      const generous = (await listRunnableChatTasks(db, { maxAttemptsByCompany: { c1: 5 } })).map((r) => r.taskId);
+      assert.ok(generous.includes(over.id), 'attempts 1 < 5 → runnable again when the company budget allows');
+
+      // The known limitation the map fixes: one fixed bound (the pre-fix 5) still lists it.
+      const legacy = (await listRunnableChatTasks(db, { maxAttempts: 5 })).map((r) => r.taskId);
+      assert.ok(legacy.includes(over.id), 'fixed maxAttempts=5 still lists over-budget rows (documents the S3 limitation)');
+
+      // CASE is per-company: c1 at cap 1 hides its row even when c2 gets a generous cap.
+      const foreign = await addChatTask(B1, { title: 'Foreign at 4' }, db);
+      await setRunnerAttempts(client, foreign.id, 4);
+      const mixed = await listRunnableChatTasks(db, { maxAttemptsByCompany: { c1: 1, c2: 3 } });
+      assert.deepEqual(mixed.map((r) => r.taskId), [healthy.id], 'c2 rows over the c2 cap drop out too');
+      const loosened = (await listRunnableChatTasks(db, { maxAttemptsByCompany: { c1: 1, c2: 5 } })).map((r) => r.taskId);
+      assert.ok(loosened.includes(foreign.id), 'c2 cap 5 admits the attempts=4 row');
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('a company absent from the map falls back to the historic listing bound (5)', async () => {
+    const { client, db } = await freshDb();
+    try {
+      const t = await addChatTask(B1, { title: 'Unknown company row' }, db);
+      await setRunnerAttempts(client, t.id, 4); // 4 < 5 → still listed under the fallback bound
+      const listed = (await listRunnableChatTasks(db, { maxAttemptsByCompany: { c1: 1 } })).map((r) => r.taskId);
+      assert.ok(listed.includes(t.id), 'absent company keeps the pre-fix bound 5 (never starved by the CASE)');
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('listPendingChatTaskCompanySettings returns one row per company with pending unpaused work', async () => {
+    const { client, db } = await freshDb();
+    try {
+      await client.query(`update companies set settings = '{"taskRunner":{"maxAttemptsPerTask":1}}'::jsonb where id = 'c1'`);
+      await addChatTask(A1, { title: 'Pending c1' }, db);
+      await addChatTask(B1, { title: 'Pending c2' }, db);
+      const paused = await addChatTask(A2, { title: 'Paused pending' }, db);
+      await setChatTaskPaused(A2, { id: paused.id, paused: true }, db);
+      await addChatTask(A1, { title: 'Done, not pending', status: 'done' }, db);
+      // A company whose only rows are done/cancelled never appears.
+      const c3Only = await client.query(
+        `insert into companies (id, name, slug, issue_prefix) values ('c3', 'Idle Co', 'idle', 'IC')
+         returning id`,
+      );
+      assert.equal(c3Only.rows.length, 1);
+      await client.query(
+        `insert into agents (id, company_id, name, role, title, url_key) values ('d1', 'c3', 'Idle Bot', 'engineer', 'E', 'idle-bot')`,
+      );
+      await addChatTask({ companyId: 'c3', agentId: 'd1' }, { title: 'Already done', status: 'done' }, db);
+
+      const pairs = await listPendingChatTaskCompanySettings(db);
+      assert.deepEqual(
+        pairs.map((p) => p.companyId).sort(),
+        ['c1', 'c2'],
+        'exactly the companies with pending unpaused rows (paused-only and done-only companies excluded)',
+      );
+      const c1 = pairs.find((p) => p.companyId === 'c1')!;
+      assert.deepEqual(c1.companySettings, { taskRunner: { maxAttemptsPerTask: 1 } }, 'raw settings travel for the caller to resolve');
+      // Multiple pending rows in one company still yield ONE pair (grouped, not joined to tasks).
+      await addChatTask(A1, { title: 'Another pending c1' }, db);
+      assert.equal((await listPendingChatTaskCompanySettings(db)).filter((p) => p.companyId === 'c1').length, 1);
     } finally {
       await client.close();
     }

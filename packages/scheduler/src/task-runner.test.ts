@@ -8,6 +8,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { drizzle } from 'drizzle-orm/postgres-js';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import type { SQL } from 'drizzle-orm';
 import {
   buildTaskRunWake,
   countActiveRuns,
@@ -17,11 +19,13 @@ import {
   pollTaskRunner,
   resolveMaxConcurrentRuns,
   startTaskRunnerPolling,
+  sweepStaleChatTaskRuns,
   taskRunSettleStatus,
   type TaskRunPollSummary,
   type TaskRunSlotState,
   type TaskRunnerDeps,
 } from './task-runner';
+import { fakeReconcileDb, staleRow } from './__fixtures__/fake-reconcile-db';
 import { buildWakeMessageWithStats } from '@tourbillon/shared';
 import type { RunnableChatTaskRow } from '@tourbillon/db';
 import type { ChatTaskDb } from '@tourbillon/db';
@@ -516,4 +520,116 @@ test('M10: a false claim result stops the task — no wake, no progress, no sett
   assert.deepEqual(f.jobs.map((j) => j.chatTaskId), ['t2'], 'no Run Task wake may fire for an unclaimed task');
   assert.deepEqual(f.settles, [{ taskId: 't2', status: 'done' }], 'only the claimed task settles');
   assert.deepEqual(f.progress, ['started:running', 'done:succeeded'], 'no progress events for the loser');
+});
+
+// ─── #202 ACCEPT softs S1: interval sweep + listing use the COMPANY-resolved budget ───
+// The db package's reconcile tests pass their OWN copy of the resolver, so they stay green if
+// the scheduler call sites drop `resolveMaxAttempts`. These tests drive the real
+// sweepStaleChatTaskRuns / createDefaultTaskRunnerDeps against fakes, so the WIRING itself is
+// under test: dropping the resolver (fixed budget 2 / fixed listing cap 5) breaks them.
+
+test('S1 (#202 softs): sweepStaleChatTaskRuns parks on the company budget — resolveMaxAttempts is wired (dropping it re-queues a budget-1 company forever)', async () => {
+  const { db, settled } = fakeReconcileDb({
+    stale: [staleRow({ taskId: 't-sweep', attempts: 1, companySettings: { taskRunner: { maxAttemptsPerTask: 1 } } })],
+  });
+  const result = await sweepStaleChatTaskRuns(db);
+  assert.deepEqual({ requeued: result.requeued, parked: result.parked }, { requeued: 0, parked: 1 });
+  assert.equal(settled[0]?.status, 'waiting_on_user');
+  assert.match(settled[0]?.notes ?? '', /attempt budget exhausted/);
+});
+
+test('S1 (#202 softs): sweepStaleChatTaskRuns default budget 2 without company settings; the resolver clamps (99 → 5)', async () => {
+  const plain = fakeReconcileDb({ stale: [staleRow({ taskId: 't-def', attempts: 1 })] });
+  const d = await sweepStaleChatTaskRuns(plain.db);
+  assert.deepEqual({ requeued: d.requeued, parked: d.parked }, { requeued: 1, parked: 0 });
+  assert.equal(plain.settled[0]?.status, 'pending');
+
+  // A non-clamping inline copy (`Number(raw)`) would treat budget 99 as real and re-queue a
+  // 5-attempt row forever; the shared resolver clamps to 5, so this parks.
+  const greedy = fakeReconcileDb({
+    stale: [staleRow({ taskId: 't-greedy', attempts: 5, companySettings: { taskRunner: { maxAttemptsPerTask: 99 } } })],
+  });
+  const g = await sweepStaleChatTaskRuns(greedy.db);
+  assert.deepEqual({ requeued: g.requeued, parked: g.parked }, { requeued: 0, parked: 1 });
+  assert.equal(greedy.settled[0]?.status, 'waiting_on_user');
+});
+
+/**
+ * Fake ChatTaskDb for the S3 listing path against the S8 (#196) per-agent-fair listing:
+ * select #1 answers listPendingChatTaskCompanySettings, selectDistinct answers the runnable
+ * agent enumeration, and later selects answer the per-agent capped listing. The WHERE of
+ * every query is captured so the test can assert the per-company caps actually reach the SQL
+ * as bind params (they ride `runnableWhere`, shared by the enumeration and the selects).
+ */
+function fakeListDb(opts: {
+  pendingCompanies: Array<{ companyId: string; companySettings: unknown }>;
+  runnable: RunnableChatTaskRow[];
+}): { db: ChatTaskDb; wheres: Array<SQL | undefined> } {
+  const wheres: Array<SQL | undefined> = [];
+  let selectCalls = 0;
+  const capture = () => {
+    const captured = wheres.length;
+    wheres.push(undefined);
+    const api: Record<string, unknown> = {};
+    for (const m of ['from', 'leftJoin', 'innerJoin', 'where', 'orderBy', 'limit', 'groupBy']) {
+      api[m] = (arg?: unknown) => {
+        if (m === 'where' && arg) wheres[captured] = arg as SQL;
+        return api;
+      };
+    }
+    return api;
+  };
+  const database = {
+    select: () => {
+      selectCalls += 1;
+      const rows = selectCalls === 1 ? opts.pendingCompanies : opts.runnable;
+      const api = capture();
+      api.then = (res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) =>
+        Promise.resolve(rows).then(res, rej);
+      return api;
+    },
+    // S8 fairness enumeration: distinct agent ids of the runnable rows.
+    selectDistinct: () => {
+      const api = capture();
+      const seen = new Map<string, { agentId: string }>();
+      for (const r of opts.runnable) seen.set(r.agentId, { agentId: r.agentId });
+      api.then = (res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) =>
+        Promise.resolve([...seen.values()]).then(res, rej);
+      return api;
+    },
+  };
+  return { db: database as unknown as ChatTaskDb, wheres };
+}
+
+test('S3 (#202 softs): createDefaultTaskRunnerDeps.listRunnable caps listing per company RESOLVED budget, not a fixed 5', async () => {
+  const pendingCompanies = [
+    { companyId: 'c-strict', companySettings: { taskRunner: { maxAttemptsPerTask: 1 } } },
+    { companyId: 'c-loose', companySettings: { taskRunner: { maxAttemptsPerTask: 4 } } },
+  ];
+  const runnable = [row({ taskId: 't-loose', companyId: 'c-loose', attempts: 3 })];
+  const { db, wheres } = fakeListDb({ pendingCompanies, runnable });
+
+  const deps = createDefaultTaskRunnerDeps({ database: db });
+  const listed = await deps.listRunnable();
+  assert.deepEqual(listed.map((r) => r.taskId), ['t-loose']);
+
+  assert.equal(wheres.length, 3, 'three queries: pending-company settings read, agent enumeration, per-agent capped select');
+  const q = new PgDialect().sqlToQuery(wheres[2]!);
+  assert.match(q.sql.toLowerCase(), /\bcase\b/, 'per-company caps must ride a CASE expression, not one fixed bound');
+  const iStrict = q.params.indexOf('c-strict');
+  const iLoose = q.params.indexOf('c-loose');
+  assert.ok(iStrict >= 0 && iLoose >= 0, `both company ids must bind into the CASE, got: ${JSON.stringify(q.params)}`);
+  assert.equal(q.params[iStrict + 1], 1, 'c-strict caps at its own resolved budget (1) — over-budget rows never get listed');
+  assert.equal(q.params[iLoose + 1], 4, 'c-loose caps at 4, per its settings');
+  // The company-settings read is the pending/unpaused filter (its WHERE binds 'pending' + false).
+  const q0 = new PgDialect().sqlToQuery(wheres[0]!);
+  assert.ok(q0.params.includes('pending') && q0.params.includes(false), 'company read filters pending + unpaused');
+});
+
+test('S3 (#202 softs): the company-settings read feeds the listing — no pending companies → caps map is empty (legacy fixed bound)', async () => {
+  const { db, wheres } = fakeListDb({ pendingCompanies: [], runnable: [] });
+  const deps = createDefaultTaskRunnerDeps({ database: db });
+  assert.deepEqual(await deps.listRunnable(), []);
+  const q = new PgDialect().sqlToQuery(wheres[1]!);
+  assert.doesNotMatch(q.sql.toLowerCase(), /\bcase\b/, 'no companies → plain bounded listing (nothing to map)');
 });
