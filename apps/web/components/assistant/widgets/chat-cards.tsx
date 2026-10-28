@@ -47,7 +47,8 @@ import type { WidgetComponentProps, WidgetDefinition, WidgetStatus } from './wid
 const inputClass =
   'w-full rounded-md border bg-transparent px-2 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60';
 
-function CardFrame({
+/** Shared frame for the chat cards (also used by the TASK-LIST-WID task list card). */
+export function CardFrame({
   kind,
   title,
   detail,
@@ -96,7 +97,7 @@ function CardFrame({
   );
 }
 
-function FieldError({ id, message }: { id: string; message?: string }) {
+export function FieldError({ id, message }: { id: string; message?: string }) {
   if (!message) return null;
   return (
     <p id={id} className="text-xs text-destructive" data-field-error>

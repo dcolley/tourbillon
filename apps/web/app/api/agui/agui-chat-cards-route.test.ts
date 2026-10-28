@@ -80,6 +80,18 @@ const CARDS = {
     answer: { confirmed: false, reason: 'Still in use' },
     outside: { answer: { confirmed: true }, issue: 'reason: required' },
   },
+  showTaskList: {
+    args: {
+      title: 'What I am working on',
+      mode: 'picker',
+      tasks: [
+        { id: 't-runbook', title: 'Draft the runbook', status: 'in_progress' },
+        { id: 't-backup', title: 'Check the restore backup', status: 'pending', notes: 'notify: Ops' },
+      ],
+    },
+    answer: { taskId: 't-runbook' },
+    outside: { answer: { taskId: 't-ghost' }, issue: 'taskId: not_a_task' },
+  },
 } as const;
 type CardName = keyof typeof CARDS;
 const CARD_NAMES = Object.keys(CARDS) as CardName[];
@@ -259,6 +271,62 @@ describe('WID-3 chat cards over AG-UI', () => {
       assert.deepEqual(await listWidgetAnswers(assistantWidgetSpecIndex, owner(), `wc-dis-${name}`, OWNER), []);
     });
   }
+
+  const TASK_MULTI = {
+    title: 'Pick what to work on',
+    mode: 'multiSelect',
+    tasks: [
+      { id: 't-runbook', title: 'Draft the runbook', status: 'in_progress' },
+      { id: 't-backup', title: 'Check the restore backup', status: 'pending' },
+      { id: 't-dns', title: 'Recheck the DNS entry', status: 'waiting_on_user' },
+    ],
+    minSelected: 1,
+    maxSelected: 2,
+  };
+
+  it('showTaskList multiSelect: taskIds[] goes in as one card answer and comes back stored and replayed', async () => {
+    await askCard('wc-tasks-multi', 'showTaskList', TASK_MULTI);
+    const events = await readSse(await post(resumeBody('wc-tasks-multi', [answerEntry({ taskIds: ['t-runbook', 't-dns'] })])));
+    const result = events.find((e) => e.type === 'TOOL_CALL_RESULT');
+    assert.deepEqual(JSON.parse(result!.content), { widget: 'showTaskList', version: 1, answer: { taskIds: ['t-runbook', 't-dns'] } });
+    const stored = await listWidgetAnswers(assistantWidgetSpecIndex, owner(), 'wc-tasks-multi', OWNER);
+    assert.deepEqual(stored.map((a) => [a.widget, a.answer]), [['showTaskList', { taskIds: ['t-runbook', 't-dns'] }]]);
+  });
+
+  it('showTaskList bounds: too_many, duplicate ids and an unknown id are refused before the run resumes', async () => {
+    await askCard('wc-tasks-bad', 'showTaskList', TASK_MULTI);
+    for (const [taskIds, issue] of [
+      [['t-runbook', 't-backup', 't-dns'], 'taskIds: too_many'],
+      [['t-runbook', 't-runbook'], 'taskIds: duplicate_id'],
+      [['t-ghost'], 'taskIds: not_a_task'],
+      [[], 'taskIds: too_few'],
+    ] as const) {
+      const res = await post(resumeBody('wc-tasks-bad', [answerEntry({ taskIds: [...taskIds] })]));
+      assert.equal(res.status, 400, issue);
+      assert.ok((await res.json()).issues.includes(`answer.${issue}`), issue);
+    }
+    // The same card still takes a valid list.
+    const ok = await readSse(await post(resumeBody('wc-tasks-bad', [answerEntry({ taskIds: ['t-runbook', 't-backup'] })])));
+    assert.deepEqual(JSON.parse(ok.find((e) => e.type === 'TOOL_CALL_RESULT')!.content).answer, { taskIds: ['t-runbook', 't-backup'] });
+  });
+
+  it('showTaskList display: a selection answer is refused (display_mode), an ack or a dismissal resumes the run', async () => {
+    const DISPLAY = {
+      title: 'What I am working on',
+      mode: 'display',
+      tasks: [{ id: 't-runbook', title: 'Draft the runbook', status: 'in_progress' }],
+    };
+    await askCard('wc-tasks-display', 'showTaskList', DISPLAY);
+    // Display never requires a selection: a picked task id is refused and the card stays pending.
+    const refused = await post(resumeBody('wc-tasks-display', [answerEntry({ taskId: 't-runbook' })]));
+    assert.equal(refused.status, 400);
+    assert.ok((await refused.json()).issues.includes('answer.taskId: display_mode'));
+    assert.ok(pending());
+    // Acknowledging (or dismissing) the read-only list resumes it; nothing is required.
+    const ack = await readSse(await post(resumeBody('wc-tasks-display', [answerEntry({ ack: true })])));
+    assert.deepEqual(JSON.parse(ack.find((e) => e.type === 'TOOL_CALL_RESULT')!.content).answer, { ack: true });
+    assert.ok(!pending());
+  });
 
   const MULTI = {
     question: 'Which extras?',

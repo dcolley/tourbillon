@@ -10,6 +10,7 @@
 import { z } from 'zod';
 import { createWidgetSpecIndex, type WidgetSpec } from '@tourbillon/shared/widgets';
 import { chatCardSpecs } from './chat-card-specs';
+import { taskListSpec } from './task-list-specs';
 
 /**
  * WID-2: the Board approval card. Props are only the approval id; the card reads the approval
@@ -30,7 +31,7 @@ export const approvalCardSpec: WidgetSpec<{ approvalId: string }> = {
   frontendTool: false,
 };
 
-/** WID-2 approval card, then the WID-3 question, choice, form and confirm cards (suspending frontend tools). */
-export const assistantWidgetSpecs: readonly WidgetSpec[] = [approvalCardSpec, ...chatCardSpecs] as readonly WidgetSpec[];
+/** WID-2 approval card, then the WID-3 question, choice, form and confirm cards, then the TASK-LIST-WID task list card (all suspending frontend tools except the approval card). */
+export const assistantWidgetSpecs: readonly WidgetSpec[] = [approvalCardSpec, ...chatCardSpecs, taskListSpec] as readonly WidgetSpec[];
 
 export const assistantWidgetSpecIndex = createWidgetSpecIndex(assistantWidgetSpecs);

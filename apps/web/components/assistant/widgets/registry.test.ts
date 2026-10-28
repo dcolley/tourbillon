@@ -60,7 +60,7 @@ describe('WID-1 registry lookup', () => {
     assert.throws(() => createWidgetRegistry([{ ...pickV1, version: 1.5 }]), /Invalid version/);
   });
 
-  it('the assistant registry has the WID-2 approval card and the WID-3 chat cards; only the chat cards are frontend tools; other tools fall back', () => {
+  it('the assistant registry has the WID-2 approval card, the WID-3 chat cards and the TASK-LIST-WID task list card; only the chat cards are frontend tools; other tools fall back', () => {
     assert.deepEqual(assistantWidgetRegistry.list().map((d) => `${d.name}@${d.version}`), [
       'approvalCard@1',
       'askChoice@1',
@@ -68,8 +68,9 @@ describe('WID-1 registry lookup', () => {
       'askConfirm@1',
       'askForm@1',
       'askQuestion@1',
+      'showTaskList@1',
     ]);
-    assert.deepEqual(assistantWidgetRegistry.frontendTools().map((t) => t.name), ['askChoice', 'askConfirm', 'askForm', 'askQuestion']);
+    assert.deepEqual(assistantWidgetRegistry.frontendTools().map((t) => t.name), ['askChoice', 'askConfirm', 'askForm', 'askQuestion', 'showTaskList']);
     const fallback = createWidgetRegistry(assistantWidgetRegistry.list(), { warn: () => {} }).resolve(call('web_search', { q: 'x' }));
     assert.equal(fallback.ok, false);
   });
@@ -241,7 +242,7 @@ describe('WID-MS multi-select registration', () => {
     assert.equal(assistantWidgetRegistry.latest('askChoice')!.version, 2);
     assert.ok(assistantWidgetRegistry.resolve(call('askChoice', multiProps)).ok); // default: version 1
     assert.ok(assistantWidgetRegistry.resolve(call('askChoice', { ...multiProps, widgetVersion: 2 })).ok);
-    assert.deepEqual(assistantWidgetRegistry.frontendTools().map((t) => t.name), ['askChoice', 'askConfirm', 'askForm', 'askQuestion']); // one tool per name (latest)
+    assert.deepEqual(assistantWidgetRegistry.frontendTools().map((t) => t.name), ['askChoice', 'askConfirm', 'askForm', 'askQuestion', 'showTaskList']); // one tool per name (latest)
   });
 
   it('one card answers with a choices list: empty, too-many, duplicate and unknown picks are refused (client = server)', () => {
