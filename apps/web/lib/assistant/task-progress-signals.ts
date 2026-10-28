@@ -32,11 +32,12 @@ import {
   type TaskProgressEventShape,
   type TaskProgressSignalPayload,
 } from '@tourbillon/mastra/concierge-signal';
-import type { SSEEventType } from '@tourbillon/shared';
-
-// S4 (#196): type-level pin against the shared SSE enum — if `chat_task_progress` ever stops
-// being a member of SSEEventType (the old `task_run_update` drift), this line fails the build.
-export const TASK_PROGRESS_SSE_TYPE = 'chat_task_progress' satisfies SSEEventType;
+// S4 (#196) closed properly (#205 softs): this used to be a SECOND `satisfies`-pinned literal
+// copy of the wire type — value-checked twice, single-sourced nowhere, so the publisher and the
+// parser could drift the moment one side changed. The shared constant is now the one source of
+// truth; re-exported here so the bridge's importers keep their existing path.
+import { TASK_PROGRESS_SSE_TYPE } from '@tourbillon/shared/types';
+export { TASK_PROGRESS_SSE_TYPE };
 
 export type TaskProgressEvent = TaskProgressEventShape;
 

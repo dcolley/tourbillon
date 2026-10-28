@@ -14,7 +14,7 @@
     "migrate": "drizzle-kit migrate",
     "studio": "drizzle-kit studio",
     "push": "drizzle-kit push",
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "sh -c 'tsx --test $(find src -name \"*.test.ts\" | sort)'",
     "migrate-mcp": "tsx scripts/migrate-mcp-to-vault.ts"
   },
   "dependencies": {

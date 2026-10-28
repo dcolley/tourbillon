@@ -471,8 +471,15 @@ describe('chat-task runner fairness + prioritisation (S8/S9, PR #196 softs)', ()
       const a1Rows = listed.filter((r) => r.agentId === 'a1');
       const a2Rows = listed.filter((r) => r.agentId === 'a2');
       assert.equal(a2Rows.length, 1);
-      assert.ok(a1Rows.length <= Math.ceil(25 / 2), `a1 capped at its fair share, got ${a1Rows.length}`);
-      assert.ok(listed.length <= 25, 'the global limit still holds');
+      // S7 (#205 softs): a1 is no longer capped at its fair share — once every agent has its
+      // share, the backfill pass lets the flooded agent use the slots the small agent left
+      // idle (slots are gated per agent downstream, so nobody else could borrow them). The
+      // STARVATION guarantee still stands: a2 got its only row BEFORE any backfill happened.
+      assert.ok(
+        a1Rows.length >= Math.ceil(25 / 2),
+        `a1 keeps at least its fair share, got ${a1Rows.length}`,
+      );
+      assert.equal(listed.length, 25, 'the global limit is fully used once every agent got its share (S7)');
       // Claim order INSIDE the flooded agent is unchanged: position, then age.
       assert.deepEqual(a1Rows.map((r) => r.title), a1Rows.map((_, i) => `Flood ${i}`));
     } finally {

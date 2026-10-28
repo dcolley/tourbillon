@@ -571,7 +571,11 @@ function fakeListDb(opts: {
     const captured = wheres.length;
     wheres.push(undefined);
     const api: Record<string, unknown> = {};
-    for (const m of ['from', 'leftJoin', 'innerJoin', 'where', 'orderBy', 'limit', 'groupBy']) {
+    // S7 (#205 softs): `offset` joins the no-op chain — listRunnableChatTasks' per-agent
+    // chunk query gained .offset(already) for the fair-share backfill pass. The fake answers
+    // every chunk with the same preset rows; the backfill never fires here anyway (the one
+    // agent returns fewer rows than its fair share, so it counts as exhausted).
+    for (const m of ['from', 'leftJoin', 'innerJoin', 'where', 'orderBy', 'offset', 'limit', 'groupBy']) {
       api[m] = (arg?: unknown) => {
         if (m === 'where' && arg) wheres[captured] = arg as SQL;
         return api;
