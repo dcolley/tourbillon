@@ -220,9 +220,9 @@ export async function createChatAgentWithSkills(
     effectiveRecord.modelId,
     providerRecord,
   );
-  const generationOptions = resolveAgentGenerationOptions(effectiveRecord, providerRecord);
+  const generationOptions = resolveAgentGenerationOptions(effectiveRecord, providerRecord, options?.params);
   if (options?.reasoningLevelOverride) generationOptions.reasoning = options.reasoningLevelOverride;
-  const contextBudget = resolveAgentContextBudget(effectiveRecord, providerRecord, 'chat');
+  const contextBudget = resolveAgentContextBudget(effectiveRecord, providerRecord, 'chat', options?.params);
 
   // Same Responses-API history sanitization as heartbeats (reasoning + tool-loop monologue).
   const inputProcessors = buildHeartbeatInputProcessors({ limit: contextBudget.limiterLimit });
@@ -323,7 +323,7 @@ export async function createChatController(
   );
   const { row: providerRow } = await resolveAgentProviderRow(effectiveRecord, { context: 'chat' });
   const providerRecord = providerRow ? llmProviderRowToRecord(providerRow) : null;
-  const contextBudget = resolveAgentContextBudget(effectiveRecord, providerRecord, 'chat');
+  const contextBudget = resolveAgentContextBudget(effectiveRecord, providerRecord, 'chat', options?.params);
 
   // Session always requires a Workspace instance (Mastra AgentController contract).
   // Chat uses a tools-disabled workspace so sandbox schemas do not inflate context.

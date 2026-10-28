@@ -44,5 +44,11 @@ export async function resolveChatModelOptions(
   if (!pair) return undefined;
   // Safe fallback: a pair whose provider is off for the company (or gone) is never used.
   if (!(await deps.isProviderAvailable(companyId, pair.providerId))) return undefined;
-  return { modelIdOverride: pair.modelId, providerIdOverride: pair.providerId };
+  // CONCIERGE-PARAMS: params ride along so the controller sizes its context budget
+  // (TokenLimiter trim + CTX meter limit) with the model's real window, not the provider default.
+  return {
+    modelIdOverride: pair.modelId,
+    providerIdOverride: pair.providerId,
+    ...(pair.params ? { params: pair.params } : {}),
+  };
 }

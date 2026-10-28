@@ -16,6 +16,8 @@ interface ProviderOption {
 interface ConciergeModelSettingsFormProps {
   initialProviderId: string;
   initialModelId: string;
+  /** CONCIERGE-PARAMS: the model's real window / output reserve (empty = provider default). */
+  initialParams?: { maxContextTokens?: number; maxOutputTokens?: number };
   providers: ProviderOption[];
   saveAction: (prev: ActionResult | null, formData: FormData) => Promise<ActionResult>;
 }
@@ -28,6 +30,7 @@ interface ConciergeModelSettingsFormProps {
 export function ConciergeModelSettingsForm({
   initialProviderId,
   initialModelId,
+  initialParams,
   providers,
   saveAction,
 }: ConciergeModelSettingsFormProps) {
@@ -153,6 +156,46 @@ export function ConciergeModelSettingsForm({
               ))}
             </select>
           )}
+        </div>
+      )}
+
+      {providerId && (
+        <div className="space-y-1.5">
+          <span className="text-sm font-medium">Context budget (tokens)</span>
+          <div className="flex gap-2">
+            <label className="flex-1 space-y-1 text-sm">
+              <span className="text-xs text-muted-foreground">Max context (window)</span>
+              <input
+                name="params.maxContextTokens"
+                type="number"
+                step="1"
+                min="8000"
+                max="1048576"
+                defaultValue={initialParams?.maxContextTokens ? String(initialParams.maxContextTokens) : ''}
+                placeholder="e.g. 65536"
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+              />
+            </label>
+            <label className="flex-1 space-y-1 text-sm">
+              <span className="text-xs text-muted-foreground">Max output (reserve)</span>
+              <input
+                name="params.maxOutputTokens"
+                type="number"
+                step="1"
+                min="1024"
+                max="131072"
+                defaultValue={initialParams?.maxOutputTokens ? String(initialParams.maxOutputTokens) : ''}
+                placeholder="e.g. 2048"
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+              />
+            </label>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Optional. Set the model&apos;s real window when the provider default is larger — e.g.
+            65536 for Qwen3.6-35B-A3B. Sizes the free-chat context budget (CTX meter limit,
+            TokenLimiter trim, output reserve) so long chats trim before the provider rejects
+            the prompt. Blank uses the provider default / env limit.
+          </p>
         </div>
       )}
 

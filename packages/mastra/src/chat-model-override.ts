@@ -6,7 +6,7 @@
  * helpers here build the controller cache key and the record the chat model is resolved from.
  */
 import type { Agent as AgentRecord } from '@tourbillon/db';
-import type { ReasoningLevel } from '@tourbillon/shared';
+import type { AgentModelSettings, ReasoningLevel } from '@tourbillon/shared';
 
 export interface ChatModelOverrideOptions {
   /** Model id for this controller (legacy `?modelId=` override, or the thread's choice). */
@@ -15,6 +15,12 @@ export interface ChatModelOverrideOptions {
   providerIdOverride?: string;
   /** Reasoning effort the thread picked (CHAT-5). Unset: the agent's configured level. */
   reasoningLevelOverride?: ReasoningLevel;
+  /**
+   * CONCIERGE-PARAMS: model params (context window etc.) the active chat model runs with
+   * (company concierge pair). Beats provider defaults + agent overrides when resolving the
+   * chat context budget, and is part of the controller cache key.
+   */
+  params?: AgentModelSettings;
 }
 
 const clean = (value: string | undefined): string | undefined => {
@@ -31,8 +37,24 @@ export function chatModelOverrideKey(options?: ChatModelOverrideOptions | null):
   const modelId = clean(options?.modelIdOverride);
   const providerId = clean(options?.providerIdOverride);
   const reasoning = clean(options?.reasoningLevelOverride);
-  if (!providerId && !reasoning) return modelId;
-  return [modelId ?? '', `provider=${providerId ?? ''}`, `effort=${reasoning ?? ''}`].join('::');
+  const params = chatModelParamsKeyPart(options?.params);
+  if (!providerId && !reasoning && !params) return modelId;
+  return [
+    modelId ?? '',
+    `provider=${providerId ?? ''}`,
+    `effort=${reasoning ?? ''}`,
+    ...(params ? [`params=${params}`] : []),
+  ].join('::');
+}
+
+/** CONCIERGE-PARAMS: sorted `key=value` params for the cache key (empty when unset). */
+function chatModelParamsKeyPart(params?: AgentModelSettings | null): string {
+  if (!params) return '';
+  return Object.entries(params)
+    .filter(([, value]) => value !== undefined)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${key}=${value}`)
+    .join(',');
 }
 
 /** The agent record with the thread's model and provider applied (tools, skills and prompt use it). */

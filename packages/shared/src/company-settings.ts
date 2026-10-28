@@ -4,6 +4,7 @@ import type {
   HitlyGateSettings,
   ObservationalMemorySettings,
 } from './types';
+import { parseAgentModelSettings, type AgentModelSettings } from './model-settings';
 
 function trimRecord(values: unknown): Record<string, string> | undefined {
   if (!values || typeof values !== 'object') return undefined;
@@ -77,9 +78,17 @@ function parseConciergeModelSettings(raw: unknown): CompanySettings['conciergeMo
   const modelId =
     typeof record.modelId === 'string' ? record.modelId.trim() || undefined : undefined;
   if (!providerId && !modelId) return undefined;
+  // CONCIERGE-PARAMS: tolerant read — malformed stored params are dropped, never thrown.
+  let params: AgentModelSettings | undefined;
+  try {
+    params = parseAgentModelSettings(record.params);
+  } catch {
+    params = undefined;
+  }
   return {
     ...(providerId ? { providerId } : {}),
     ...(modelId ? { modelId } : {}),
+    ...(params && Object.keys(params).length > 0 ? { params } : {}),
   };
 }
 
@@ -144,7 +153,19 @@ export function mergeCompanySettings(
     const providerId = cm.providerId?.trim();
     const modelId = cm.modelId?.trim();
     if (providerId && modelId) {
-      next.conciergeModel = { providerId, modelId };
+      // CONCIERGE-PARAMS: the pair may carry model params (maxContextTokens …); invalid
+      // values are dropped rather than stored.
+      let params: AgentModelSettings | undefined;
+      try {
+        params = parseAgentModelSettings(cm.params);
+      } catch {
+        params = undefined;
+      }
+      next.conciergeModel = {
+        providerId,
+        modelId,
+        ...(params && Object.keys(params).length > 0 ? { params } : {}),
+      };
     } else {
       delete next.conciergeModel;
     }
@@ -201,12 +222,18 @@ export function isObservationalMemoryConfigured(
  */
 export function resolveConciergeModel(
   companySettings?: CompanySettings | null,
-): { providerId: string; modelId: string } | null {
+): { providerId: string; modelId: string; params?: AgentModelSettings } | null {
   const cm = companySettings?.conciergeModel;
   const providerId = cm?.providerId?.trim();
   const modelId = cm?.modelId?.trim();
   if (!providerId || !modelId) return null;
-  return { providerId, modelId };
+  // CONCIERGE-PARAMS: pass the stored params through when non-empty (budget/limiter inputs).
+  const params = cm?.params;
+  return {
+    providerId,
+    modelId,
+    ...(params && Object.keys(params).length > 0 ? { params } : {}),
+  };
 }
 
 /** OM defaults (min 1024, min 8000, min 8000). */

@@ -91,3 +91,36 @@ describe('chatObserveAfterTokens (CONCIERGE-OM B1)', () => {
     assert.equal(chatObserveAfterTokens(null, undefined), null);
   });
 });
+
+describe('CONCIERGE-PARAMS — params-sized budget in the meter', () => {
+  it('shows the params window instead of the provider default and clamps used under it', async () => {
+    const qwenAgent = { ...agent, modelId: 'qwen/qwen3.6-35b-a3b', providerId: 'p-qwen', runtimeConfig: {} };
+    const qwenProvider = { defaultModelSettings: { maxContextTokens: 132_000 } };
+    const budget = resolveAgentContextBudget(
+      qwenAgent as never,
+      qwenProvider as never,
+      'chat',
+      { maxContextTokens: 65_536, maxOutputTokens: 2_048 },
+    );
+    assert.equal(budget.contextTokens, 65_536);
+    assert.equal(budget.limiterLimit, 55_488);
+
+    const huge = [{ role: 'user', content: 'x'.repeat(4_000_000) }];
+    const meter = await threadContextMeter(qwenAgent, {}, huge, {
+      resolveBudget: async () => budget,
+      observeAfterTokens: async () => null,
+    });
+    assert.equal(meter.limitTokens, 65_536, 'the limit shown is the params window, not the provider default');
+    assert.ok(meter.usedTokens <= meter.limitTokens, 'used stays clamped to the budget (single number)');
+    assert.equal(meter.level, 'over');
+  });
+
+  it('unset params keep the provider default budget', () => {
+    const budget = resolveAgentContextBudget(
+      { ...agent, runtimeConfig: {} } as never,
+      { defaultModelSettings: { maxContextTokens: 132_000 } } as never,
+      'chat',
+    );
+    assert.equal(budget.contextTokens, 132_000);
+  });
+});
