@@ -357,7 +357,13 @@ export async function sweepStaleChatTaskRuns(
 ): Promise<ChatTaskReconcileResult> {
   const { staleSec } = resolveHeartbeatLivenessConfig();
   const cutoff = new Date(Date.now() - staleSec * 1000);
-  return reconcileStaleChatTaskRuns(database, { staleCutoff: cutoff });
+  return reconcileStaleChatTaskRuns(database, {
+    staleCutoff: cutoff,
+    // S-soft: park/re-queue on the company's OWN resolved budget (settings.taskRunner.
+    // maxAttemptsPerTask, clamped) — the same number the claim used. Budget 1 parks, never
+    // re-queues in a loop; a fixed 2 here would re-queue past the company's limit forever.
+    resolveMaxAttempts: (settings) => resolveTaskRunnerSettingsForCompany(settings).maxAttemptsPerTask,
+  });
 }
 
 /**

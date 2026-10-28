@@ -1,5 +1,6 @@
 import { db as defaultDb, heartbeatRuns, reconcileStaleChatTaskRuns, type ChatTaskDb, type ChatTaskReconcileResult } from '@tourbillon/db';
 import { and, eq, isNull, lt, or } from 'drizzle-orm';
+import { resolveTaskRunnerSettingsForCompany } from './task-runner';
 
 export const ORPHANED_ON_RESTART_ERROR_TEXT =
   'Scheduler restarted while this run was in flight; marked failed on startup';
@@ -48,5 +49,10 @@ export async function reconcileChatTaskRunsOnStartup(
   bootTime: Date,
   database: ChatTaskDb = defaultDb as unknown as ChatTaskDb,
 ): Promise<ChatTaskReconcileResult> {
-  return reconcileStaleChatTaskRuns(database, { staleCutoff: bootTime });
+  return reconcileStaleChatTaskRuns(database, {
+    staleCutoff: bootTime,
+    // S-soft: same company-resolved budget as the interval sweep (settings.taskRunner.
+    // maxAttemptsPerTask, clamped) — budget 1 parks instead of re-queueing past the limit.
+    resolveMaxAttempts: (settings) => resolveTaskRunnerSettingsForCompany(settings).maxAttemptsPerTask,
+  });
 }

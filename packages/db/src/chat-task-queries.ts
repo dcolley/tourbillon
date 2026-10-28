@@ -351,6 +351,12 @@ export interface StaleChatTaskRunRow {
   /** runner_attempts at read time (the same budget claim/finish use). */
   attempts: number;
   runnerLastRunId: string;
+  /**
+   * Raw companies.settings jsonb (null when the company row is missing). The reconciler reads
+   * `settings.taskRunner.maxAttemptsPerTask` through `resolveMaxAttempts` (S-soft), so a park
+   * decision uses the SAME budget the poller claimed with — never a fixed 2.
+   */
+  companySettings: unknown;
 }
 
 /**
@@ -367,11 +373,15 @@ export async function listStaleChatTaskRuns(
   database: ChatTaskDb,
   opts: { staleCutoff: Date; limit?: number },
 ): Promise<StaleChatTaskRunRow[]> {
+  // HOTFIX (same class as #199's countActiveRuns): the repo's postgres-js client runs with
+  // prepare:false, so drizzle hands (sql, params) straight to client.unsafe() — a raw Date in
+  // this template's params throws ERR_INVALID_ARG_TYPE on every reconcile call (boot + sweep →
+  // scheduler exit 1). Pre-serialise the cutoff to ISO; the timestamp column compares it fine.
   const deadRun = sql`not exists (
     select 1 from ${heartbeatRuns} live
     where live.id = ${chatTasks.runnerLastRunId}
       and live.status in ('queued', 'running')
-      and (live.last_seen_at is null or live.last_seen_at >= ${opts.staleCutoff})
+      and (live.last_seen_at is null or live.last_seen_at >= ${opts.staleCutoff.toISOString()})
   )`;
   // isNotNull() guards the WHERE; Drizzle cannot narrow the column type, so the cast is the
   // only way to hand back a non-null runnerLastRunId (the filter makes it safe).
@@ -383,8 +393,12 @@ export async function listStaleChatTaskRuns(
       title: chatTasks.title,
       attempts: chatTasks.runnerAttempts,
       runnerLastRunId: chatTasks.runnerLastRunId,
+      companySettings: companies.settings,
     })
     .from(chatTasks)
+    // LEFT join: a chat row whose company row vanished must still be reconciled (settings
+    // read as null → default budget), never stranded in_progress by an inner-join miss.
+    .leftJoin(companies, eq(companies.id, chatTasks.companyId))
     .where(
       and(
         eq(chatTasks.status, 'in_progress'),
@@ -415,12 +429,25 @@ export interface ChatTaskReconcileResult {
  */
 export async function reconcileStaleChatTaskRuns(
   database: ChatTaskDb,
-  opts: { staleCutoff: Date; maxAttempts?: number; now?: Date; limit?: number },
+  opts: {
+    staleCutoff: Date;
+    /** Fixed budget override (tests / explicit callers) — wins over `resolveMaxAttempts`. */
+    maxAttempts?: number;
+    /**
+     * S-soft (#196 follow-up): per-company attempt budget — resolves the row's raw
+     * companies.settings jsonb to the SAME maxAttemptsPerTask the poller claimed with
+     * (settings.taskRunner.maxAttemptsPerTask, clamped). Budget 1 therefore PARKS on the
+     * first lost run instead of re-queueing forever. Default budget 2 when unset.
+     */
+    resolveMaxAttempts?: (companySettings: unknown) => number;
+    now?: Date;
+    limit?: number;
+  },
 ): Promise<ChatTaskReconcileResult> {
-  const maxAttempts = opts.maxAttempts ?? 2;
   const stale = await listStaleChatTaskRuns(database, opts);
   const result: ChatTaskReconcileResult = { requeued: 0, parked: 0, reconciled: [] };
   for (const row of stale) {
+    const maxAttempts = opts.maxAttempts ?? opts.resolveMaxAttempts?.(row.companySettings) ?? 2;
     const requeue = row.attempts < maxAttempts;
     const settled = await finishChatTaskRun(database, {
       taskId: row.taskId,

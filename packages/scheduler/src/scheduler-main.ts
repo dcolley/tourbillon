@@ -24,7 +24,14 @@ export async function main(logger: Logger): Promise<void> {
   const orphanedRunsFailed = await sweepOrphanedRunsOnStartup(bootTime);
   // S2 (#196 follow-up): heartbeat rows are failed by the sweep above, so settle the chat_tasks
   // rows their Run Task wakes died with — otherwise they stay in_progress forever.
-  const taskRunsReconciled = await reconcileChatTaskRunsOnStartup(bootTime);
+  // B1 (PR #202 hold): a reconcile fault must NEVER block boot — the sweep already landed and
+  // the interval sweep (wake-server) retries every 30 s, so log-and-continue on failure.
+  const taskRunsReconciled = await reconcileChatTaskRunsOnStartup(bootTime).catch((err) => {
+    logger.info('startup Run Task reconcile failed; continuing boot (interval sweep retries)', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { requeued: 0, parked: 0, reconciled: [] };
+  });
   // Defence-in-depth: unlink dead egress proxy socks left by prior crashes.
   // Live listeners are connect-probed and never removed.
   await sweepStaleEgressSockets().catch(() => undefined);

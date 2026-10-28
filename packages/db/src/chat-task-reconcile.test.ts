@@ -15,6 +15,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
 import { drizzle } from 'drizzle-orm/pglite';
+import { drizzle as drizzlePostgresJs } from 'drizzle-orm/postgres-js';
 import { readMigrationFiles } from 'drizzle-orm/migrator';
 import * as schema from './schema/index';
 import {
@@ -279,6 +280,182 @@ describe('reconcileStaleChatTaskRuns (S2: crashed/stale Run Task rows)', () => {
         (await listChatTasks(A1, { includeClosed: true }, db)).map((t) => [t.title, t.status]),
       );
       assert.deepEqual(statuses, { A: 'pending', B: 'done' });
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+// HOTFIX regression (PR #202 TEST hold, same class as #199's countActiveRuns test):
+// listStaleChatTaskRuns interpolated the staleCutoff Date into the deadRun raw sql template.
+// The repo's postgres-js client runs with prepare:false (packages/db/src/client.ts), so
+// drizzle hands (sqlString, params) straight to client.unsafe() — a raw Date in params hits
+// Node's string-argument check with ERR_INVALID_ARG_TYPE on REAL Postgres. PGlite never
+// raised it (its own parameter layer accepts Date), so both reconcileChatTaskRunsOnStartup
+// and sweepStaleChatTaskRuns threw on boot and the scheduler exited 1. The fix pre-serialises
+// the cutoff (staleCutoff.toISOString()). This test drives the REAL drizzle→postgres-js
+// boundary with a fake client replicating the driver's parameter type gate.
+describe('listStaleChatTaskRuns: driver boundary never sees a raw Date (B1, PR #202)', () => {
+  /** Fake postgres-js client: unsafe() rejects params Node's string check would choke on. */
+  function fakeUnsafeClient(
+    calls: Array<{ sql: string; params: unknown[] }>,
+    rowsPerCall: unknown[][][], // queue per unsafe(); past the queue = [] (row vanished)
+  ) {
+    let call = 0;
+    return {
+      options: { parsers: {}, serializers: {}, types: {} },
+      PostgresError: class PostgresError extends Error {},
+      END: {},
+      listen: () => () => {},
+      // prepare:false routes every drizzle query through unsafe(sql, params).
+      unsafe(query: string, params: unknown[]) {
+        calls.push({ sql: query, params });
+        for (const p of params ?? []) {
+          // numbers/booleans/null pass (drizzle binds limit as a number; #199's gate same);
+          // anything else — above all a Date instance — is what Node/postgres.js rejected.
+          const ok =
+            p === null ||
+            typeof p === 'string' ||
+            typeof p === 'number' ||
+            typeof p === 'boolean' ||
+            (typeof Buffer !== 'undefined' && Buffer.isBuffer(p));
+          if (!ok) {
+            const err: any = new TypeError(
+              `The "string" argument must be of type string. Received ${
+                p instanceof Date ? 'an instance Date' : 'an instance of ' + (p?.constructor?.name ?? typeof p)
+              }`,
+            );
+            err.code = 'ERR_INVALID_ARG_TYPE';
+            throw err; // exactly what postgres.js + Node raised on TEST for the Date cutoff
+          }
+        }
+        const rows = rowsPerCall[call++] ?? [];
+        const promise = Promise.resolve(rows) as Promise<unknown> & { values: () => Promise<unknown> };
+        promise.values = () => Promise.resolve(rows);
+        return promise;
+      },
+    };
+  }
+
+  it('the staleCutoff reaches unsafe() as a pre-serialised ISO string, never a Date', async () => {
+    const calls: Array<{ sql: string; params: unknown[] }> = [];
+    // drizzle mapResultRow reads row[columnIndex] — raw rows are arrays in SELECT order
+    // (chat_tasks cols then the LEFT-joined companies.settings). Queue: one unsafe() call.
+    const rows = [[['t1', 'c1', 'a1', 'Old crash', 1, 'run-x', null]]];
+    const database = drizzlePostgresJs(
+      fakeUnsafeClient(calls, rows) as never,
+      { schema: {} as never },
+    ) as unknown as Parameters<typeof listStaleChatTaskRuns>[0];
+
+    const cutoff = new Date(Date.now() - 90_000);
+    // The regression proper: the buggy raw-Date param used to throw here on every boot/sweep.
+    const stale = await listStaleChatTaskRuns(database, { staleCutoff: cutoff });
+    assert.equal(stale.length, 1);
+    assert.equal(stale[0]!.runnerLastRunId, 'run-x');
+
+    assert.equal(calls.length, 1);
+    const { sql: emitted, params } = calls[0]!;
+    assert.match(
+      emitted,
+      /live\.last_seen_at is null or live\.last_seen_at >= \$\d+/,
+      'cutoff must be a bind placeholder, not inlined SQL text',
+    );
+    assert.ok(!/\bDate\b/.test(emitted), `raw Date leaked into SQL text: ${emitted}`);
+    assert.ok(
+      params.every((p) => !(p instanceof Date)),
+      `no bind param may reach the driver as a Date object, got: ${JSON.stringify(
+        params.map((p) => (p instanceof Date ? 'Date' : typeof p)),
+      )}`,
+    );
+    // The cutoff travels as a STRING timestamp bind param (both the lt(updated_at) grace and
+    // the deadRun last_seen_at comparison), recent enough to be the cutoff we passed in.
+    const cutoffs = params.filter(
+      (p) => typeof p === 'string' && Math.abs(Date.parse(p) - cutoff.getTime()) < 5_000,
+    );
+    assert.equal(
+      cutoffs.length,
+      2,
+      `both cutoff binds must arrive as ISO strings, got params: ${JSON.stringify(params)}`,
+    );
+  });
+
+  it('reconcile end-to-end through the driver-boundary client never throws ERR_INVALID_ARG_TYPE', async () => {
+    const calls: Array<{ sql: string; params: unknown[] }> = [];
+    // unsafe() #1 = the stale list (one parked-candidate row); #2+ = [] so
+    // finishChatTaskRun's read sees the row as vanished and the reconcile counts stay 0.
+    const rows = [[['t1', 'c1', 'a1', 'Old crash', 2, 'run-x', null]]];
+    const database = drizzlePostgresJs(
+      fakeUnsafeClient(calls, rows) as never,
+      { schema: {} as never },
+    ) as unknown as Parameters<typeof reconcileStaleChatTaskRuns>[0];
+    // finishChatTaskRun reads then writes; empty read = row vanished between read and settle.
+    // Here the LIST read is the one under test — the finish path is covered on PGlite above.
+    const result = await reconcileStaleChatTaskRuns(database, {
+      staleCutoff: new Date(Date.now() - 90_000),
+      resolveMaxAttempts: () => 2,
+    });
+    assert.deepEqual(result, { requeued: 0, parked: 0, reconciled: [] });
+    assert.ok(calls.length >= 1, 'the list query must have reached the driver');
+    for (const c of calls) {
+      for (const p of c.params) {
+        assert.ok(!(p instanceof Date), 'no Date may cross the driver boundary');
+      }
+    }
+  });
+});
+
+// S-soft (PR #202 hold): the park/re-queue decision must use the COMPANY's resolved
+// maxAttemptsPerTask (settings.taskRunner.maxAttemptsPerTask) — the same budget the poller
+// claimed with — not a fixed 2. Budget 1 must PARK on the first lost run; with the old
+// fixed 2 an attempts=1 row re-queued forever and the poller re-claimed it (attempts < 5).
+describe('reconcileStaleChatTaskRuns budget follows company settings (S-soft, PR #202)', () => {
+  /** Mirrors the scheduler wiring: resolveTaskRunnerSettings(...).maxAttemptsPerTask. */
+  const resolveMaxAttempts = (companySettings: unknown): number => {
+    const raw = (companySettings as { taskRunner?: { maxAttemptsPerTask?: unknown } } | null)
+      ?.taskRunner?.maxAttemptsPerTask;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 1 ? Math.min(5, Math.trunc(n)) : 2;
+  };
+
+  it("company maxAttemptsPerTask=1: an attempts=1 lost run PARKS instead of re-queueing", async () => {
+    const { client, db } = await freshDb();
+    try {
+      await client.query(`update companies set settings = '{"taskRunner":{"maxAttemptsPerTask":1}}'::jsonb where id = 'c1'`);
+      const task = await addChatTask(A1, { title: 'One shot only' }, db);
+      await claimedCrash(client, db, task.id, 'run-single');
+      await seedRun(client, { id: 'run-single', status: 'failed', lastSeenAt: null });
+
+      const result = await reconcileStaleChatTaskRuns(db, { staleCutoff: sweepCutoff(), resolveMaxAttempts });
+      assert.deepEqual({ requeued: result.requeued, parked: result.parked }, { requeued: 0, parked: 1 },
+        'budget 1 + attempts 1 → parked (the old fixed 2 would have re-queued)');
+      const [row] = await listChatTasks(A1, { includeClosed: true }, db);
+      assert.equal(row!.status, 'waiting_on_user');
+      assert.match(row!.notes!, /attempt budget exhausted/);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('company settings unset: default budget 2 still re-queues an attempts=1 lost run; opts.maxAttempts wins', async () => {
+    const { client, db } = await freshDb();
+    try {
+      const task = await addChatTask(A1, { title: 'Default budget' }, db);
+      await claimedCrash(client, db, task.id, 'run-def');
+      await seedRun(client, { id: 'run-def', status: 'failed', lastSeenAt: null });
+
+      const result = await reconcileStaleChatTaskRuns(db, { staleCutoff: sweepCutoff(), resolveMaxAttempts });
+      assert.deepEqual({ requeued: result.requeued, parked: result.parked }, { requeued: 1, parked: 0 });
+
+      // Explicit opts.maxAttempts (tests/callers) overrides the company resolver.
+      const t2 = await addChatTask(A1, { title: 'Override wins' }, db);
+      await claimedCrash(client, db, t2.id, 'run-ovr');
+      await seedRun(client, { id: 'run-ovr', status: 'failed', lastSeenAt: null });
+      const forced = await reconcileStaleChatTaskRuns(db, {
+        staleCutoff: sweepCutoff(),
+        resolveMaxAttempts,
+        maxAttempts: 1,
+      });
+      assert.deepEqual({ requeued: forced.requeued, parked: forced.parked }, { requeued: 0, parked: 1 });
     } finally {
       await client.close();
     }

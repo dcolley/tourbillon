@@ -50,8 +50,9 @@ describe('SSEEventType (S4: the enum matches the wire)', () => {
     // The scheduler publishes { type: 'chat_task_progress', ... } on `sse:{companyId}`
     // (packages/scheduler/src/task-runner.ts emitProgress). If either side renames, this
     // string is the contract; the old dead 'task_run_update' member must not come back.
-    const emitted = 'chat_task_progress' as const;
-    const type: import('./types').SSEEventType = emitted;
-    assert.equal(type, 'chat_task_progress');
+    // `satisfies` makes this a COMPILE-TIME assertion: delete/rename the enum member and
+    // tsc fails on this line (unlike a bare `as const`, which erases to a plain string).
+    const emitted = 'chat_task_progress' as const satisfies import('./types').SSEEventType;
+    assert.equal(emitted, 'chat_task_progress');
   });
 });
