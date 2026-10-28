@@ -227,44 +227,99 @@ export interface RunnableChatTaskRow {
   companyStatus: string;
 }
 
+/** The Run Task claim-order projection (joined rows carry agent/company liveness for the poller). */
+const runnableProjection = {
+  taskId: chatTasks.id,
+  companyId: chatTasks.companyId,
+  agentId: chatTasks.agentId,
+  title: chatTasks.title,
+  notes: chatTasks.notes,
+  position: chatTasks.position,
+  attempts: chatTasks.runnerAttempts,
+  paused: chatTasks.paused,
+  sourceThreadId: chatTasks.sourceThreadId,
+  agentName: agents.name,
+  agentUrlKey: agents.urlKey,
+  agentStatus: agents.status,
+  companyStatus: companies.status,
+};
+
 /**
- * Pending, non-paused chat tasks with attempt budget left, in claim order
- * (per agent, then position, then age). Joined against agents + companies so
- * the caller can skip inactive agents/companies before burning a run slot.
+ * Pending, non-paused chat tasks with attempt budget left, in claim order, joined against
+ * agents + companies so the caller can skip inactive agents/companies before burning a run slot.
+ *
+ * S8 (#196) fairness: a single global `order by agentId limit N` let one agent's backlog starve
+ * every agent behind it (25+ pending rows for agent A meant agent B never appeared). Candidates
+ * are now picked per agent: each runnable agent gets a fair share of the global limit
+ * (ceil(limit / agents), optionally capped by `perAgentLimit`), filled in claim order
+ * (position, then age) inside that agent. Agents keep their claim-order prefix; nobody starves.
  */
 export async function listRunnableChatTasks(
   database: ChatTaskDb,
-  opts: { limit?: number; maxAttempts?: number } = {},
+  opts: { limit?: number; maxAttempts?: number; perAgentLimit?: number } = {},
 ): Promise<RunnableChatTaskRow[]> {
   const maxAttempts = opts.maxAttempts ?? 2;
-  return database
-    .select({
-      taskId: chatTasks.id,
-      companyId: chatTasks.companyId,
-      agentId: chatTasks.agentId,
-      title: chatTasks.title,
-      notes: chatTasks.notes,
-      position: chatTasks.position,
-      attempts: chatTasks.runnerAttempts,
-      paused: chatTasks.paused,
-      sourceThreadId: chatTasks.sourceThreadId,
-      agentName: agents.name,
-      agentUrlKey: agents.urlKey,
-      agentStatus: agents.status,
-      companyStatus: companies.status,
-    })
+  const limit = opts.limit ?? 25;
+  const runnableWhere = and(
+    eq(chatTasks.status, 'pending'),
+    eq(chatTasks.paused, false),
+    sql`${chatTasks.runnerAttempts} < ${maxAttempts}`,
+  );
+
+  const agentRows = await database
+    .selectDistinct({ agentId: chatTasks.agentId })
     .from(chatTasks)
-    .innerJoin(agents, eq(agents.id, chatTasks.agentId))
-    .innerJoin(companies, eq(companies.id, chatTasks.companyId))
-    .where(
-      and(
-        eq(chatTasks.status, 'pending'),
-        eq(chatTasks.paused, false),
-        sql`${chatTasks.runnerAttempts} < ${maxAttempts}`,
-      ),
-    )
-    .orderBy(asc(chatTasks.agentId), asc(chatTasks.position), asc(chatTasks.createdAt))
-    .limit(opts.limit ?? 25);
+    .where(runnableWhere)
+    .orderBy(asc(chatTasks.agentId));
+  const agentIds = agentRows.map((r) => r.agentId);
+  if (agentIds.length === 0 || limit <= 0) return [];
+
+  // Fair share per agent; ceil so small agent counts still fill the global limit, max(1,·) so
+  // an agent is never left out purely because there are more agents than slots this tick.
+  const fairShare = Math.max(1, Math.min(opts.perAgentLimit ?? limit, Math.ceil(limit / agentIds.length)));
+
+  const picked: RunnableChatTaskRow[] = [];
+  for (const agentId of agentIds) {
+    const remaining = limit - picked.length;
+    if (remaining <= 0) break;
+    const rows = await database
+      .select(runnableProjection)
+      .from(chatTasks)
+      .innerJoin(agents, eq(agents.id, chatTasks.agentId))
+      .innerJoin(companies, eq(companies.id, chatTasks.companyId))
+      .where(and(runnableWhere, eq(chatTasks.agentId, agentId)))
+      .orderBy(asc(chatTasks.position), asc(chatTasks.createdAt))
+      .limit(Math.min(fairShare, remaining));
+    picked.push(...rows);
+  }
+  return picked;
+}
+
+/**
+ * S9 (#196): move one task to the FRONT of its agent's list so it truly sorts first.
+ *
+ * `updateChatTask({ position: 0 })` alone does not: an older row already sitting at 0 keeps
+ * winning the (position, createdAt) tiebreak, so the "prioritised" task is still claimed last.
+ * Front-prioritisation therefore assigns `min(position) - 1` across the agent's own rows — the
+ * `position` column is a plain integer, and one strictly-below-everything value sorts ahead of
+ * all of them in both listChatTasks and the Run Task claim order. Repeated prioritisation walks
+ * negative; that is fine and stays collision-free. An explicit `position` still passes straight
+ * through to the normal update (caller-owned ordering, same semantics as updateMyTask).
+ */
+export async function prioritizeChatTask(
+  scope: ChatTaskScope,
+  input: { id: string; position?: number },
+  database: ChatTaskDb = defaultDb,
+): Promise<ChatTask | null> {
+  let position = input.position;
+  if (position === undefined) {
+    const [head] = await database
+      .select({ min: sql<number>`coalesce(min(${chatTasks.position}), 0)::int` })
+      .from(chatTasks)
+      .where(and(...scopeWhere(scope)));
+    position = Number(head?.min ?? 0) - 1;
+  }
+  return updateChatTask(scope, { id: input.id, position }, database);
 }
 
 /**

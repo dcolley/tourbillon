@@ -135,3 +135,127 @@ describe('CHAT_TASK_TOOLS — scope from the request context only (AC5)', () => 
     assert.match(listMyTasksTool.description, /at least one task/);
   });
 });
+
+// ─── S7 (#196 soft-pack): the two Run Task controls, driven end-to-end ──────
+// pauseMyTask / prioritizeMyTask had NO behaviour tests (only the chat-registration and
+// missing-scope paths above). These run the real tools against an in-memory Postgres through
+// the toolDb() seam: pausing must gate the Run Task queue flag, and prioritising must make the
+// task genuinely sort first (S9: an older row at position 0 used to win the createdAt tiebreak).
+
+import path from 'node:path';
+import { PGlite } from '@electric-sql/pglite';
+import { drizzle as drizzlePglite } from 'drizzle-orm/pglite';
+import { readMigrationFiles } from 'drizzle-orm/migrator';
+import * as dbSchema from '@tourbillon/db/schema';
+import { addChatTask, listChatTasks, type ChatTaskDb } from '@tourbillon/db';
+import { pauseMyTaskTool, prioritizeMyTaskTool } from './chat-task-tools';
+
+const MIGRATIONS_DIR = path.join(__dirname, '../../../db/src/migrations');
+const SCOPE = { companyId: 'c1', agentId: 'a1' };
+const scopeContext = new Map([
+  ['agentId', 'a1'],
+  ['companyId', 'c1'],
+  ['threadId', 'thread-1'],
+]);
+
+async function seededToolDb(): Promise<{ client: PGlite; db: ChatTaskDb }> {
+  const client = new PGlite();
+  for (const m of readMigrationFiles({ migrationsFolder: MIGRATIONS_DIR })) {
+    for (const chunk of m.sql) {
+      if (chunk.trim()) await client.exec(chunk);
+    }
+  }
+  await client.exec(`
+    insert into companies (id, name, slug, issue_prefix) values ('c1', 'Bug Hunt', 'bug-hunt', 'BH');
+    insert into agents (id, company_id, name, role, title, url_key) values
+      ('a1', 'c1', 'Assistant', 'cto', 'The Assistant', 'assistant'),
+      ('a2', 'c1', 'Other Agent', 'engineer', 'Engineer', 'other-agent');
+  `);
+  return { client, db: drizzlePglite(client, { schema: dbSchema }) as unknown as ChatTaskDb };
+}
+
+type ToolResult = Record<string, any>;
+
+describe('pauseMyTask + prioritizeMyTask — Run Task controls (S7, #196 soft-pack)', () => {
+  it('pauseMyTask pauses by default (Run Task skips it), resumes on request, and 404s foreign ids', async () => {
+    const { client, db } = await seededToolDb();
+    try {
+      setToolDbForTests(db);
+      const task = await addChatTask(SCOPE, { title: 'Hold this' }, db);
+
+      const paused = (await pauseMyTaskTool.execute!(
+        { id: task.id },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.equal(paused.ok, true);
+      assert.match(paused.message, /paused — Run Task will skip it/);
+      assert.equal((await listChatTasks(SCOPE, {}, db)).find((t) => t.id === task.id)?.paused, true);
+
+      const resumed = (await pauseMyTaskTool.execute!(
+        { id: task.id, paused: false },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.equal(resumed.ok, true);
+      assert.match(resumed.message, /resumed — eligible for Run Task again/);
+      assert.equal((await listChatTasks(SCOPE, {}, db)).find((t) => t.id === task.id)?.paused, false);
+
+      const foreign = (await pauseMyTaskTool.execute!(
+        { id: 'nope' },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.equal(foreign.error, 'task_not_found');
+
+      const scoped = (await pauseMyTaskTool.execute!({ id: task.id }, {} as never)) as ToolResult;
+      assert.equal(scoped.error, 'missing_scope');
+    } finally {
+      setToolDbForTests(null);
+      await client.close();
+    }
+  });
+
+  it('prioritizeMyTask (default) truly sorts first — the S9 createdAt tiebreak fix', async () => {
+    const { client, db } = await seededToolDb();
+    try {
+      setToolDbForTests(db);
+      const older = await addChatTask(SCOPE, { title: 'Older at zero' }, db); // position 0
+      const target = await addChatTask(SCOPE, { title: 'Front of the queue', position: 2 }, db);
+      // Deterministic tiebreak setup: `older` was created strictly before `target`.
+      await client.query(`update chat_tasks set created_at = '2026-01-01T00:00:00Z'::timestamptz where id = $1`, [older.id]);
+
+      const moved = (await prioritizeMyTaskTool.execute!(
+        { id: target.id },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.equal(moved.ok, true);
+      assert.match(moved.message, /front of your list/);
+      // Pre-fix this landed on position 0, tied with `older`, and the createdAt tiebreak kept
+      // the older task ahead — the "prioritised" task was still claimed last.
+      const listed = await listChatTasks(SCOPE, {}, db);
+      const storedTarget = listed.find((t) => t.id === target.id)!;
+      const storedOlder = listed.find((t) => t.id === older.id)!;
+      assert.ok(
+        storedTarget.position < storedOlder.position && storedTarget.position < 0,
+        `front move must go below every other row, got target=${storedTarget.position} older=${storedOlder.position}`,
+      );
+      assert.equal(listed[0]!.id, target.id, 'the prioritised task sorts first');
+      assert.equal(listed[1]!.id, older.id, 'the older task falls back behind it');
+
+      // Explicit position still passes through untouched.
+      const explicit = (await prioritizeMyTaskTool.execute!(
+        { id: older.id, position: 5 },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.equal(explicit.ok, true);
+      assert.equal((await listChatTasks(SCOPE, {}, db)).find((t) => t.id === older.id)?.position, 5);
+
+      const foreign = (await prioritizeMyTaskTool.execute!(
+        { id: 'nope' },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.equal(foreign.error, 'task_not_found');
+    } finally {
+      setToolDbForTests(null);
+      await client.close();
+    }
+  });
+});

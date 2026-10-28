@@ -21,6 +21,7 @@ import {
   finishChatTaskRun,
   listChatTasks,
   listRunnableChatTasks,
+  prioritizeChatTask,
   setChatTaskPaused,
   setChatTaskStatus,
   updateChatTask,
@@ -361,3 +362,77 @@ describe('chat-task runner queries (listRunnable / claim / finish / pause)', () 
 function countOpenSafe(list: { status: string }[]): number {
   return list.filter((t) => t.status === 'pending' || t.status === 'in_progress' || t.status === 'waiting_on_user').length;
 }
+
+// ─── S8 / S9 (#196 soft-pack): runnable-list fairness + true front-prioritisation ──
+
+describe('chat-task runner fairness + prioritisation (S8/S9, PR #196 softs)', () => {
+  it('S8: a 25+ backlog on one agent does not starve a later agent', async () => {
+    const { client, db } = await freshDb();
+    try {
+      // The old query was ONE global `order by agentId, position, createdAt limit N`: with 30
+      // pending rows on a1 and N=25, a2 never appeared. Per-agent fair share fixes that.
+      for (let i = 0; i < 30; i++) await addChatTask(A1, { title: `Flood ${i}` }, db);
+      const late = await addChatTask(A2, { title: 'Late agent task' }, db);
+
+      const listed = await listRunnableChatTasks(db, { limit: 25 });
+      assert.ok(listed.some((r) => r.taskId === late.id), 'agent a2 must appear despite a1 30-row backlog');
+      const a1Rows = listed.filter((r) => r.agentId === 'a1');
+      const a2Rows = listed.filter((r) => r.agentId === 'a2');
+      assert.equal(a2Rows.length, 1);
+      assert.ok(a1Rows.length <= Math.ceil(25 / 2), `a1 capped at its fair share, got ${a1Rows.length}`);
+      assert.ok(listed.length <= 25, 'the global limit still holds');
+      // Claim order INSIDE the flooded agent is unchanged: position, then age.
+      assert.deepEqual(a1Rows.map((r) => r.title), a1Rows.map((_, i) => `Flood ${i}`));
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('S8: fair shares fill the global limit when both agents have backlog', async () => {
+    const { client, db } = await freshDb();
+    try {
+      for (let i = 0; i < 5; i++) await addChatTask(A1, { title: `A1-${i}` }, db);
+      for (let i = 0; i < 5; i++) await addChatTask(A2, { title: `A2-${i}` }, db);
+      const listed = await listRunnableChatTasks(db, { limit: 4 });
+      assert.equal(listed.length, 4, 'the global limit is saturated from both agents');
+      assert.equal(listed.filter((r) => r.agentId === 'a1').length, 2);
+      assert.equal(listed.filter((r) => r.agentId === 'a2').length, 2);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('S9: prioritizeChatTask sorts ahead of an older task tied at position 0 (createdAt tiebreak)', async () => {
+    const { client, db } = await freshDb();
+    try {
+      const older = await addChatTask(A1, { title: 'Older at zero' }, db); // position 0, created first
+      const mid = await addChatTask(A1, { title: 'Mid' }, db); // position 1
+      const target = await addChatTask(A1, { title: 'Prioritise me', position: 2 }, db);
+
+      // Pre-fix, setting position 0 tied the newer task with `older` and the createdAt
+      // tiebreak kept `older` first — the "prioritised" task was still claimed last.
+      const prio = await prioritizeChatTask(A1, { id: target.id }, db);
+      assert.ok(prio);
+      assert.ok(prio!.position < 0, `front position must be strictly below every other row, got ${prio!.position}`);
+      const listed = await listChatTasks(A1, {}, db);
+      assert.equal(listed[0]!.id, target.id, 'the prioritised task sorts first, ahead of the older position-0 row');
+      assert.deepEqual(listed.map((t) => t.title).slice(1), ['Older at zero', 'Mid']);
+
+      // Prioritising another task keeps strict ordering (no collision with the current head).
+      const again = await prioritizeChatTask(A1, { id: mid.id }, db);
+      assert.ok(again!.position < prio!.position);
+      assert.equal((await listChatTasks(A1, {}, db))[0]!.id, mid.id);
+      // The Run Task claim order follows the same sort: mid leads a1's runnable rows.
+      const run = await listRunnableChatTasks(db, {});
+      assert.equal(run.find((r) => r.agentId === 'a1')?.taskId, mid.id);
+
+      // Explicit position passes through unchanged; unknown id misses; foreign scope refuses.
+      assert.equal((await prioritizeChatTask(A1, { id: older.id, position: 3 }, db))?.position, 3);
+      assert.equal(await prioritizeChatTask(A1, { id: 'nope' }, db), null);
+      assert.equal(await prioritizeChatTask(A2, { id: target.id }, db), null);
+      assert.equal((await listChatTasks(A1, {}, db)).find((t) => t.id === target.id)?.position, -1);
+    } finally {
+      await client.close();
+    }
+  });
+});

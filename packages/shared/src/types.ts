@@ -379,12 +379,21 @@ export type SSEEventType =
   | 'heartbeat.started'
   | 'heartbeat.completed'
   | 'heartbeat.failed'
-  | 'task_run_update'
+  | 'chat_task_progress'
   | 'agent.budget_exceeded'
   | 'issue.status_changed'
   | 'issue.assigned'
   | 'approval.created'
   | 'approval.decided';
+
+/**
+ * S4 (#196): the one pinned channel for Run Task progress chips. The scheduler publishes
+ * `{ type: TASK_PROGRESS_SSE_TYPE, ...ChatTaskProgressEvent }` on `sse:{companyId}` and the web
+ * bridge (`apps/web/lib/assistant/task-progress-signals.ts`) parses exactly this type. The
+ * `satisfies` is the type-level contract: if this string ever stops being a member of
+ * SSEEventType (an enum rename, like the old `task_run_update` drift), the build breaks here.
+ */
+export const TASK_PROGRESS_SSE_TYPE = 'chat_task_progress' satisfies SSEEventType;
 
 export interface SSEEvent {
   type: SSEEventType;

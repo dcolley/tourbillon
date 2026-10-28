@@ -22,6 +22,7 @@ import {
   addChatTask,
   countOpenChatTasks,
   listChatTasks,
+  prioritizeChatTask,
   setChatTaskPaused,
   setChatTaskStatus,
   updateChatTask,
@@ -317,13 +318,23 @@ export const prioritizeMyTaskTool = createTool({
   execute: async (inputData, { requestContext }) => {
     const scope = chatTaskScope(requestContext);
     if (!scope) return missingScope();
-    const updated = await updateChatTask(
+    // S9 (#196): the default front-of-list move goes through prioritizeChatTask, which assigns
+    // min(position)-1 — a plain position:0 would tie with an existing 0-row and still lose the
+    // (position, createdAt) tiebreak to the older task. Explicit positions pass through.
+    const updated = await prioritizeChatTask(
       scope,
-      { id: inputData.id, position: inputData.position ?? 0 },
+      { id: inputData.id, ...(inputData.position !== undefined ? { position: inputData.position } : {}) },
       toolDb(),
     );
     if (!updated) return notFound(inputData.id);
-    return { ok: true, message: `Task ${updated.id} moved to position ${updated.position}.`, task: row(updated) };
+    return {
+      ok: true,
+      message:
+        inputData.position === undefined
+          ? `Task ${updated.id} moved to the front of your list (ahead of every other task).`
+          : `Task ${updated.id} moved to position ${updated.position}.`,
+      task: row(updated),
+    };
   },
 });
 

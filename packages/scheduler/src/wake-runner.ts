@@ -334,7 +334,9 @@ export async function startWake(wake: WakeRequest): Promise<StartWakeResult> {
  * TASK-RUNNER: Run Task wake entry. Bypasses the per-agent heartbeat single-flight gate
  * (agentLocks) — a private chat task must never coalesce behind a heartbeat. It stays bounded
  * the other way round: the task-runner poller gates task runs through the SHARED per-agent
- * run-slot budget (heartbeat + task rows draw on one pool, cap RUN_TASK_CAP_PER_AGENT tasks),
+ * run-slot budget (heartbeat + task rows draw on one pool, at most defaultTaskCapPerAgent =
+ * min(RUN_TASK_CAP_PER_AGENT, budget-1) tasks — one slot stays reserved for this heartbeat
+ * side, S3 #196),
  * so tasks wait when the slots are full instead of stacking a parallel unlimited runner.
  */
 export async function startTaskWake(wake: WakeRequest): Promise<WakeResult> {
