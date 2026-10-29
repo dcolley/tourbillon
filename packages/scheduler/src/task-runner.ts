@@ -106,7 +106,15 @@ export interface TaskRunnerDeps {
   settle(taskId: string, status: 'pending' | 'waiting_on_user' | 'done', note?: string): Promise<void>;
   /** High-level progress event for the parent chat (SSE chip), never a tool transcript. */
   emitProgress?(event: ChatTaskProgressEvent): void;
-  log?: { info: (msg: string, data?: Record<string, unknown>) => void };
+  /**
+   * S199a: warn/error are optional so existing info-only loggers still satisfy the interface,
+   * but the poll-failure path PREFERS them (greppable by level) and only falls back to info.
+   */
+  log?: {
+    info: (msg: string, data?: Record<string, unknown>) => void;
+    warn?: (msg: string, data?: Record<string, unknown>) => void;
+    error?: (msg: string, data?: Record<string, unknown>) => void;
+  };
 }
 
 export interface ChatTaskProgressEvent {
@@ -171,7 +179,19 @@ export interface TaskRunPollSummary {
   skippedInactive: number;
   /** Rows skipped because the company disabled Run Task (settings.taskRunner.enabled=false, S1). */
   skippedDisabled: number;
+  /**
+   * S199c: agents whose slot-count/claim work threw this tick. They are skipped in isolation —
+   * the rest of the queue still gets its turn (one bad agent must never starve the tick).
+   */
+  skippedErrored: number;
 }
+
+/**
+ * S199b: how long a "task-run slots full, deferring" line stays quiet per agent after being
+ * logged. The poller ticks every 30s; without this window a busy agent's deferral printed a
+ * line every tick forever. First deferral always logs; repeats inside the window are silent.
+ */
+export const DEFER_LOG_WINDOW_MS = 10 * 60_000;
 
 /**
  * S1: dig the taskRunner block out of the companies.settings jsonb and resolve it with the
@@ -190,7 +210,22 @@ export function resolveTaskRunnerSettingsForCompany(companySettings: unknown): R
  */
 export async function pollTaskRunner(
   deps: TaskRunnerDeps,
-  opts: { limit?: number; maxAttempts?: number; maxConcurrentRuns?: number; taskCap?: number } = {},
+  opts: {
+    limit?: number;
+    maxAttempts?: number;
+    maxConcurrentRuns?: number;
+    taskCap?: number;
+    /**
+     * S199b: per-agent memory for the "task-run slots full, deferring" rate limit. The poller
+     * loop owns one Map across ticks; tests can inject their own. Absent (bare pollTaskRunner
+     * calls in tests) → every deferral logs, the historic behaviour.
+     */
+    deferLogMemory?: Map<string, number>;
+    /** S199b: quiet window, default DEFER_LOG_WINDOW_MS. */
+    deferLogWindowMs?: number;
+    /** S199b: clock injection for tests (defaults to Date.now). */
+    now?: () => number;
+  } = {},
 ): Promise<TaskRunPollSummary> {
   const maxConcurrent = opts.maxConcurrentRuns ?? DEFAULT_MAX_CONCURRENT_RUNS;
 
@@ -201,6 +236,7 @@ export async function pollTaskRunner(
     skippedFull: 0,
     skippedInactive: 0,
     skippedDisabled: 0,
+    skippedErrored: 0,
   };
   if (rows.length === 0) return summary;
 
@@ -230,7 +266,30 @@ export async function pollTaskRunner(
     else byAgent.set(row.agentId, { tasks: [row], settings });
   }
 
+  const now = opts.now ?? Date.now;
+  const deferLogWindowMs = opts.deferLogWindowMs ?? DEFER_LOG_WINDOW_MS;
+
   for (const [agentId, group] of byAgent) {
+    // S199c: one agent's countActiveRuns/claim blowing up (a DB hiccup, a driver bug like the
+    // post-#196 Date crash) must NOT abort the tick for every other agent — before this, the
+    // throw escaped pollTaskRunner and the poller's .catch swallowed the whole tick, starving
+    // the queue until the next interval. Isolate per agent: log, count, continue.
+    try {
+      await pollOneAgent(agentId, group);
+    } catch (err) {
+      summary.skippedErrored += 1;
+      const data = { agentId, error: err instanceof Error ? err.message : String(err) };
+      if (deps.log?.error) deps.log.error('task-run agent poll failed', data);
+      else if (deps.log?.warn) deps.log.warn('task-run agent poll failed', data);
+      else deps.log?.info('task-run agent poll failed', data);
+    }
+  }
+  return summary;
+
+  async function pollOneAgent(
+    agentId: string,
+    group: { tasks: RunnableChatTaskRow[]; settings: ResolvedTaskRunnerSettings },
+  ): Promise<void> {
     const { tasks, settings } = group;
     // opts overrides win (tests + explicit callers); otherwise the resolved company settings
     // clamp per agent. Defaults land on the historic 2/2 values.
@@ -245,9 +304,20 @@ export async function pollTaskRunner(
     const free = freeTaskRunSlots(slot, maxConcurrent, taskCap);
     if (free <= 0) {
       summary.skippedFull += 1;
-      deps.log?.info('task-run slots full, deferring', { agentId, pending: tasks.length, slot });
-      continue;
+      // S199b: the default logger has no level filtering, so an every-tick line here meant a
+      // busy agent printed "task-run slots full, deferring" once per 30s tick forever. Keep
+      // the FIRST deferral loud; repeats for the same agent inside the quiet window stay
+      // silent. Once the agent gets free slots again the memory entry is dropped, so the
+      // NEXT time it defers it is loud again. The skippedFull counter is untouched — the
+      // tick summary still counts every deferral, only the log line is rate-limited.
+      const lastLoggedAt = opts.deferLogMemory?.get(agentId);
+      if (lastLoggedAt === undefined || now() - lastLoggedAt >= deferLogWindowMs) {
+        deps.log?.info('task-run slots full, deferring', { agentId, pending: tasks.length, slot });
+        opts.deferLogMemory?.set(agentId, now());
+      }
+      return;
     }
+    if (opts.deferLogMemory) opts.deferLogMemory.delete(agentId);
     const batch = tasks.slice(0, free);
     for (const task of batch) {
       const runId = randomUUID();
@@ -289,7 +359,6 @@ export async function pollTaskRunner(
       summary.started.push({ agentId, taskId: task.taskId, runId, done });
     }
   }
-  return summary;
 }
 
 // ─── Production wiring ───────────────────────────────────────────────────────
@@ -430,6 +499,9 @@ export function startTaskRunnerPolling(
   const runner = deps ?? createDefaultTaskRunnerDeps();
   let busy = false;
   let timer: ReturnType<typeof setInterval> | undefined;
+  // S199b: one Map for the whole poller lifetime → the defer-log rate limit persists across
+  // ticks (30s each), so a busy agent logs its first deferral and then stays quiet.
+  const deferLogMemory = new Map<string, number>();
 
   const tick = (): void => {
     if (busy) return;
@@ -437,6 +509,7 @@ export function startTaskRunnerPolling(
     void pollTaskRunner(runner, {
       maxConcurrentRuns: maxConcurrent,
       taskCap: opts.taskCap,
+      deferLogMemory,
     })
       .then((summary) => {
         if (summary.polled > 0) {
@@ -450,9 +523,13 @@ export function startTaskRunnerPolling(
         }
       })
       .catch((err) => {
-        runner.log?.info('task-run poll failed', {
-          error: err instanceof Error ? err.message : String(err),
-        });
+        // S199a: poll failures used to log at `info` — buried in the noise, not greppable by
+        // level. Raise to error → warn → info (first available) so the message content is
+        // unchanged but the line carries a level the log tooling can filter on.
+        const data = { error: err instanceof Error ? err.message : String(err) };
+        if (runner.log?.error) runner.log.error('task-run poll failed', data);
+        else if (runner.log?.warn) runner.log.warn('task-run poll failed', data);
+        else runner.log?.info('task-run poll failed', data);
       })
       .finally(() => {
         busy = false;
