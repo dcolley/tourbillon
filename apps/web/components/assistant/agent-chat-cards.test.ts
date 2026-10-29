@@ -6,6 +6,8 @@
  */
 import { describe, it, before } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { initialAgentChatState, type AgentChatItem, type AgentChatState } from '../../lib/agui/client/chat-state';
@@ -224,11 +226,23 @@ describe('WID-3 chat cards in the assistant chat view', () => {
       'form card (“Setup”)',
     );
     assert.equal(pendingCardDescription({ threadId: 't', toolCallId: 'c', toolName: 'unknownTool', elsewhere: false }), 'widget card');
-    // S8 (#193): the client label for the task list card, kept in step with lib/agui/parked-widgets.ts.
+    // S8 (#193): the client label for the task list card, through the shared CARD_KIND
+    // (lib/assistant/card-kind.ts, #201 soft S3) — kept in step with lib/agui/parked-widgets.ts.
     assert.equal(
       pendingCardDescription({ threadId: 't', toolCallId: 'c', toolName: 'showTaskList', label: 'What I am working on', elsewhere: false }),
       'task list card (“What I am working on”)',
     );
+  });
+
+  // #201 soft S3 (M17 drift class): the client names cards through the shared map, not a hand copy.
+  it('parkedCardKind names cards through the shared CARD_KIND module (S3)', async () => {
+    const src = readFileSync(join(__dirname, 'agent-chat.tsx'), 'utf8');
+    assert.match(src, /import \{ cardKindName \} from '@\/lib\/assistant\/card-kind'/);
+    assert.doesNotMatch(src, /const CARD_KIND/);
+    const { parkedCardKind } = await import('./agent-chat');
+    assert.equal(parkedCardKind({ toolName: 'showTaskList' }), 'task list card');
+    assert.equal(parkedCardKind({ toolName: 'askChoice' }), 'choice card');
+    assert.equal(parkedCardKind({ toolName: 'someUnknownTool' }), 'widget card');
   });
 
   it('a card whose parked run was stopped renders locked with a note', () => {

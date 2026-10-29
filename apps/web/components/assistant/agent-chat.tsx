@@ -37,6 +37,7 @@ import type {
 } from '@/lib/agui/client/chat-state';
 import type { AguiThreadRef } from '@/lib/agui/client/thread-bootstrap';
 import type { AgentChatResult, AgentChatSendOptions } from '@/lib/agui/client/agent-chat-client';
+import { cardKindName } from '@/lib/assistant/card-kind';
 import { contextChipLabel, type OpenInChatContext } from '@/lib/assistant/open-in-chat';
 import { assistantAgentPath } from '@/lib/assistant/sidebar';
 import { feedbackTargets } from '@/lib/assistant/feedback';
@@ -229,14 +230,6 @@ export interface AgentChatViewProps {
   onJumpToLatest?: () => void;
 }
 
-const CARD_KIND: Record<string, string> = {
-  askQuestion: 'question',
-  askChoice: 'choice',
-  askForm: 'form',
-  askConfirm: 'confirmation',
-  showTaskList: 'task list',
-};
-
 function cardLabel(argsText: string | undefined, args?: unknown): string | undefined {
   let value = args;
   if (value === undefined && argsText) {
@@ -322,9 +315,9 @@ function ParkedNotice({
   );
 }
 
-/** "approval card", "choice card", … for a parked card. */
+/** "approval card", "choice card", … for a parked card (shared map, lib/assistant/card-kind.ts). */
 export function parkedCardKind(parked: Pick<ParkedWidget, 'toolName'>): string {
-  return `${CARD_KIND[parked.toolName] ?? 'widget'} card`;
+  return cardKindName(parked.toolName);
 }
 
 /** Slice B: the waiting card as the Clear chat confirm names it, e.g. `choice card (“Pick a plan”)`. */
