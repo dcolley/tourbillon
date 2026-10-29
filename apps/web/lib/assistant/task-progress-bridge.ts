@@ -130,7 +130,18 @@ export async function getAgent(
   const real = sources.db ? undefined : await (sources.loadDb ?? loadRealDbModule)();
   // B1: the module NAMESPACE has no `query` export — the default path must use the module's
   // `db` export (and its `agents`/`companies` table exports below).
-  const db = (sources.db ?? real?.db) as { query: TaskProgressDbQuery };
+  // S18 (soft of #209): no call-site cast — `real.db` is the REAL drizzle client type (S17
+  // slice), so the annotated assignment below is itself the check that it structurally fits
+  // the `{ query: TaskProgressDbQuery }` seam getAgent uses (the same fit S17's `satisfies`
+  // pin asserts). If `@tourbillon/db` ever drops `db`/`query`, tsc fails HERE, not at runtime.
+  const dbSource = sources.db ?? real?.db;
+  if (!dbSource) {
+    // Unreachable through startTaskProgressSignalBridge: either `sources.db` was injected or
+    // `loadDb` returned a TaskProgressDbModule. Loud guard keeps the narrowing honest without
+    // an `as` cast over the union.
+    throw new Error('getAgent: no db source — neither `sources.db` nor the loaded module provided one.');
+  }
+  const db: { query: TaskProgressDbQuery } = dbSource;
   if (sources.db && !sources.tables) {
     // S16: an injected db with no tables would silently fall back to `{}` — the exact blind
     // spot S13 closed (every `eq` would record column:undefined and a swapped join stayed
@@ -142,7 +153,11 @@ export async function getAgent(
   }
   const agents = (sources.tables?.agents ?? real?.agents ?? {}) as Record<string, unknown>;
   const companies = (sources.tables?.companies ?? real?.companies ?? {}) as Record<string, unknown>;
-  const { eq } = sources.orm ?? ((await import('drizzle-orm')) as unknown as TaskProgressOrm);
+  // S18: annotated assignment instead of `as unknown as TaskProgressOrm` — the real drizzle
+  // `eq` (method-form bivariance on the interface) must structurally fit the seam, so a
+  // renamed/incompatible `eq` export is a tsc error, not an erased cast.
+  const orm: TaskProgressOrm = sources.orm ?? (await import('drizzle-orm'));
+  const { eq } = orm;
   const row = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
   if (!row) return null;
   const company = await db.query.companies.findFirst({ where: eq(companies.id, row.companyId) });
@@ -209,10 +224,16 @@ export function createDeliver(deps: DeliverDeps) {
 
 const realDeliver = createDeliver({
   resourceId: async (agent) => (await import('@/lib/chat')).chatResourceId(agent.companyId),
+  // S18: two CHECKED assertion steps (`as Partial<Agent> as Agent`) instead of
+  // `as unknown as Agent`. The first leg is what tsc actually validates: every key the
+  // record shares with Agent (id, companyId, status) must be comparable to the Agent column
+  // type — e.g. renaming `companyId` or turning `status` into a boolean breaks tsc HERE.
+  // The second leg is the trivial widen Partial<Agent> -> Agent. Nothing is erased through
+  // `unknown` (the S18 eslint rule in eslint.config.mjs would flag that).
   getOrCreateChatController: async (agent) =>
-    (await import('@/lib/chat')).getOrCreateChatController(agent as unknown as Agent),
+    (await import('@/lib/chat')).getOrCreateChatController(agent as Partial<Agent> as Agent),
   getChatSession: async (controller, agent, opts) =>
-    (await import('@/lib/chat')).getChatSession(controller as never, agent as unknown as Agent, opts),
+    (await import('@/lib/chat')).getChatSession(controller as never, agent as Partial<Agent> as Agent, opts),
 });
 
 // ─── redis single-consumer claim (S2) ──────────────────────────────────────────────────────
@@ -281,7 +302,10 @@ export interface StartBridgeOptions extends TaskProgressBridgeWiring {
   createSubscriber?: () => BridgeSubscriber;
 }
 
-const globalForBridge = globalThis as unknown as {
+// S18: intersection cast instead of `globalThis as unknown as {...}` — still one checked
+// step (the `typeof globalThis` leg keeps every existing global visible; only the optional
+// bridge slot is added).
+const globalForBridge = globalThis as typeof globalThis & {
   tourbillonTaskProgressBridge?: { started: boolean };
 };
 
