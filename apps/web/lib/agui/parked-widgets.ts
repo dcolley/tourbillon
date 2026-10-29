@@ -12,6 +12,7 @@
  * Only the asking session's own cards are reported (never another session's).
  */
 import type { WidgetSpecIndex } from '@tourbillon/shared/widgets';
+import { cardKindName } from '@/lib/assistant/card-kind';
 import { suspendedWidgetSpec } from './widgets';
 import { pendingOwnedWidgetCalls, widgetCallArgs } from './widget-owners';
 
@@ -52,17 +53,9 @@ export function widgetCardLabel(args: unknown): string | undefined {
   return text.length > LABEL_MAX ? `${text.slice(0, LABEL_MAX - 1)}…` : text;
 }
 
-const CARD_KIND: Record<string, string> = {
-  askQuestion: 'question',
-  askChoice: 'choice',
-  askForm: 'form',
-  askConfirm: 'confirmation',
-  showTaskList: 'task list',
-};
-
-/** Plain name of a card kind ("question card"), for messages. */
+/** Plain name of a card kind ("question card"), for messages (shared map, lib/assistant/card-kind.ts). */
 export function widgetCardKind(toolName: string): string {
-  return `${CARD_KIND[toolName] ?? 'widget'} card`;
+  return cardKindName(toolName);
 }
 
 /** Cards this session asked on `threadId` that are still waiting for an answer. */

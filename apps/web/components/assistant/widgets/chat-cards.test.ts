@@ -152,6 +152,13 @@ describe('WID-3 card specs', () => {
     assert.deepEqual(issues({ ...MULTI, recommended: ['gold', 'pro'] }, askChoiceSpec), ['recommended: not_an_option']);
     assert.deepEqual(issues({ ...MULTI, maxSelected: 3 }, askChoiceSpec), ['maxSelected: max_above_options']); // only two options offered
     assert.deepEqual(issues({ ...MULTI, minSelected: 3, maxSelected: 2 }, askChoiceSpec), ['minSelected: min_above_max']);
+    // #201 soft S1 (askForm WID-MS / task-list S7 pattern): bounds belong to multiSelect — a card
+    // without it refuses them instead of dropping them silently.
+    assert.deepEqual(issues({ ...CHOICE, minSelected: 1 }, askChoiceSpec), ['multiSelect: multi_select_only']);
+    assert.deepEqual(issues({ ...CHOICE, maxSelected: 2 }, askChoiceSpec), ['multiSelect: multi_select_only']);
+    assert.deepEqual(issues({ ...CHOICE, minSelected: 0, maxSelected: 2 }, askChoiceSpec), ['multiSelect: multi_select_only']);
+    assert.deepEqual(issues(CHOICE, askChoiceSpec), []); // a single-select card without bounds is untouched
+    assert.deepEqual(issues({ ...MULTI, minSelected: 1, maxSelected: 2 }, askChoiceSpec), []); // bounds stay fine on multiSelect
     // askForm: a multiSelect field answers with a string[] of offered option values.
     const TAGS = { name: 'tags', label: 'Tags', type: 'multiSelect' as const, options: [{ value: 'x', label: 'X' }, { value: 'y', label: 'Y' }, { value: 'z', label: 'Z' }] };
     const formProps = { title: 't', fields: [TAGS] };
