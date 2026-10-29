@@ -10,18 +10,24 @@
  *
  * Plain text only: the value is the bare kind ("task list"); `cardKindName` adds " card".
  * Unknown tool names fall back to "widget" so an unregistered card is still named sensibly.
+ *
+ * #215 soft S21b: the map is `as const satisfies` (a write to it is a tsc error, pinned by a
+ * `@ts-expect-error` directive in parked-widgets.test.ts) and the lookup goes through
+ * `Object.hasOwn` — a plain `CARD_KIND[name] ?? 'widget'` resolved inherited names
+ * (`toString`, `constructor`) to `Object.prototype` members, and a refusal said
+ * "function toString() { [native code] } card" (behaviour predates #215).
  */
-export const CARD_KIND: Record<string, string> = {
+export const CARD_KIND = {
   askQuestion: 'question',
   askChoice: 'choice',
   askForm: 'form',
   askConfirm: 'confirmation',
   showTaskList: 'task list',
-};
+} as const satisfies Record<string, string>;
 
 /** The bare kind of a card tool ("task list"), or "widget" for an unknown tool name. */
 export function cardKindLabel(toolName: string): string {
-  return CARD_KIND[toolName] ?? 'widget';
+  return Object.hasOwn(CARD_KIND, toolName) ? CARD_KIND[toolName as keyof typeof CARD_KIND] : 'widget';
 }
 
 /** Plain name of a card kind ("task list card"), for messages. */

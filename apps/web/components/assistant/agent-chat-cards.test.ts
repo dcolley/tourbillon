@@ -245,6 +245,30 @@ describe('WID-3 chat cards in the assistant chat view', () => {
     assert.equal(parkedCardKind({ toolName: 'someUnknownTool' }), 'widget card');
   });
 
+  // #215 soft S21a: behavioural parity, not literal pins. A renamed hand-copy (mutant M8:
+  // `const CLIENT_CARD_KIND` — the S3 source scan only bans the literal `const CARD_KIND`, and
+  // the import line is left in place) with one drifted key passes every literal pin on each
+  // side; comparing the two helpers per CARD_KIND key catches the drift whatever the map is
+  // called on either side.
+  it('widgetCardKind (server) and parkedCardKind (client) name every CARD_KIND key identically (S21a)', async () => {
+    const { CARD_KIND } = await import('../../lib/assistant/card-kind');
+    const { parkedCardKind } = await import('./agent-chat');
+    const { widgetCardKind } = await import('../../lib/agui/parked-widgets');
+    const keys = Object.keys(CARD_KIND);
+    assert.ok(keys.length >= 5, 'CARD_KIND registers the five card tools — the parity loop must not be vacuous');
+    for (const k of keys) {
+      assert.equal(widgetCardKind(k), parkedCardKind({ toolName: k }), `server/client naming drift on ${k}`);
+    }
+  });
+
+  // #215 soft S21b (client side): parkedCardKind goes through the same Object.hasOwn lookup, so
+  // an inherited name like `toString` falls back instead of stringifying Object.prototype.
+  it('parkedCardKind falls back to "widget card" for prototype keys (S21b)', async () => {
+    const { parkedCardKind } = await import('./agent-chat');
+    assert.equal(parkedCardKind({ toolName: 'toString' }), 'widget card');
+    assert.equal(parkedCardKind({ toolName: 'constructor' }), 'widget card');
+  });
+
   it('a card whose parked run was stopped renders locked with a note', () => {
     const html = renderToStaticMarkup(React.createElement(AgentChatView, props({ items: [toolItem({ status: 'stopped' })] }, { onWidgetAnswer: noop })));
     assert.match(html, /Run stopped — this card no longer takes an answer\./);
