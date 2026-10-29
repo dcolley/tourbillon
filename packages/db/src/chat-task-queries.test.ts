@@ -433,12 +433,27 @@ describe('listRunnableChatTasks per-company caps (S3, PR #202 ACCEPT softs)', ()
         `insert into agents (id, company_id, name, role, title, url_key) values ('d1', 'c3', 'Idle Bot', 'engineer', 'E', 'idle-bot')`,
       );
       await addChatTask({ companyId: 'c3', agentId: 'd1' }, { title: 'Already done', status: 'done' }, db);
+      // #208 S1: a PAUSED-ONLY company. The paused row above sits in c1 alongside unpaused
+      // work, so before this fixture no company tested the paused-only exclusion the assertion
+      // message claims — every pending row of c4 is paused, and c4 must never appear.
+      await client.query(
+        `insert into companies (id, name, slug, issue_prefix) values ('c4', 'Paused Co', 'paused', 'PC')`,
+      );
+      await client.query(
+        `insert into agents (id, company_id, name, role, title, url_key) values ('d2', 'c4', 'Paused Bot', 'engineer', 'E', 'paused-bot')`,
+      );
+      const pausedOnly = await addChatTask({ companyId: 'c4', agentId: 'd2' }, { title: 'Paused only' }, db);
+      await setChatTaskPaused({ companyId: 'c4', agentId: 'd2' }, { id: pausedOnly.id, paused: true }, db);
 
       const pairs = await listPendingChatTaskCompanySettings(db);
       assert.deepEqual(
         pairs.map((p) => p.companyId).sort(),
         ['c1', 'c2'],
         'exactly the companies with pending unpaused rows (paused-only and done-only companies excluded)',
+      );
+      assert.ok(
+        !pairs.some((p) => p.companyId === 'c4'),
+        'c4 is excluded: its only pending rows are PAUSED (the paused=false filter is live)',
       );
       const c1 = pairs.find((p) => p.companyId === 'c1')!;
       assert.deepEqual(c1.companySettings, { taskRunner: { maxAttemptsPerTask: 1 } }, 'raw settings travel for the caller to resolve');
@@ -530,6 +545,99 @@ describe('chat-task runner fairness + prioritisation (S8/S9, PR #196 softs)', ()
       assert.equal(await prioritizeChatTask(A1, { id: 'nope' }, db), null);
       assert.equal(await prioritizeChatTask(A2, { id: target.id }, db), null);
       assert.equal((await listChatTasks(A1, {}, db)).find((t) => t.id === target.id)?.position, -1);
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+// ─── #208 ACCEPT softs (S2/S3): company-read determinism + one fallback bound ──
+
+/**
+ * Record every (sql, params) pair drizzle hands to the driver from here on — the driver-
+ * boundary truth for what the company read actually compiles to (same spy shape as
+ * chat-task-runner-softs.test.ts, local here so that file stays #205's own).
+ */
+function spyQueries(client: PGlite): Array<{ sql: string; params: unknown[] }> {
+  const captured: Array<{ sql: string; params: unknown[] }> = [];
+  const original = client.query.bind(client);
+  (client as unknown as {
+    query: (sql: string, params?: unknown[], config?: unknown) => Promise<unknown>;
+  }).query = (sqlText: string, params?: unknown[], config?: unknown) => {
+    captured.push({ sql: String(sqlText), params: params ?? [] });
+    return original(sqlText, params as never[], config as never);
+  };
+  return captured;
+}
+
+describe('chat-task company read + fallback bound (S2/S3, PR #208 ACCEPT softs)', () => {
+  it('S2: the company read is ORDERED and grouped on the companies PK — a limit is a stable prefix', async () => {
+    const { client, db } = await freshDb();
+    try {
+      // Four companies with pending unpaused work, seeded OUT of id order so a missing
+      // ORDER BY cannot hide behind heap order: 'b9' is the FIRST pending row inserted (heap
+      // leader) but must sort second-to-last behind 'a0'.
+      await client.exec(`
+        insert into companies (id, name, slug, issue_prefix) values
+          ('a0', 'Alpha Co', 'alpha', 'AC'),
+          ('b9', 'Bravo Co', 'bravo', 'BC');
+        insert into agents (id, company_id, name, role, title, url_key) values
+          ('e1', 'a0', 'Alpha Bot', 'engineer', 'E', 'alpha-bot'),
+          ('e2', 'b9', 'Bravo Bot', 'engineer', 'E', 'bravo-bot');
+      `);
+      await addChatTask({ companyId: 'b9', agentId: 'e2' }, { title: 'Bravo pending' }, db);
+      await addChatTask({ companyId: 'a0', agentId: 'e1' }, { title: 'Alpha pending' }, db);
+      await addChatTask(A1, { title: 'C1 pending' }, db);
+      await addChatTask(B1, { title: 'C2 pending' }, db);
+
+      const captured = spyQueries(client);
+      const pairs = await listPendingChatTaskCompanySettings(db, { limit: 3 });
+      // Deterministic LOWEST-ID prefix. Drop the ORDER BY and the limit truncates by scan
+      // order instead — b9 sneaks in, a0 falls off the map, and a lowered-budget company
+      // silently relists (the exact S2 bug) — this assertion goes RED.
+      assert.deepEqual(pairs.map((p) => p.companyId), ['a0', 'b9', 'c1']);
+
+      const companyRead = captured.find(
+        (q) => /group by/i.test(q.sql) && q.sql.toLowerCase().includes('inner join "companies"'),
+      );
+      assert.ok(companyRead, 'the company read actually ran (spy observed the real query)');
+      const sqlText = companyRead!.sql.toLowerCase();
+      assert.match(sqlText, /order by "companies"\."id"/, 'the read is ORDERED — the limit is a stable prefix (S2)');
+      assert.match(sqlText, /group by "companies"\."id"/, 'grouped on the companies PK, not the jsonb settings value');
+      assert.doesNotMatch(sqlText, /group by[^]*"settings"/, 'the jsonb settings column never joins the GROUP BY');
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('S3: the EMPTY map uses the SAME fallback bound 5 as the CASE ELSE (one fallback)', async () => {
+    const { client, db } = await freshDb();
+    try {
+      // Four rows on a1 with attempts 2..5, listed with NO company map at all (the empty-map
+      // branch). Pre-fix the empty map capped at 2 while the CASE ELSE capped at 5: a task
+      // inserted between the company read and the listing was judged by the tighter bound —
+      // the lowered-budget relisting behaviour returning through the side door.
+      const ids: string[] = [];
+      for (const attempts of [2, 3, 4, 5]) {
+        const t = await addChatTask(A1, { title: `At ${attempts}` }, db);
+        await setRunnerAttempts(client, t.id, attempts);
+        ids.push(t.id);
+      }
+
+      const emptyMap = new Set((await listRunnableChatTasks(db, {})).map((r) => r.taskId));
+      assert.ok(emptyMap.has(ids[0]), 'attempts 2 lists — the fallback is 5, not 2');
+      assert.ok(emptyMap.has(ids[2]), 'attempts 4 lists under the fallback');
+      assert.ok(!emptyMap.has(ids[3]), 'attempts 5 is still over the historic bound 5');
+
+      // Same rows through the OTHER branch (map present, ELSE applies): identical bounds.
+      const viaElse = new Set(
+        (await listRunnableChatTasks(db, { maxAttemptsByCompany: { c2: 1 } })).map((r) => r.taskId),
+      );
+      assert.deepEqual(
+        [...viaElse].sort(),
+        [...emptyMap].sort(),
+        'empty-map listing and CASE ELSE agree — one fallback, no drift between the branches',
+      );
     } finally {
       await client.close();
     }
