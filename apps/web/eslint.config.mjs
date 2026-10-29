@@ -73,6 +73,19 @@ export default defineConfig([
   // a CallExpression/ObjectExpression between the legs is not a hop — as do the bare
   // single-step `as never` / `<never>x` forms. Deeper chains (3+ hops) stay GREEN by
   // design until a future pack adds the next mirror pair.
+  //
+  // S29b: #226's sweep found the two-hop mirrors still let THREE wrapper hops escape —
+  // `(x as T)!!! as never`, `((x as never)!!!) as T`, `((x as T)!! satisfies object) as
+  // never`, `<never>((<T>x)!!!)`, `((x as never)!! satisfies object) as T` and
+  // `<T>((<never>x)!!!)` were all GREEN on tip. Same enumerated child-combinator discipline
+  // (esquery 1.7.0 still has no Kleene star over combinators, and a bare descendant
+  // `Cast Cast[never]` would re-catch the call-arg / object-wrapped shapes S23b released):
+  // two more mirrors now allow exactly three TSNonNullExpression / TSSatisfiesExpression
+  // hops between the legs. Mutant-verified: the six three-hop shapes are RED x1 (every
+  // wrapper chain matches exactly one of the 0/1/2/3-hop selectors, no double-reports),
+  // the call-arg `f({ a: 1 } as T) as never`, object-wrapped `{ k: x as T } as never` and
+  // bare single-step `as never` / `<never>x` stay GREEN — 4+ hops stay GREEN by design
+  // until a later pack adds the next mirror pair.
   // Scope unchanged: bridge source + test only.
   {
     files: ['lib/assistant/task-progress-bridge.ts', 'lib/assistant/task-progress-bridge.test.ts'],
@@ -206,6 +219,33 @@ export default defineConfig([
             ":matches(TSAsExpression, TSTypeAssertion)[typeAnnotation.type='TSNeverKeyword'] > :matches(TSNonNullExpression, TSSatisfiesExpression) > :matches(TSNonNullExpression, TSSatisfiesExpression) > :matches(TSAsExpression, TSTypeAssertion)",
           message:
             'S27a: reaching `as never`/`<never>` as the tail through two `!`/`satisfies` wrappers (`(x as T)!! as never`, `((x as T)! satisfies object) as never`, `<never>((<T>x)!!)`) erases types exactly like `as unknown as` — keep casts single-step and typed. A deliberate single-step `as never` is fine (see task-progress-bridge.ts).',
+        },
+        {
+          // S29b lead-leg three-hop mirror: the `never` leg can hide THREE wrapper hops
+          // under the outer cast — `((x as never)!!!) as T`, `((x as never)!! satisfies
+          // object) as T` and the bracketed `<T>((<never>x)!!!)`. Same enumerated child-
+          // combinator discipline as the 0/1/2-hop pairs (esquery has no Kleene star, so
+          // the chain stays enumerated): exactly three named hop nodes between the casts,
+          // so a call/object between the legs is not a hop and each wrapper chain matches
+          // exactly one of the 0/1/2/3-hop selectors — no double-reports. Mutant-verified;
+          // 4+ hops stay GREEN by design until a later pack adds the next mirror pair.
+          selector:
+            ":matches(TSAsExpression, TSTypeAssertion) > :matches(TSNonNullExpression, TSSatisfiesExpression) > :matches(TSNonNullExpression, TSSatisfiesExpression) > :matches(TSNonNullExpression, TSSatisfiesExpression) > :matches(TSAsExpression, TSTypeAssertion)[typeAnnotation.type='TSNeverKeyword']",
+          message:
+            'S29b: an `as never`/`<never>` leg three `!`/`satisfies` hops under a cast (`((x as never)!!!) as T`, `((x as never)!! satisfies object) as T`, `<T>((<never>x)!!!)`) erases types exactly like `as unknown as` — `never` is assignable everywhere; keep casts single-step and typed. A deliberate single-step `as never` is fine (see task-progress-bridge.ts).',
+        },
+        {
+          // S29b tail-leg three-hop mirror: the tail `as never`/`<never>` can sit THREE
+          // wrapper hops above the inner cast — `(x as T)!!! as never`, `((x as T)!!
+          // satisfies object) as never` and the bracketed `<never>((<T>x)!!!)`. Enumerated
+          // child-combinator chain like the 0/1/2/3-hop pairs: exactly three named hop
+          // nodes between the casts, so the call-arg form `f({ a: 1 } as T) as never` and
+          // the object-wrapped `{ k: x as T } as never` (CallExpression/ObjectExpression
+          // between the legs) are not hops and stay GREEN — mutant-verified both ways.
+          selector:
+            ":matches(TSAsExpression, TSTypeAssertion)[typeAnnotation.type='TSNeverKeyword'] > :matches(TSNonNullExpression, TSSatisfiesExpression) > :matches(TSNonNullExpression, TSSatisfiesExpression) > :matches(TSNonNullExpression, TSSatisfiesExpression) > :matches(TSAsExpression, TSTypeAssertion)",
+          message:
+            'S29b: reaching `as never`/`<never>` as the tail through three `!`/`satisfies` wrappers (`(x as T)!!! as never`, `((x as T)!! satisfies object) as never`, `<never>((<T>x)!!!)`) erases types exactly like `as unknown as` — keep casts single-step and typed. A deliberate single-step `as never` is fine (see task-progress-bridge.ts).',
         },
       ],
     },
