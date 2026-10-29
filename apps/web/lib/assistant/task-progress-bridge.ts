@@ -222,18 +222,30 @@ export function createDeliver(deps: DeliverDeps) {
   };
 }
 
+/**
+ * S19b: the narrow Agent slice the two chat call sites in `realDeliver` actually consume from
+ * the bridge record. Stricter than the S18 `as Partial<Agent> as Agent` seam it replaces:
+ * `Pick` keeps `id` / `companyId` / `status` REQUIRED, so the first assertion step is only
+ * comparable when the record still carries all three with Agent-compatible types — a lost or
+ * retyped field breaks tsc at the call site. `Partial<Agent>` made every key optional, so it
+ * checked only the keys the record happened to share. Agent fields OUTSIDE the seam stay a
+ * deliberate widening: the chat path reads more of Agent (registry.ts), but the bridge only
+ * guarantees this slice, and naming it here is what makes the gap visible (the type-level
+ * pins in task-progress-bridge.test.ts keep the seam honest).
+ */
+export type ChatAgentSeam = Pick<Agent, 'id' | 'companyId' | 'status'>;
+
 const realDeliver = createDeliver({
   resourceId: async (agent) => (await import('@/lib/chat')).chatResourceId(agent.companyId),
-  // S18: two CHECKED assertion steps (`as Partial<Agent> as Agent`) instead of
-  // `as unknown as Agent`. The first leg is what tsc actually validates: every key the
-  // record shares with Agent (id, companyId, status) must be comparable to the Agent column
-  // type — e.g. renaming `companyId` or turning `status` into a boolean breaks tsc HERE.
-  // The second leg is the trivial widen Partial<Agent> -> Agent. Nothing is erased through
-  // `unknown` (the S18 eslint rule in eslint.config.mjs would flag that).
+  // S18 + S19b: two CHECKED assertion steps through the named `ChatAgentSeam` — never through
+  // `unknown`/`any` (the S18/S19a eslint rules in eslint.config.mjs flag those). The first
+  // leg is what tsc validates: the record must still structurally fit Pick<Agent, 'id' |
+  // 'companyId' | 'status'> — e.g. renaming `companyId` or turning `status` into a boolean
+  // breaks tsc HERE. The second leg is the trivial comparable widen ChatAgentSeam -> Agent.
   getOrCreateChatController: async (agent) =>
-    (await import('@/lib/chat')).getOrCreateChatController(agent as Partial<Agent> as Agent),
+    (await import('@/lib/chat')).getOrCreateChatController(agent as ChatAgentSeam as Agent),
   getChatSession: async (controller, agent, opts) =>
-    (await import('@/lib/chat')).getChatSession(controller as never, agent as Partial<Agent> as Agent, opts),
+    (await import('@/lib/chat')).getChatSession(controller as never, agent as ChatAgentSeam as Agent, opts),
 });
 
 // ─── redis single-consumer claim (S2) ──────────────────────────────────────────────────────
