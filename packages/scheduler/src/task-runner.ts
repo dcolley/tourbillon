@@ -466,6 +466,12 @@ export function createDefaultTaskRunnerDeps(
 }
 
 export interface TaskRunnerPoller {
+  /**
+   * S236-S3: stopping ALSO settles every pending `whenTicks` waiter immediately — after stop()
+   * no further tick can ever complete, so a waiter would otherwise sit on its 30s guard
+   * timeout for no reason. Pending waiters reject with a `poller stopped` error (an already
+   * satisfied n still resolves).
+   */
   stop(): void;
   /**
    * S233-S6: resolves once `n` ticks have COMPLETED (success or tick-level failure). The
@@ -478,6 +484,34 @@ export interface TaskRunnerPoller {
    * that never starts never ticks, and a test must not hang on it.
    */
   whenTicks(n?: number, timeoutMs?: number): Promise<void>;
+}
+
+/**
+ * S236-S2: resolve the poller's setInterval delay. `intervalMs` is an @internal, TEST-ONLY
+ * seam (see startTaskRunnerPolling) and is NOT trusted: `0` / `NaN` / negative clamp to ≥1 ms
+ * so a mistyped option can never turn the scheduler into a ~1ms hot loop. Production callers
+ * omit it and land on `intervalSec * 1000` — the 5s floor / env default. Exported (pure) so
+ * the clamp is pinned directly instead of being timing-inferred.
+ */
+export function resolvePollIntervalMs(
+  intervalMs: number | undefined,
+  intervalSec: number,
+): number {
+  const raw = intervalMs ?? intervalSec * 1000;
+  return Number.isFinite(raw) ? Math.max(1, raw) : 1;
+}
+
+/**
+ * S236-S2 (same class, production side): the seconds interval keeps its historic 5s floor, but
+ * garbage in TASK_RUNNER_POLL_INTERVAL_SEC used to yield NaN — which setInterval coerces to 1,
+ * i.e. the very hot loop the floor exists to prevent. Non-finite input falls back to 30.
+ */
+export function resolvePollIntervalSec(
+  raw: string | number | undefined,
+  fallbackSec = 30,
+): number {
+  const parsed = Number(raw ?? fallbackSec);
+  return Math.max(5, Number.isFinite(parsed) ? parsed : fallbackSec);
 }
 
 /**
@@ -517,6 +551,9 @@ export function startTaskRunnerPolling(
      * floor, so real-loop pins complete many ticks in milliseconds instead of sleeping. It
      * wins over intervalSec when both are given. Production callers pass neither (or just
      * intervalSec) and stay floored at 5s / the env default.
+     *
+     * S236-S2: @internal / TEST-ONLY and NOT trusted — `0` / `NaN` / negative clamp to ≥1 ms
+     * via resolvePollIntervalMs, so a mistyped option can never hot-loop the scheduler.
      */
     intervalMs?: number;
     maxConcurrentRuns?: number;
@@ -534,10 +571,13 @@ export function startTaskRunnerPolling(
       whenTicks: async () => undefined,
     };
   }
-  const intervalSec = Math.max(5, opts.intervalSec ?? Number(process.env.TASK_RUNNER_POLL_INTERVAL_SEC ?? 30));
+  const intervalSec = resolvePollIntervalSec(opts.intervalSec ?? process.env.TASK_RUNNER_POLL_INTERVAL_SEC);
   const runner = deps ?? createDefaultTaskRunnerDeps();
   let busy = false;
   let timer: ReturnType<typeof setInterval> | undefined;
+  // S236-S3: once stopped, no tick can ever complete — new whenTicks(n) callers must not
+  // queue onto a dead poller either.
+  let stopped = false;
   // S199b: one Map for the whole poller lifetime → the defer-log rate limit persists across
   // ticks (30s each), so a busy agent logs its first deferral and then stays quiet.
   const deferLogMemory = new Map<string, number>();
@@ -545,8 +585,10 @@ export function startTaskRunnerPolling(
   // S233-S6: tick-completion ledger for whenTicks(). A tick is counted once its promise
   // settles — success OR tick-level failure — mirroring what the old sleeps implicitly waited
   // for. Waiters are one-shot and fire in arrival order once the count reaches their n.
+  // S236-S3: each waiter also carries an `abort` so stop() can settle it promptly instead of
+  // leaving it on its 30s guard timer.
   let ticksCompleted = 0;
-  const tickWaiters: Array<{ n: number; resolve: () => void }> = [];
+  const tickWaiters: Array<{ n: number; resolve: () => void; abort: (err: Error) => void }> = [];
   const settleTick = (): void => {
     ticksCompleted += 1;
     for (let i = tickWaiters.length - 1; i >= 0; i -= 1) {
@@ -594,7 +636,7 @@ export function startTaskRunnerPolling(
       });
   };
 
-  const intervalMs = opts.intervalMs ?? intervalSec * 1000;
+  const intervalMs = resolvePollIntervalMs(opts.intervalMs, intervalSec);
   timer = setInterval(tick, intervalMs);
   timer.unref?.();
   tick();
@@ -602,29 +644,44 @@ export function startTaskRunnerPolling(
     stop: () => {
       if (timer) clearInterval(timer);
       timer = undefined;
+      // S236-S3: a stopped poller can never complete another tick, so a pending whenTicks(n)
+      // is a guaranteed guard-timeout reject with a 30s delay for no reason. Settle every
+      // waiter NOW — the guard timers are cleared in `abort`, and an already-satisfied n
+      // never sat in this list (whenTicks resolves it up front).
+      stopped = true;
+      const stopErr = new Error('task-run poller stopped before the awaited tick count completed');
+      for (const waiter of tickWaiters.splice(0)) waiter.abort(stopErr);
     },
     whenTicks: (n = 1, timeoutMs = 30_000) =>
       ticksCompleted >= n
         ? Promise.resolve()
-        : new Promise<void>((resolve, reject) => {
-            const waiter: { n: number; resolve: () => void } = { n, resolve: () => undefined };
-            const settle = (fn: () => void): void => {
-              clearTimeout(guard);
-              const i = tickWaiters.indexOf(waiter);
-              if (i >= 0) tickWaiters.splice(i, 1);
-              fn();
-            };
-            // Ref'd guard timer: also keeps the event loop alive so the unref'd poll interval
-            // actually fires while a test awaits ticks; a stalled poller REJECTS fast.
-            const guard = setTimeout(() => {
-              settle(() =>
-                reject(
-                  new Error(`whenTicks(${n}): only ${ticksCompleted}/${n} ticks completed after ${timeoutMs}ms`),
-                ),
-              );
-            }, timeoutMs);
-            waiter.resolve = () => settle(resolve);
-            tickWaiters.push(waiter);
-          }),
+        : stopped
+          ? Promise.reject(new Error(`whenTicks(${n}): task-run poller is stopped (${ticksCompleted}/${n} ticks completed)`))
+          : new Promise<void>((resolve, reject) => {
+              const waiter: { n: number; resolve: () => void; abort: (err: Error) => void } = {
+                n,
+                resolve: () => undefined,
+                abort: () => undefined,
+              };
+              const settle = (fn: () => void): void => {
+                clearTimeout(guard);
+                const i = tickWaiters.indexOf(waiter);
+                if (i >= 0) tickWaiters.splice(i, 1);
+                fn();
+              };
+              // Ref'd guard timer: also keeps the event loop alive so the unref'd poll interval
+              // actually fires while a test awaits ticks; a stalled poller REJECTS fast.
+              const guard = setTimeout(() => {
+                settle(() =>
+                  reject(
+                    new Error(`whenTicks(${n}): only ${ticksCompleted}/${n} ticks completed after ${timeoutMs}ms`),
+                  ),
+                );
+              }, timeoutMs);
+              waiter.resolve = () => settle(resolve);
+              // S236-S3: stop() calls this — same one-shot settle, different rejection cause.
+              waiter.abort = (err: Error) => settle(() => reject(err));
+              tickWaiters.push(waiter);
+            }),
   };
 }
