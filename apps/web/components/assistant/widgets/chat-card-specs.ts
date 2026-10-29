@@ -166,6 +166,11 @@ export const askChoiceProps = z
     if (p.defaultOption !== undefined && !ids.includes(p.defaultOption)) {
       ctx.addIssue({ code: 'custom', path: ['defaultOption'], message: 'not_an_option' });
     }
+    // #201 soft S1 (askForm WID-MS / task-list S7 pattern): selection bounds belong to multiSelect;
+    // a single-select card refuses minSelected/maxSelected instead of accepting them silently.
+    if (p.multiSelect !== true && (p.minSelected !== undefined || p.maxSelected !== undefined)) {
+      ctx.addIssue({ code: 'custom', path: ['multiSelect'], message: 'multi_select_only' });
+    }
     if (p.multiSelect === true) {
       const max = p.maxSelected ?? ids.length;
       const min = p.minSelected ?? 1;
