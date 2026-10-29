@@ -187,12 +187,22 @@ test('S5: listRunnable with no pending work — empty map, no CASE, empty listin
 
 // #216 S7a — '@tourbillon/db/test/query-spy' is gated behind the "tourbillon-test" package-
 // exports condition (packages/db/package.json), so a naive production import
-// (`import '@tourbillon/db/test/query-spy'`) fails to resolve from apps/web and
-// packages/mastra (ERR_PACKAGE_PATH_NOT_EXPORTED — verified in the PR body). Caveat: tsx
-// resolves through tsconfig `paths`, so this package's own test files still reach it, and a
-// scheduler PRODUCTION file could too. The accepted workspace-only floor: no non-test file in
-// any production path may reference the subpath at all. This static pin enforces that floor —
-// if the exports gate is ever removed, this test remains the wall.
+// (`import '@tourbillon/db/test/query-spy'`) fails to resolve outside tsconfig `paths`
+// (ERR_PACKAGE_PATH_NOT_EXPORTED — verified in the PR body). Caveat (#219 S24a): tsx resolves
+// through the tsconfig.base.json `paths` key, so this package's own test files still reach it,
+// and a scheduler PRODUCTION file could too — the --conditions flag in the scheduler test
+// script is belt-and-braces only (task-runner-208-softs passes without it; it must stay BARE,
+// see the S24a script pin below). The accepted workspace-only floor: no non-test file in any
+// production path may reference the subpath at all. This static pin enforces that floor — if
+// the exports gate is ever removed, this test remains the wall.
+//
+// #219 S24b — the pin used to scan only *.ts/*.tsx under three roots (apps/web,
+// packages/mastra/src, packages/scheduler/src) and match only the full literal specifier.
+// Widened per Test ACCEPT #219: it now walks EVERY apps/* directory and EVERY packages/*/src
+// (except packages/db/src/test — the spy's own home), matches *.ts/.tsx/.js/.jsx/.mjs/.cjs/
+// .mts/.cts (config files like apps/web/next.config.mjs were previously invisible), and matches
+// the '@tourbillon/db/test/' PREFIX so computed specifiers (`import(`@tourbillon/db/test/${x}`)`,
+// string concatenation) cannot slip past a full-literal check.
 test('S7a pin: no production file imports @tourbillon/db/test/query-spy', () => {
   let repoRoot = __dirname;
   while (repoRoot !== path.dirname(repoRoot) && !existsSync(path.join(repoRoot, 'pnpm-workspace.yaml'))) {
@@ -200,23 +210,90 @@ test('S7a pin: no production file imports @tourbillon/db/test/query-spy', () => 
   }
   assert.ok(existsSync(path.join(repoRoot, 'pnpm-workspace.yaml')), 'walked up to the pnpm workspace root');
 
-  const FORBIDDEN = '@tourbillon/db/test/query-spy';
-  const SKIP_DIRS = new Set(['node_modules', '.next', '.turbo', 'dist', 'build', 'migrations']);
+  // PREFIX, not the full literal (#219 S24b): a computed specifier assembled at runtime
+  // ('@tourbillon/db/test/' + 'query-spy', template literals) never contains the full string
+  // but always carries the subpath prefix.
+  const FORBIDDEN_PREFIX = '@tourbillon/db/test/';
+  const PRODUCTION_EXT = /\.(?:tsx?|jsx?|mjs|cjs|mts|cts)$/;
+  const TEST_FILE = /\.(?:test|spec)\.(?:tsx?|jsx?|mjs|cjs|mts|cts)$/;
+  const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', 'coverage', 'migrations']);
+  // The spy's own home legitimately holds the subpath (and its doc comments) — excluded as
+  // WRITTEN in the #219 ACCEPT S24b ('all packages/*/src except db test/').
+  const EXCLUDED_DIRS = new Set([path.join(repoRoot, 'packages', 'db', 'src', 'test')]);
+
   const hits: string[] = [];
-  const walk = (dir: string): void => {
+  const scannedPerRoot = new Map<string, number>();
+  let skippedTestFiles = 0;
+
+  const walk = (dir: string, root: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const file = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        if (!SKIP_DIRS.has(entry.name)) walk(path.join(dir, entry.name));
-      } else if (/\.tsx?$/.test(entry.name) && !/\.test\.tsx?$/.test(entry.name)) {
-        const file = path.join(dir, entry.name);
-        if (readFileSync(file, 'utf8').includes(FORBIDDEN)) {
+        // Dot-dirs (.next, .turbo, .expo, .git, ...) and SKIP_DIRS are generated/vendored.
+        if (!SKIP_DIRS.has(entry.name) && !entry.name.startsWith('.') && !EXCLUDED_DIRS.has(file)) {
+          walk(file, root);
+        }
+      } else if (PRODUCTION_EXT.test(entry.name)) {
+        if (TEST_FILE.test(entry.name)) {
+          skippedTestFiles += 1;
+          continue;
+        }
+        if (readFileSync(file, 'utf8').includes(FORBIDDEN_PREFIX)) {
           hits.push(path.relative(repoRoot, file));
         }
+        scannedPerRoot.set(root, (scannedPerRoot.get(root) ?? 0) + 1);
       }
     }
   };
-  for (const prod of ['apps/web', 'packages/mastra/src', 'packages/scheduler/src']) {
-    walk(path.join(repoRoot, prod));
+
+  // ALL workspace production roots (#219 S24b): every app (walked whole, like apps/web always
+  // was — config files live at the package root) and every package's src if it has one.
+  const roots: string[] = [];
+  for (const app of readdirSync(path.join(repoRoot, 'apps'), { withFileTypes: true })) {
+    if (app.isDirectory() && !app.name.startsWith('.')) roots.push(path.join('apps', app.name));
   }
-  assert.deepEqual(hits, [], 'only *.test.ts files may import the gated test-only subpath');
+  for (const pkg of readdirSync(path.join(repoRoot, 'packages'), { withFileTypes: true })) {
+    const src = path.join('packages', pkg.name, 'src');
+    if (pkg.isDirectory() && existsSync(path.join(repoRoot, src))) roots.push(src);
+  }
+  for (const root of roots) walk(path.join(repoRoot, root), root);
+
+  // Non-vacuity (#219 S24b): a silently-empty walk must not read as a green pin. Every root
+  // the ACCEPT names must have had production files actually scanned under it, and the test-
+  // file exemption must have fired (this very file is one of the skipped files).
+  for (const expected of [
+    'apps/web',
+    'packages/db/src',
+    'packages/mastra/src',
+    'packages/scheduler/src',
+    'packages/shared/src',
+  ]) {
+    assert.ok((scannedPerRoot.get(expected) ?? 0) > 0, `pin actually scanned production files under ${expected}`);
+  }
+  assert.ok(skippedTestFiles > 0, 'the *.test.*/*.spec.* exemption actually skips files');
+
+  assert.deepEqual(hits, [], `only test files may reference the gated test-only subpath (prefix '${FORBIDDEN_PREFIX}')`);
+});
+
+// #219 S24a — the scheduler test script keeps --conditions=tourbillon-test as belt-and-braces
+// (tsx resolves the subpath through the tsconfig.base.json paths key today, so the suite passes
+// without it — verified). The form must be BARE: '+tourbillon-test' (esbuild syntax) matches
+// nothing in tsx 4.23.1 / node 22 — with the paths key removed, '+' dies with
+// ERR_PACKAGE_PATH_NOT_EXPORTED while bare passes 4/4 (both verified in the PR). This pin stops
+// the script and its documented rationale from drifting: a dropped or '+'-reverted flag loses
+// the backup wall silently the day the paths key goes away (the tsx-paths fix).
+test('S24a pin: scheduler test script keeps the working belt --conditions=tourbillon-test (bare)', () => {
+  const pkg = JSON.parse(
+    readFileSync(path.join(__dirname, '../package.json'), 'utf8'),
+  ) as { scripts: Record<string, string> };
+  assert.match(
+    pkg.scripts.test ?? '',
+    /--conditions=tourbillon-test\b/,
+    'the working (bare) condition stays in the scheduler test script — see the S24a note in package.json',
+  );
+  assert.doesNotMatch(
+    pkg.scripts.test ?? '',
+    /--conditions=\+tourbillon-test/,
+    "'+tourbillon-test' is esbuild syntax — tsx/node match condition names literally, so the '+' form resolves NOTHING (verified dead in #219 S24a)",
+  );
 });
