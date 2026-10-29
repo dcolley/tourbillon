@@ -19,12 +19,13 @@
       // / 140 TS6059; intentional, tracked; folds into any future scheduler rootDir/project-
       // references fix). Runtime import is gated behind the "tourbillon-test" exports condition
       // (#216 S7a) - scheduler's test script passes --conditions=tourbillon-test (bare form;
-      // the old '+tourbillon-test' wording was stale — #223 S26a, see the S24a note below). TS resolves
+      // the old plus-prefixed variant of that condition name was stale — #223 S26a, see
+      // the S24a note below). TS resolves
       // types for this specifier through this paths key either way.
       // #219 S24a: this key is also why the scheduler's --conditions flag is INERT today
       // (task-runner-208-softs passes 3/3 without it) — belt-and-braces; the S7a pin is the
       // real wall. The flag MUST be the BARE form '--conditions=tourbillon-test' (verified on
-      // tsx 4.23.1: with this key removed, '+tourbillon-test' still dies with
+      // tsx 4.23.1: with this key removed, the plus-prefixed variant still dies with
       // ERR_PACKAGE_PATH_NOT_EXPORTED, bare passes 4/4) — it becomes load-bearing exactly when
       // this key is removed for the subpath (the tsx-paths fix).
       "@tourbillon/db/test/query-spy": ["./packages/db/src/test/query-spy.ts"],
