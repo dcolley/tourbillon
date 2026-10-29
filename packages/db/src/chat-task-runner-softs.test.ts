@@ -231,28 +231,25 @@ describe('S7: per-agent fair share no longer under-fills the global limit', () =
     const { client, db } = await freshDb();
     try {
       await seedBacklog(db, 30);
-      // S210b (#210 softs): the old perAgentLimit:2 case asserted only `<= 2` per agent —
-      // which the pass-1-only listing (a1:2 + b1:1) ALSO satisfies: with ceiling 2 every agent
-      // is already at the ceiling after pass 1, so the backfill loop is entirely skipped and
-      // the test proved nothing about it. Ceiling 3 is the first discriminating value: fair
-      // share is min(3, ceil(25/2)) = 2 < ceiling, so pass 1 lists a1:2 + b1:1 (3 rows) and
-      // the backfill must top the tick up to the full ceiling — a1:3. Mutant: drop the S7
-      // backfill loop → rows stay 3 and rows.length/a1:3 go RED while the old `<=` ceiling
-      // checks stay green (that was the gap). Mutant: drop `already >= perAgentCeiling` in the
-      // backfill gate → a1 runs away to 2 + min(2, 23, ∞) = 4 and a1:3/rows:4 go RED, so the
-      // ceiling honour is asserted at its boundary, not just one-sided.
-      const rows = await listRunnableChatTasks(db, { limit: 25, maxAttempts: 2, perAgentLimit: 3 });
+      // S210b (#210 softs / HOLD fix): backfill only fires when perAgentLimit > fairShare.
+      // fairShare = max(1, min(perAgentLimit, ceil(limit/agents))) — with limit 25 and 2
+      // agents, ceil(25/2)=13. So perAgentLimit:3 has fairShare=min(3,13)=3 (NOT 2): pass 1
+      // already returns a1:3+b1:1 and the backfill gate skips everyone. Discriminating value
+      // is any perAgentLimit > 13. Here perAgentLimit:20 → fairShare=13 < 20: pass 1 lists
+      // a1:13 + b1:1 (14 rows); backfill tops a1 to 20 → rows.length 21. Mutant drop backfill
+      // fetchChunk → actual 14 → RED. Mutant drop ceiling term from cap → a1 runs past 20 → RED.
+      const rows = await listRunnableChatTasks(db, { limit: 25, maxAttempts: 2, perAgentLimit: 20 });
       const perAgent = new Map<string, number>();
       for (const r of rows) perAgent.set(r.agentId, (perAgent.get(r.agentId) ?? 0) + 1);
-      assert.ok((perAgent.get('a1') ?? 0) <= 3, 'a1 capped at the caller per-agent limit');
-      assert.ok((perAgent.get('b1') ?? 0) <= 3, 'b1 capped at the caller per-agent limit');
-      assert.equal(rows.length, 4, 'tick fills past the pass-1 under-fill to the ceiling — backfill included');
-      assert.equal(perAgent.get('a1'), 3, 'backfilled a1 tops up to exactly perAgentLimit, no more');
+      assert.ok((perAgent.get('a1') ?? 0) <= 20, 'a1 capped at the caller per-agent limit');
+      assert.ok((perAgent.get('b1') ?? 0) <= 20, 'b1 capped at the caller per-agent limit');
+      assert.equal(rows.length, 21, 'tick fills past pass-1 under-fill (14) to a1:20 + b1:1 — backfill included');
+      assert.equal(perAgent.get('a1'), 20, 'backfilled a1 tops up to exactly perAgentLimit, no more');
       assert.equal(perAgent.get('b1'), 1, 'b1 keeps its row (never starved) and stays at its real backlog of 1');
       assert.deepEqual(
         rows.filter((r) => r.agentId === 'a1').map((r) => r.title),
-        ['T00', 'T01', 'T02'],
-        'backfilled rows continue the claim-order prefix, no duplicates, no gaps',
+        Array.from({ length: 20 }, (_, i) => `T${String(i).padStart(2, '0')}`),
+        'backfilled rows continue the claim-order prefix T00–T19, no duplicates, no gaps',
       );
       assert.equal(new Set(rows.map((r) => r.taskId)).size, rows.length, 'no task listed twice');
     } finally {
