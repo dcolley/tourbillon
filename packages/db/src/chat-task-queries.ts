@@ -349,6 +349,15 @@ export async function listRunnableChatTasks(
   // may have more rows); agents that returned fewer than fairShare are exhausted, so they are
   // never re-queried. Bounded: at most one further chunk per agent, per-agent ceiling honoured,
   // claim order (position, then age) preserved inside each agent.
+  //
+  // S210c (#210 softs) — the offset(already) race, documented not fixed: `already` counts rows
+  // pass 1 saw, but pass 2 re-reads the live table `already` rows into the SAME (position,
+  // createdAt) order. A concurrent claim (or insert/pause) between the passes shifts that
+  // window, so within one tick a row can be skipped (claimed after pass 1, so pass 2's offset
+  // pages past it) or re-listed (a row shifted left into the offset). Both are harmless:
+  // claimChatTaskRun is a CAS (`WHERE status = 'pending'` plus pause/attempt guards), so a
+  // re-listed row just fails its second claim, and a skipped row is pending again for the NEXT
+  // tick's listing — no task is lost, no slot is double-spent.
   for (const agentId of agentIds) {
     const remaining = limit - picked.length;
     if (remaining <= 0) break;
