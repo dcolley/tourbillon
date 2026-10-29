@@ -14,6 +14,7 @@
     "paths": {
       "@tourbillon/db": ["./packages/db/src/index.ts"],
       "@tourbillon/db/schema": ["./packages/db/src/schema/index.ts"],
+      "@tourbillon/db/test/query-spy": ["./packages/db/src/test/query-spy.ts"],
       "@tourbillon/shared": ["./packages/shared/src/index.ts"],
       "@tourbillon/shared/*": ["./packages/shared/src/*"],
       "@tourbillon/mastra": ["./packages/mastra/src/index.ts"],

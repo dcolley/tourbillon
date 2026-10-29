@@ -25,6 +25,7 @@ import path from 'node:path';
 import { readMigrationFiles } from 'drizzle-orm/migrator';
 import { addChatTask, setChatTaskPaused } from '@tourbillon/db';
 import * as schema from '@tourbillon/db/schema';
+import { spyQueries } from '@tourbillon/db/test/query-spy';
 import type { ChatTaskDb } from '@tourbillon/db';
 import { createDefaultTaskRunnerDeps } from './task-runner';
 
@@ -94,22 +95,8 @@ const A1 = { companyId: 'c1', agentId: 'a1' };
 const A2 = { companyId: 'c1', agentId: 'a2' };
 const B1 = { companyId: 'c2', agentId: 'b1' };
 
-interface CapturedQuery {
-  sql: string;
-  params: unknown[];
-}
-
-function spyQueries(client: PGliteLike): CapturedQuery[] {
-  const captured: CapturedQuery[] = [];
-  const original = client.query.bind(client);
-  (client as unknown as {
-    query: (sql: string, params?: unknown[], config?: unknown) => Promise<unknown>;
-  }).query = (sqlText: string, params?: unknown[], config?: unknown) => {
-    captured.push({ sql: String(sqlText), params: params ?? [] });
-    return original(sqlText, params as never[], config as never);
-  };
-  return captured;
-}
+// spyQueries (#213 S6c) is the shared helper from '@tourbillon/db/test/query-spy' — one
+// driver-boundary spy for the two db chat-task suites and this file.
 
 test('S5: listRunnable end-to-end — resolved per-company budgets travel company read → CASE → rows (real PGlite)', async () => {
   const { client, db } = await freshDb();
@@ -173,8 +160,11 @@ test('S5: listRunnable with no pending work — empty map, no CASE, empty listin
   const { client, db } = await freshDb();
   try {
     // Only a paused row and a done row exist: the company read sees nothing, so the listing
-    // runs the empty-map branch. #208 S3 made that branch share bound 5 with the CASE ELSE;
-    // a row raced in at attempts=2 (added AFTER nothing was pending) must still list.
+    // runs the empty-map branch and returns []. NOTE (#213 S6b): this exercises the empty-map
+    // branch only STRUCTURALLY — with nothing pending there is no row for the fallback bound
+    // to judge, so the #208 S3 bound (5, shared with the CASE ELSE) is NOT asserted here and
+    // the S3 5→2 mutant stays green in this file. That bound is pinned by the db suite
+    // (chat-task-queries.test.ts, 'S3: the EMPTY map uses the SAME fallback bound 5').
     const paused = await addChatTask(A1, { title: 'Paused only' }, db);
     await setChatTaskPaused(A1, { id: paused.id, paused: true }, db);
     await addChatTask(B1, { title: 'Done only', status: 'done' }, db);
@@ -182,9 +172,10 @@ test('S5: listRunnable with no pending work — empty map, no CASE, empty listin
     const deps = createDefaultTaskRunnerDeps({ database: db, log: { info: () => undefined } });
     assert.deepEqual(await deps.listRunnable(), [], 'nothing pending unpaused → empty listing');
 
-    // Race a task in at attempts=2 and re-poll: the company map is still empty for the
-    // settings read only if the row is invisible — it is NOT, so it maps to its company's
-    // resolved budget (c1 = 1 → excluded). Pin that too: tight company, one attempt spent.
+    // Race a pending row in at attempts=2 and re-poll. On THIS poll the company read sees c1,
+    // so the row is judged through the CASE path against c1's resolved budget (1) — excluded.
+    // What this pins is the map path end-to-end (settings read → resolved budget → CASE bind
+    // → exclusion); it is deliberately NOT the S3 empty-map bound (see the note above).
     const raced = await addChatTask(A1, { title: 'Raced in' }, db);
     await client.query('update chat_tasks set runner_attempts = 2 where id = $1', [raced.id]);
     assert.deepEqual((await deps.listRunnable()).map((r) => r.taskId), [],
