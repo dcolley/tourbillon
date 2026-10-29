@@ -46,6 +46,17 @@ export default defineConfig([
   // and the tail/parenthesised tail legs are RED with exactly 1 report, while the call-arg
   // form `f({ a: 1 } as T) as never` and the bare single-step `as never`/`<never>x` are GREEN
   // (a bare single-step `<never>x` stays green by design, mirroring `controller as never`).
+  //
+  // S25a: Test's #222 sweep found the child combinator lets a WRAPPER node between the two
+  // casts escape both never selectors — `(x as T)! as never` and `(x as T satisfies object) as
+  // never` (tail through a hop, RED on main's descendant form) plus `((x as never)!) as T` and
+  // `<never>((<T>x)!)` (lead through a hop, green even on main). Two mirror selectors now allow
+  // exactly one TSNonNullExpression / TSSatisfiesExpression hop between the legs; a call-arg
+  // form (`f({ a: 1 } as T) as never`) keeps its CallExpression between the legs, is not a hop,
+  // and stays GREEN — mutant-verified both ways. One hop is the full scope Test asked for.
+  // S25b: wording-only nits on the #222 pair — the lead-leg message no longer lists the
+  // tail shape `x as T as never` (that shape is reported by the tail selector), and the tail
+  // message is retagged so it also credits the S23a angle-bracket legs it reports.
   // Scope unchanged: bridge source + test only.
   {
     files: ['lib/assistant/task-progress-bridge.ts', 'lib/assistant/task-progress-bridge.test.ts'],
@@ -100,10 +111,24 @@ export default defineConfig([
           // A bare single-step `as never` / `<never>x` is NOT nested, so the deliberate
           // `controller as never` in getChatSession (and the test's `signal as never`)
           // stay green without disables — mutant-verified both ways.
+          // S25b: this message used to also list `x as T as never` — that shape carries the
+          // `never` annotation on the OUTER node and is reported by the tail selector below,
+          // so the list here names only lead-leg (annotation-on-child) shapes.
           selector:
             ":matches(TSAsExpression, TSTypeAssertion) > :matches(TSAsExpression, TSTypeAssertion)[typeAnnotation.type='TSNeverKeyword']",
           message:
-            'S20b/S23a: an `as never`/`<never>` leg inside a multi-step cast (`(x as never) as T`, `x as T as never`, `<T><never>x`, `<T>(x as never)`, `(<never>x) as T`) erases types exactly like `as unknown as` — `never` is assignable everywhere; keep casts single-step and typed. A deliberate single-step `as never` is fine (see task-progress-bridge.ts).',
+            'S20b/S23a: an `as never`/`<never>` leg DIRECTLY inside a multi-step cast (`(x as never) as T`, `<T><never>x`, `<T>(x as never)`, `(<never>x) as T`) erases types exactly like `as unknown as` — `never` is assignable everywhere; keep casts single-step and typed. A deliberate single-step `as never` is fine (see task-progress-bridge.ts).',
+        },
+        {
+          // S25a lead-leg mirror: the `never` leg can hide ONE wrapper hop under the outer
+          // cast — `((x as never)!) as T` (TSNonNullExpression) or `((x as never) satisfies
+          // object) as T` (TSSatisfiesExpression). Same child-combinator discipline as the
+          // direct pair: exactly one named hop node between the two casts, so a call-arg
+          // shape (cast under a CallExpression, not a hop) is out of scope. Mutant-verified.
+          selector:
+            ":matches(TSAsExpression, TSTypeAssertion) > :matches(TSNonNullExpression, TSSatisfiesExpression) > :matches(TSAsExpression, TSTypeAssertion)[typeAnnotation.type='TSNeverKeyword']",
+          message:
+            'S25a: an `as never`/`<never>` leg one `!`/`satisfies` hop under a cast (`((x as never)!) as T`) erases types exactly like `as unknown as` — `never` is assignable everywhere; keep casts single-step and typed. A deliberate single-step `as never` is fine (see task-progress-bridge.ts).',
         },
         {
           // S20b tail-leg twin + S23b: `x as T as never` (and `<never>(x as T)`,
@@ -117,10 +142,25 @@ export default defineConfig([
           // `(x as T) as never` is AST-identical to the tail leg and is caught too —
           // deliberate (getChatSession's real shape is the BARE `controller as never`, AST
           // child = Identifier, which stays green).
+          // S25b: retagged S20b/S23b -> S20b/S23a/S23b — since S23a this selector also
+          // reports the angle-bracket tail legs (`<never>(x as T)`, `<never><T>x`,
+          // `(<T>x) as never`), so the tag/wording now credits that S23a work too.
           selector:
             ":matches(TSAsExpression, TSTypeAssertion)[typeAnnotation.type='TSNeverKeyword'] > :matches(TSAsExpression, TSTypeAssertion)",
           message:
-            'S20b/S23b: reaching `as never`/`<never>` as the tail of a multi-step cast (`x as T as never`, `<never>(x as T)`) erases types exactly like `as unknown as` — keep casts single-step and typed. A deliberate single-step `as never` is fine (see task-progress-bridge.ts).',
+            'S20b/S23a/S23b: reaching `as never`/`<never>` as the tail of a multi-step cast (`x as T as never`, `<never>(x as T)`, `<never><T>x`, `(<T>x) as never`) erases types exactly like `as unknown as` — keep casts single-step and typed. A deliberate single-step `as never` is fine (see task-progress-bridge.ts).',
+        },
+        {
+          // S25a tail-leg mirror: the tail `as never`/`<never>` can sit one wrapper hop
+          // above the inner cast — `(x as T)! as never` and `(x as T satisfies object) as
+          // never` (RED on main's descendant form, green on #222's child form), plus the
+          // bracketed `<never>((<T>x)!)`. Exactly one named hop node between the casts, so
+          // the call-arg form `f({ a: 1 } as T) as never` (CallExpression between the legs)
+          // is not a hop and stays GREEN — mutant-verified both ways.
+          selector:
+            ":matches(TSAsExpression, TSTypeAssertion)[typeAnnotation.type='TSNeverKeyword'] > :matches(TSNonNullExpression, TSSatisfiesExpression) > :matches(TSAsExpression, TSTypeAssertion)",
+          message:
+            'S25a: reaching `as never`/`<never>` as the tail through a `!`/`satisfies` wrapper (`(x as T)! as never`, `(x as T satisfies object) as never`, `<never>((<T>x)!)`) erases types exactly like `as unknown as` — keep casts single-step and typed. A deliberate single-step `as never` is fine (see task-progress-bridge.ts).',
         },
       ],
     },
