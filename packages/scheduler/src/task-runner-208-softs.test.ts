@@ -32,6 +32,13 @@ import { createDefaultTaskRunnerDeps } from './task-runner';
 // task-runner.ts imports @tourbillon/db at module load, which validates DATABASE_URL eagerly.
 process.env.DATABASE_URL ??= 'postgres://unused@127.0.0.1:1/unused';
 
+// #224 S28b: the S24a pin's match regex, hoisted to ONE module-level const (above every test()
+// so the hoisted node:test callbacks can't hit a TDZ) shared by BOTH the assert.match in the
+// S24a pin AND the S26b mutant legs below — no private copy. Drift the pattern and the legs
+// fail alongside the pin (and vice versa): the legs can never quietly guard a stale duplicate
+// of what the pin actually enforces. Pattern is unchanged from #223 S26b.
+const PIN_RE = /--conditions=tourbillon-test(?=\s|$)/;
+
 const dbRequire = createRequire(path.join(__dirname, '../../db/package.json'));
 
 /** Structural surface we actually use — PGlite is not a scheduler dependency, so no types. */
@@ -290,7 +297,7 @@ test('S24a pin: scheduler test script keeps the working belt --conditions=tourbi
   ) as { scripts: Record<string, string> };
   assert.match(
     pkg.scripts.test ?? '',
-    /--conditions=tourbillon-test(?=\s|$)/,
+    PIN_RE,
     'the working (bare) condition stays in the scheduler test script — see the S24a note in package.json',
   );
   assert.doesNotMatch(
@@ -301,8 +308,9 @@ test('S24a pin: scheduler test script keeps the working belt --conditions=tourbi
 
   // #223 S26b - the S24a regex must match the EXACT condition token only. '\b' sat before the
   // '-' in 'tourbillon-test-foo', so a near-miss condition false-passed the pin. The end-of-token
-  // lookahead (?=\s|$) closes that: mutant legs pin both directions.
-  const PIN_RE = /--conditions=tourbillon-test(?=\s|$)/;
+  // lookahead (?=\s|$) closes that: mutant legs pin both directions. #224 S28b: these legs run
+  // against the SAME module-level PIN_RE the assert.match above consumes — mutate it and both
+  // the pin and the legs go red together.
   assert.ok(
     PIN_RE.test('tsx --conditions=tourbillon-test --test src/**/*.test.ts'),
     'bare --conditions=tourbillon-test (end of token) satisfies the pin',
