@@ -6,12 +6,14 @@
  * getAgent company join (S10) with column-pinned `eq` assertions (S13), the paused-agent
  * status mapping (S14), the DEFAULT (un-injected) getAgent path pinning that the module `db`
  * EXPORT is queried — the B1 namespace regression (S15), the loud injected-db-without-tables
- * failure (S16), and the fail-open redis claim (S11) — all against fakes, no real
- * redis/db/chat imports — plus the S17 compile-time pins on the real `@tourbillon/db` export
- * shapes (type-level only; enforced by `tsc --noEmit`, see the S17 section at the bottom).
+ * failure (S16), the loud falsy-loaded-db guard (S19c), and the fail-open redis claim (S11)
+ * — all against fakes, no real redis/db/chat imports — plus the S17 compile-time pins on the
+ * real `@tourbillon/db` export shapes and the S19b pins on the chat call-site Pick seam
+ * (type-level only; enforced by `tsc --noEmit`, see the S17/S19b sections at the bottom).
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import type { Agent } from '@tourbillon/db';
 import {
   buildTaskProgressBridgeDeps,
   createDeliver,
@@ -23,6 +25,7 @@ import {
   __resetTaskProgressSignalBridgeForTests,
   TASK_PROGRESS_CLAIM_TTL_SECONDS,
   type BridgeSubscriber,
+  type ChatAgentSeam,
   type DeliverDeps,
   type DeliverSession,
   type RedisClaimCommands,
@@ -564,6 +567,36 @@ test('getAgent (default path, S15/B1): the db passed to lookups is === the modul
     'the module namespace was never used as the db (B1)');
 });
 
+/**
+ * S19c: the B1 `!dbSource` throw had no coverage — every default-path test handed `loadDb` a
+ * COMPLETE fake module, so the falsy branch never ran. Delete the throw (or let a loader
+ * regress to a module without `db`) and previously the bridge limped into `db.query` and died
+ * with an opaque TypeError deep in the lookup. This resolves the seam to `{}` — no `db` — and
+ * pins the loud guard instead: throws at the seam, before any load bookkeeping beyond the one
+ * loadDb call and before any eq/lookup. The cast is the single-step, checked
+ * `Partial<TaskProgressDbModule> -> TaskProgressDbModule` form (comparable via the interface),
+ * so it stays inside what the S18/S19a bridge lint rules allow.
+ */
+test('getAgent (S19c/B1 guard): a loaded module with no `db` throws at the seam, not deep in the lookup', async () => {
+  let loadCalls = 0;
+  const noDbModule: Partial<TaskProgressDbModule> = {};
+  const orm = fakeOrm();
+  await assert.rejects(
+    () =>
+      getAgent('agent-1', {
+        orm: orm.orm,
+        loadDb: async () => {
+          loadCalls += 1;
+          return noDbModule as TaskProgressDbModule;
+        },
+      }),
+    /getAgent: no db source/,
+    'a falsy dbSource must hit the loud B1 guard, not a downstream db.query TypeError',
+  );
+  assert.equal(loadCalls, 1, 'the module was loaded — the guard fires on what it yielded');
+  assert.deepEqual(orm.where, [], 'no eq ran — the throw precedes every lookup');
+});
+
 test('getAgent (S16): injected db WITHOUT tables fails loudly instead of silently using {}', async () => {
   const db = fakeDb({
     agent: { id: 'agent-1', companyId: 'company-1', status: 'active' },
@@ -686,7 +719,7 @@ test('bridge: idempotent per process; the reset hook restarts it (S1)', async ()
 
 // ─── S17: compile-time pins on the REAL `@tourbillon/db` export shapes ──────────────────
 //
-// Type-level only (no runtime assertions — the runtime suite stays at 20 tests). Enforced by
+// Type-level only (no runtime assertions — the runtime suite stays at 21 tests). Enforced by
 // `tsc --noEmit` on apps/web. Background: `loadRealDbModule` used to launder the whole module
 // through `as unknown as TaskProgressDbModule`, so a shape drift in `@tourbillon/db` was only
 // visible through the S15 fake-module probe. The source now pins the real exports twice: the
@@ -720,6 +753,50 @@ export type S17SliceMatchesRealExports = Assert<
  * (richer than the interface's `{ query }` shim), so an erasure cannot pass unnoticed. */
 export type S17DbIsRealNotQueryShim = Assert<
   Awaited<ReturnType<typeof loadRealDbModule>>['db'] extends { query: unknown; select: unknown }
+    ? true
+    : false
+>;
+
+// ─── S19b: compile-time pins on the chat call-site seam (ChatAgentSeam) ─────────────────
+//
+// realDeliver widens the bridge record to Agent through the named `ChatAgentSeam`
+// (Pick<Agent, 'id' | 'companyId' | 'status'>), replacing S18's `as Partial<Agent> as Agent`.
+// The call-site assertion steps pass via TS's COMPARABLE relation (Agent['status'] is a
+// drizzle enum union vs the record's string), so a naive `record extends seam` pin would be
+// wrongly red. These pins witness the strictness that actually matters instead:
+//   - loosening the seam back toward `Partial<Agent>` -> S19bSeamIsNotOptionalShadow goes red
+//     (a Partial IS assignable to itself, so the conditional flips);
+//   - swapping/removing a seam key -> S19bSeamKeysAreExact / S19bRecordCoversSeam go red;
+//   - Agent column drift (e.g. `status` becomes a number) -> S19bSeamTypesFitRecord goes red
+//     alongside the call-site cast.
+
+/** The seam is EXACTLY the three consumed Agent keys — no quiet key swaps or additions. */
+export type S19bSeamKeysAreExact = Assert<
+  [Exclude<keyof ChatAgentSeam, 'id' | 'companyId' | 'status'>,
+    Exclude<'id' | 'companyId' | 'status', keyof ChatAgentSeam>] extends [never, never]
+    ? true
+    : false
+>;
+
+/** The seam's keys are REQUIRED, not an optional shadow of Agent: this is precisely what
+ * makes `Pick` a stricter first cast leg than S18's `as Partial<Agent> as Agent` (whose
+ * optional keys were only checked where the record happened to share them). */
+export type S19bSeamIsNotOptionalShadow = Assert<Partial<Agent> extends ChatAgentSeam ? false : true>;
+
+/** The bridge record still PROVIDES every seam key — drop or rename one on
+ * TaskProgressAgentRecord and this goes red (the call-site cast alone would stay comparable). */
+export type S19bRecordCoversSeam = Assert<
+  Exclude<keyof ChatAgentSeam, keyof TaskProgressAgentRecord> extends never ? true : false
+>;
+
+/** The Agent-derived seam types still fit the record's declared field types (direction that
+ * IS strict-assignable: enum union -> string). Column drift on Agent turns this red. */
+export type S19bSeamTypesFitRecord = Assert<
+  [ChatAgentSeam['id'], ChatAgentSeam['companyId'], ChatAgentSeam['status']] extends [
+    TaskProgressAgentRecord['id'],
+    TaskProgressAgentRecord['companyId'],
+    TaskProgressAgentRecord['status'],
+  ]
     ? true
     : false
 >;
