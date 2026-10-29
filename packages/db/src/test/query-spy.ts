@@ -6,8 +6,10 @@
  *
  * #216 S7a: that export is gated behind the "tourbillon-test" package-exports condition (see
  * packages/db/package.json) so production importers (apps/web, packages/mastra) cannot resolve
- * this test-only module; only the scheduler test script opts in via
- * `tsx --conditions=+tourbillon-test --test …`. db's own suites import it by relative path.
+ * this test-only module; only the scheduler test script opts in via the BARE form
+ * `tsx --conditions=tourbillon-test --test …` (the plus-prefixed variant of that condition
+ * name is dead on tsx 4.23.1 — matches nothing; see the S24a note in
+ * packages/scheduler/package.json). db's own suites import it by relative path.
  *
  * Records every (sql, params) pair drizzle hands to `client.query` from here on — the
  * driver-boundary truth for what actually binds, PGlite leniency included. The target is
