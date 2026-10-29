@@ -231,11 +231,50 @@ describe('S7: per-agent fair share no longer under-fills the global limit', () =
     const { client, db } = await freshDb();
     try {
       await seedBacklog(db, 30);
+      // S210b (#210 softs): the old perAgentLimit:2 case asserted only `<= 2` per agent —
+      // which the pass-1-only listing (a1:2 + b1:1) ALSO satisfies: with ceiling 2 every agent
+      // is already at the ceiling after pass 1, so the backfill loop is entirely skipped and
+      // the test proved nothing about it. Ceiling 3 is the first discriminating value: fair
+      // share is min(3, ceil(25/2)) = 2 < ceiling, so pass 1 lists a1:2 + b1:1 (3 rows) and
+      // the backfill must top the tick up to the full ceiling — a1:3. Mutant: drop the S7
+      // backfill loop → rows stay 3 and rows.length/a1:3 go RED while the old `<=` ceiling
+      // checks stay green (that was the gap). Mutant: drop `already >= perAgentCeiling` in the
+      // backfill gate → a1 runs away to 2 + min(2, 23, ∞) = 4 and a1:3/rows:4 go RED, so the
+      // ceiling honour is asserted at its boundary, not just one-sided.
+      const rows = await listRunnableChatTasks(db, { limit: 25, maxAttempts: 2, perAgentLimit: 3 });
+      const perAgent = new Map<string, number>();
+      for (const r of rows) perAgent.set(r.agentId, (perAgent.get(r.agentId) ?? 0) + 1);
+      assert.ok((perAgent.get('a1') ?? 0) <= 3, 'a1 capped at the caller per-agent limit');
+      assert.ok((perAgent.get('b1') ?? 0) <= 3, 'b1 capped at the caller per-agent limit');
+      assert.equal(rows.length, 4, 'tick fills past the pass-1 under-fill to the ceiling — backfill included');
+      assert.equal(perAgent.get('a1'), 3, 'backfilled a1 tops up to exactly perAgentLimit, no more');
+      assert.equal(perAgent.get('b1'), 1, 'b1 keeps its row (never starved) and stays at its real backlog of 1');
+      assert.deepEqual(
+        rows.filter((r) => r.agentId === 'a1').map((r) => r.title),
+        ['T00', 'T01', 'T02'],
+        'backfilled rows continue the claim-order prefix, no duplicates, no gaps',
+      );
+      assert.equal(new Set(rows.map((r) => r.taskId)).size, rows.length, 'no task listed twice');
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('S210b: ceiling 2 skips the backfill entirely (every agent starts AT the ceiling)', async () => {
+    // The config the old test used, pinned honestly: pass 1 already puts a1 at perAgentLimit
+    // and b1 is exhausted, so the backfill loop re-queries nobody and the tick stays at 3.
+    // Same shape as the original `<= 2` assertions, plus the exact-fill pins.
+    const { client, db } = await freshDb();
+    try {
+      await seedBacklog(db, 30);
       const rows = await listRunnableChatTasks(db, { limit: 25, maxAttempts: 2, perAgentLimit: 2 });
       const perAgent = new Map<string, number>();
       for (const r of rows) perAgent.set(r.agentId, (perAgent.get(r.agentId) ?? 0) + 1);
       assert.ok((perAgent.get('a1') ?? 0) <= 2, 'a1 capped at the caller per-agent limit');
       assert.ok((perAgent.get('b1') ?? 0) <= 2, 'b1 capped at the caller per-agent limit');
+      assert.equal(rows.length, 3, 'no backfill fires below/at the ceiling — pass-1 fill only');
+      assert.equal(perAgent.get('a1'), 2, 'a1 fills the caller per-agent ceiling exactly');
+      assert.equal(perAgent.get('b1'), 1, 'b1 keeps its row (never starved)');
     } finally {
       await client.close();
     }

@@ -5,6 +5,8 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   handleTaskProgressEvent,
   parseTaskProgressMessage,
@@ -353,4 +355,27 @@ test('S4: the bridge re-exports the SHARED constant — publisher and parser can
     parseTaskProgressMessage(JSON.stringify({ type: SHARED_TASK_PROGRESS_SSE_TYPE, ...event() })),
     event(),
   );
+});
+
+// ─── S210a (#210 softs): static source guard — the value pin above has a blind spot ──────
+
+test('S210a: the re-export module contains no local chat_task_progress string literal — only the shared import/re-export', () => {
+  // The S4 pin is value-only: a same-value local re-fork (`const TASK_PROGRESS_SSE_TYPE =
+  // 'chat_task_progress' satisfies SSEEventType` next to the shared one) stays green because
+  // both sides still equal 'chat_task_progress'. This static guard reads the module source and
+  // asserts the wire type exists HERE only as the shared import/re-export. Mutant: add a local
+  // 'chat_task_progress' literal to task-progress-signals.ts → RED.
+  const src = readFileSync(fileURLToPath(new URL('./task-progress-signals.ts', import.meta.url)), 'utf8');
+  const code = src
+    .replace(/\/\*[\s\S]*?\*\//g, ' ') // block comments (the prose mentions the literal)
+    .replace(/^\s*\/\/.*$/gm, ' '); // line comments
+  const literal = /(['"`])chat_task_progress\1/;
+  assert.ok(
+    !literal.test(code),
+    "task-progress-signals.ts must not define its own 'chat_task_progress' literal — " +
+      'the shared TASK_PROGRESS_SSE_TYPE is the single source (import + re-export only)',
+  );
+  // Positive half: the shared binding really is what this module re-exports.
+  assert.match(src, /import\s*\{[^}]*TASK_PROGRESS_SSE_TYPE[^}]*\}\s*from\s*'@tourbillon\/shared\/types'/);
+  assert.match(src, /export\s*\{\s*TASK_PROGRESS_SSE_TYPE\s*\}/);
 });
