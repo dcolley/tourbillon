@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parkedWidgetMessage, widgetCardKind } from './parked-widgets';
+import { CARD_KIND, cardKindLabel } from '../assistant/card-kind';
 
 describe('WID-3 parked-card naming (S8)', () => {
   it('names every known card kind, including the TASK-LIST-WID task list card (pins mutant M17)', () => {
@@ -44,4 +45,21 @@ describe('WID-3 parked-card naming (S8)', () => {
     assert.doesNotMatch(serverSrc, /const CARD_KIND/);
     assert.doesNotMatch(clientSrc, /const CARD_KIND/);
   });
+
+  // #215 soft S21b: the shared lookup must not resolve prototype keys. Before the hardening the
+  // map was a plain Record and `CARD_KIND['toString']` hit Object.prototype.toString — not
+  // nullish, so `?? 'widget'` never fired and the refusal said
+  // "function toString() { [native code] } card".
+  it('prototype keys fall back to "widget", never resolving through Object.prototype (S21b)', () => {
+    assert.equal(widgetCardKind('toString'), 'widget card');
+    assert.equal(widgetCardKind('constructor'), 'widget card');
+    assert.equal(widgetCardKind('__proto__'), 'widget card');
+    assert.equal(cardKindLabel('hasOwnProperty'), 'widget');
+  });
 });
+
+// #215 soft S21b: compile-time pin (teeth are in `tsc --noEmit`, harmless at runtime) — the
+// shared map is readonly. Drop `as const` from card-kind.ts and tsc reports this directive as
+// unused, failing the error-set check.
+// @ts-expect-error CARD_KIND is readonly as of #215 S21b
+CARD_KIND.askChoice = 'choice';
