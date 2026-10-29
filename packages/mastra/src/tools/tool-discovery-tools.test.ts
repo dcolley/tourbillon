@@ -9,16 +9,11 @@
  */
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { describe, it, beforeEach, afterEach } from 'node:test';
+import { describe, it, before, after, beforeEach, afterEach } from 'node:test';
 import { PGlite } from '@electric-sql/pglite';
 import { drizzle as drizzlePglite } from 'drizzle-orm/pglite';
 import { readMigrationFiles } from 'drizzle-orm/migrator';
 import * as dbSchema from '@tourbillon/db/schema';
-// Load-order pin: tool-discovery-tools ↔ agent-factory ↔ control-plane-tools form an import
-// cycle that tsx's CJS interop resolves only when the cycle root initialises first —
-// importing './tool-discovery-tools' as the first entry hits "Cannot access
-// 'TOOL_DISCOVERY_TOOLS' before initialization" from control-plane-tools.
-import './control-plane-tools';
 import { listToolsTool, getToolDetailsTool } from './tool-discovery-tools';
 import { setToolDbForTests, type ToolDb } from './tool-db';
 
@@ -27,16 +22,21 @@ const MIGRATIONS_DIR = path.join(__dirname, '../../../db/src/migrations');
 const TEST_COMPANY_ID = 'td-company-1';
 const TEST_AGENT_ID = 'td-agent-1';
 
-/** PGlite with the full schema applied, seeded with one company + one web-search agent. */
-async function seededToolDb(): Promise<{ client: PGlite; db: ToolDb }> {
-  const client = new PGlite();
-  for (const m of readMigrationFiles({ migrationsFolder: MIGRATIONS_DIR })) {
-    for (const chunk of m.sql) {
-      if (chunk.trim()) await client.exec(chunk);
-    }
-  }
-  const database = drizzlePglite(client, { schema: dbSchema }) as unknown as ToolDb;
-  await database
+// S189-S1b: the tool-discovery-tools ↔ agent-factory ↔ control-plane-tools import cycle is
+// broken product-side (tool-discovery-tools lazy-loads agent-factory at execute time), so
+// the former "import './control-plane-tools' first" load-order pin is gone — importing
+// this module directly is now safe from any entry point.
+
+/**
+ * S189-S1c: the migration suite runs ONCE per file (was once per test, ~13s of setup for
+ * 9 tests). Per-test isolation is preserved by truncating the fixture tables before each
+ * test and reseeding — CASCADE also clears the dependent agents rows.
+ */
+let client: PGlite;
+let seededDb: ToolDb;
+
+async function seedFixtureRows(): Promise<void> {
+  await seededDb
     .insert(dbSchema.companies)
     .values({
       id: TEST_COMPANY_ID,
@@ -46,7 +46,7 @@ async function seededToolDb(): Promise<{ client: PGlite; db: ToolDb }> {
       createdAt: new Date(),
       updatedAt: new Date(),
     } as never);
-  await database
+  await seededDb
     .insert(dbSchema.agents)
     .values({
       id: TEST_AGENT_ID,
@@ -64,19 +64,32 @@ async function seededToolDb(): Promise<{ client: PGlite; db: ToolDb }> {
       createdAt: new Date(),
       updatedAt: new Date(),
     } as never);
-  return { client, db: database };
 }
 
 type ToolResult = Record<string, any>;
 
 describe('Tool Discovery Tools', () => {
   let mockContext: unknown;
-  let client: PGlite | null = null;
+
+  before(async () => {
+    client = new PGlite();
+    for (const m of readMigrationFiles({ migrationsFolder: MIGRATIONS_DIR })) {
+      for (const chunk of m.sql) {
+        if (chunk.trim()) await client.exec(chunk);
+      }
+    }
+    seededDb = drizzlePglite(client, { schema: dbSchema }) as unknown as ToolDb;
+  });
+
+  after(async () => {
+    setToolDbForTests(null);
+    await client?.close();
+  });
 
   beforeEach(async () => {
-    const seeded = await seededToolDb();
-    client = seeded.client;
-    setToolDbForTests(seeded.db);
+    await client.exec('TRUNCATE companies CASCADE');
+    await seedFixtureRows();
+    setToolDbForTests(seededDb);
 
     // extractToolRuntimeContext accepts the plain-object shape (api-client fallback branch).
     mockContext = {
@@ -89,8 +102,6 @@ describe('Tool Discovery Tools', () => {
 
   afterEach(async () => {
     setToolDbForTests(null);
-    await client?.close();
-    client = null;
   });
 
   describe('listTools', () => {
@@ -101,7 +112,10 @@ describe('Tool Discovery Tools', () => {
       )) as ToolResult;
 
       assert.ok(result.tools, 'result must carry tools');
-      assert.ok(result.count, 'result must carry count');
+      // S189-S1e: explicit presence/type check instead of truthiness (count may be 0
+      // legitimately for a tool-less agent; the > 0 assert below pins this fixture).
+      assert.ok('count' in result, 'result must carry count');
+      assert.equal(typeof result.count, 'number', 'count must be a number');
       assert.ok(Array.isArray(result.tools));
       assert.ok(result.count > 0);
 

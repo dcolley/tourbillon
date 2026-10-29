@@ -2,12 +2,19 @@ import { createTool } from '@mastra/core/tools';
 import { agents, companies, eq } from '@tourbillon/db';
 import { z } from 'zod';
 import { extractToolRuntimeContext } from './api-client';
-import { assembleAgentTools } from '../agent-factory';
 import { CHAT_TASK_TOOL_IDS } from './chat-task-tools';
 import { toolDb } from './tool-db';
 import { parseCompanySettings } from '@tourbillon/shared';
 import type { CompanySettings } from '@tourbillon/shared';
 import { serializeToolInputSchema } from './tool-schema-serialize';
+
+// S189-S1b: agent-factory statically imports control-plane-tools, which statically spreads
+// TOOL_DISCOVERY_TOOLS from this module — a static import cycle. The edge back to
+// agent-factory is only needed at execute time, so it is resolved lazily. This keeps
+// module load acyclic regardless of which entry point initialises first.
+async function loadAssembleAgentTools(): Promise<typeof import('../agent-factory').assembleAgentTools> {
+  return (await import('../agent-factory')).assembleAgentTools;
+}
 
 async function loadAgentRecord(agentId: string | undefined) {
   if (!agentId) return null;
@@ -95,6 +102,7 @@ export const listToolsTool = createTool({
       ? parseCompanySettings(company.settings)
       : null;
 
+    const assembleAgentTools = await loadAssembleAgentTools();
     const tools = await assembleAgentTools(agent, {
       companySettings,
       allowedMcpServerIds: agent.mcpServerIds ?? [],
@@ -147,6 +155,7 @@ export const getToolDetailsTool = createTool({
       ? parseCompanySettings(company.settings)
       : null;
 
+    const assembleAgentTools = await loadAssembleAgentTools();
     const tools = await assembleAgentTools(agent, {
       companySettings,
       allowedMcpServerIds: agent.mcpServerIds ?? [],
