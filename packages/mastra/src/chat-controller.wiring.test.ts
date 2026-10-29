@@ -9,6 +9,8 @@
  * createChatAgentWithSkills / createChatController with recorded deps. No DB.
  */
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 process.env.DATABASE_URL ??= 'postgres://user:***@127.0.0.1:5432/unused';
@@ -223,5 +225,28 @@ describe('chat assembly call-site wiring (S1)', () => {
     const om = (controller as any).omConfig ?? (controller as any).config?.omConfig;
     assert.ok(om, 'controller keeps the chat-forced omConfig (drop of ...omConfigPart lands here)');
     assert.equal(om.defaultObserverModelId, 'm-om', 'omConfig from the chat resolver, not heartbeat');
+  });
+});
+
+/**
+ * S195-S4 (#195 ACCEPT): source pin. createChatController used to resolve the provider row
+ * and compute a `contextBudget` it never used (dead since the CONCIERGE-PARAMS wiring
+ * landed in createChatAgentWithSkills/buildChatRunConfig). If a second budget resolution
+ * creeps back into createChatController, the count leg and the slice leg both go RED.
+ */
+describe('createChatController source pin (S195-S4: no dead contextBudget)', () => {
+  const src = readFileSync(join(__dirname, 'chat-controller.ts'), 'utf8');
+
+  it('exactly one resolveAgentContextBudget( call site in chat-controller.ts (buildChatRunConfig)', () => {
+    const calls = src.match(/resolveAgentContextBudget\(/g) ?? [];
+    assert.equal(calls.length, 1, 'the only budget resolution is the live one in buildChatRunConfig');
+  });
+
+  it('createChatController body contains no budget/provider resolution chain', () => {
+    const start = src.indexOf('export async function createChatController');
+    assert.ok(start > 0, 'createChatController found in source');
+    const body = src.slice(start);
+    assert.doesNotMatch(body, /resolveAgentContextBudget\(/, 'dead contextBudget must not return to createChatController');
+    assert.doesNotMatch(body, /resolveAgentProviderRow\(/, 'its provider resolution was dead too (the chat Agent site is authoritative)');
   });
 });

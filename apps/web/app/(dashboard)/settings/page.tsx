@@ -26,6 +26,7 @@ import { ObservationalMemorySettingsForm } from '@/components/observational-memo
 import { ConciergeModelSettingsForm } from '@/components/concierge-model-settings-form';
 import { listLlmProvidersForCompanyPicker } from '@/lib/llm-providers';
 import { actionError, actionSuccess, type ActionResult } from '@/lib/action-result';
+import { validateConciergeModelParams } from '@/lib/concierge-params';
 import { CompanySettingsTabs } from './company-settings-tabs';
 import { redactBaseURL } from '@/lib/provider-safety';
 
@@ -186,19 +187,16 @@ async function saveConciergeModel(
       return actionError('Pick both a provider and a model, or choose "No concierge model".');
     }
     // CONCIERGE-PARAMS: optional model params (blank = provider default / env limit).
-    const params: { maxContextTokens?: number; maxOutputTokens?: number } = {};
-    for (const [key, min] of [
-      ['maxContextTokens', 8_000],
-      ['maxOutputTokens', 1_024],
-    ] as const) {
-      const raw = ((formData.get(`params.${key}`) as string | null) ?? '').trim();
-      if (!raw) continue;
-      const value = Number(raw);
-      if (!Number.isInteger(value) || value < min) {
-        return actionError(`Enter ${key} as a whole number of at least ${min} tokens (or leave it blank).`);
-      }
-      params[key] = value;
+    // S195-S3: the server enforces the same min/max as the form inputs plus
+    // output < context — see lib/concierge-params.ts (the browser is not the validator).
+    const validated = validateConciergeModelParams({
+      maxContextTokens: formData.get('params.maxContextTokens') as string | null,
+      maxOutputTokens: formData.get('params.maxOutputTokens') as string | null,
+    });
+    if (!validated.ok) {
+      return actionError(validated.error);
     }
+    const params = validated.params;
     await updateCompanyConciergeModel(company.id, {
       providerId: providerId || undefined,
       modelId: modelId || undefined,

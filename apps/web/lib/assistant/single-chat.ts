@@ -63,7 +63,7 @@ export function isAssistantOmSummary(value: unknown): value is AssistantOmSummar
   return Boolean(v) && (v!.mode === 'inherit' || v!.mode === 'on' || v!.mode === 'off') && typeof v!.active === 'boolean';
 }
 
-/** "Observational Memory: On", "… Off", "… Inherit (on)", "… On (not configured)", "… On in chat · heartbeats Off". */
+/** "Observational Memory: On", "… Off", "… Inherit (on)", "… On (not configured)", "… On in chat · heartbeats Off", "… On in heartbeats · chat Off". */
 export function agentOmMenuLabel(om: AssistantOmSummary | null | undefined): string {
   const base = 'Observational Memory';
   if (!om) return base;
@@ -71,7 +71,14 @@ export function agentOmMenuLabel(om: AssistantOmSummary | null | undefined): str
   // heartbeats don't, say so — "Off" / "Inherit (off)" here would contradict the running chat.
   if (om.active && om.heartbeatActive === false) return `${base}: On in chat · heartbeats Off`;
   if (om.mode === 'off') return `${base}: Off`;
-  if (om.mode === 'on') return `${base}: ${om.active ? 'On' : 'On (not configured)'}`;
+  if (om.mode === 'on') {
+    if (om.active) return `${base}: On`;
+    // S194-S7: the chat resolver only sees company OM → concierge → none, so with an agent-only
+    // observer model (agent OM overrides, no company OM / concierge) chat is off while
+    // heartbeats DO run OM. "On (not configured)" contradicted that; say which side runs.
+    if (om.heartbeatActive === true) return `${base}: On in heartbeats · chat Off`;
+    return `${base}: On (not configured)`;
+  }
   return `${base}: Inherit (${om.active ? 'on' : 'off'})`;
 }
 

@@ -127,3 +127,35 @@ describe('chatOmSummary + agentOmMenuLabel (CONCIERGE-OM B1: menu shows the CHAT
     assert.equal(agentOmMenuLabel(s), 'Observational Memory: Inherit (on)');
   });
 });
+
+/**
+ * S194-S7 (#194 ACCEPT): mode:'on' + an agent-only observer model (agent OM overrides, no
+ * company OM pair, no concierge model). The chat resolver never sees the agent override
+ * (company OM → concierge → none), so chat has no observer (active=false) while heartbeats
+ * DO run OM (heartbeatActive=true). The menu must not claim "not configured" there.
+ * Reverting the label branch to `On (not configured)` fails the first two assertions.
+ */
+describe('agentOmMenuLabel (S194-S7: mode on + agent-only model is not "not configured")', () => {
+  const AGENT_ONLY = {
+    observationalMemory: { mode: 'on', providerId: 'p-agent', modelId: 'agent-observer' },
+  } as unknown as AgentRuntimeConfig;
+
+  it('chat off + heartbeats on the agent model: summary says so, label drops "not configured"', () => {
+    const s = chatOmSummary({}, AGENT_ONLY);
+    assert.deepEqual(s, { mode: 'on', active: false, heartbeatActive: true });
+    assert.equal(agentOmMenuLabel(s), 'Observational Memory: On in heartbeats · chat Off');
+    const items = agentChatMenuItems({ agentUrlKey: 'ceo', runOpen: false, observationalMemory: s });
+    assert.equal(items[1].label, 'Observational Memory: On in heartbeats · chat Off');
+  });
+
+  it('genuinely unconfigured (no agent override either) keeps the honest "not configured" copy', () => {
+    const s = chatOmSummary({}, { observationalMemory: { mode: 'on' } } as AgentRuntimeConfig);
+    assert.deepEqual(s, { mode: 'on', active: false, heartbeatActive: false });
+    assert.equal(agentOmMenuLabel(s), 'Observational Memory: On (not configured)');
+  });
+
+  it('legacy payload without heartbeatActive is unchanged', () => {
+    assert.equal(agentOmMenuLabel({ mode: 'on', active: false }), 'Observational Memory: On (not configured)');
+    assert.equal(agentOmMenuLabel({ mode: 'on', active: true }), 'Observational Memory: On');
+  });
+});
