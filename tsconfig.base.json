@@ -18,7 +18,8 @@
       // error, the same pre-existing class as the 139 other @tourbillon/db sources (tip 171 total
       // / 140 TS6059; intentional, tracked; folds into any future scheduler rootDir/project-
       // references fix). Runtime import is gated behind the "tourbillon-test" exports condition
-      // (#216 S7a) - scheduler's test script passes --conditions=+tourbillon-test; TS resolves
+      // (#216 S7a) - scheduler's test script passes --conditions=tourbillon-test (bare form;
+      // the old '+tourbillon-test' wording was stale — #223 S26a, see the S24a note below). TS resolves
       // types for this specifier through this paths key either way.
       // #219 S24a: this key is also why the scheduler's --conditions flag is INERT today
       // (task-runner-208-softs passes 3/3 without it) — belt-and-braces; the S7a pin is the
