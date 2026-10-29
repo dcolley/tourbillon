@@ -146,6 +146,11 @@ describe('Chat ↔ Heartbeat Tool Parity', () => {
       const chatToolIds = await chatToolKeys(chatAgent);
       const heartbeatToolIds = Object.keys(heartbeatTools);
 
+      // Non-vacuity guard (S189-S1a): the negative asserts below pass trivially if the
+      // tool lists come back empty, so pin an always-present meta tool first.
+      assert.ok(chatToolIds.includes('listToolsTool'), 'chat tool list must be populated (meta tool present)');
+      assert.ok(heartbeatToolIds.includes('getToolDetailsTool'), 'heartbeat tool list must be populated (meta tool present)');
+
       assert.ok(!chatToolIds.includes('searxngSearchTool'), 'chat must not include searxngSearchTool');
       assert.ok(!heartbeatToolIds.includes('searxngSearchTool'), 'heartbeat must not include searxngSearchTool');
     });
