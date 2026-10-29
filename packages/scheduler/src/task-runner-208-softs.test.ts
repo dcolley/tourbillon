@@ -282,18 +282,33 @@ test('S7a pin: no production file imports @tourbillon/db/test/query-spy', () => 
 // ERR_PACKAGE_PATH_NOT_EXPORTED while bare passes 4/4 (both verified in the PR). This pin stops
 // the script and its documented rationale from drifting: a dropped or '+'-reverted flag loses
 // the backup wall silently the day the paths key goes away (the tsx-paths fix).
+// #223 S26b: the match regex requires end-of-token (lookahead) so 'tourbillon-test-foo' style
+// near-misses can't false-pass; mutant legs below pin both directions.
 test('S24a pin: scheduler test script keeps the working belt --conditions=tourbillon-test (bare)', () => {
   const pkg = JSON.parse(
     readFileSync(path.join(__dirname, '../package.json'), 'utf8'),
   ) as { scripts: Record<string, string> };
   assert.match(
     pkg.scripts.test ?? '',
-    /--conditions=tourbillon-test\b/,
+    /--conditions=tourbillon-test(?=\s|$)/,
     'the working (bare) condition stays in the scheduler test script — see the S24a note in package.json',
   );
   assert.doesNotMatch(
     pkg.scripts.test ?? '',
     /--conditions=\+tourbillon-test/,
     "'+tourbillon-test' is esbuild syntax — tsx/node match condition names literally, so the '+' form resolves NOTHING (verified dead in #219 S24a)",
+  );
+
+  // #223 S26b - the S24a regex must match the EXACT condition token only. '\b' sat before the
+  // '-' in 'tourbillon-test-foo', so a near-miss condition false-passed the pin. The end-of-token
+  // lookahead (?=\s|$) closes that: mutant legs pin both directions.
+  const PIN_RE = /--conditions=tourbillon-test(?=\s|$)/;
+  assert.ok(
+    PIN_RE.test('tsx --conditions=tourbillon-test --test src/**/*.test.ts'),
+    'bare --conditions=tourbillon-test (end of token) satisfies the pin',
+  );
+  assert.ok(
+    !PIN_RE.test('tsx --conditions=tourbillon-test-foo --test src/**/*.test.ts'),
+    "a near-miss condition like '--conditions=tourbillon-test-foo' must NOT satisfy the pin (#223 S26b)",
   );
 });
