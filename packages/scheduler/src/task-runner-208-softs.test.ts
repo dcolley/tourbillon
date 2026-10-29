@@ -19,7 +19,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { readMigrationFiles } from 'drizzle-orm/migrator';
@@ -183,4 +183,40 @@ test('S5: listRunnable with no pending work — empty map, no CASE, empty listin
   } finally {
     await client.close();
   }
+});
+
+// #216 S7a — '@tourbillon/db/test/query-spy' is gated behind the "tourbillon-test" package-
+// exports condition (packages/db/package.json), so a naive production import
+// (`import '@tourbillon/db/test/query-spy'`) fails to resolve from apps/web and
+// packages/mastra (ERR_PACKAGE_PATH_NOT_EXPORTED — verified in the PR body). Caveat: tsx
+// resolves through tsconfig `paths`, so this package's own test files still reach it, and a
+// scheduler PRODUCTION file could too. The accepted workspace-only floor: no non-test file in
+// any production path may reference the subpath at all. This static pin enforces that floor —
+// if the exports gate is ever removed, this test remains the wall.
+test('S7a pin: no production file imports @tourbillon/db/test/query-spy', () => {
+  let repoRoot = __dirname;
+  while (repoRoot !== path.dirname(repoRoot) && !existsSync(path.join(repoRoot, 'pnpm-workspace.yaml'))) {
+    repoRoot = path.dirname(repoRoot);
+  }
+  assert.ok(existsSync(path.join(repoRoot, 'pnpm-workspace.yaml')), 'walked up to the pnpm workspace root');
+
+  const FORBIDDEN = '@tourbillon/db/test/query-spy';
+  const SKIP_DIRS = new Set(['node_modules', '.next', '.turbo', 'dist', 'build', 'migrations']);
+  const hits: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        if (!SKIP_DIRS.has(entry.name)) walk(path.join(dir, entry.name));
+      } else if (/\.tsx?$/.test(entry.name) && !/\.test\.tsx?$/.test(entry.name)) {
+        const file = path.join(dir, entry.name);
+        if (readFileSync(file, 'utf8').includes(FORBIDDEN)) {
+          hits.push(path.relative(repoRoot, file));
+        }
+      }
+    }
+  };
+  for (const prod of ['apps/web', 'packages/mastra/src', 'packages/scheduler/src']) {
+    walk(path.join(repoRoot, prod));
+  }
+  assert.deepEqual(hits, [], 'only *.test.ts files may import the gated test-only subpath');
 });

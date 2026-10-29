@@ -9,7 +9,7 @@
     "start:service": "tsx --env-file=../../.env src/index.ts",
     "start": "node dist/index.js",
     "build": "tsc",
-    "test": "tsx --test src/**/*.test.ts"
+    "test": "tsx --conditions=+tourbillon-test --test src/**/*.test.ts"
   },
   "dependencies": {
     "@tourbillon/db": "workspace:*",
