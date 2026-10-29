@@ -74,12 +74,38 @@ export const TASK_PROGRESS_CLAIM_TTL_SECONDS = 900;
 // ─── agent + company lookup (S4: inactive tenants are skipped by the pure core) ───────────
 
 /**
+ * The slice of the REAL `@tourbillon/db` module exports the bridge reads (softs S17). Used as
+ * the annotation for the loaders below so the default path is pinned to the module's actual
+ * export types — an `as unknown as TaskProgressDbModule` erasure no longer fits here, because
+ * the interface's minimal `db` (`{ query }`) is not assignable to the real drizzle client.
+ */
+export type RealDbModuleSlice = Pick<typeof import('@tourbillon/db'), 'db' | 'agents' | 'companies'>;
+
+/**
+ * S17 compile pin: build the bridge's db-module slice from the REAL exports. `satisfies`
+ * typechecks `db` / `agents` / `companies` against `TaskProgressDbModule` at typecheck time —
+ * a shape drift in `@tourbillon/db` (renamed `db` export, dropped `query`, table object
+ * missing the `id` column getAgent's `eq` uses) fails `tsc --noEmit` immediately instead of
+ * only surfacing through the S15 probe, and unlike `as unknown as` nothing is erased. The
+ * B1/S15 runtime guards in getAgent stay exactly as they were.
+ */
+export function sliceRealDbModule(mod: typeof import('@tourbillon/db')): RealDbModuleSlice {
+  return {
+    db: mod.db,
+    agents: mod.agents,
+    companies: mod.companies,
+  } satisfies TaskProgressDbModule;
+}
+
+/**
  * Default lazy loader for the `@tourbillon/db` module (softs S15). Kept as a named export so
  * it can be swapped — and so the seam `loadDb` below is the ONLY place the module namespace
- * is touched.
+ * is touched. S17: the return type is the REAL export slice (not the interface), routed
+ * through `sliceRealDbModule`'s `satisfies` pin; loosening either back to an unconstrained
+ * cast turns the type-level pins in task-progress-bridge.test.ts red.
  */
-export async function loadRealDbModule(): Promise<TaskProgressDbModule> {
-  return (await import('@tourbillon/db')) as unknown as TaskProgressDbModule;
+export async function loadRealDbModule(): Promise<RealDbModuleSlice> {
+  return sliceRealDbModule(await import('@tourbillon/db'));
 }
 
 /**

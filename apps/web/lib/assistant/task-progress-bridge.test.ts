@@ -7,7 +7,8 @@
  * status mapping (S14), the DEFAULT (un-injected) getAgent path pinning that the module `db`
  * EXPORT is queried — the B1 namespace regression (S15), the loud injected-db-without-tables
  * failure (S16), and the fail-open redis claim (S11) — all against fakes, no real
- * redis/db/chat imports.
+ * redis/db/chat imports — plus the S17 compile-time pins on the real `@tourbillon/db` export
+ * shapes (type-level only; enforced by `tsc --noEmit`, see the S17 section at the bottom).
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -15,7 +16,9 @@ import {
   buildTaskProgressBridgeDeps,
   createDeliver,
   getAgent,
+  loadRealDbModule,
   redisClaimClient,
+  sliceRealDbModule,
   startTaskProgressSignalBridge,
   __resetTaskProgressSignalBridgeForTests,
   TASK_PROGRESS_CLAIM_TTL_SECONDS,
@@ -27,6 +30,7 @@ import {
   type TaskProgressDbModule,
   type TaskProgressDbTables,
   type TaskProgressOrm,
+  type RealDbModuleSlice,
 } from './task-progress-bridge';
 import {
   handleTaskProgressEvent,
@@ -679,3 +683,43 @@ test('bridge: idempotent per process; the reset hook restarts it (S1)', async ()
   assert.deepEqual(subs[1]!.patterns, ['sse:*']);
   __resetTaskProgressSignalBridgeForTests();
 });
+
+// ─── S17: compile-time pins on the REAL `@tourbillon/db` export shapes ──────────────────
+//
+// Type-level only (no runtime assertions — the runtime suite stays at 20 tests). Enforced by
+// `tsc --noEmit` on apps/web. Background: `loadRealDbModule` used to launder the whole module
+// through `as unknown as TaskProgressDbModule`, so a shape drift in `@tourbillon/db` was only
+// visible through the S15 fake-module probe. The source now pins the real exports twice: the
+// slice object literal `satisfies TaskProgressDbModule`, and both loader signatures are
+// annotated `RealDbModuleSlice` (the module's ACTUAL export types). These assertions make the
+// pin itself mutation-testable:
+//   - drift in the real exports (e.g. `db` loses `query.agents`, a table loses `id`) -> the
+//     source `satisfies` AND S17RealDbExportsMatchContract go red;
+//   - loosening the loaders back toward `as unknown as TaskProgressDbModule` -> the interface's
+//     minimal `db` (`{ query }`) no longer matches the annotated real types, so
+//     S17LoadPathCarriesRealDbTypes / S17DbIsRealNotQueryShim go red (tsc).
+
+type Assert<T extends true> = T;
+
+/** The real exports still satisfy the bridge's own contract (the drift the cast hid). */
+export type S17RealDbExportsMatchContract = Assert<
+  RealDbModuleSlice extends TaskProgressDbModule ? true : false
+>;
+
+/** The default loader hands out the REAL module types — not an erased `as unknown as` shadow. */
+export type S17LoadPathCarriesRealDbTypes = Assert<
+  Awaited<ReturnType<typeof loadRealDbModule>> extends RealDbModuleSlice ? true : false
+>;
+
+/** The slice builder itself still returns the REAL export types (not an erased cast). */
+export type S17SliceMatchesRealExports = Assert<
+  ReturnType<typeof sliceRealDbModule> extends RealDbModuleSlice ? true : false
+>;
+
+/** Positive control for the pin above: the `db` on that path is the real drizzle client
+ * (richer than the interface's `{ query }` shim), so an erasure cannot pass unnoticed. */
+export type S17DbIsRealNotQueryShim = Assert<
+  Awaited<ReturnType<typeof loadRealDbModule>>['db'] extends { query: unknown; select: unknown }
+    ? true
+    : false
+>;
