@@ -363,7 +363,11 @@ export async function createChatController(
   deps?: ChatAssemblyDeps,
 ): Promise<AgentController<ChatControllerState>> {
   const agent = await createChatAgentWithSkills(agentRecord, options, deps);
-  const effectiveRecord = chatEffectiveRecord(agentRecord, options);
+  // S195-S4 (#195 ACCEPT): this used to also resolve the provider row and compute a
+  // contextBudget here - both were dead (the Agent built above already carries the
+  // params-sized budget and provider wiring; see buildChatRunConfig in
+  // createChatAgentWithSkills). A source pin in chat-controller.wiring.test.ts keeps
+  // the duplicate resolution from returning.
   const modes: AgentControllerMode[] = [
     {
       id: 'chat',
@@ -386,11 +390,6 @@ export async function createChatController(
     agentRecord.runtimeConfig as AgentRuntimeConfig,
     'chat',
   );
-  const { row: providerRow } = await (deps?.resolveProviderRow ?? resolveAgentProviderRow)(effectiveRecord, {
-    context: 'chat',
-  });
-  const providerRecord = providerRow ? llmProviderRowToRecord(providerRow) : null;
-  const contextBudget = resolveAgentContextBudget(effectiveRecord, providerRecord, 'chat', options?.params);
 
   // Session always requires a Workspace instance (Mastra AgentController contract).
   // Chat uses a tools-disabled workspace so sandbox schemas do not inflate context.
