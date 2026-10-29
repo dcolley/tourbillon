@@ -58,8 +58,34 @@ describe('WID-3 parked-card naming (S8)', () => {
   });
 });
 
-// #215 soft S21b: compile-time pin (teeth are in `tsc --noEmit`, harmless at runtime) — the
-// shared map is readonly. Drop `as const` from card-kind.ts and tsc reports this directive as
-// unused, failing the error-set check.
-// @ts-expect-error CARD_KIND is readonly as of #215 S21b
-CARD_KIND.askChoice = 'choice';
+// #215 soft S21b: compile-time pin (teeth are in `tsc --noEmit`, see S22b note below) — the
+// shared map is readonly. Drop `as const` from card-kind.ts (and `Object.freeze` with it) and
+// tsc reports this directive as unused, failing the gate's tip-vs-main error-set check.
+//
+// #217 soft S22a: the assignment used to sit at top level, so it EXECUTED on file load —
+// `as const` is compile-time only and the shared object was really written to (harmless only
+// because the value was the same). The arrow is never invoked, so tsc still type-checks the
+// write and the directive still pins, but nothing mutates at runtime. The value is deliberately
+// wrong ('x'): if the wrapper is ever unwrapped back to top level on an unfrozen map, the
+// naming asserts above (widgetCardKind('askChoice') === 'choice card') go RED instead of
+// silently drifting; with the freeze in place such a write is neutralised as well.
+void (() => {
+  // @ts-expect-error CARD_KIND is readonly as of #215 S21b
+  CARD_KIND.askChoice = 'x';
+});
+
+// #217 soft S22b: two guards, two failure modes.
+// 1. The runtime guard below is always on: card-kind.ts freezes CARD_KIND (#217 S22a
+//    hardening), so a mistaken runtime write is a no-op (sloppy) / TypeError (strict) and this
+//    assert goes RED if the freeze is dropped. This is the guard that bites TODAY, under the
+//    pre-existing apps/web tsc noise.
+// 2. The compile pin above bites via the gate's tip-vs-main `tsc --noEmit` error-set
+//    comparison — apps/web still carries pre-existing `error TS` records, so it only fails CI
+//    once apps/web tsc is clean. Until then, the runtime guard is the load-bearing one.
+// Note: `Object.freeze`'s `Readonly<T>` return alone also keeps the directive used; the full
+// drop-to-make-it-unused mutant is `as const` AND freeze removed together in card-kind.ts.
+describe('CARD_KIND runtime hardening (S22a–b)', () => {
+  it('the shared CARD_KIND map is frozen at runtime, not just readonly to tsc', () => {
+    assert.ok(Object.isFrozen(CARD_KIND), 'card-kind.ts must Object.freeze(CARD_KIND)');
+  });
+});
