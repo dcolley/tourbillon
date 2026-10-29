@@ -273,16 +273,24 @@ export async function listRunnableChatTasks(
      * budget drops out of the listing entirely, instead of being listed and refused by the
      * claim every tick (the old fixed `maxAttempts` bound listed rows over a lowered company
      * budget forever). Companies absent from the map fall back to the historic listing bound
-     * (5 — the pre-fix fixed cap) so an unknown company never starves behind the CASE.
+     * (5 — the pre-fix fixed cap) so an unknown company never starves behind the CASE. The
+     * EMPTY map uses the SAME bound (#208 S3): a task inserted between the company read and
+     * this listing must not be held to a different (tighter) fallback than a task whose
+     * company simply raced out of the map.
      */
     maxAttemptsByCompany?: Record<string, number>;
   } = {},
 ): Promise<RunnableChatTaskRow[]> {
   const entries = Object.entries(opts.maxAttemptsByCompany ?? {});
-  const defaultCap = opts.maxAttempts ?? (entries.length ? 5 : 2);
-  // Searched CASE: one cap per company, bind params throughout (no inlined SQL). The
-  // ::int casts matter — Postgres cannot infer an untyped CASE parameter's type and would
-  // compare `integer < text` (PGlite raises; same class of bind-typing bug as #199/#202).
+  // #208 S3: ONE fallback for both branches. The old `(entries.length ? 5 : 2)` meant the
+  // empty-map path capped at 2 while the CASE's ELSE capped at 5 — the same raced-in task was
+  // judged by two different bounds depending on whether the company read happened to see it.
+  const defaultCap = opts.maxAttempts ?? 5;
+  // Searched CASE: one cap per company, bind params throughout (no inlined SQL). At least one
+  // ::int cast matters — Postgres cannot infer an untyped CASE parameter's type when NO branch
+  // is typed and would compare `integer < text` (PGlite raises; verified empirically: dropping
+  // BOTH casts fails, either single cast alone still infers the int type — same class of
+  // bind-typing bug as #199/#202).
   const attemptsFilter = entries.length
     ? sql`${chatTasks.runnerAttempts} < (case ${sql.join(
         entries.map(
@@ -386,18 +394,27 @@ export async function prioritizeChatTask(
  * each company's maxAttemptsPerTask from this and feeds `listRunnableChatTasks` a per-company
  * cap, so over-budget pending rows never re-enter the listing. Grouped, not joined to tasks:
  * this is a small company-level read that precedes the (capped) task listing.
+ *
+ * #208 S2: grouped on the companies PK (functional dependency covers `settings` — cleaner than
+ * grouping on the jsonb value) and ORDERED by company id. A caller-supplied `limit` is then a
+ * STABLE lowest-id prefix; previously the read had `limit 100` with no ORDER BY, so past 100
+ * pending companies the ones silently dropped from the map fell back to the listing's default
+ * cap — re-opening the exact lowered-budget relisting bug the per-company CASE exists to fix.
+ * There is deliberately NO default limit: one row per company with pending work is a tiny read,
+ * and any silent truncation re-opens that bug (pass `limit` only when the caller accepts it).
  */
 export async function listPendingChatTaskCompanySettings(
   database: ChatTaskDb,
   opts: { limit?: number } = {},
 ): Promise<Array<{ companyId: string; companySettings: unknown }>> {
-  return database
-    .select({ companyId: chatTasks.companyId, companySettings: companies.settings })
+  const query = database
+    .select({ companyId: companies.id, companySettings: companies.settings })
     .from(chatTasks)
     .innerJoin(companies, eq(companies.id, chatTasks.companyId))
     .where(and(eq(chatTasks.status, 'pending'), eq(chatTasks.paused, false)))
-    .groupBy(chatTasks.companyId, companies.settings)
-    .limit(opts.limit ?? 100);
+    .groupBy(companies.id)
+    .orderBy(asc(companies.id));
+  return opts.limit === undefined ? query : query.limit(opts.limit);
 }
 
 /**
