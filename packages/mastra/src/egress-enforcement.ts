@@ -338,12 +338,15 @@ export function buildEgressFilterEnv(options: {
   extra?: NodeJS.ProcessEnv;
 }): NodeJS.ProcessEnv {
   const lib = ensureEgressLandlockLibrary();
-  const env: NodeJS.ProcessEnv = {
+  // A child-process env map, so NODE_ENV may legitimately be absent (`extra` is optional).
+  // Next's global types make ProcessEnv.NODE_ENV required when apps/web type-checks this file,
+  // so assert the map's shape, as execution-workspace.ts does for sandboxEnv. Type-only.
+  const env = {
     ...options.extra,
     LD_PRELOAD: lib,
     TOURBILLON_EGRESS_ENFORCE: '1',
     TOURBILLON_EGRESS_MODE: options.proxySocketPath ? 'proxy' : 'deny',
-  };
+  } as NodeJS.ProcessEnv;
   if (options.proxySocketPath) {
     env.TOURBILLON_EGRESS_PROXY_SOCKET = options.proxySocketPath;
     env.TOURBILLON_EGRESS_PROXY_PORT = String(options.proxyPort ?? EGRESS_PROXY_LOOPBACK_PORT);
