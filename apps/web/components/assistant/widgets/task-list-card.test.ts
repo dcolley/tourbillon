@@ -239,6 +239,35 @@ describe('TASK-LIST-WID task list card', () => {
     assert.ok(boxes[0]!.endsWith('-multi')); // same naming convention as ChoiceCard
   });
 
+  // S193-S9 (#193; S5 follow-up from #200): S5 pins the shared name WITHIN a card, but a constant
+  // name would pass that too. useId uniqueness is the other half: two picker cards in ONE tree
+  // must get DIFFERENT radio-group names, or the pickers on a page collapse into one radio group.
+  // renderToStaticMarkup restarts the id counter on every call, so both cards must go through a
+  // single render. Mutant: `React.useId()` -> a constant string -> RED here, still green in S5.
+  it('two pickers in one tree get distinct radio-group names (S193-S9, useId uniqueness)', () => {
+    const inputNames = (html: string, type: string): string[] =>
+      [...html.matchAll(/<input([^>]*?)>/g)]
+        .map((m) => m[1])
+        .filter((attrs) => attrs.includes(`type="${type}"`))
+        .map((attrs) => /name="([^"]*)"/.exec(attrs)?.[1] ?? '');
+    const html = renderToStaticMarkup(
+      React.createElement(
+        React.Fragment,
+        null,
+        React.createElement(TaskListCard, { toolCallId: 'c1', props: PICKER, status: 'pending', onAnswer: () => undefined, onDismiss: () => undefined }),
+        React.createElement(TaskListCard, { toolCallId: 'c2', props: PICKER, status: 'pending', onAnswer: () => undefined, onDismiss: () => undefined }),
+      ),
+    );
+    const radios = inputNames(html, 'radio');
+    assert.equal(radios.length, 4); // 2 rows per card, 2 cards
+    const cardOne = radios.slice(0, 2);
+    const cardTwo = radios.slice(2, 4);
+    assert.equal(new Set(cardOne).size, 1); // each card is still ONE radio group (the S5 invariant)
+    assert.equal(new Set(cardTwo).size, 1);
+    assert.ok(cardOne[0]!.length > 0 && cardTwo[0]!.length > 0); // names actually render
+    assert.notEqual(cardOne[0], cardTwo[0]); // the two cards do not share a group name
+  });
+
   it('an answered card locks and replays the chosen tasks; a dismissed card says so', () => {
     assert.match(card(PICKER, 'answered', { taskId: 't-2' }), /Chosen: Check the restore backup/);
     assert.match(card(MULTI, 'answered', { taskIds: ['t-1', 't-2'] }), /Chosen: Draft the runbook, Check the restore backup/);
