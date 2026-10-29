@@ -5,11 +5,12 @@
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "scripts": {
+    "//test": "#219 S24a: this suite resolves '@tourbillon/db/test/query-spy' through the tsconfig.base.json paths key today, so the --conditions flag is INERT here (208-softs passes 3/3 without it) - belt-and-braces, not the wall; the db exports gate (#216 S7a) + the S7a pin (task-runner-208-softs.test.ts) are the walls. The flag must stay BARE '--conditions=tourbillon-test': verified on tsx 4.23.1 / node 22 that '+tourbillon-test' (esbuild syntax) matches nothing - with the paths key removed, '+tourbillon-test' still dies with ERR_PACKAGE_PATH_NOT_EXPORTED while the bare form passes 4/4. That is the day this belt becomes load-bearing (the tsx-paths fix). Pinned by the S24a script pin in task-runner-208-softs.test.ts.",
     "dev": "tsx watch --env-file=../../.env src/index.ts",
     "start:service": "tsx --env-file=../../.env src/index.ts",
     "start": "node dist/index.js",
     "build": "tsc",
-    "test": "tsx --conditions=+tourbillon-test --test src/**/*.test.ts"
+    "test": "tsx --conditions=tourbillon-test --test src/**/*.test.ts"
   },
   "dependencies": {
     "@tourbillon/db": "workspace:*",
