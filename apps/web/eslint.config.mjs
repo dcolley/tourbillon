@@ -11,7 +11,7 @@ export default defineConfig([
       'react-hooks/set-state-in-effect': 'warn',
     },
   },
-  // CONCIERGE-QUEUE-SIGNAL softs S18 (#209) + S19a (#212) + S20a/S20b: the task-progress bridge
+  // CONCIERGE-QUEUE-SIGNAL softs S18 (#209) + S19a (#212) + S20a/S20b + S23a/S23b: the task-progress bridge
   // must not launder types through `as unknown as` (or its `any`/`never`/angle-bracket twins).
   // The S17 compile pins (`sliceRealDbModule`'s
   // `satisfies` + the type-level Asserts in the test) only have teeth if nothing re-erases the
@@ -33,6 +33,16 @@ export default defineConfig([
   // `never` rule matches only an `as never` LEG nested inside another cast, so the deliberate
   // single-step `controller as never` in getChatSession needs no eslint-disable — mutant-
   // verified both ways.
+  //
+  // S23a/S23b: Test's #218 sweep found the TSTypeAssertion twins of S20b still sailing through
+  // — `<T><never>x`, `<T>(x as never)` and `(<never>x) as T` were green because both never
+  // selectors only ranged over TSAsExpression parents/children. The same sweep also probed the
+  // tail-leg selector too BROAD: its descendant combinator flagged ANY cast inside the operand
+  // subtree of an `as never`, e.g. `f({ a: 1 } as T) as never` — a single-step `as never` over
+  // a call, not a double cast. Fix: both never selectors now range over
+  // `:matches(TSAsExpression, TSTypeAssertion)` on BOTH sides (one selector per leg) and use
+  // the CHILD combinator — parentheses are not AST nodes, so a real double-cast leg is always a
+  // direct child; the call-arg form goes green and bare `x as never` / `<never>x` stay green.
   {
     files: ['lib/assistant/task-progress-bridge.ts', 'lib/assistant/task-progress-bridge.test.ts'],
     rules: {
@@ -72,34 +82,42 @@ export default defineConfig([
             'S20a: `<any>x` erases types exactly like `as any` — the S19a rule above applies to angle-bracket assertions too (see task-progress-bridge.ts).',
         },
         {
-          // S20b: the `never` leg of `(x as never) as T` / `x as T as never`. `never` is
-          // assignable to everything, so a chain touching it sails through tsc while the
-          // value's real type is erased — the twin of the S18 `as unknown as` selector.
-          // esquery matches concrete node kinds (the parser emits `type: 'TSAsExpression'`
-          // for both union variants, with typeAnnotation holding the bare keyword node —
-          // no TSTypeAnnotation wrapper), so the rule is: ANY `as never` leg NESTED inside
-          // another cast is banned — both the leading leg `(x as never) as T` (inner child
-          // = the as-never leg) and the tail leg `x as T as never` (outer = as-never) are
-          // covered by the two selectors below.
-          // A bare single-step `as never` is NOT nested, so the deliberate
+          // S20b + S23a (lead leg): a `never`-annotated cast nested DIRECTLY inside another
+          // cast. `never` is assignable to everything, so a chain touching it sails through
+          // tsc while the value's real type is erased — the twin of the S18 `as unknown as`
+          // selector. esquery matches concrete node kinds (the parser emits
+          // `type: 'TSAsExpression'` / `type: 'TSTypeAssertion'`, with typeAnnotation holding
+          // the bare keyword node — no TSTypeAnnotation wrapper), so the rule spans BOTH cast
+          // forms on both sides via :matches: `(x as never) as T`, `x as T as never` (inner
+          // child = the as-never leg), and the TSTypeAssertion twins Test probed green on
+          // #218: `<T><never>x`, `<T>(x as never)`, `(<never>x) as T`. Child combinator, not
+          // descendant: parentheses are not AST nodes, so a real double-cast leg is always a
+          // direct child.
+          // A bare single-step `as never` / `<never>x` is NOT nested, so the deliberate
           // `controller as never` in getChatSession (and the test's `signal as never`)
           // stay green without disables — mutant-verified both ways.
-          selector: "TSAsExpression > TSAsExpression[typeAnnotation.type='TSNeverKeyword']",
+          selector:
+            ":matches(TSAsExpression, TSTypeAssertion) > :matches(TSAsExpression[typeAnnotation.type='TSNeverKeyword'], TSTypeAssertion[typeAnnotation.type='TSNeverKeyword'])",
           message:
-            'S20b: an `as never` leg inside a multi-step cast (`(x as never) as T`, `x as T as never`) erases types exactly like `as unknown as` — `never` is assignable everywhere; keep casts single-step and typed. A deliberate single-step `as never` is fine (see task-progress-bridge.ts).',
+            'S20b/S23a: a `never` leg inside a multi-step cast (`(x as never) as T`, `<T><never>x`, `<T>(x as never)`, `(<never>x) as T`) erases types exactly like `as unknown as` — `never` is assignable everywhere; keep casts single-step and typed. A deliberate single-step `as never`/`<never>x` is fine (see task-progress-bridge.ts).',
         },
         {
-          // S20b tail-leg twin: `x as T as never` — here the `as never` annotation sits on
-          // the OUTER node, so the selector above (annotation on the child) cannot see it.
-          // Same nesting gate: a never-annotated cast CONTAINING another cast. Note the
-          // AST: typeAnnotation is the bare keyword node (no TSTypeAnnotation wrapper),
-          // and the operand subtree includes the inner cast's own typeAnnotation. A
-          // parenthesised single-step `(x as T) as never` is AST-indistinguishable from
-          // the tail leg and is caught too — deliberate (getChatSession's real shape is
-          // the BARE `controller as never`, AST child = Identifier, which stays green).
-          selector: "TSAsExpression[typeAnnotation.type='TSNeverKeyword'] TSAsExpression",
+          // S20b tail-leg twin + S23a: `x as T as never` — here the `as never` annotation sits
+          // on the OUTER node, so the selector above (annotation on the child) cannot see it.
+          // Same nesting gate, now spanning both cast forms: a never-annotated cast whose
+          // operand is DIRECTLY another cast — covers the classic tail, the mixed
+          // `(<T>x) as never`, and the angle-bracket tail `<never>(x as T)` / `<never><T>x`.
+          // S23b: this used a DESCENDANT combinator, which flagged any cast anywhere in the
+          // operand subtree — `f({ a: 1 } as SomeType) as never` was probed RED on #218 even
+          // though the inner cast sits in a call argument (not a double cast). Tightened to
+          // `>` so only the real double-cast tail leg fires; the call-arg form is green again.
+          // A parenthesised `(x as T) as never` is AST-indistinguishable from the tail leg and
+          // stays RED — deliberate (getChatSession's real shape is the BARE
+          // `controller as never`, AST child = Identifier, which stays green).
+          selector:
+            ":matches(TSAsExpression[typeAnnotation.type='TSNeverKeyword'], TSTypeAssertion[typeAnnotation.type='TSNeverKeyword']) > :matches(TSAsExpression, TSTypeAssertion)",
           message:
-            'S20b: reaching `as never` as the tail of a multi-step cast (`x as T as never`) erases types exactly like `as unknown as` — keep casts single-step and typed. A deliberate single-step `as never` is fine (see task-progress-bridge.ts).',
+            'S20b/S23a: reaching `never` as the tail of a multi-step cast (`x as T as never`, `(<T>x) as never`, `<never>(x as T)`) erases types exactly like `as unknown as` — keep casts single-step and typed. A deliberate single-step `as never`/`<never>x` is fine (see task-progress-bridge.ts).',
         },
       ],
     },
