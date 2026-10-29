@@ -6,6 +6,11 @@
  * Converted to node:test + node:assert/strict (the package-wide runner convention)
  * and moved off the live `db` pool onto the `toolDb()` test seam with an in-memory
  * PGlite — same pattern as the S7 section of chat-task-tools.test.ts.
+ *
+ * S235-S3 (#235 ACCEPT) note for PR bodies: full-suite pass/fail/skip totals are
+ * env-dependent and drift between runs and worktrees — quote the gate command's live
+ * output (e.g. `pnpm --filter @tourbillon/mastra test`) instead of hard-coding absolute
+ * counts here or in PR descriptions.
  */
 import assert from 'node:assert/strict';
 import path from 'node:path';
@@ -31,6 +36,16 @@ const TEST_AGENT_ID = 'td-agent-1';
  * S189-S1c: the migration suite runs ONCE per file (was once per test, ~13s of setup for
  * 9 tests). Per-test isolation is preserved by truncating the fixture tables before each
  * test and reseeding — CASCADE also clears the dependent agents rows.
+ *
+ * S235-S2 (#235 ACCEPT): TRUNCATE scope note. `TRUNCATE companies CASCADE` resets exactly
+ * the rows reachable through FK chains rooted at a `companies` row (agents, goals,
+ * projects, issues, routines, approvals, heartbeat_runs, cost_events, activity_log, … via
+ * ON DELETE CASCADE). This fixture only seeds companies + agents, both inside that tree, so
+ * it is sufficient here. It is NOT a whole-database reset: rows with no FK path into the
+ * companies tree — e.g. system-wide `llm_providers` rows with a null companyId, or any
+ * future fixture table added without a cascading companies FK — would LEAK between tests
+ * under this once-per-file migration suite. If such a fixture is added, either give its FK
+ * `onDelete: 'cascade'` or extend the TRUNCATE below with an explicit table list.
  */
 let client: PGlite;
 let seededDb: ToolDb;
@@ -87,6 +102,8 @@ describe('Tool Discovery Tools', () => {
   });
 
   beforeEach(async () => {
+    // S235-S2: resets the companies FK tree only (see scope note above); the fixture seeds
+    // stay inside that tree.
     await client.exec('TRUNCATE companies CASCADE');
     await seedFixtureRows();
     setToolDbForTests(seededDb);
