@@ -238,7 +238,8 @@ export async function pollTaskRunner(
     skippedDisabled: 0,
     skippedErrored: 0,
   };
-  if (rows.length === 0) return summary;
+  // S233-S7: no early return on `rows.length === 0` — the defer-log cleanup below still has
+  // to run, and an empty queue means every agent has left it (clear the whole Map).
 
   // Group in claim order (the query already orders by agentId → position → createdAt).
   // One agent belongs to one company, so an agent group shares one resolved settings block.
@@ -265,6 +266,19 @@ export async function pollTaskRunner(
     if (group) group.tasks.push(row);
     else byAgent.set(row.agentId, { tasks: [row], settings });
   }
+
+  // S199b + S233-S7: the defer-log rate limit memory drops an agent when it gets free slots
+  // again (pollOneAgent) AND when it has LEFT this tick's runnable queue (no row grouped for
+  // it at all — drained, cancelled, paused, inactive or company-disabled). Historic behaviour
+  // was only the free-slot drop: an agent whose tasks emptied kept its stamp forever (bounded
+  // leak) and, if it refilled inside the quiet window, its next deferral was silenced even
+  // though its deferral history had reset. An empty queue clears the whole Map.
+  if (opts.deferLogMemory) {
+    for (const agentId of opts.deferLogMemory.keys()) {
+      if (!byAgent.has(agentId)) opts.deferLogMemory.delete(agentId);
+    }
+  }
+  if (byAgent.size === 0) return summary;
 
   const now = opts.now ?? Date.now;
   const deferLogWindowMs = opts.deferLogWindowMs ?? DEFER_LOG_WINDOW_MS;
@@ -453,6 +467,17 @@ export function createDefaultTaskRunnerDeps(
 
 export interface TaskRunnerPoller {
   stop(): void;
+  /**
+   * S233-S6: resolves once `n` ticks have COMPLETED (success or tick-level failure). The
+   * real-loop behaviour pins used to sleep 50–11_500 ms and hope the right number of ticks
+   * had fired; they await this instead. A ref'd timeout guard keeps the event loop alive
+   * while waiting (the poll interval itself is unref'd for scheduler shutdown hygiene, so
+   * without the guard node would drain the loop and cancel the pending test) and REJECTS
+   * with the completed-tick count after timeoutMs — a stalled poller fails fast instead of
+   * hanging. The kill-switch stub (maxConcurrentRuns = 0) resolves immediately — a poller
+   * that never starts never ticks, and a test must not hang on it.
+   */
+  whenTicks(n?: number, timeoutMs?: number): Promise<void>;
 }
 
 /**
@@ -485,7 +510,18 @@ export async function sweepStaleChatTaskRuns(
  */
 export function startTaskRunnerPolling(
   deps?: TaskRunnerDeps,
-  opts: { intervalSec?: number; maxConcurrentRuns?: number; taskCap?: number } = {},
+  opts: {
+    intervalSec?: number;
+    /**
+     * S233-S6 test seam: an explicit millisecond interval that BYPASSES the 5s production
+     * floor, so real-loop pins complete many ticks in milliseconds instead of sleeping. It
+     * wins over intervalSec when both are given. Production callers pass neither (or just
+     * intervalSec) and stay floored at 5s / the env default.
+     */
+    intervalMs?: number;
+    maxConcurrentRuns?: number;
+    taskCap?: number;
+  } = {},
 ): TaskRunnerPoller {
   const maxConcurrent = opts.maxConcurrentRuns ?? DEFAULT_MAX_CONCURRENT_RUNS;
   if (maxConcurrent <= 0) {
@@ -493,6 +529,9 @@ export function startTaskRunnerPolling(
     deps?.log?.info('task-run poller disabled (max concurrent runs = 0)');
     return {
       stop: () => undefined,
+      // S233-S6: a never-starting poller never ticks; resolve immediately so a test awaiting
+      // whenTicks on the kill switch cannot hang.
+      whenTicks: async () => undefined,
     };
   }
   const intervalSec = Math.max(5, opts.intervalSec ?? Number(process.env.TASK_RUNNER_POLL_INTERVAL_SEC ?? 30));
@@ -502,6 +541,20 @@ export function startTaskRunnerPolling(
   // S199b: one Map for the whole poller lifetime → the defer-log rate limit persists across
   // ticks (30s each), so a busy agent logs its first deferral and then stays quiet.
   const deferLogMemory = new Map<string, number>();
+
+  // S233-S6: tick-completion ledger for whenTicks(). A tick is counted once its promise
+  // settles — success OR tick-level failure — mirroring what the old sleeps implicitly waited
+  // for. Waiters are one-shot and fire in arrival order once the count reaches their n.
+  let ticksCompleted = 0;
+  const tickWaiters: Array<{ n: number; resolve: () => void }> = [];
+  const settleTick = (): void => {
+    ticksCompleted += 1;
+    for (let i = tickWaiters.length - 1; i >= 0; i -= 1) {
+      if (ticksCompleted >= tickWaiters[i]!.n) {
+        tickWaiters.splice(i, 1)[0]!.resolve();
+      }
+    }
+  };
 
   const tick = (): void => {
     if (busy) return;
@@ -519,6 +572,10 @@ export function startTaskRunnerPolling(
             deferred: summary.skippedFull,
             inactive: summary.skippedInactive,
             disabled: summary.skippedDisabled,
+            // S233-S4: per-agent isolation (S199c) was invisible in the per-tick line — an
+            // agent whose slot-count/claim work threw was counted only in summary.skippedErrored,
+            // which the log dropped on the floor. Surface it so a quietly-erroring agent shows up.
+            errored: summary.skippedErrored,
           });
         }
       })
@@ -533,10 +590,12 @@ export function startTaskRunnerPolling(
       })
       .finally(() => {
         busy = false;
+        settleTick();
       });
   };
 
-  timer = setInterval(tick, intervalSec * 1000);
+  const intervalMs = opts.intervalMs ?? intervalSec * 1000;
+  timer = setInterval(tick, intervalMs);
   timer.unref?.();
   tick();
   return {
@@ -544,5 +603,28 @@ export function startTaskRunnerPolling(
       if (timer) clearInterval(timer);
       timer = undefined;
     },
+    whenTicks: (n = 1, timeoutMs = 30_000) =>
+      ticksCompleted >= n
+        ? Promise.resolve()
+        : new Promise<void>((resolve, reject) => {
+            const waiter: { n: number; resolve: () => void } = { n, resolve: () => undefined };
+            const settle = (fn: () => void): void => {
+              clearTimeout(guard);
+              const i = tickWaiters.indexOf(waiter);
+              if (i >= 0) tickWaiters.splice(i, 1);
+              fn();
+            };
+            // Ref'd guard timer: also keeps the event loop alive so the unref'd poll interval
+            // actually fires while a test awaits ticks; a stalled poller REJECTS fast.
+            const guard = setTimeout(() => {
+              settle(() =>
+                reject(
+                  new Error(`whenTicks(${n}): only ${ticksCompleted}/${n} ticks completed after ${timeoutMs}ms`),
+                ),
+              );
+            }, timeoutMs);
+            waiter.resolve = () => settle(resolve);
+            tickWaiters.push(waiter);
+          }),
   };
 }

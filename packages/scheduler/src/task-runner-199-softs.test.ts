@@ -31,6 +31,29 @@
  *   reach the driver with a pre-serialised ISO string), while the raw-Date sql form must
  *   stay RED at that same driver boundary. Gated on TOURBILLON_TEST_DATABASE_URL — CI
  *   without a live db skips, the CI-with-postgres run executes it for real.
+ *
+ * #233 ACCEPT softs on this file (S233-S1–S3, S6):
+ *   S233-S1: migrateUp used to replay EVERY migration with no hash check — a second run
+ *     against the same database died with `relation "companies" already exists`.
+ *     applyMigrations() now skips hashes already recorded in drizzle.__drizzle_migrations;
+ *     idempotency is pinned on PGlite (always on) and on the live db.
+ *   S233-S2: seed() wipes heartbeat_runs/agents/companies — assertTestDatabaseUrl() now
+ *     refuses unless the target db NAME carries a `test` token, checked BEFORE a single
+ *     statement runs. A mis-pointed TOURBILLON_TEST_DATABASE_URL can no longer nuke a real
+ *     workspace.
+ *   S233-S3: no CI workflow sets TOURBILLON_TEST_DATABASE_URL, so the live block skips by
+ *     default. Exact local run (disposable container — the seed guard REQUIRES a test-named
+ *     db):
+ *       docker run -d --rm --name tourbillon-test-pg -e POSTGRES_PASSWORD=*** \
+ *         -p 5433:5432 postgres:16
+ *       docker exec tourbillon-test-pg psql -U postgres -c 'create database tourbillon_test'
+ *       TOURBILLON_TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5433/tourbillon_test \
+ *         pnpm --filter @tourbillon/scheduler test
+ *     Setting TOURBILLON_TEST_REQUIRE_LIVE=1 WITHOUT the URL turns the skip into a FAILURE,
+ *     so a job that means to run live can prove it actually did.
+ *   S233-S6: the real-loop pins no longer sleep (50–11_500 ms): startTaskRunnerPolling gained
+ *     an intervalMs test seam (bypasses the 5s floor) and poller.whenTicks(n) — pins await
+ *     exact tick counts.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -148,8 +171,8 @@ test('S199a: a poll failure logs at ERROR level with the message content unchang
     },
     log: forLevel('error'),
   };
-  const poller = startTaskRunnerPolling(deps, { intervalSec: 5, maxConcurrentRuns: 2 });
-  await new Promise((r) => setTimeout(r, 50));
+  const poller = startTaskRunnerPolling(deps, { intervalMs: 10, maxConcurrentRuns: 2 });
+  await poller.whenTicks(); // S233-S6: await the first COMPLETED tick — no sleep guessing
   poller.stop();
 
   const failed = lines.filter((l) => l.msg === 'task-run poll failed');
@@ -169,8 +192,8 @@ test('S199a: with no error method the failure falls back to warn, then to info',
       },
       log: forLevel(level),
     };
-    const poller = startTaskRunnerPolling(deps, { intervalSec: 5 });
-    await new Promise((r) => setTimeout(r, 50));
+    const poller = startTaskRunnerPolling(deps, { intervalMs: 10 });
+    await poller.whenTicks(); // S233-S6: exactly one completed tick, no sleep guessing
     poller.stop();
     const failed = lines.filter((l) => l.msg === 'task-run poll failed');
     assert.equal(failed.length, 1, `${level}: one failure line`);
@@ -289,8 +312,10 @@ test('S199b: the rate limit is PER AGENT — two busy agents each get their firs
 test('S199b: through the REAL poller loop, three ticks one busy agent = one defer line', async () => {
   const { lines, log } = recordingLog();
   const f = fakes({ rows: [row({ taskId: 't1', agentId: 'a-busy' })], slots: { 'a-busy': { total: 2, task: 1 } }, log });
-  const poller = startTaskRunnerPolling(f.deps, { intervalSec: 5, maxConcurrentRuns: 2, taskCap: 1 });
-  await new Promise((r) => setTimeout(r, 11_500)); // ticks at t≈0, 5, 10s
+  // S233-S6: intervalMs seam + whenTicks(3) replaces the 11.5s sleep — exact tick counts,
+  // sub-100ms runtime, and the every-5s floor is only a PRODUCTION default (opt-in override).
+  const poller = startTaskRunnerPolling(f.deps, { intervalMs: 10, maxConcurrentRuns: 2, taskCap: 1 });
+  await poller.whenTicks(3); // three COMPLETED ticks (t≈0 + two 10ms intervals)
   poller.stop();
 
   const deferLines = lines.filter((l) => l.msg === 'task-run slots full, deferring');
@@ -361,8 +386,8 @@ test('S199c: through the REAL poller loop, a throwing agent does not stop the he
     throwOnCount: (agentId) => (agentId === 'a-bad' ? new Error('db hiccup') : undefined),
     log,
   });
-  const poller = startTaskRunnerPolling(f.deps, { intervalSec: 5, maxConcurrentRuns: 2, taskCap: 1 });
-  await new Promise((r) => setTimeout(r, 60));
+  const poller = startTaskRunnerPolling(f.deps, { intervalMs: 10, maxConcurrentRuns: 2, taskCap: 1 });
+  await poller.whenTicks(); // S233-S6: one completed tick replaces the 60ms sleep
   poller.stop();
 
   assert.deepEqual(f.jobs.map((j) => j.chatTaskId), ['t-good'], 'healthy agent started despite the bad one');
@@ -378,9 +403,30 @@ test('S199c: through the REAL poller loop, a throwing agent does not stop the he
 // the whole point is the driver boundary, so PGlite would test the wrong driver.
 
 const LIVE_URL = process.env.TOURBILLON_TEST_DATABASE_URL;
-const liveSkipReason = LIVE_URL
-  ? false
-  : 'set TOURBILLON_TEST_DATABASE_URL to run the real postgres-js boundary tests';
+// S233-S3: opt-in clarity. TOURBILLON_TEST_REQUIRE_LIVE=1 without the URL turns the default
+// skip into a hard FAILURE (requireLive() below), so a CI/local job that means to run the
+// live block can PROVE it ran instead of silently skipping it. Exact command in the header.
+const REQUIRE_LIVE = /^(1|true|yes)$/i.test(process.env.TOURBILLON_TEST_REQUIRE_LIVE ?? '');
+const LIVE_SKIP =
+  'set TOURBILLON_TEST_DATABASE_URL to a live, test-NAMED postgres db to run the real postgres-js ' +
+  'boundary tests (exact docker + run command: see the S233-S3 header block in this file; ' +
+  'TOURBILLON_TEST_REQUIRE_LIVE=1 turns this skip into a failure)';
+const liveSkipReason = LIVE_URL || REQUIRE_LIVE ? false : LIVE_SKIP;
+
+/**
+ * S233-S3: fail (never skip) when the operator demanded live pins but gave no db URL.
+ * S233-S2: also the single entry guard for EVERY live pin — a mis-pointed URL (even a
+ * non-test-named db the additive migrator would happily touch) refuses before any pin runs.
+ */
+function requireLive(): void {
+  if (!LIVE_URL) {
+    if (REQUIRE_LIVE) {
+      assert.fail(`TOURBILLON_TEST_REQUIRE_LIVE=1 is set but TOURBILLON_TEST_DATABASE_URL is missing — ${LIVE_SKIP}`);
+    }
+    return;
+  }
+  assertTestDatabaseUrl(LIVE_URL);
+}
 
 const dbRequire = createRequire(path.join(__dirname, '../../db/package.json'));
 
@@ -388,7 +434,13 @@ interface UnsafeSpy {
   calls: Array<{ sql: string; params: unknown[] }>;
 }
 
-function liveClient(): { sqlTag: any; db: ChatTaskDb; spy: UnsafeSpy; close: () => Promise<void> } {
+/** The minimal tagged-template surface applyMigrations needs (postgres-js pool tag shape). */
+interface MigrationSqlTag {
+  (strings: TemplateStringsArray, ...params: unknown[]): Promise<unknown>;
+  unsafe(sql: string, params?: unknown[], options?: unknown): Promise<unknown>;
+}
+
+function liveClient(): { sqlTag: MigrationSqlTag; db: ChatTaskDb; spy: UnsafeSpy; close: () => Promise<void> } {
   const postgres = dbRequire('postgres');
   const { drizzle: drizzlePg } = dbRequire('drizzle-orm/postgres-js');
   const pool = postgres(LIVE_URL!, { prepare: false, max: 2, idle_timeout: 10, max_lifetime: 60 });
@@ -412,34 +464,78 @@ function liveClient(): { sqlTag: any; db: ChatTaskDb; spy: UnsafeSpy; close: () 
   };
 }
 
+/**
+ * S233-S1: apply every journal migration NOT already recorded in drizzle.__drizzle_migrations.
+ * The historic version replayed ALL migration SQL on every call with no hash check, so a
+ * second run against the same database died with `relation "companies" already exists` (e.g.
+ * a leftover TOURBILLON_TEST_DATABASE_URL db from a previous run). The applied-hash skip makes
+ * a rerun a GREEN no-op; the ledger itself is created with if-not-exists DDL above.
+ *
+ * Separated from the memo wrapper (migrateUp) so the idempotency pins can call the REAL apply
+ * path twice — the memo would otherwise hide a second invocation entirely.
+ */
+async function applyMigrations(sqlTag: MigrationSqlTag): Promise<void> {
+  const migrationsFolder = path.join(__dirname, '../../db/src/migrations');
+  const journal = (
+    JSON.parse(
+      readFileSync(path.join(migrationsFolder, 'meta', '_journal.json'), 'utf8'),
+    ) as { entries: { tag: string; when: number }[] }
+  ).entries;
+  const whenLatest = journal[journal.length - 1]!.when;
+  await sqlTag`create schema if not exists drizzle`;
+  await sqlTag`create table if not exists drizzle.__drizzle_migrations (id serial primary key, hash text, created_at bigint)`;
+  const appliedRows = (await sqlTag`select hash from drizzle.__drizzle_migrations`) as Array<{
+    hash: string;
+  }>;
+  const applied = new Set(appliedRows.map((r) => r.hash));
+  for (const m of readMigrationFiles({ migrationsFolder })) {
+    if (m.folderMillis > whenLatest) break;
+    if (applied.has(m.hash)) continue; // S233-S1: already applied — a rerun must be a no-op
+    for (const chunk of m.sql) {
+      if (chunk.trim()) await sqlTag.unsafe(chunk, [], { prepare: false });
+    }
+    await sqlTag`insert into drizzle.__drizzle_migrations (hash, created_at) values (${m.hash}, ${m.folderMillis})`;
+    applied.add(m.hash);
+  }
+}
+
 let migratedOnce: Promise<void> | undefined;
 
-async function migrateUp(sqlTag: any): Promise<void> {
-  if (!migratedOnce) {
-    migratedOnce = (async () => {
-      const migrationsFolder = path.join(__dirname, '../../db/src/migrations');
-      const journal = (
-        JSON.parse(
-          readFileSync(path.join(migrationsFolder, 'meta', '_journal.json'), 'utf8'),
-        ) as { entries: { tag: string; when: number }[] }
-      ).entries;
-      const whenLatest = journal[journal.length - 1]!.when;
-      await sqlTag`create schema if not exists drizzle`;
-      await sqlTag`create table if not exists drizzle.__drizzle_migrations (id serial primary key, hash text, created_at bigint)`;
-      for (const m of readMigrationFiles({ migrationsFolder })) {
-        if (m.folderMillis > whenLatest) break;
-        for (const chunk of m.sql) {
-          if (chunk.trim()) await sqlTag.unsafe(chunk, [], { prepare: false });
-        }
-        await sqlTag`insert into drizzle.__drizzle_migrations (hash, created_at) values (${m.hash}, ${m.folderMillis})`;
-      }
-    })();
-  }
+async function migrateUp(sqlTag: MigrationSqlTag): Promise<void> {
+  migratedOnce ??= applyMigrations(sqlTag);
   await migratedOnce;
 }
 
+/**
+ * S233-S2: seed() deletes EVERY row of heartbeat_runs / agents / companies. Refuse unless the
+ * target db NAME carries a `test` token (tourbillon_test, tb-test, test …) — a mis-pointed
+ * TOURBILLON_TEST_DATABASE_URL must never wipe a real workspace. Pure function so the refusal
+ * is pinned without any live db.
+ */
+function assertTestDatabaseUrl(rawUrl: string, label = 'TOURBILLON_TEST_DATABASE_URL'): string {
+  let name: string;
+  try {
+    name = new URL(rawUrl).pathname.replace(/^\//, '');
+  } catch {
+    throw new Error(`${label}="${rawUrl}" is not a parseable postgres URL — refusing the destructive seed`);
+  }
+  if (!/(^|[-_.])test([-_.]|$)/i.test(name)) {
+    throw new Error(
+      `${label} points at database "${name}" — not a test-named database. seed() deletes every row in ` +
+        'companies / agents / heartbeat_runs; point it at a disposable db whose name contains a "test" ' +
+        'token (e.g. tourbillon_test) and rerun.',
+    );
+  }
+  return name;
+}
+
 /** Deterministic seed: 2 live rows for AGENT (1 task + 1 null-lastSeen timer), noise for others. */
-async function seed(client: ReturnType<typeof liveClient>): Promise<void> {
+async function seed(
+  client: { sqlTag: MigrationSqlTag },
+  targetUrl: string = LIVE_URL ?? '',
+): Promise<void> {
+  // S233-S2: guard runs BEFORE a single statement touches the db.
+  assertTestDatabaseUrl(targetUrl);
   const { sqlTag } = client;
   await sqlTag`delete from heartbeat_runs`;
   await sqlTag`delete from agents`;
@@ -469,6 +565,7 @@ function buggyRawDateWhere(cutoff: Date) {
 }
 
 test('S199d (live): countActiveRuns is GREEN end-to-end on real postgres-js — gte binds a pre-serialised ISO string', { skip: liveSkipReason }, async () => {
+  requireLive(); // S233-S3: demanded live but no URL → hard failure, never a silent skip
   const client = liveClient();
   try {
     await migrateUp(client.sqlTag);
@@ -501,6 +598,7 @@ test('S199d (live): countActiveRuns is GREEN end-to-end on real postgres-js — 
 });
 
 test('S199d (live): the raw-Date sql form stays RED at the same driver boundary — proving why gte is load-bearing', { skip: liveSkipReason }, async () => {
+  requireLive(); // S233-S3
   const client = liveClient();
   try {
     await migrateUp(client.sqlTag);
@@ -537,4 +635,108 @@ test('S199d (live): the raw-Date sql form stays RED at the same driver boundary 
   } finally {
     await client.close();
   }
+});
+
+// ─── S233 — #233 ACCEPT softs on this file's live helpers ────────────────────
+
+interface PGliteLike {
+  exec(sql: string): Promise<unknown>;
+  query(sql: string, params?: unknown[], config?: unknown): Promise<unknown>;
+  close(): Promise<void>;
+}
+
+/**
+ * PGlite adapter for the applyMigrations tagged-template surface. The S233-S1 idempotency
+ * question is about the LEDGER SKIP, not the driver, so PGlite is the right tool here (the
+ * S199d pins deliberately stay on real postgres-js). Same dbRequire pattern as
+ * task-runner-208-softs.test.ts — PGlite is a @tourbillon/db devDependency, not a scheduler one.
+ */
+function pgliteMigrationTag(client: PGliteLike): MigrationSqlTag {
+  const tag = ((strings: TemplateStringsArray, ...params: unknown[]) =>
+    client
+      .query(strings.reduce((acc, s, i) => (i === 0 ? s : `${acc}$${i}${s}`), ''), params)
+      .then((r) => (r as { rows?: unknown[] })?.rows ?? [])) as MigrationSqlTag;
+  tag.unsafe = (sql: string) => client.exec(sql);
+  return tag;
+}
+
+test('S233-S1: applyMigrations is idempotent — a second pass on the same database is a GREEN no-op (PGlite, always on)', async () => {
+  const { PGlite } = dbRequire('@electric-sql/pglite') as { PGlite: new () => PGliteLike };
+  const pglite = new PGlite();
+  const tag = pgliteMigrationTag(pglite);
+  try {
+    await applyMigrations(tag);
+    const first = (await tag`select hash from drizzle.__drizzle_migrations`) as Array<{ hash: string }>;
+    assert.ok(first.length > 0, 'the first pass must record the migration ledger');
+
+    // Historic crash point: the second run replayed ALL migration SQL with no hash check and
+    // died on `relation "companies" already exists`. With the applied-hash skip it is a no-op.
+    await applyMigrations(tag);
+    const second = (await tag`select hash from drizzle.__drizzle_migrations`) as Array<{ hash: string }>;
+    assert.deepEqual(
+      second.map((r) => r.hash),
+      first.map((r) => r.hash),
+      'the second pass must skip every recorded hash and insert nothing new',
+    );
+  } finally {
+    await pglite.close();
+  }
+});
+
+test('S233-S1 (live): two applyMigrations passes on the same live db are GREEN — rerun skips recorded hashes', { skip: liveSkipReason }, async () => {
+  requireLive();
+  const client = liveClient();
+  try {
+    await applyMigrations(client.sqlTag);
+    await applyMigrations(client.sqlTag); // pre-fix: threw `relation "companies" already exists`
+    const ledger = (await client.sqlTag`select hash from drizzle.__drizzle_migrations`) as Array<{
+      hash: string;
+    }>;
+    assert.ok(ledger.length > 0, 'the live ledger is populated after the rerun');
+  } finally {
+    await client.close();
+  }
+});
+
+test('S233-S2: the seed guard refuses non-test db names and accepts test-named ones', () => {
+  for (const bad of [
+    'postgres://u:p@h:5432/tourbillon',
+    'postgresql://u:p@h:5432/postgres',
+    'postgres://u:p@h:5432/production',
+    'postgres://u:p@h:5432/protest', // substring trap — 'test' inside 'protest' is not a token
+    'postgres://u:p@h:5432/tourbillon.testing', // substring trap — trailing 'ing' breaks the token
+    'not a url',
+  ]) {
+    assert.throws(
+      () => assertTestDatabaseUrl(bad),
+      /not a test-named database|not a parseable/,
+      `must refuse ${bad}`,
+    );
+  }
+  for (const good of [
+    'postgres://u:p@h:5432/tourbillon_test',
+    'postgresql://u:p@h:5432/tb-test',
+    'postgres://u:p@h:5432/test',
+    'postgres://u:p@h/test.tourbillon',
+  ]) {
+    assert.doesNotThrow(() => assertTestDatabaseUrl(good), `must accept ${good}`);
+  }
+});
+
+test('S233-S2: seed() refuses a mis-pointed URL BEFORE any statement reaches the db', async () => {
+  let touched = 0;
+  const explodingTag = (() => {
+    touched += 1;
+    return Promise.reject(new Error('the guard must have fired before this ran'));
+  }) as unknown as MigrationSqlTag;
+  explodingTag.unsafe = () => {
+    touched += 1;
+    return Promise.reject(new Error('the guard must have fired before this ran'));
+  };
+
+  await assert.rejects(
+    () => seed({ sqlTag: explodingTag }, 'postgres://u:p@127.0.0.1:5432/tourbillon'),
+    /not a test-named database/,
+  );
+  assert.equal(touched, 0, 'the wipe guard fires BEFORE the first delete reaches the db');
 });
