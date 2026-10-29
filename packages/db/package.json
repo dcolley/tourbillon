@@ -7,7 +7,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./schema": "./src/schema/index.ts",
-    "./database-url": "./src/database-url.ts"
+    "./database-url": "./src/database-url.ts",
+    "./test/query-spy": "./src/test/query-spy.ts"
   },
   "scripts": {
     "generate": "drizzle-kit generate",

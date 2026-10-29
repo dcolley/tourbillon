@@ -30,6 +30,7 @@ import {
   listRunnableChatTasks,
   listStaleChatTaskRuns,
 } from './chat-task-queries';
+import { spyQueries } from './test/query-spy';
 
 const MIGRATIONS = path.join(__dirname, 'migrations');
 const JOURNAL = (
@@ -72,27 +73,8 @@ async function freshDb() {
   return { client, db };
 }
 
-interface CapturedQuery {
-  sql: string;
-  params: unknown[];
-}
-
-/**
- * Record every (sql, params) pair drizzle hands to the driver from here on (drizzle's PGlite
- * session calls `client.query(queryString, params, config)`). Returns the capture log — the
- * driver-boundary truth for what actually binds, PGlite leniency included.
- */
-function spyQueries(client: PGlite): CapturedQuery[] {
-  const captured: CapturedQuery[] = [];
-  const original = client.query.bind(client);
-  (client as unknown as {
-    query: (sql: string, params?: unknown[], config?: unknown) => Promise<unknown>;
-  }).query = (sqlText: string, params?: unknown[], config?: unknown) => {
-    captured.push({ sql: String(sqlText), params: params ?? [] });
-    return original(sqlText, params as never[], config as never);
-  };
-  return captured;
-}
+// spyQueries (#213 S6c) now lives in ./test/query-spy — shared with chat-task-queries.test.ts
+// and the scheduler's task-runner-208-softs.test.ts.
 
 const A1 = { companyId: 'c1', agentId: 'a1' };
 const B1 = { companyId: 'c2', agentId: 'b1' };

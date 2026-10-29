@@ -27,6 +27,7 @@ import {
   setChatTaskStatus,
   updateChatTask,
 } from './chat-task-queries';
+import { spyQueries } from './test/query-spy';
 
 const MIGRATIONS = path.join(__dirname, 'migrations');
 const JOURNAL = (
@@ -553,22 +554,8 @@ describe('chat-task runner fairness + prioritisation (S8/S9, PR #196 softs)', ()
 
 // ─── #208 ACCEPT softs (S2/S3): company-read determinism + one fallback bound ──
 
-/**
- * Record every (sql, params) pair drizzle hands to the driver from here on — the driver-
- * boundary truth for what the company read actually compiles to (same spy shape as
- * chat-task-runner-softs.test.ts, local here so that file stays #205's own).
- */
-function spyQueries(client: PGlite): Array<{ sql: string; params: unknown[] }> {
-  const captured: Array<{ sql: string; params: unknown[] }> = [];
-  const original = client.query.bind(client);
-  (client as unknown as {
-    query: (sql: string, params?: unknown[], config?: unknown) => Promise<unknown>;
-  }).query = (sqlText: string, params?: unknown[], config?: unknown) => {
-    captured.push({ sql: String(sqlText), params: params ?? [] });
-    return original(sqlText, params as never[], config as never);
-  };
-  return captured;
-}
+// spyQueries (#213 S6c) now lives in ./test/query-spy — shared with chat-task-runner-softs.test.ts
+// and the scheduler's task-runner-208-softs.test.ts.
 
 describe('chat-task company read + fallback bound (S2/S3, PR #208 ACCEPT softs)', () => {
   it('S2: the company read is ORDERED and grouped on the companies PK — a limit is a stable prefix', async () => {
@@ -637,6 +624,49 @@ describe('chat-task company read + fallback bound (S2/S3, PR #208 ACCEPT softs)'
         [...viaElse].sort(),
         [...emptyMap].sort(),
         'empty-map listing and CASE ELSE agree — one fallback, no drift between the branches',
+      );
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('S6a (#213 softs): the default company read carries NO LIMIT — a hidden default limit(100) goes RED', async () => {
+    const { client, db } = await freshDb();
+    try {
+      await addChatTask(A1, { title: 'Pending c1' }, db);
+      await addChatTask(B1, { title: 'Pending c2' }, db);
+
+      const captured = spyQueries(client);
+      const companyReads = () =>
+        captured.filter(
+          (q) => /group by/i.test(q.sql) && q.sql.toLowerCase().includes('inner join "companies"'),
+        );
+
+      // Default call (no opts.limit) — the poller's own path: createDefaultTaskRunnerDeps
+      // .listRunnable calls this WITHOUT a limit, and the CASE map must cover EVERY pending
+      // company. Reinstating the old default `limit(100)` truncates the map to a 100-company
+      // prefix (companies past it silently fall to the fallback bound) and stays green in
+      // every result-shape test above — THIS assertion is the pin: no LIMIT clause at all.
+      const pairs = await listPendingChatTaskCompanySettings(db);
+      assert.equal(pairs.length, 2, 'both pending companies returned');
+      const defaultReads = companyReads();
+      assert.equal(defaultReads.length, 1, 'the default call ran exactly one company read');
+      assert.doesNotMatch(
+        defaultReads[0]!.sql.toLowerCase(),
+        /\blimit\b/i,
+        'no caller limit → NO LIMIT clause at all (the map must be complete, never a 100-company prefix)',
+      );
+
+      // The caller-passed limit still compiles a LIMIT clause: this keeps the doesNotMatch
+      // above meaningful (it proves the spy sees LIMIT when one IS requested, so its absence
+      // on the default call is the no-default behaviour, not a dead opts.limit branch).
+      await listPendingChatTaskCompanySettings(db, { limit: 1 });
+      const allReads = companyReads();
+      assert.equal(allReads.length, 2, 'the caller-limit call ran a second read');
+      assert.match(
+        allReads[1]!.sql.toLowerCase(),
+        /\blimit\b/i,
+        'a caller-passed limit still appears in the compiled SQL',
       );
     } finally {
       await client.close();
