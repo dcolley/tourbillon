@@ -1,3 +1,14 @@
+# Unreleased
+
+## Observational Memory on Assistant free-chat (#194)
+
+- Assistant free-chat runs Observational Memory on the concierge / observer model
+  resolution: company OM model, then concierge model, then none (no OM - chat runs with
+  recent messages only). The company `observationalMemory.enabled` switch and the agent's
+  OM `mode: Off` gate **heartbeats only**: free-chat keeps OM while an observer model is
+  resolvable. When heartbeats run OM on an agent-only observer model but chat has no
+  resolvable observer, the chat menu states which side runs OM.
+
 # v0.2.0 — WakeRunner + Mastra Schedules
 
 ## Breaking changes
