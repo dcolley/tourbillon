@@ -4,6 +4,11 @@
  * task-runner-208-softs.test.ts (which reaches this file through the '@tourbillon/db/test/query-spy'
  * export — it loads PGlite itself via createRequire, so it needs no client types from here).
  *
+ * #216 S7a: that export is gated behind the "tourbillon-test" package-exports condition (see
+ * packages/db/package.json) so production importers (apps/web, packages/mastra) cannot resolve
+ * this test-only module; only the scheduler test script opts in via
+ * `tsx --conditions=+tourbillon-test --test …`. db's own suites import it by relative path.
+ *
  * Records every (sql, params) pair drizzle hands to `client.query` from here on — the
  * driver-boundary truth for what actually binds, PGlite leniency included. The target is
  * typed STRUCTURALLY (only `query` is spied) so both the db suites' PGlite and the

@@ -14,6 +14,12 @@
     "paths": {
       "@tourbillon/db": ["./packages/db/src/index.ts"],
       "@tourbillon/db/schema": ["./packages/db/src/schema/index.ts"],
+      // #216 S7b: scheduler `tsc -p` pulls query-spy.ts through this key -> +1 TS6059 rootDir
+      // error, the same pre-existing class as the 139 other @tourbillon/db sources (tip 171 total
+      // / 140 TS6059; intentional, tracked; folds into any future scheduler rootDir/project-
+      // references fix). Runtime import is gated behind the "tourbillon-test" exports condition
+      // (#216 S7a) - scheduler's test script passes --conditions=+tourbillon-test; TS resolves
+      // types for this specifier through this paths key either way.
       "@tourbillon/db/test/query-spy": ["./packages/db/src/test/query-spy.ts"],
       "@tourbillon/shared": ["./packages/shared/src/index.ts"],
       "@tourbillon/shared/*": ["./packages/shared/src/*"],
