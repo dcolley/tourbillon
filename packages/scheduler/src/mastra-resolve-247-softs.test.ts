@@ -40,6 +40,29 @@
  *     prefixes (^, ~, >=, ...), so a range devDep pins its base version instead of
  *     failing with "store entry must be the DECLARED version ^1.78.0" — a store dir name
  *     that can never exist. Still exact equality, deliberately not semver.satisfies.
+ *
+ * #254 softs (this pack):
+ *   S254-S1 — the structural pin only counted the spawn-call TOKEN, so a rewire that kept
+ *     the token but dropped the env hand-off (or swapped childEnv for an un-stripped
+ *     builder) stayed GREEN. Added: a resolve+echo probe replaying the resolve expression
+ *     over the shared spawnChild seam with NODE_PATH injected (env hand-off observable from
+ *     the resolve path's side), a body pin on childEnv (fresh spread of process.env + the
+ *     NODE_PATH delete), and a strict pin that the spawn options object opens with env set
+ *     to exactly the childEnv() call and carries no other env-shaped key.
+ *   S254-S2 — the live-manifest assertion ended in the magic literal '1.78.0' (the same
+ *     gap S241-S1 caught elsewhere). It now goes through the declared-version path: the
+ *     live spec must survive declaredPinVersion and be a concrete three-part version; the
+ *     exact monorepo value is pinned ONCE by S241-S1 (manifest + packages/mastra match),
+ *     and store/installed equality against the declared spec is pinned by the
+ *     materialisation test above.
+ *   S254-S3 — declaredPinVersion only stripped a single leading comparator, so '||'
+ *     disjunctions, two-token ranges, 'npm:pkg@ver' aliases and 'workspace:'/'catalog:'/
+ *     'file:' refs mis-compared (e.g. '<1.78.0 || >=1.80.0' yielded base '1.78.0 ||
+ *     >=1.80.0', and a lone leading strip made '<1.78.0' look like a base the spec
+ *     excludes). It now resolves only UNAMBIGUOUS single-version specs (including the
+ *     alias form npm:pkg@ver) and REFUSES everything else with the spec in the message —
+ *     a manifest edited to an unresolvable form fails loudly instead of silently
+ *     comparing a malformed token. No semver.satisfies was invented.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -98,16 +121,64 @@ function childResolve(specifier: string): { status: number | null; stdout: strin
 }
 
 /**
- * S251-S2: normalise a semver SPEC to its bare version before the exact comparisons
- * below. The scheduler devDep is declared exact today ('1.78.0', pinned by S241-S1), but
- * the comparisons are raw string equality: if the devDep ever becomes a range
- * ('^1.78.0'), comparing the store entry against '^1.78.0' REDs misleadingly — no pnpm
- * store dir can be named that. Stripping the range prefix keeps the declared-pin INTENT
- * (installed tree must equal the declared version). Deliberately NOT semver.satisfies:
- * under '^1.78.0' that would wave 1.99.0 through and gut the pin.
+ * S254-S1: run a resolve+echo probe through the resolve path's spawn seam. childResolve
+ * itself JSON.stringifies its specifier (no code-injection seam, by design) so the probe
+ * cannot be smuggled through it; instead this replays childResolve's own resolve expression
+ * over the SAME spawnChild call childResolve delegates to (delegation pinned structurally
+ * below) and additionally echoes NODE_PATH. One child therefore exercises the resolve path's
+ * env hand-off end to end: same spawn site, same createRequire anchor, plus the observable
+ * the resolve assertions alone cannot see.
+ */
+function echoResolveEnvViaSharedSeam(specifier: string): { status: number | null; stdout: string; stderr: string } {
+  const script =
+    `process.stdout.write(require('module').createRequire(${JSON.stringify(PKG_JSON)})` +
+    `.resolve(${JSON.stringify(specifier)}) + '|' + String(process.env.NODE_PATH));`;
+  return spawnChild(script);
+}
+
+/**
+ * S251-S2 / S254-S3: normalise a semver SPEC to its bare version before the exact
+ * comparisons below. The scheduler devDep is declared exact today, but the comparisons
+ * are raw string equality: if the devDep ever becomes a range ('^1.78.0'), comparing the
+ * store entry against '^1.78.0' REDs misleadingly — no pnpm store dir can be named that.
+ * Stripping the range prefix keeps the declared-pin INTENT (installed tree must equal the
+ * declared version). Deliberately NOT semver.satisfies: under '^1.78.0' that would wave
+ * 1.99.0 through and gut the pin.
+ *
+ * S254-S3: a single leading-comparator strip is NOT safe for every npm spec form. The old
+ * one-regex strip turned '<1.78.0 || >=1.80.0' into the garbage base '1.78.0 || >=1.80.0'
+ * (and, being satisfied by the leading '<', made a spec that EXCLUDES 1.78.0 look like it
+ * pinned 1.78.0), while 'npm:pkg@1.78.0' / 'workspace:*' never normalised at all and then
+ * mis-compared as literal tokens. Rule now: resolve ONLY unambiguous single-version specs
+ * (optionally prefixed by one comparator, optionally an npm: alias carrying a concrete
+ * version tail) and REFUSE every other form by throwing with the spec in the message.
+ * Refuse beats inventing semver resolution: the materialisation test surfaces the throw
+ * as a loud failure naming the spec, instead of a misleading compare.
  */
 function declaredPinVersion(spec: string): string {
-  return spec.trim().replace(/^(?:[v=]|>=|<=|>|<|\^|~)?\s*/, '');
+  const trimmed = spec.trim();
+  if (/^(?:workspace:|catalog:|file:|link:)/.test(trimmed)) {
+    throw new Error(
+      `declaredPinVersion: spec '${spec}' is a non-registry reference — there is no published version to pin the store entry against; ` +
+        `point the devDep at a concrete version (or update this normaliser deliberately) before re-enabling the comparison`,
+    );
+  }
+  let base = trimmed.startsWith('npm:') ? trimmed.slice(4) : trimmed;
+  if (trimmed.startsWith('npm:')) {
+    // 'npm:pkg@1.2.3' — the pin is the alias's version tail. '@' starting at index 1 so
+    // the leading scope '@' of '@scope/pkg' is not mistaken for the version separator.
+    const at = base.indexOf('@', 1);
+    base = at === -1 ? '' : base.slice(at + 1);
+  }
+  base = base.trim().replace(/^(?:[v=]|>=|<=|>|<|\^|~)?\s*/, '');
+  if (!/^\d+\.\d+\.\d+$/.test(base)) {
+    throw new Error(
+      `declaredPinVersion: spec '${spec}' is not an unambiguous single version (resolved to '${base}') — ` +
+        `multi-comparator forms ('||' disjunctions, two-token ranges) and protocol refs have no single base version; ` +
+        `refusing beats mis-comparing, so declare an exact or single-comparator version instead`,
+    );
+  }
+  return base;
 }
 
 test('S247-S1: the declared @mastra/core devDep is materialised in packages/scheduler/node_modules', () => {
@@ -204,6 +275,36 @@ test('S247-S1: the same child resolve is NODE_PATH-discriminating (hoist-only wo
   }
 });
 
+test('S254-S1: the env the resolve path hands its children is childEnv() output (resolve+echo through the shared spawn seam)', () => {
+  // The sibling echo above calls spawnChild directly, so it can only ever prove THAT
+  // site's env. The brief's mutant — keeping the spawn-call token but rewiring so the
+  // resolve children stop receiving the stripped env — left every prior test GREEN: the
+  // echo checked its own call, the resolve children still landed on the scheduler link
+  // (link-present, so no resolve assertion discriminates env), and the structural pin
+  // only counted the token. This echo runs the resolve expression ITSELF (same anchor,
+  // same spawnChild seam childResolve delegates to) with NODE_PATH injected in the
+  // parent, so any child env reaching the resolve path un-stripped lands here RED.
+  const savedNodePath = process.env.NODE_PATH;
+  process.env.NODE_PATH = '/pretend/pnpm-hoist-dir';
+  try {
+    const proc = echoResolveEnvViaSharedSeam('@mastra/core/observability');
+    assert.equal(proc.status, 0, `resolve+echo child must exit 0; stderr: ${proc.stderr}`);
+    const [resolved, nodePathSeen] = proc.stdout.split('|');
+    assert.ok(
+      resolved.includes(path.join('@mastra', 'core')) && resolved.includes('observab'),
+      `precondition: the same child must really perform the resolve (got ${resolved})`,
+    );
+    assert.equal(
+      nodePathSeen,
+      'undefined',
+      'the resolve path must hand its children the stripped childEnv(), not an inherited or re-spread env',
+    );
+  } finally {
+    if (savedNodePath === undefined) delete process.env.NODE_PATH;
+    else process.env.NODE_PATH = savedNodePath;
+  }
+});
+
 test('S251-S1: childResolve is wired through the single childEnv-built spawn site (structural pin)', () => {
   // The behavioural reroute above covers the SHARED spawn site; it cannot see a second
   // spawn path re-inlined into childResolve — the echo would check its own site while the
@@ -233,6 +334,52 @@ test('S251-S1: childResolve is wired through the single childEnv-built spawn sit
     SRC,
     /env:\s*\{\s*\.\.\.process\.env/,
     'no spawn site may build the child env as a raw process.env spread — that is the S251-S1 mutant (childResolve would silently stop stripping NODE_PATH)',
+  );
+
+  // S254-S1 (token-only gap): counting the spawn-call token proved the CALL survived, not
+  // that the env hand-off survived with it. Assert on the spawn OPTIONS OBJECT, so any env
+  // key whose value is not the childEnv() call — a swapped-in builder, a re-spread, a
+  // precomputed variable — REDs even while the token count stays 1. The env value is CAPTURED
+  // and compared literally (no lookahead, no unanchored \\b that would also hit the
+  // encoding key); the whole options object must be just this env hand-off plus the
+  // encoding, so a second env-shaped key cannot hide in it.
+  const optsPos = SRC.indexOf('{', SRC.indexOf('process.execPath', sitePos));
+  assert.ok(optsPos !== -1, 'the single spawn site must pass an options object');
+  const optionsObject = SRC.slice(optsPos, SRC.indexOf('}', optsPos) + 1);
+  assert.match(
+    optionsObject,
+    /^\{\s*env:\s*childEnv\(\)\s*[,}]/,
+    'the spawn options object must open with the env key set to the childEnv() call (a token-only pin let a rewire keep the token and drop the hand-off)',
+  );
+  const envValueMatch = optionsObject.match(/^\{\s*env:\s*([^,}]+)/);
+  assert.ok(envValueMatch, 'precondition: the options object carries an env key');
+  assert.equal(
+    envValueMatch[1].trim(),
+    'childEnv()',
+    'the spawn options env value must be exactly the childEnv() call — the S254-S1 rewire mutant (keep the token, swap or drop the stripped-env hand-off) lands here',
+  );
+  assert.doesNotMatch(
+    optionsObject.slice(envValueMatch[0].length),
+    /\b[a-zA-Z]*[eE]nv\w*\s*:/,
+    'no additional env-shaped key may appear in the spawn options object alongside the childEnv() hand-off',
+  );
+
+  // S254-S1: the builder itself must be the strip. A rewire can keep env: childEnv() at
+  // the site and gut the BUILDER (raw spread, missing delete) — the echo tests catch that
+  // behaviourally; this pin catches it structurally with a named assertion.
+  const ceStart = SRC.indexOf('function childEnv(');
+  const ceEnd = SRC.indexOf('function spawnChild(', ceStart);
+  assert.ok(ceStart !== -1 && ceEnd > ceStart, 'precondition: childEnv is defined above spawnChild');
+  const childEnvBody = SRC.slice(ceStart, ceEnd);
+  assert.match(
+    childEnvBody,
+    /\{\s*\.\.\.process\.env\s*\}/,
+    'childEnv must start from a fresh copy of process.env (everything the parent has, minus what it strips)',
+  );
+  assert.match(
+    childEnvBody,
+    /delete\s+env\.NODE_PATH/,
+    'childEnv must delete NODE_PATH from the copy it returns — without this the hoist dir can rescue a missing link (the #241 failure mode)',
   );
 
   // childResolve must DELEGATE to the shared site: an inlined spawn there is invisible to
@@ -266,10 +413,81 @@ test('S251-S2: declared-version comparison stays meaningful when the devDep spec
   for (const spec of ['^1.78.0', '~1.78.0', '>=1.78.0', '>1.78.0', '<=1.78.0', '<1.78.0', '=1.78.0', 'v1.78.0', ' ^1.78.0 ']) {
     assert.equal(declaredPinVersion(spec), '1.78.0', `range spec '${spec}' must normalise to its base version`);
   }
-  // The live manifest still pins exactly the version the materialisation test expects
-  // (that test does the full store/installed comparison; this pins the normalised value).
+  // S254-S2: the live manifest goes through the SAME declared-version path as every
+  // other comparison instead of ending in a second magic literal. A hardcoded literal
+  // here re-pins the monorepo version a second time: bump the pin and the materialisation
+  // test above stays GREEN (it compares store/installed against the DECLARED spec) while
+  // this assertion REDs with a stale expectation — the same gap S241-S1 caught elsewhere.
+  // The exact value is pinned ONCE, in task-runner-241-softs.test.ts (manifest equals the
+  // monorepo pin AND matches packages/mastra's dependency); the store/installed equality
+  // against the declared spec is pinned by the materialisation test. What belongs here is
+  // that the LIVE spec survives the normaliser and is itself concrete.
   const schedulerPkg = JSON.parse(readFileSync(PKG_JSON, 'utf8')) as Record<string, unknown>;
   const declared = (schedulerPkg.devDependencies as Record<string, unknown>)['@mastra/core'];
   assert.equal(typeof declared, 'string', 'precondition: @mastra/core declared in devDependencies');
-  assert.equal(declaredPinVersion(declared as string), '1.78.0', 'the declared pin must normalise to the monorepo-pinned version');
+  const livePin = declaredPinVersion(declared as string);
+  assert.match(
+    livePin,
+    /^\d+\.\d+\.\d+$/,
+    `the declared spec '${declared}' must survive declaredPinVersion as a concrete three-part version the materialisation test can compare (S254-S2)`,
+  );
+});
+
+test('S254-S3: declaredPinVersion strips unambiguous specs and refuses the forms it cannot resolve', () => {
+  // Pre-fix the ONE-REGEX strip only ever removed a single leading comparator, so the
+  // forms below either mis-compared as garbage tokens or, worse, looked resolvable when
+  // they were not ('<1.78.0 || >=1.80.0' stripped to '1.78.0 || >=1.80.0'; a leading '<'
+  // on its own made an EXCLUDING spec look like a base pin; aliases and workspace refs
+  // came back verbatim). The smallest safe change is strip-when-unambiguous / REFUSE
+  // otherwise — deliberately no semver.satisfies, which would gut the exact pin.
+  //
+  // Unambiguous single-version specs keep resolving (S251-S2 behaviour preserved):
+  for (const spec of ['^1.78.0', '~1.78.0', '>=1.78.0', '>1.78.0', '<=1.78.0', '<1.78.0', '1.78.0', ' v1.78.0 ']) {
+    assert.equal(declaredPinVersion(spec), '1.78.0', `single-comparator spec '${spec}' must normalise to its base version`);
+  }
+  // npm: ALIAS form: the spec itself carries the concrete version, so it is unambiguous —
+  // strip the alias prefix and package name (scoped name included) down to the tail.
+  assert.equal(declaredPinVersion('npm:@mastra/core@1.78.0'), '1.78.0', 'an npm: alias with a version tail resolves to that version');
+  assert.equal(declaredPinVersion('npm:other-pkg@2.3.4'), '2.3.4', 'the alias name is irrelevant; the version tail is the pin');
+  assert.throws(
+    () => declaredPinVersion('npm:other-pkg'),
+    /npm:other-pkg/,
+    "an npm: alias WITHOUT a version tail has nothing to pin and must refuse with the spec named",
+  );
+  // DISJUNCTIONS: the base of the first comparator is NOT the pin — the store could be at
+  // a version the range excludes and the old strip still compared it GREEN. Must refuse.
+  assert.throws(
+    () => declaredPinVersion('<1.78.0 || >=1.80.0'),
+    /\|\|/,
+    "a '||' disjunction has no single base version and must refuse, not mis-compare (pre-fix this returned '1.78.0 || >=1.80.0')",
+  );
+  assert.throws(
+    () => declaredPinVersion('>=1.78.0 <2.0.0'),
+    />=/,
+    'a two-token intersection range must refuse (pre-fix it returned the garbage base 1.78.0 <2.0.0)',
+  );
+  // Protocol refs: no published version exists to compare the .pnpm store entry against.
+  for (const spec of ['workspace:*', 'workspace:../mastra', 'catalog:default', 'file:../local-pkg', 'link:../local-pkg']) {
+    assert.throws(
+      () => declaredPinVersion(spec),
+      /non-registry reference/,
+      `protocol ref '${spec}' must be refused with a clear message, not compared as a literal token`,
+    );
+  }
+  // Garbage fails the same loud way (pre-fix it flowed through as a misleading compare).
+  for (const spec of ['*', 'x', 'latest', '', '1.78']) {
+    assert.throws(
+      () => declaredPinVersion(spec),
+      /unambiguous single version/,
+      `wildcard/tag spec '${spec}' has no single base version and must refuse`,
+    );
+  }
+  // The refusal is surfaced LOUDLY: the materialisation test calls declaredPinVersion on
+  // the live manifest, so a manifest edited to a refused form fails naming the spec
+  // instead of silently comparing a malformed token.
+  assert.throws(
+    () => declaredPinVersion('>=1.78.0 <2.0.0 || 3.0.0'),
+    /unambiguous single version/,
+    'compound forms refuse with the resolution diagnostic',
+  );
 });
