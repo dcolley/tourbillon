@@ -21,6 +21,7 @@ import { createTool } from '@mastra/core/tools';
 import {
   addChatTask,
   countOpenChatTasks,
+  getCompanySettingsSnapshot,
   listChatTasks,
   prioritizeChatTask,
   setChatTaskPaused,
@@ -31,6 +32,7 @@ import {
   type ChatTask,
   type ChatTaskScope,
 } from '@tourbillon/db';
+import { resolveTaskRunnerSettings, type CompanySettings } from '@tourbillon/shared';
 import { z } from 'zod';
 import { extractToolRuntimeContext } from './api-client';
 import { getCurrentHeartbeatContext } from '../heartbeat-context';
@@ -180,13 +182,80 @@ const ADD_MY_TASK_WAKE_DESCRIPTION =
  * operator warning — "queued but Run Task is OFF — enable it or break the ask into simple steps
  * done live in chat" — so the Concierge never claims a queue that will never drain and never
  * infinite-loops tools trying to work the ask live instead. Bounded on purpose: no scheduler
- * change; agent-factory derives the flag with resolveTaskRunnerSettings(), mirroring the
- * scheduler poller's own enabled check (packages/scheduler/src/task-runner.ts).
+ * change. S245-S3a moved the decision from build time to execute time: the company row is
+ * re-read LIVE per addMyTask (resolveRunTaskQueueState) so a cached chat controller can never
+ * serve a stale verdict; the agent-factory flag derived with resolveTaskRunnerSettings() is the
+ * fallback when that read fails, mirroring the scheduler poller's own enabled check
+ * (packages/scheduler/src/task-runner.ts).
  */
 export const RUN_TASK_DISABLED_WARNING =
   ' WARNING: this company has Run Task turned OFF (settings taskRunner.enabled=false) — no Run ' +
   'Task will start for it. Tell the operator to enable Run Task in Settings, or break the ask ' +
   'into simple steps you can do live in chat.';
+
+/**
+ * S245-S3b (#245): the company switch is not the only way the queue freezes. The GLOBAL budget
+ * (env TASK_RUNNER_MAX_CONCURRENT_RUNS) reaching 0 is the kill switch (poller never starts) and
+ * 1 leaves zero task capacity after the heartbeat reservation — either way addMyTask would keep
+ * promising "queued for Run Task" while nothing can EVER start. Mirrors the scheduler's
+ * resolveMaxConcurrentRuns + defaultTaskCapPerAgent semantics (unset/blank/garbage → default 2;
+ * negative → garbage → 2). Read from THIS process's env: per the standard setup both web and
+ * scheduler source the same root .env, so the chat warning and the poller agree; a split-env
+ * deployment degrades to the company-level warning only (never a false all-clear from stale data).
+ */
+export const RUN_TASK_CAPACITY_ZERO_WARNING =
+  ' WARNING: the Run Task queue has ZERO task capacity right now ' +
+  '(TASK_RUNNER_MAX_CONCURRENT_RUNS is 0 — kill switch — or 1, leaving no slot after the ' +
+  'heartbeat reservation) — no Run Task will start for it. Tell the operator to raise ' +
+  'TASK_RUNNER_MAX_CONCURRENT_RUNS to at least 2, or break the ask into simple steps you can ' +
+  'do live in chat.';
+
+/** Why the queue is frozen — surfaced on the tool result for triage. */
+export type RunTaskQueueReason = 'company_disabled' | 'no_task_capacity';
+
+/** Mirrors scheduler resolveMaxConcurrentRuns(0/1 ⇒ no task capacity). Pure; env injectable. */
+export function globalRunTaskCapacityZero(
+  raw: string | undefined = process.env.TASK_RUNNER_MAX_CONCURRENT_RUNS,
+): boolean {
+  if (raw === undefined || raw.trim() === '') return false; // unset/blank → default 2 → has capacity
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) return false; // garbage/negative → default 2
+  return Math.trunc(parsed) <= 1; // 0 = kill switch; 1 = heartbeat reservation eats the only slot
+}
+
+/**
+ * S245-S3a (#245): resolve the queue state LIVE on every addMyTask call. The chat controller is
+ * cached per agent (apps/web/lib/chat/registry.ts), so the flag computed when it was BUILT goes
+ * stale the moment Settings flips `taskRunner.enabled` — the warning lied in both directions
+ * until the process restarted. Re-reading the company row per ask (the same source the poller
+ * re-reads every tick) is the smallest correct fix. A db hiccup falls back to the build-time
+ * flag (better a stale warning than a dropped queue message); the task write itself never
+ * depends on this read.
+ */
+export async function resolveRunTaskQueueState(
+  companyId: string,
+  staticFallback: boolean,
+  readSettings: (companyId: string) => Promise<unknown | null> = (id) =>
+    getCompanySettingsSnapshot(id, toolDb()),
+): Promise<{ reason: RunTaskQueueReason | null; warning: string }> {
+  let companyDisabled: boolean;
+  try {
+    const settings = await readSettings(companyId);
+    // Same discipline as the poller's resolveTaskRunnerSettingsForCompany: pull the block
+    // straight off the jsonb. parseCompanySettings is a WHITELIST parser that drops taskRunner
+    // (deliberately — it never passes credentials around) — running the raw row through it
+    // would make every company look enabled and the warning could never fire.
+    const block = (settings ?? undefined) as Pick<CompanySettings, 'taskRunner'> | undefined;
+    companyDisabled = !resolveTaskRunnerSettings(block).enabled;
+  } catch {
+    companyDisabled = staticFallback;
+  }
+  if (companyDisabled) return { reason: 'company_disabled', warning: RUN_TASK_DISABLED_WARNING };
+  if (globalRunTaskCapacityZero()) {
+    return { reason: 'no_task_capacity', warning: RUN_TASK_CAPACITY_ZERO_WARNING };
+  }
+  return { reason: null, warning: '' };
+}
 
 async function runAddMyTask(
   inputData: z.infer<typeof addMyTaskInputSchema>,
@@ -223,20 +292,26 @@ async function runAddMyTask(
       ),
     );
   }
+  // S245-S3a: resolved AFTER the writes (the task is recorded whatever the queue says) and
+  // LIVE per call — a cached controller's build-time flag must never be the last word.
+  const queue = await resolveRunTaskQueueState(scope.companyId, opts.runTaskDisabled);
   return {
     ok: true,
     message:
-      `Added ${added.length} task${added.length === 1 ? '' : 's'}.` +
-      (opts.runTaskDisabled ? RUN_TASK_DISABLED_WARNING : ''),
-    ...(opts.runTaskDisabled ? { runTaskDisabled: true } : {}),
+      `Added ${added.length} task${added.length === 1 ? '' : 's'}.` + queue.warning,
+    ...(queue.reason
+      ? { runTaskDisabled: true, runTaskDisabledReason: queue.reason }
+      : {}),
     tasks: added.map(row),
   };
 }
 
 /**
  * Build the addMyTask tool for a run context. `context: 'run-task-wake'` swaps in the wake copy
- * (execute queued work — do not re-queue, S243-S2); `runTaskDisabled` appends the operator
- * warning to the result (S243-S3). Callers must not mutate the returned tool.
+ * (execute queued work — do not re-queue, S243-S2); `runTaskDisabled` is the BUILD-TIME fallback
+ * for the operator warning (S243-S3) — at execute time the company row is re-read LIVE and wins
+ * over it (S245-S3a); the flag only speaks when that read fails. Callers must not mutate the
+ * returned tool.
  */
 export function createAddMyTaskTool(opts?: {
   context?: 'chat' | 'run-task-wake';

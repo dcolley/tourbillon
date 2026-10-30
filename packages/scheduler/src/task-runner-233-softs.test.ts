@@ -137,7 +137,7 @@ test('S233-S4: the per-tick summary line includes errored=skippedErrored (real l
   assert.equal(summaries.length, 1, 'one completed tick → one summary line');
   assert.deepEqual(
     summaries[0]!.data,
-    { polled: 2, started: 1, deferred: 0, inactive: 0, disabled: 0, errored: 1 },
+    { polled: 2, started: 1, deferred: 0, inactive: 0, disabled: 0, noCapacity: 0, errored: 1 },
     'the tick line must surface per-agent isolation: errored is the summary.skippedErrored counter',
   );
 });
@@ -157,7 +157,7 @@ test('S233-S4: an all-erroring tick still logs the summary (started=0, errored=2
   assert.equal(summaries.length, 1, 'polled > 0 keeps the summary line even when every agent errored');
   assert.deepEqual(
     summaries[0]!.data,
-    { polled: 2, started: 0, deferred: 0, inactive: 0, disabled: 0, errored: 2 },
+    { polled: 2, started: 0, deferred: 0, inactive: 0, disabled: 0, noCapacity: 0, errored: 2 },
     'two erroring agents → errored=2, started=0',
   );
 });

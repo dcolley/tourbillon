@@ -16,13 +16,16 @@ import {
   CHAT_TASK_TOOLS,
   CHAT_TASK_TOOL_IDS,
   RUN_TASK_WAKE_CHAT_TASK_TOOLS,
+  RUN_TASK_CAPACITY_ZERO_WARNING,
   RUN_TASK_DISABLED_WARNING,
   addMyTaskTool,
   addMyTaskRunTaskWakeTool,
   cancelMyTaskTool,
   completeMyTaskTool,
   createAddMyTaskTool,
+  globalRunTaskCapacityZero,
   listMyTasksTool,
+  resolveRunTaskQueueState,
   updateMyTaskTool,
 } from './chat-task-tools';
 import { CONTROL_PLANE_TOOLS } from './control-plane-tools';
@@ -327,19 +330,73 @@ describe('pauseMyTask + prioritizeMyTask — Run Task controls (S7, #196 soft-pa
 // resolveTaskRunnerSettings) the Concierge must still not infinite-loop tools: addMyTask records
 // the task and its RESULT carries the operator message ("enable Run Task or break the ask into
 // simple steps done live in chat"). Product rule pinned in code at createAddMyTaskTool.
+//
+// S245-S3a (#245): the chat controller is cached per agent, so the flag computed at BUILD time
+// went stale when Settings flipped taskRunner.enabled — the warning lied until the process
+// restarted. The verdict is now resolved LIVE per addMyTask from the company row (the same
+// source the poller re-reads every tick); the build-time flag is only the fallback when that
+// read throws. S245-S3b adds the global cap-0 refusal (env TASK_RUNNER_MAX_CONCURRENT_RUNS ≤ 1
+// freezes every queue — addMyTask must say so, never quietly promise a dead queue).
 
-describe('addMyTask — Run Task disabled fallback (S243-S3)', () => {
-  it('records the task but warns the operator when the company has Run Task OFF', async () => {
+/** Point the LIVE company row at a taskRunner block (or clear settings entirely). */
+async function setCompanyTaskRunner(
+  client: PGlite,
+  taskRunner: Record<string, unknown> | undefined,
+): Promise<void> {
+  if (taskRunner === undefined) {
+    await client.exec(`update companies set settings = null where id = 'c1'`);
+    return;
+  }
+  const json = JSON.stringify({ taskRunner }).replace(/'/g, "''");
+  await client.exec(`update companies set settings = '${json}'::jsonb where id = 'c1'`);
+}
+
+/** Working chat-task db whose ONLY company-settings read throws — the db-hiccup fallback. */
+function withFailingCompanyRead(db: ChatTaskDb): ChatTaskDb {
+  return Object.create(db, {
+    query: {
+      value: {
+        companies: {
+          findFirst: async () => {
+            throw new Error('simulated db hiccup on companies read');
+          },
+        },
+      },
+    },
+  }) as unknown as ChatTaskDb;
+}
+
+/** Determinism: the capacity check reads the real env — pin/restore it around a test. */
+async function withEnv<T>(raw: string | undefined, fn: () => Promise<T>): Promise<T> {
+  const prev = process.env.TASK_RUNNER_MAX_CONCURRENT_RUNS;
+  if (raw === undefined) delete process.env.TASK_RUNNER_MAX_CONCURRENT_RUNS;
+  else process.env.TASK_RUNNER_MAX_CONCURRENT_RUNS = raw;
+  try {
+    return await fn();
+  } finally {
+    if (prev === undefined) delete process.env.TASK_RUNNER_MAX_CONCURRENT_RUNS;
+    else process.env.TASK_RUNNER_MAX_CONCURRENT_RUNS = prev;
+  }
+}
+
+const callAddMyTask = async (tool: ReturnType<typeof createAddMyTaskTool>, title: string) =>
+  (await tool.execute!(
+    { titles: [title] },
+    { requestContext: scopeContext } as never,
+  )) as ToolResult;
+
+describe('addMyTask — Run Task disabled: LIVE verdict per ask (S243-S3 + S245-S3a)', () => {
+  it('records the task but warns the operator when the company row has Run Task OFF', async () => {
     const { client, db } = await seededToolDb();
     try {
       setToolDbForTests(db);
-      const off = createAddMyTaskTool({ runTaskDisabled: true });
-      const res = (await off.execute!(
-        { titles: ['Investigate the flaky deploy'] },
-        { requestContext: scopeContext } as never,
-      )) as ToolResult;
+      // Company flipped OFF AFTER any controller build — the live row is the truth.
+      await setCompanyTaskRunner(client, { enabled: false });
+      const off = createAddMyTaskTool(); // build-time flag default FALSE: live read must win
+      const res = await callAddMyTask(off, 'Investigate the flaky deploy');
       assert.equal(res.ok, true, 'the task is still recorded — never dropped');
       assert.equal(res.runTaskDisabled, true);
+      assert.equal(res.runTaskDisabledReason, 'company_disabled');
       assert.equal(res.message, `Added 1 task.${RUN_TASK_DISABLED_WARNING}`, 'exported warning is the one used');
       assert.match(res.message, /Run Task turned OFF \(settings taskRunner\.enabled=false\)/);
       assert.match(res.message, /no Run Task will start/);
@@ -353,17 +410,18 @@ describe('addMyTask — Run Task disabled fallback (S243-S3)', () => {
     }
   });
 
-  it('no warning when Run Task is enabled (default) — normal queue path untouched', async () => {
+  it('S245-S3a: a stale build-time warning dies the moment the company row says enabled', async () => {
     const { client, db } = await seededToolDb();
     try {
       setToolDbForTests(db);
-      const on = createAddMyTaskTool(); // default: Run Task on
-      const res = (await on.execute!(
-        { titles: ['Normal queued work'] },
-        { requestContext: scopeContext } as never,
-      )) as ToolResult;
+      // The exact stale-controller shape: assembled while OFF (runTaskDisabled: true captured),
+      // Settings has since enabled Run Task. The live row must overrule the cached flag —
+      // dropping the live re-read (the mutant) leaves this RED.
+      await setCompanyTaskRunner(client, { enabled: true });
+      const staleOn = createAddMyTaskTool({ runTaskDisabled: true });
+      const res = await callAddMyTask(staleOn, 'Work the queue proves enabled');
       assert.equal(res.ok, true);
-      assert.notEqual(res.runTaskDisabled, true);
+      assert.notEqual(res.runTaskDisabled, true, 'no stale warning survives a live enabled read');
       assert.equal(res.message, 'Added 1 task.');
     } finally {
       setToolDbForTests(null);
@@ -371,10 +429,50 @@ describe('addMyTask — Run Task disabled fallback (S243-S3)', () => {
     }
   });
 
-  it('assembly derives the flag from settings.taskRunner.enabled === false (mirrors the poller)', async () => {
+  it('no warning when Run Task is enabled (default) — normal queue path untouched', async () => {
     const { client, db } = await seededToolDb();
     try {
       setToolDbForTests(db);
+      await withEnv('2', async () => {
+        const on = createAddMyTaskTool(); // default: Run Task on
+        const res = await callAddMyTask(on, 'Normal queued work');
+        assert.equal(res.ok, true);
+        assert.notEqual(res.runTaskDisabled, true);
+        assert.equal(res.message, 'Added 1 task.');
+      });
+    } finally {
+      setToolDbForTests(null);
+      await client.close();
+    }
+  });
+
+  it('build-time flag only speaks when the LIVE read throws (db hiccup fallback)', async () => {
+    const { client, db } = await seededToolDb();
+    try {
+      setToolDbForTests(withFailingCompanyRead(db));
+      const off = createAddMyTaskTool({ runTaskDisabled: true });
+      const resOff = await callAddMyTask(off, 'Fallback still warns when db is down');
+      assert.equal(resOff.ok, true, 'task write never depends on the settings read');
+      assert.equal(resOff.runTaskDisabled, true, 'better a stale warning than silence');
+      assert.equal(resOff.runTaskDisabledReason, 'company_disabled');
+      assert.match(resOff.message, /Run Task turned OFF/);
+
+      const on = createAddMyTaskTool();
+      const resOn = await callAddMyTask(on, 'Fallback false stays silent too');
+      assert.equal(resOn.ok, true);
+      assert.notEqual(resOn.runTaskDisabled, true);
+    } finally {
+      setToolDbForTests(null);
+      await client.close();
+    }
+  });
+
+  it('assembly derives the build-time fallback from settings.taskRunner.enabled === false (mirrors the poller)', async () => {
+    const { client, db } = await seededToolDb();
+    try {
+      // Company row stays enabled/null: only under a failing live read can the assembly-
+      // derived flag speak — which is exactly what pins the agent-factory derivation.
+      setToolDbForTests(withFailingCompanyRead(db));
       const assemble = (taskRunner: Record<string, unknown> | undefined) =>
         assembleAgentTools(agentTestRecord, {
           companySettings: { taskRunner } as never,
@@ -401,5 +499,124 @@ describe('addMyTask — Run Task disabled fallback (S243-S3)', () => {
       setToolDbForTests(null);
       await client.close();
     }
+  });
+});
+
+// ─── S245-S3b (#245): global cap-0 must refuse, never silently queue forever ────
+// TASK_RUNNER_MAX_CONCURRENT_RUNS=0 is the scheduler kill switch; 1 reserves the only slot for
+// heartbeats (defaultTaskCapPerAgent(1)=0). Either way NO Run Task can ever start — addMyTask
+// must carry the honest operator message instead of promising a permanently dead queue.
+
+describe('addMyTask — global task-capacity zero (S245-S3b)', () => {
+  it('budget 0 (kill switch) and budget 1 (no task capacity) both warn with the capacity message', async () => {
+    const { client, db } = await seededToolDb();
+    try {
+      setToolDbForTests(db);
+      for (const raw of ['0', '1']) {
+        await withEnv(raw, async () => {
+          const tool = createAddMyTaskTool();
+          const res = await callAddMyTask(tool, `Queued while budget ${raw}`);
+          assert.equal(res.ok, true, 'still recorded — the refusal is in the message, not a write block');
+          assert.equal(res.runTaskDisabled, true);
+          assert.equal(res.runTaskDisabledReason, 'no_task_capacity');
+          assert.equal(res.message, `Added 1 task.${RUN_TASK_CAPACITY_ZERO_WARNING}`);
+          assert.match(res.message, /ZERO task capacity/);
+          assert.match(res.message, /TASK_RUNNER_MAX_CONCURRENT_RUNS/);
+          assert.match(res.message, /at least 2/);
+          assert.match(res.message, /break the ask into simple steps you can do live in chat/);
+        });
+      }
+    } finally {
+      setToolDbForTests(null);
+      await client.close();
+    }
+  });
+
+  it('healthy budgets (2, garbage, negative, unset) stay silent — capacity ≠ false alarm', async () => {
+    const { client, db } = await seededToolDb();
+    try {
+      setToolDbForTests(db);
+      for (const raw of ['2', '3', 'abc', '-1', '', undefined]) {
+        await withEnv(raw, async () => {
+          const res = await callAddMyTask(createAddMyTaskTool(), `Budget ${raw ?? 'unset'}`);
+          assert.equal(res.ok, true);
+          assert.notEqual(res.runTaskDisabled, true, `budget ${raw ?? 'unset'} is healthy`);
+          assert.equal(res.message, `Added 1 task.`);
+        });
+      }
+    } finally {
+      setToolDbForTests(null);
+      await client.close();
+    }
+  });
+
+  it('company-disabled outranks the capacity warning when both are broken', async () => {
+    const { client, db } = await seededToolDb();
+    try {
+      setToolDbForTests(db);
+      await setCompanyTaskRunner(client, { enabled: false });
+      await withEnv('0', async () => {
+        const res = await callAddMyTask(createAddMyTaskTool(), 'Both broken');
+        assert.equal(res.runTaskDisabledReason, 'company_disabled', 'fix the switch before the budget');
+        assert.match(res.message, /Run Task turned OFF/);
+      });
+    } finally {
+      setToolDbForTests(null);
+      await client.close();
+    }
+  });
+
+  it('globalRunTaskCapacityZero mirrors the scheduler parse (env injectable, pure)', () => {
+    assert.equal(globalRunTaskCapacityZero('0'), true, 'kill switch');
+    assert.equal(globalRunTaskCapacityZero('1'), true, 'heartbeat reservation leaves 0');
+    assert.equal(globalRunTaskCapacityZero('1.5'), true, 'trunc → 1');
+    assert.equal(globalRunTaskCapacityZero('2'), false);
+    assert.equal(globalRunTaskCapacityZero('10'), false);
+    assert.equal(globalRunTaskCapacityZero(undefined), false, 'unset → default 2');
+    assert.equal(globalRunTaskCapacityZero('  '), false, 'blank → unset, not 0');
+    assert.equal(globalRunTaskCapacityZero('garbage'), false, 'garbage → default 2');
+    assert.equal(globalRunTaskCapacityZero('-1'), false, 'negative is garbage, not the switch');
+  });
+});
+
+describe('resolveRunTaskQueueState — decision matrix (S245-S3a/b, pure)', () => {
+  const readReturning = (settings: unknown) => async () => settings;
+  const readThrowing = async () => {
+    throw new Error('db down');
+  };
+
+  it('live disabled row wins over a static false', async () => {
+    const q = await resolveRunTaskQueueState('c1', false, readReturning({ taskRunner: { enabled: false } }));
+    assert.equal(q.reason, 'company_disabled');
+    assert.equal(q.warning, RUN_TASK_DISABLED_WARNING);
+  });
+
+  it('live enabled row clears a static true', async () => {
+    const q = await resolveRunTaskQueueState('c1', true, readReturning({ taskRunner: { enabled: true } }));
+    assert.equal(q.reason, null);
+    assert.equal(q.warning, '');
+  });
+
+  it('missing company row (null settings) resolves to the poller default — enabled', async () => {
+    const q = await resolveRunTaskQueueState('c1', true, readReturning(null));
+    assert.equal(q.reason, null, 'null row is a REAL answer, not a read failure: no stale warning');
+  });
+
+  it('read failure falls back to the static flag, both directions', async () => {
+    assert.equal((await resolveRunTaskQueueState('c1', true, readThrowing)).reason, 'company_disabled');
+    assert.equal((await resolveRunTaskQueueState('c1', false, readThrowing)).reason, null);
+  });
+
+  it('capacity zero only speaks when the company switch is on', async () => {
+    await withEnv('0', async () => {
+      assert.equal((await resolveRunTaskQueueState('c1', false, readReturning(null))).reason, 'no_task_capacity');
+      assert.equal(
+        (await resolveRunTaskQueueState('c1', false, readReturning({ taskRunner: { enabled: false } }))).reason,
+        'company_disabled',
+      );
+    });
+    await withEnv('2', async () => {
+      assert.equal((await resolveRunTaskQueueState('c1', false, readReturning(null))).reason, null);
+    });
   });
 });

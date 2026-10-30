@@ -427,6 +427,25 @@ export async function listPendingChatTaskCompanySettings(
 }
 
 /**
+ * S245-S3a (#245): one company's raw `settings` jsonb by id — the LIVE read the chat-side
+ * addMyTask warning uses on every call, mirroring how the scheduler poller re-resolves
+ * `settings.taskRunner` per tick from the row. The chat controller caches its tool assembly,
+ * so a flag computed only at build time goes stale when Settings toggles
+ * `taskRunner.enabled`; this read is the freshness seam. Returns null when the company row
+ * does not exist; THROWS on a db hiccup — callers decide their fallback (never swallow here).
+ */
+export async function getCompanySettingsSnapshot(
+  companyId: string,
+  database: ChatTaskDb = defaultDb,
+): Promise<unknown | null> {
+  const row = await database.query.companies.findFirst({
+    where: eq(companies.id, companyId),
+    columns: { settings: true },
+  });
+  return row?.settings ?? null;
+}
+
+/**
  * Claim one task for a Run Task (conditional pending→in_progress). Returns the
  * claimed row, or null when it is no longer claimable (paused, cancelled, or
  * another worker got there first). The attempt count and run id are written in

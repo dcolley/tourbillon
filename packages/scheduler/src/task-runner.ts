@@ -57,8 +57,10 @@ export const TASK_RUNNER_DEFAULT_MAX_CONCURRENT_RUNS = 2;
  *
  * S3 edge case (documented behaviour, not a bug): with an explicit budget of 1 there is no
  * task capacity left after the heartbeat reservation — defaultTaskCapPerAgent(1) = 0 — so
- * Run Tasks never start even though the poller runs. Use 0 for the kill switch; anything
- * that should also run tasks needs a budget of at least 2.
+ * Run Tasks never start even though the poller runs. S245-S3b made that state VISIBLE: the
+ * poll tick now refuses with a dedicated warn ("task-run capacity zero, refusing…") and its
+ * own skippedNoCapacity counter instead of hiding in the "slots full, deferring" line. Use 0
+ * for the kill switch; anything that should also run tasks needs a budget of at least 2.
  */
 export function resolveMaxConcurrentRuns(
   raw: string | undefined = process.env.TASK_RUNNER_MAX_CONCURRENT_RUNS,
@@ -180,6 +182,13 @@ export interface TaskRunPollSummary {
   /** Rows skipped because the company disabled Run Task (settings.taskRunner.enabled=false, S1). */
   skippedDisabled: number;
   /**
+   * S245-S3b (#245): agents whose EFFECTIVE task cap is 0 (shared budget ≤ 1, or an explicit
+   * taskCap of 0) while tasks were queued for them. Distinct from `skippedFull`: capacity is
+   * structurally zero — no amount of slot freeing will ever start these runs — so a mis-set
+   * budget must be visible as its own counter, not buried in routine budget deferrals.
+   */
+  skippedNoCapacity: number;
+  /**
    * S199c: agents whose slot-count/claim work threw this tick. They are skipped in isolation —
    * the rest of the queue still gets its turn (one bad agent must never starve the tick).
    */
@@ -236,6 +245,7 @@ export async function pollTaskRunner(
     skippedFull: 0,
     skippedInactive: 0,
     skippedDisabled: 0,
+    skippedNoCapacity: 0,
     skippedErrored: 0,
   };
   // S233-S7: no early return on `rows.length === 0` — the defer-log cleanup below still has
@@ -315,6 +325,27 @@ export async function pollTaskRunner(
     const taskCap =
       opts.taskCap ?? Math.min(settings.maxConcurrentTasks, defaultTaskCapPerAgent(maxConcurrent));
     const slot = await deps.countActiveRuns(agentId);
+    // S245-S3b (#245): an EFFECTIVE task cap of 0 (shared budget ≤ 1 → defaultTaskCapPerAgent
+    // reserves the only slot for heartbeats; or an explicit opts.taskCap = 0) is not "slots
+    // full" — no future tick can ever start these runs, and before this they hid in the
+    // every-10-min "task-run slots full, deferring" line forever: a silent forever-queue with a
+    // lying message. Refuse loudly (same rate-limit discipline, honest message) and count the
+    // agents separately so the mis-set budget shows up in the tick summary.
+    if (taskCap <= 0) {
+      summary.skippedNoCapacity += 1;
+      const lastLoggedAt = opts.deferLogMemory?.get(agentId);
+      if (lastLoggedAt === undefined || now() - lastLoggedAt >= deferLogWindowMs) {
+        const msg =
+          'task-run capacity zero, refusing — Run Tasks cannot start for this agent while the ' +
+          'effective task cap is 0 (raise TASK_RUNNER_MAX_CONCURRENT_RUNS to ≥ 2, or set a ' +
+          'company taskRunner.maxConcurrentTasks ≥ 1 with budget headroom)';
+        const data = { agentId, pending: tasks.length, slot, maxConcurrent, taskCap };
+        if (deps.log?.warn) deps.log.warn(msg, data);
+        else deps.log?.info(msg, data);
+        opts.deferLogMemory?.set(agentId, now());
+      }
+      return;
+    }
     const free = freeTaskRunSlots(slot, maxConcurrent, taskCap);
     if (free <= 0) {
       summary.skippedFull += 1;
@@ -562,6 +593,16 @@ export async function sweepStaleChatTaskRuns(
 }
 
 /**
+ * S245-S3b (#245): the kill-switch log message, exported so the test asserts the EXACT
+ * operator-facing text (name + remedy, not a bare "disabled"). Prefers warn over info —
+ * a halted queue is not routine startup noise, and info is exactly where it went unnoticed
+ * while pending chat_tasks queued forever.
+ */
+export const RUN_TASK_KILL_SWITCH_LOG =
+  'task-run poller disabled (max concurrent runs = 0) — KILL SWITCH: queued Run Tasks will NOT ' +
+  'start until TASK_RUNNER_MAX_CONCURRENT_RUNS is raised above 0';
+
+/**
  * Poller loop for scheduler startup. Non-reentrant (a slow tick skips, never queues) and
  * never rejects — errors land in the log so one bad task cannot kill the scheduler.
  * TASK_RUNNER_MAX_CONCURRENT_RUNS=0 is the global kill switch: the loop never starts.
@@ -587,7 +628,10 @@ export function startTaskRunnerPolling(
   const maxConcurrent = opts.maxConcurrentRuns ?? DEFAULT_MAX_CONCURRENT_RUNS;
   if (maxConcurrent <= 0) {
     // Kill switch honoured before anything is wired up: no interval, no poll, no claims.
-    deps?.log?.info('task-run poller disabled (max concurrent runs = 0)');
+    // S245-S3b: warn-preferred + the exported KILL SWITCH message (was a bare info line that
+    // buried "every queued task is frozen" in routine startup noise).
+    if (deps?.log?.warn) deps.log.warn(RUN_TASK_KILL_SWITCH_LOG);
+    else deps?.log?.info(RUN_TASK_KILL_SWITCH_LOG);
     return {
       stop: () => undefined,
       // S233-S6: a never-starting poller never ticks; resolve immediately so a test awaiting
@@ -638,6 +682,9 @@ export function startTaskRunnerPolling(
             deferred: summary.skippedFull,
             inactive: summary.skippedInactive,
             disabled: summary.skippedDisabled,
+            // S245-S3b: budget ≤ 1 (or an explicit 0 cap) freezes the whole queue for the
+            // agent — surface it per tick alongside the other skip reasons.
+            noCapacity: summary.skippedNoCapacity,
             // S233-S4: per-agent isolation (S199c) was invisible in the per-tick line — an
             // agent whose slot-count/claim work threw was counted only in summary.skippedErrored,
             // which the log dropped on the floor. Surface it so a quietly-erroring agent shows up.

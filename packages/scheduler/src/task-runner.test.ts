@@ -18,6 +18,7 @@ import {
   freeTaskRunSlots,
   pollTaskRunner,
   resolveMaxConcurrentRuns,
+  RUN_TASK_KILL_SWITCH_LOG,
   startTaskRunnerPolling,
   sweepStaleChatTaskRuns,
   taskRunSettleStatus,
@@ -331,7 +332,9 @@ test('S1: maxConcurrentRuns=0 stops the poller BEFORE it polls', async () => {
   poller.stop(); // stop() must be safe on a poller that never started
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(listed, 0, 'kill switch: not even one listRunnable call');
-  assert.deepEqual(logs, ['task-run poller disabled (max concurrent runs = 0)']);
+  // S245-S3b: the message names the switch and the remedy (exported constant); this deps has
+  // no warn, so the info fallback must still fire exactly once.
+  assert.deepEqual(logs, [RUN_TASK_KILL_SWITCH_LOG]);
 });
 
 // HOTFIX regression (post-#196, TEST 28 Oct): countActiveRuns interpolated the staleCutoff Date
