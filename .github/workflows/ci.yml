@@ -1,0 +1,36 @@
+name: CI
+
+# S261-S2: the root type-check gate (`pnpm -r type-check`) is what catches type
+# regressions across packages — apps/web tsc + the now-covered packages/mastra
+# (baseline-gated, see packages/mastra/type-check.baseline). Before this workflow the
+# gate only ever ran on developer machines, so type regressions reached review.
+# Scope deliberately stops at type-check: the test suites need Postgres/redis and are
+# flaky under parallel worktrees (recorded as a deferral in the soft-pack PR), so they
+# stay a local/pre-merge concern until an infra recipe exists.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-type-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        # packageManager pin in package.json resolves the actual version; this is
+        # only the bootstrap for the `pnpm` command itself.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm type-check
