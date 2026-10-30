@@ -13,7 +13,8 @@
     "./widget-tools": "./src/tools/widget-tools.ts"
   },
   "scripts": {
-    "test": "node --import tsx --test src/*.test.ts src/**/*.test.ts"
+    "test": "node --import tsx --test src/*.test.ts src/**/*.test.ts",
+    "test:counts": "node scripts/run-tests.mjs"
   },
   "dependencies": {
     "@ai-sdk/openai": "catalog:",
