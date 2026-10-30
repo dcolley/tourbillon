@@ -373,6 +373,39 @@ describe('getApprovalTool', () => {
     );
   });
 
+  // S264-S1: the S1 lock above only checks that `issue keys` and `TOUR-\d+`
+  // APPEAR. Inverting just the guardrail ("You may also pass issue keys
+  // (`TOUR-123`...) directly") kept the UUID phrase and both substrings, so
+  // mutant M1e survived. Pin the guardrail as a prohibition, in its exact
+  // wording, and reject permissive copy outright.
+  it('description pins the issue-key guardrail as a prohibition, not permission', () => {
+    const tools = ROLE_TOOLS['approvals'] as Record<string, any>;
+    const desc: string = tools.getApprovalTool.description;
+    // Exact prohibition wording (kills M1e: inverted guardrail).
+    assert.match(desc, /Do not pass issue keys \(`TOUR-123`, `BUG-\.\.\.`\)/);
+    // The guardrail sentence must route to issue tools / boardApprovalId.
+    assert.match(desc, /use issue tools .*`boardApprovalId`/);
+    // Permissive/optional copy must never satisfy the pin.
+    assert.doesNotMatch(desc, /you may (also )?pass issue keys/i);
+    assert.doesNotMatch(desc, /(can|could|should) (also )?pass issue keys/i);
+  });
+
+  // S264-S2: the .uuid() error message is the model-facing text returned when
+  // a TOUR-622 call is refused at validation, but nothing pinned it (mutant
+  // M3d: message changed to 'bad id' stayed GREEN). Pin it exactly on both
+  // refused shapes so drift REDs the suite.
+  it('.uuid() refusal message is pinned (model-facing validation text)', () => {
+    const tools = ROLE_TOOLS['approvals'] as Record<string, any>;
+    const schema = tools.getApprovalTool.inputSchema;
+    const expected =
+      'approvalId must be an approval UUID (the `id` field from listApprovals), not an issue key like TOUR-123.';
+    for (const bad of ['TOUR-622', 'not-a-uuid']) {
+      const parsed = schema.safeParse({ approvalId: bad });
+      assert.ok(!parsed.success, `${bad} is refused at the schema`);
+      assert.equal(parsed.error!.issues[0].message, expected);
+    }
+  });
+
   // S262-S3: refuse issue-key shapes at schema validation instead of letting
   // them round-trip to a server 404. approvals.id is generated only via
   // createId() = randomUUID() (packages/db/src/utils.ts), so .uuid() admits

@@ -3,9 +3,13 @@ import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { describe, it } from 'node:test';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { lookup as dnsLookup } from 'node:dns/promises';
+import type { AddressInfo } from 'node:net';
+import { describe, it, type TestContext } from 'node:test';
 import { LocalSandbox } from '@mastra/core/workspace';
 import { EgressProxy } from './egress-proxy';
+import type { HostResolver } from './egress-private-ranges';
 import {
   buildEgressFilterEnv,
   buildTourbillonBwrapArgs,
@@ -110,11 +114,34 @@ describe('Sandbox DNS and /dev/null under filter + bwrap', () => {
     }
   });
 
-  it('proxy resolves a real hostname; sandbox cannot use TCP/53 or skip the proxy', { skip: !bwrapAvailable() || !filterReady }, async () => {
+  // S264-S3: the old version of this test depended on real DNS (and internet)
+  // in the parent process: dns.lookup('example.com') inside EgressProxy plus
+  // a live fetch of example.com, and failed on hosts without either. The
+  // sandbox-facing guarantees (proxy-only egress, no TCP/53, no proxy skip)
+  // do not depend on the internet at all, so the happy path now pins the
+  // target to a local origin through the proxy's injected HostResolver
+  // (same pattern as egress-proxy.test.ts, "resolve-then-pin"). never-allow.invalid
+  // still gets 403 from the allow-list, and the resolver throws for any other
+  // host so an accidental DNS round-trip would surface as 502 != 403.
+  it('proxy pins allow-listed host to a local origin; sandbox cannot use TCP/53 or skip the proxy', { skip: !bwrapAvailable() || !filterReady }, async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'tourbillon-bwrap-dns-'));
+    const origin = createServer((_req: IncomingMessage, res: ServerResponse) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('tourbillon-origin-ok');
+    });
+    await new Promise<void>((resolve) => origin.listen(0, '127.0.0.1', resolve));
+    const originPort = (origin.address() as AddressInfo).port;
+
+    const resolveHost: HostResolver = async (host) => {
+      if (host === 'example.com') return [{ address: '127.0.0.1', family: 4 }];
+      throw new Error(`unexpected resolve for ${host} (allow-list must deny before DNS)`);
+    };
     const proxy = new EgressProxy({
-      allowList: ['example.com'],
+      // 127.0.0.1 as an exact-IP entry is the only way through the private-range
+      // guard for the loopback pin (see hasPrivateOverride).
+      allowList: ['example.com', '127.0.0.1'],
       companyId: 'co-bwrap',
+      resolve: resolveHost,
     });
     const socketPath = egressProxySocketPath('co-bwrap', 'dns');
     await proxy.start({ socketPath });
@@ -142,11 +169,12 @@ describe('Sandbox DNS and /dev/null under filter + bwrap', () => {
     try {
       const viaProxy = await sandbox.executeCommand?.('sh', [
         '-c',
-        'curl -sS -o /tmp/out -w "%{http_code}" --max-time 15 http://example.com/ && echo && cat /tmp/out | head -c 80',
+        `curl -sS -o /tmp/out -w "%{http_code}" --max-time 15 http://example.com:${originPort}/ && echo && cat /tmp/out | head -c 80`,
       ]);
       assert.ok(viaProxy);
       assert.equal(viaProxy.exitCode, 0, `curl via proxy failed: ${viaProxy.stderr}\n${viaProxy.stdout}`);
-      assert.match(viaProxy.stdout, /^(20[0-9]|30[0-9])/);
+      assert.match(viaProxy.stdout, /^200/);
+      assert.match(viaProxy.stdout, /tourbillon-origin-ok/);
 
       const dnsBypass = await sandbox.executeCommand?.('sh', [
         '-c',
@@ -163,6 +191,60 @@ describe('Sandbox DNS and /dev/null under filter + bwrap', () => {
       ]);
       assert.ok(denied);
       assert.match(denied.stdout, /403/);
+    } finally {
+      await sandbox.destroy();
+      await proxy.stop();
+      await new Promise<void>((resolve, reject) =>
+        origin.close((err?: Error | null) => (err ? reject(err) : resolve())),
+      );
+    }
+  });
+
+  // Real-DNS leg kept as its own test, deterministically SKIPPED when the host
+  // has no usable DNS (probe first; no DNS -> skip, never fail). Covers
+  // defaultHostResolver end-to-end on gate machines where DNS works.
+  it('proxy resolves a real hostname through system DNS', { skip: !bwrapAvailable() || !filterReady }, async (t: TestContext) => {
+    try {
+      await dnsLookup('example.com');
+    } catch (err) {
+      t.skip(`host has no usable DNS: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    const cwd = mkdtempSync(join(tmpdir(), 'tourbillon-bwrap-realdns-'));
+    const proxy = new EgressProxy({
+      allowList: ['example.com'],
+      companyId: 'co-bwrap-real',
+    });
+    const socketPath = egressProxySocketPath('co-bwrap-real', 'dns');
+    await proxy.start({ socketPath });
+
+    const env = buildEgressFilterEnv({ proxySocketPath: socketPath });
+    const binds = resolveEgressBwrapBinds({ proxySocketPath: socketPath });
+
+    const sandbox = new LocalSandbox({
+      workingDirectory: cwd,
+      isolation: 'bwrap',
+      timeout: 25_000,
+      env,
+      nativeSandbox: {
+        allowNetwork: false,
+        bwrapArgs: buildTourbillonBwrapArgs({
+          workspacePath: cwd,
+          allowNetwork: false,
+          extraRoBinds: binds.extraRoBinds,
+          extraRwBinds: binds.extraRwBinds,
+        }),
+      },
+    });
+    await sandbox.start();
+    try {
+      const viaProxy = await sandbox.executeCommand?.('sh', [
+        '-c',
+        'curl -sS -o /tmp/out -w "%{http_code}" --max-time 15 http://example.com/ && echo && cat /tmp/out | head -c 80',
+      ]);
+      assert.ok(viaProxy);
+      assert.equal(viaProxy.exitCode, 0, `curl via proxy failed: ${viaProxy.stderr}\n${viaProxy.stdout}`);
+      assert.match(viaProxy.stdout, /^(20[0-9]|30[0-9])/);
     } finally {
       await sandbox.destroy();
       await proxy.stop();
