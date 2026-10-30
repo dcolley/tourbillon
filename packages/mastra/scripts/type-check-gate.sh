@@ -44,8 +44,15 @@ fi
 
 actual=$(grep -cE 'error TS[0-9]+:' "$out" || true)
 
-if [ "$code" -eq 2 ] && [ "$actual" -eq 0 ]; then
-  echo "mastra type-check: tsc crashed with no diagnostics (exit 2)" >&2
+# S267-S3: tsc exiting 0 is the ONLY way to reach the count comparison with no
+# diagnostics. Any non-zero exit (1 = diagnostics, 2 = fatal) MUST have produced at
+# least one `error TS` line. This generalises the old exit-2-only crash check: a
+# missing tsc binary makes `node <missing path>` exit 1 with a MODULE_NOT_FOUND
+# message (zero error lines), which previously slipped through to the count
+# comparison and read as "0 < baseline -> ratchet down" (M12's misleading message)
+# or, with a 0 baseline, as a clean GREEN (M13). Neither is allowed.
+if [ "$code" -ne 0 ] && [ "$actual" -eq 0 ]; then
+  echo "mastra type-check: tsc exited $code with zero 'error TS' diagnostics - the gate did not observe real type errors (missing/crashed tsc?)" >&2
   cat "$out" >&2
   exit 1
 fi

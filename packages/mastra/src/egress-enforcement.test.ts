@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import { createServer } from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { describe, it } from 'node:test';
-import { copyFileSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync, chmodSync, realpathSync, rmSync, readFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync, chmodSync, realpathSync, rmSync, readFileSync, existsSync, accessSync, constants } from 'node:fs';
 import { join, sep } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -144,33 +144,62 @@ describe('/tmp skip guard (S261-S1)', () => {
   // it must skip ONLY for a genuine /tmp runtime dir and must RUN otherwise.
 
   const scratchDirs: string[] = [];
+  /** Register a scratch dir for cleanup BEFORE creating anything inside it (S267-S5). */
+  function trackScratch(dir: string): string {
+    scratchDirs.push(dir);
+    return dir;
+  }
   function scratchRoot(label: string): string {
     // Literal /tmp, NOT tmpdir(): the guard matches the /tmp prefix specifically and
     // TMPDIR can point elsewhere (e.g. a scratch dir under $HOME) without changing
     // what counts as the world-writable /tmp for this guard.
     const dir = join('/tmp', `tourbillon-s261-s1-${label}-${process.pid}`);
-    scratchDirs.push(dir);
+    trackScratch(dir);
     mkdirSync(dir, { recursive: true });
     return dir;
   }
-  function outsideTmpRoot(label: string): string {
-    // S267-S1: an "outside /tmp" fixture must NOT be derived from the checkout
-    // location — when the checkout itself lives under /tmp a sibling of src/ is
-    // still under /tmp and the pin tests would assert nothing (or fail outright).
-    // mkdtemp under /var/tmp (falling back to $HOME) is independent of where the
-    // repo lives; cleaned up via scratchDirs.
-    const bases = ['/var/tmp', homedir()];
-    let lastError: unknown;
-    for (const base of bases) {
+  /** True when realpath(dir) is /tmp itself or lives under /tmp/. */
+  function underTmp(dir: string): boolean {
+    try {
+      const real = realpathSync(dir);
+      return real === '/tmp' || real.startsWith('/tmp/');
+    } catch {
+      return true; // unreadable base: treat as unsafe, never as a valid non-/tmp base
+    }
+  }
+  /**
+   * S267-S6a: the base is passed IN per row (no implicit /var/tmp-then-$HOME
+   * fallback chain, which made the "$HOME" row silently re-test /var/tmp).
+   * S267-S6b: the base is realpath-checked before use — a symlinked /var/tmp ->
+   * /tmp or a $HOME under /tmp must not produce a false "outside /tmp" fixture;
+   * callers skip with a clear reason instead (see nonTmpBase / row skip handling).
+   * S267-S5: the dir is registered in scratchDirs before creation so the
+   * `.runtime` subtree getEgressRuntimeDir() writes inside it is cleaned up too.
+   */
+  function outsideTmpRootAt(base: string, label: string): { dir: string; base: string } {
+    if (underTmp(base)) {
+      throw new Error(`fixture base ${base} resolves under /tmp (realpath ${(() => { try { return realpathSync(base); } catch { return '<unresolvable>'; } })()}); not a valid non-/tmp base`);
+    }
+    const dir = mkdtempSync(join(base, `tourbillon-s267-s1-${label}-`));
+    trackScratch(dir);
+    return { dir, base };
+  }
+  /** Candidate bases for the generic "outside /tmp" fixtures, in preference order. */
+  const OUTSIDE_TMP_BASES = ['/var/tmp', homedir()];
+  /**
+   * Pick the first usable base and build the fixture; returns null when every
+   * candidate is missing, unwritable, or (after realpath) under /tmp — callers
+   * t.skip() with this reason rather than failing an environmental condition.
+   */
+  function nonTmpBase(label: string): { dir: string; base: string } | null {
+    for (const base of OUTSIDE_TMP_BASES) {
       try {
-        const dir = mkdtempSync(join(base, `tourbillon-s267-s1-${label}-`));
-        scratchDirs.push(dir);
-        return dir;
-      } catch (err) {
-        lastError = err;
+        return outsideTmpRootAt(base, label);
+      } catch {
+        /* try next candidate; skip reason is "no usable base" */
       }
     }
-    throw new Error(`cannot create non-/tmp fixture dir (${bases.join(', ')}): ${String(lastError)}`);
+    return null;
   }
   function cleanupScratch(): void {
     while (scratchDirs.length) {
@@ -192,35 +221,159 @@ describe('/tmp skip guard (S261-S1)', () => {
     }
   });
 
-  it('classifies literal runtime roots: /tmp true, /var/tmp and $HOME false', () => {
+  // S267-S6b determinism seam: on hosts where /var/tmp is a symlink into /tmp the
+  // /var/tmp row MUST skip with a reason — but that environmental state cannot be
+  // created by a non-root test run, so a mutant that drops the realpath check
+  // would survive unverified. The container verification (PR body) creates
+  // `/var/tmp -> /tmp` and drops this marker file to declare the condition; the
+  // row then asserts the SKIP outcome (and the mutant REDs because it exercises
+  // the /tmp-backed fixture and asserts false instead).
+  const VARTMP_LINKED_MARKER = '/opt/tourbillon-test-fixture/vartmp-is-link';
+  const vartmpLinkedOnHost = existsSync(VARTMP_LINKED_MARKER);
+
+  /** label -> 'exercised' | skip-reason, per row of the literal-roots pin (S267-S6a/b). */
+  const rowOutcomes = new Map<string, 'exercised' | string>();
+
+  function isUsableHome(): boolean {
+    try {
+      accessSync(homedir(), constants.W_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  it('classifies literal runtime roots: /tmp true, /tmpfoo, /var/tmp and $HOME false', (t) => {
     // S267-S1: location-independent pin of the guard itself, driven by literal
     // EXECUTION_WORKSPACE_ROOT values. Sub-directories are created inside each
     // root so getEgressRuntimeDir()'s mkdir does not depend on write access to
-    // the parent itself. An always-skip mutant fails on the /var/tmp and $HOME
-    // cases regardless of where the checkout lives.
+    // the parent itself. An always-skip mutant fails on the non-/tmp cases
+    // regardless of where the checkout lives.
+    // S267-S2: the /tmpfoo row pins the trailing separator in the guard's prefix
+    // check — a mutant that drops the sep (`startsWith('/tmp')`) would wrongly
+    // report /tmpfoo as /tmp and REDs here.
+    // S267-S6a: each non-/tmp row gets its base passed EXPLICITLY (a shared
+    // fallback chain made the "$HOME" row silently re-test /var/tmp). A row whose
+    // base is missing, unwritable, or realpath-resolves under /tmp is recorded as
+    // skipped with a visible reason (S267-S6b) so it never masquerades as
+    // exercised. NOTE: row skips use t.diagnostic(), NOT t.skip() — calling
+    // t.skip() here would mark the WHOLE test skipped and silently swallow the
+    // row-outcome assertions below (verified: a dead row then keeps the suite
+    // GREEN). The outcome assertions decide whether a skip is legitimate.
+    rowOutcomes.clear();
+    const rows: Array<{ root: string; expected: boolean; base?: string; label: string; skipIfUnwritable?: boolean; resolvedBase?: string }> = [
+      // S267-S5: routed through trackScratch() so the dir (and the `.runtime`
+      // subtree getEgressRuntimeDir() creates inside it) is registered in
+      // scratchDirs and actually removed by cleanupScratch().
+      { root: trackScratch(join('/tmp', `tourbillon-s267-s1-literal-${process.pid}`)), expected: true, label: 'literal /tmp' },
+      // S267-S2: a top-level sibling of /tmp with "tmp" as a string prefix — must
+      // be false. Top-level (NOT /tmpfoo/child): a child of /tmp would let the
+      // dropped-sep mutant match the raw path and survive.
+      { root: trackScratch(join('/tmpfoo', `tourbillon-s267-s1-literal-${process.pid}`)), expected: false, label: 'literal /tmpfoo', skipIfUnwritable: true },
+      { root: undefined as unknown as string, expected: false, base: '/var/tmp', label: 'literal /var/tmp' },
+      { root: undefined as unknown as string, expected: false, base: homedir(), label: 'literal $HOME' },
+    ];
     try {
-      for (const [root, expected] of [
-        [join('/tmp', `tourbillon-s267-s1-literal-${process.pid}`), true],
-        [join(outsideTmpRoot('vartmp'), 'runtime'), false],
-        [join(outsideTmpRoot('home'), 'runtime'), false],
-      ] as Array<[string, boolean]>) {
-        withEnv({ EXECUTION_WORKSPACE_ROOT: root }, () => {
-          assert.equal(libDirUnderTmp(), expected, `guard must report ${expected} for ${root}`);
+      for (const row of rows) {
+        if (row.base !== undefined) {
+          let fixture: { dir: string; base: string };
+          try {
+            fixture = outsideTmpRootAt(row.base, 'literal');
+          } catch (err) {
+            const reason = `${row.label}: base ${row.base} unusable as non-/tmp fixture (${String(err)})`;
+            rowOutcomes.set(row.label, reason);
+            t.diagnostic(`SKIP row: ${reason}`);
+            continue;
+          }
+          row.resolvedBase = fixture.base;
+          row.root = join(fixture.dir, 'runtime');
+        } else {
+          try {
+            mkdirSync(row.root, { recursive: true });
+          } catch (err) {
+            // /tmpfoo-style host constraint (root-owned / on the host blocks a
+            // top-level sibling; the container verification exercises this row).
+            const reason = `${row.label}: ${row.root} not creatable on this host (${String(err)})`;
+            assert.ok(row.skipIfUnwritable, `${row.label}: cannot create ${row.root}`);
+            rowOutcomes.set(row.label, reason);
+            t.diagnostic(`SKIP row: ${reason}`);
+            continue;
+          }
+        }
+        rowOutcomes.set(row.label, 'exercised');
+        withEnv({ EXECUTION_WORKSPACE_ROOT: row.root }, () => {
+          assert.equal(libDirUnderTmp(), row.expected, `guard must report ${row.expected} for ${row.root}`);
         });
+      }
+      // S267-S6a anti-mislabel pins: the rows must test what they CLAIM to test.
+      const homeOutcome = rowOutcomes.get('literal $HOME');
+      const vartmpOutcome = rowOutcomes.get('literal /var/tmp');
+      if (vartmpLinkedOnHost) {
+        assert.equal(typeof vartmpOutcome, 'string', 'with /var/tmp -> /tmp the /var/tmp row must SKIP, not run');
+        assert.match(String(vartmpOutcome), /under \/tmp/, 'the /var/tmp skip reason must name the realpath-under-/tmp condition');
+      } else {
+        assert.equal(vartmpOutcome, 'exercised', '/var/tmp row must be exercised when /var/tmp is a real non-/tmp base');
+      }
+      if (homeOutcome === 'exercised' && vartmpOutcome === 'exercised') {
+        // Compare the BASES, not the mkdtemp fixture paths: mkdtemp suffixes make
+        // two fixtures under the SAME base look different (an early version of
+        // this pin stayed GREEN when the $HOME row was re-pointed at /var/tmp).
+        assert.notEqual(rows[3].resolvedBase, rows[2].resolvedBase, 'the $HOME row must exercise a DIFFERENT base than the /var/tmp row (S267-S6a)');
+        assert.equal(rows[3].resolvedBase, homedir(), `$HOME row must run from homedir(), got ${rows[3].resolvedBase}`);
+        assert.equal(rows[2].resolvedBase, '/var/tmp', `/var/tmp row must run from /var/tmp, got ${rows[2].resolvedBase}`);
+      }
+      // On a normal host ($HOME outside /tmp) the $HOME row must be exercised —
+      // a shared fallback chain re-testing /var/tmp (the mislabel) shows up here
+      // only if homedir() itself is /var/tmp, which the notEqual above also kills.
+      if (!underTmp(homedir()) && isUsableHome()) {
+        assert.equal(homeOutcome, 'exercised', '$HOME is outside /tmp on this host, so the $HOME row must run');
+      } else {
+        assert.equal(typeof homeOutcome, 'string', '$HOME is under /tmp/unusable, so the row must skip with a reason');
+      }
+      // /tmpfoo host constraint stays visible in the TAP output without flipping
+      // the whole test to SKIP (see note above on why t.skip() is wrong here).
+      const tmpfooOutcome = rowOutcomes.get('literal /tmpfoo');
+      if (typeof tmpfooOutcome === 'string') {
+        t.diagnostic(`NOTE: ${tmpfooOutcome} — exercised in the root container gate instead`);
       }
     } finally {
       cleanupScratch();
     }
   });
 
-  it('runs (does not skip) for a non-/tmp runtime dir', () => {
+  it('the literal /tmp row is registered for cleanup (no /tmp leak, S267-S5)', () => {
+    // Runs AFTER the literal-roots test in declaration order. Its finally block
+    // already ran cleanupScratch(), so the literal row's dir — including the
+    // `.runtime` subtree getEgressRuntimeDir() created inside it — must be GONE.
+    // The mutant (drop trackScratch from the literal /tmp row) leaves
+    // /tmp/tourbillon-s267-s1-literal-<pid> behind and REDs this assertion
+    // (verified where the row is exercised: root in the container gate; as a
+    // non-root user on a host, / is root-owned so the row itself skips).
+    const literal = join('/tmp', `tourbillon-s267-s1-literal-${process.pid}`);
+    assert.ok(!existsSync(literal), `literal /tmp row leaked ${literal} — row must be registered via trackScratch for cleanupScratch()`);
+    // Positive control: a registered dir with a `.runtime` child IS removed by
+    // cleanupScratch (proves the cleanup path covers the subtree, not just empty dirs).
+    const probe = trackScratch(join('/tmp', `tourbillon-s267-s5-leakprobe-${process.pid}`));
+    mkdirSync(join(probe, '.runtime'), { recursive: true });
+    cleanupScratch();
+    assert.ok(!existsSync(probe), 'cleanupScratch must remove registered dirs including .runtime subtrees');
+  });
+
+  it('runs (does not skip) for a non-/tmp runtime dir', (t) => {
     // An always-skip mutant fails HERE: a genuine non-/tmp runtime dir must report
     // false so the compile assertion executes (see also the real-compile case
     // below). The fixture is created OUTSIDE the checkout (S267-S1) so this holds
-    // even when the checkout itself lives under /tmp.
-    const root = outsideTmpRoot('outside');
+    // even when the checkout itself lives under /tmp. S267-S6b: a candidate base
+    // that realpath-resolves under /tmp is rejected inside nonTmpBase(); if no
+    // candidate survives, the test skips with a reason instead of asserting on a
+    // fixture that is not actually outside /tmp.
+    const fixture = nonTmpBase('outside');
+    if (!fixture) {
+      t.skip(`no usable non-/tmp base among ${OUTSIDE_TMP_BASES.join(', ')} (missing, unwritable, or under /tmp)`);
+      return;
+    }
     try {
-      withEnv({ EXECUTION_WORKSPACE_ROOT: root }, () => {
+      withEnv({ EXECUTION_WORKSPACE_ROOT: fixture.dir }, () => {
         assert.equal(libDirUnderTmp(), false);
       });
     } finally {
@@ -228,13 +381,20 @@ describe('/tmp skip guard (S261-S1)', () => {
     }
   });
 
-  it('resolves symlinks: a runtime dir symlinked into /tmp still counts as /tmp', () => {
+  it('resolves symlinks: a runtime dir symlinked into /tmp still counts as /tmp', (t) => {
     // An isAbsolute()-style mutant that inspects the raw path instead of realpathSync
     // would wrongly report false here (raw path outside /tmp, real target inside).
     // The raw-side fixture is created OUTSIDE the checkout (S267-S1) so the raw path
     // is genuinely non-/tmp even from a /tmp checkout — otherwise the mutant would
-    // see /tmp raw and pass vacuously.
-    const outside = outsideTmpRoot('link');
+    // see /tmp raw and pass vacuously. S267-S6b: nonTmpBase() realpath-rejects a
+    // candidate base that is itself under /tmp; with no candidate left, skip with
+    // a reason (the raw side must be trustworthy for this pin to mean anything).
+    const fixture = nonTmpBase('link');
+    if (!fixture) {
+      t.skip(`no usable non-/tmp base among ${OUTSIDE_TMP_BASES.join(', ')} (missing, unwritable, or under /tmp)`);
+      return;
+    }
+    const outside = fixture.dir;
     const realInside = scratchRoot('link-target');
     const linkDir = join(outside, '.runtime');
     try {
