@@ -58,7 +58,7 @@ test('S241-S2: the ceiling constant is the largest whole-seconds value whose ×1
   assert.equal(MAX_HEARTBEAT_INTERVAL_SEC * 1000, 2_147_483_000);
   assert.ok(
     MAX_HEARTBEAT_INTERVAL_SEC * 1000 < 2 ** 31 - 1,
-    'the ceiling in ms must stay under the int32 timer limit (off-by-one guard: +1 second is still safe, +1 ms would not be)',
+    'the ceiling in ms must stay under the int32 timer limit (off-by-one guard: +647 ms of headroom to 2**31 − 1 is still safe, +1 second would not be)',
   );
   assert.ok(
     (MAX_HEARTBEAT_INTERVAL_SEC + 1) * 1000 > 2 ** 31 - 1,
