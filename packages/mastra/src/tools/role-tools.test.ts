@@ -390,6 +390,72 @@ describe('getApprovalTool', () => {
     assert.doesNotMatch(desc, /(can|could|should) (also )?pass issue keys/i);
   });
 
+  // S268-S1: the S264-S1 pin is a substring regex, so copy that SOFTENED the
+  // prohibition ("... unless the UUID is unknown - those ...", mutant M1e4)
+  // or CONTRADICTED it ("It is fine to pass issue keys directly." prepended,
+  // mutant M1e5) kept the pinned substring and stayed GREEN. Pin the whole
+  // `description` by exact equality (the `.describe()` idiom below), and pin
+  // the meaning with a checker that refuses softening conditionals and
+  // permissive copy around an intact prohibition - then prove the checker in
+  // both directions: exact guardrail copy passes, both survivor shapes are
+  // refused.
+  const GUARDRAIL_SENTENCE =
+    'Do not pass issue keys (`TOUR-123`, `BUG-...`) - those are company issues; ' +
+    'use issue tools or open the issue and follow its linked `boardApprovalId`.';
+
+  function guardrailProblems(desc: string): string[] {
+    const problems: string[] = [];
+    if (!desc.includes(GUARDRAIL_SENTENCE)) {
+      problems.push('guardrail sentence is not present verbatim');
+    }
+    // A softening conditional inside the guardrail sentence ("unless ...",
+    // "except ...", "if ...") turns the prohibition into advice (M1e4).
+    const start = desc.indexOf('Do not pass issue keys');
+    const end = desc.indexOf('boardApprovalId`.', start);
+    if (start !== -1 && end !== -1 && /\b(unless|except|if|when)\b/i.test(desc.slice(start, end))) {
+      problems.push('guardrail sentence carries a softening conditional');
+    }
+    // Permissive copy anywhere in the description contradicts the prohibition
+    // even when the prohibition itself is intact (M1e5).
+    const permissive = [
+      /you\s+(?:may|can|could|should|are\s+(?:welcome|allowed|able))\s+(?:to\s+)?(?:also\s+)?(?:directly\s+)?pass(?:ing)?\s+issue\s+keys/i,
+      /(?:it(?:'s|\s+is)?|that(?:'s|\s+is)?)\s+(?:fine|okay|ok|permitted|acceptable|allowed|safe)\s+to\s+(?:also\s+)?(?:directly\s+)?pass(?:ing)?\s+issue\s+keys/i,
+      /pass(?:ing)?\s+issue\s+keys\s+(?:directly\s+)?(?:is|was|will\s+be)\s+(?:fine|okay|ok|allowed|permitted|acceptable)/i,
+    ];
+    for (const re of permissive) {
+      if (re.test(desc)) problems.push(`permissive issue-key copy: ${re.source}`);
+    }
+    return problems;
+  }
+
+  it('description is pinned by exact equality (softened/contradicting copy REDs)', () => {
+    const tools = ROLE_TOOLS['approvals'] as Record<string, any>;
+    const desc: string = tools.getApprovalTool.description;
+    assert.equal(
+      desc,
+      'Read one board approval by its approval UUID (the `id` field from listApprovals). ' +
+        'Do not pass issue keys (`TOUR-123`, `BUG-...`) - those are company issues; use issue tools or open the issue and follow its linked `boardApprovalId`. ' +
+        'If the human names a TOUR-N, resolve it via listApprovals (e.g. `status: all`, `q: ...`) or the issue first.',
+    );
+  });
+
+  it('guardrail checker accepts exact copy and refuses both survivor shapes (S268-S1)', () => {
+    const tools = ROLE_TOOLS['approvals'] as Record<string, any>;
+    const desc: string = tools.getApprovalTool.description;
+    // Direction 1: the exact shipped guardrail copy keeps passing.
+    assert.deepEqual(guardrailProblems(desc), [], 'exact guardrail copy must pass the checker');
+    // Direction 2a: softened guardrail (M1e4 wording) is refused.
+    const softened = desc.replace(
+      '`) - those are company issues;',
+      '`) unless the UUID is unknown - those are company issues;',
+    );
+    assert.notEqual(softened, desc, 'M1e4 mutant text must actually differ from the shipped copy');
+    assert.ok(guardrailProblems(softened).length > 0, 'softened guardrail copy must be refused');
+    // Direction 2b: copy that contradicts the prohibition (M1e5 wording) is refused.
+    const contradicted = `It is fine to pass issue keys directly. ${desc}`;
+    assert.ok(guardrailProblems(contradicted).length > 0, 'contradicting copy must be refused');
+  });
+
   // S264-S2: the .uuid() error message is the model-facing text returned when
   // a TOUR-622 call is refused at validation, but nothing pinned it (mutant
   // M3d: message changed to 'bad id' stayed GREEN). Pin it exactly on both
