@@ -334,3 +334,22 @@ test('S24a pin: scheduler test script keeps the working belt --conditions=tourbi
     "a near-miss condition like '--conditions=tourbillon-test-foo' must NOT satisfy the pin (#223 S26b)",
   );
 });
+
+// S272-S3 (#272 ACCEPT soft-pack, info): the S266-S3 per-test timeouts had NO existence pin
+// — S256-S3's timeout option on the 199-softs slow pins likewise only lived in the option
+// literals themselves, so deleting one would silently return that pin to the opaque
+// whole-file parallel-gate timeout the treatment was added to kill. Same source-reading
+// shape as the S236-S1 HELPER_SRC pins, pointed at this file.
+test('S272-S3 pin: both async PGlite pins carry the PARALLEL_GATE_TIMEOUT_MS per-test timeout', () => {
+  const SRC = readFileSync(__filename, 'utf8');
+  // The const declaration has no `timeout:` prefix and the header note names the constant
+  // bare — only real per-test options match (note: keep this test's own prose from
+  // containing the literal option form, or the expected count shifts).
+  const carried = SRC.match(/\btimeout:\s*PARALLEL_GATE_TIMEOUT_MS\b/g) ?? [];
+  assert.equal(
+    carried.length,
+    2,
+    'the two async listRunnable pins must each keep their PARALLEL_GATE_TIMEOUT_MS per-test ' +
+      'option (S266-S3) — dropping one starves it into the opaque file-level wall under a parallel gate',
+  );
+});

@@ -248,3 +248,86 @@ test('S266-S1: the wiring-claim matcher keeps harmless copy GREEN and real forbi
     );
   }
 });
+
+// ─── S272-S1 / S272-S2 ───────────────────────────────────────────────────────
+
+test('S272-S1: inflected wiring verbs (supplies/supplied/providing) RED, honest near-misses GREEN', () => {
+  // The old alternation had two dead branches: `supply(?:ies|ied)?` could only ever match
+  // the non-words "supplyies"/"supplyied", and `provid(?:e|es|ed)` had no -ing branch.
+  // The boot path as PROVIDER in any real inflection must RED — loosen the stem fix and a
+  // row here goes RED-for-the-wrong-reason no more: these rows fail when the fix regresses.
+  const FORBIDDEN = [
+    'the scheduler supplies opts.taskCap for you',
+    'boot supplied the explicit opts.taskCap',
+    'the scheduler is providing opts.taskCap automatically',
+  ];
+  for (const copy of FORBIDDEN) {
+    assert.match(
+      copy,
+      FORBIDDEN_TASKCAP_WIRING_CLAIM,
+      `inflected wiring claim must stay RED (S272-S1): ${copy}`,
+    );
+  }
+
+  // Honest near-misses: the fixed stems must not smear into ordinary copy where supplies/
+  // providing govern something OTHER than taskCap (the verb ties docs/logs/context, never
+  // the boot path to the cap). Same-clause breakers (; and :) keep these GREEN.
+  const HARMLESS = [
+    'the log supplies context for the refusal; the tool passes opts.taskCap explicitly',
+    'the scheduler log supplies the env value; you may pass opts.taskCap yourself',
+    'we are providing docs, not config: the tools pass opts.taskCap explicitly',
+  ];
+  for (const copy of HARMLESS) {
+    assert.doesNotMatch(
+      copy,
+      FORBIDDEN_TASKCAP_WIRING_CLAIM,
+      `honest inflected near-miss must stay GREEN (S272-S1): ${copy}`,
+    );
+  }
+});
+
+test('S272-S2: wiring verbs in relative clauses RED (head-as-object and wide-window), honest relatives GREEN', () => {
+  // The S266-S1 same-clause windows only glue CLOSE tokens, so moving the wiring verb into
+  // a relative clause escaped the ban: the head is the verb's object (nothing re-states
+  // taskCap after the verb) and the gaps exceed both connector windows. These shapes claim
+  // exactly what CAP-zero copy must never claim — the boot path provides opts.taskCap.
+  const FORBIDDEN = [
+    // Agentive relative, head-as-object (verb 28+ chars from the head token).
+    'opts.taskCap, which the scheduler passes at boot, is gone',
+    'opts.taskCap which the scheduler supplies at boot is gone',
+    'opts.taskCap is the value which the scheduler passes',
+    'opts.taskCap that the main tick forwards to tools at boot is removed',
+    'opts.taskCap, which the scheduler passes for you, is gone',
+    // Relative with an EXPLICIT taskCap object in a wide verb→object window.
+    'there is a note which says the scheduler passes the number of slots as opts.taskCap',
+    // Passive relatives that ONLY the S272-S1 stem fix can reach (double-bug rows:
+    // loosen either soft and these slip GREEN).
+    'opts.taskCap, which is supplied by the scheduler, covers most cases',
+    'opts.taskCap, which is provided by the boot wrapper, covers most cases',
+  ];
+  for (const copy of FORBIDDEN) {
+    assert.match(
+      copy,
+      FORBIDDEN_TASKCAP_WIRING_CLAIM,
+      `relative-clause wiring claim must stay RED (S272-S2): ${copy}`,
+    );
+  }
+
+  // Honest relatives stay GREEN: a relative with no wiring verb, a boot word that merely
+  // appears inside the relative without tying to taskCap, or a verb whose subject is some
+  // other noun (the tools read the cap; the scheduler merely appears as defaults prose).
+  const HARMLESS = [
+    'opts.taskCap, which is undocumented today, is read-only',
+    'opts.taskCap, which the boot log merely mentions, is tool-only',
+    'opts.taskCap, which is undefined at boot, comes from env later',
+    'the tools, which read opts.taskCap, never see the scheduler defaults',
+    'opts.taskCap is the value you get from the scheduler defaults only when env is unset',
+  ];
+  for (const copy of HARMLESS) {
+    assert.doesNotMatch(
+      copy,
+      FORBIDDEN_TASKCAP_WIRING_CLAIM,
+      `honest relative-clause copy must stay GREEN (S272-S2): ${copy}`,
+    );
+  }
+});
