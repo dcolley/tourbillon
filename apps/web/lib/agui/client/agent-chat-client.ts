@@ -34,6 +34,12 @@
  * open on the thread (action `attach`: the run's events so far, then live), and `resume()` (called when
  * the page is shown again or comes back online) reloads the history, merges it into what is shown and
  * re-attaches.
+ * CHAT-RECONNECT: a run stream adopted by `attach` that dies without a terminal event (the reconnect
+ * itself dropping, e.g. iPad Safari's network wake-up) is re-attached on a bounded schedule
+ * (`reconnect`: attempts × delayMs) instead of reporting a lost connection; the disconnect is shown
+ * only once that budget is spent, and a later `resume()` starts a fresh budget. `resume()` also
+ * restores the cards still waiting on the thread before it resolves, so a parked question is
+ * answerable again with no sticky "connection lost".
  * CHAT-PAGE-1: `loadHistory()` loads only the newest page (ASSISTANT_TRANSCRIPT_PAGE_SIZE messages);
  * `loadPrevious()` prepends the page before the oldest message shown (state.history: hasMore, cursor).
  */
@@ -93,6 +99,11 @@ export interface AgentChatClientOptions {
   abortTimeoutMs?: number;
   /** CHAT-PAGE-1: messages per transcript page (default ASSISTANT_TRANSCRIPT_PAGE_SIZE). */
   historyPageSize?: number;
+  /**
+   * CHAT-RECONNECT: attempts and base delay (ms) for re-attaching when a run stream adopted by
+   * `attach` ends without RUN_FINISHED / RUN_ERROR (a dropped reconnect after a backgrounded tab).
+   */
+  reconnect?: { attempts: number; delayMs: number };
 }
 
 /** Per-message options for send / steer. */
@@ -128,11 +139,15 @@ interface OpenRun {
   done: Promise<void>;
   /** Set when this client closed the stream itself (abort fallback / dispose). */
   closedLocally?: 'abort' | 'dispose' | 'superseded';
+  /** True when this run was adopted from an `attach` response (CHAT-RECONNECT: a drop re-attaches). */
+  attached?: boolean;
 }
 
 type Decision = { mode: 'control'; value: Record<string, unknown> } | { mode: 'run' } | { mode: 'empty' };
 
 const RETRY_SHORTLY = /retry shortly/i;
+/** CHAT-RECONNECT: default re-attach budget for a dropped attached stream. */
+const DEFAULT_RECONNECT = { attempts: 3, delayMs: 500 };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function defaultId(): string {
@@ -169,6 +184,9 @@ export class AgentChatClient {
   private tokens = 0;
   private disposed = false;
   private resuming: Promise<AgentChatResult> | null = null;
+  /** CHAT-RECONNECT: consecutive adopted-attach streams lost so far (reset by resume / a finished run). */
+  private attachLosses = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(opts: AgentChatClientOptions) {
     this.opts = opts;
@@ -229,6 +247,8 @@ export class AgentChatClient {
     if (this.active) return this.control('followUp', message, extra);
 
     const itemId = this.newId();
+    // CHAT-RECONNECT: a user-initiated send takes the thread over; drop any re-attach budget.
+    this.attachLosses = 0;
     this.update((s) => ({
       ...s,
       status: 'starting',
@@ -384,6 +404,12 @@ export class AgentChatClient {
    */
   resume(): Promise<AgentChatResult> {
     if (this.disposed) return Promise.resolve(this.fail({ kind: 'rejected', message: 'Chat closed' }));
+    // CHAT-RECONNECT: a page-level resume starts a fresh re-attach budget (an auto-retry does not).
+    this.attachLosses = 0;
+    return this.startResume();
+  }
+
+  private startResume(): Promise<AgentChatResult> {
     if (this.resuming) return this.resuming;
     const resuming = this.doResume().finally(() => {
       if (this.resuming === resuming) this.resuming = null;
@@ -409,8 +435,10 @@ export class AgentChatClient {
       if (!attached && !this.disposed && !this.active && !this.starting) {
         // The run ended while the stream was lost: its last messages may have been stored just now.
         if (run || this.state.status !== 'idle') await this.loadHistory('merge');
-        this.update(settleAfterResume);
-        void this.restorePending();
+        // CHAT-RECONNECT: show again the cards still waiting before resolving, so a chat that lost
+        // its stream while a question was parked is answerable again once resume() returns.
+        await this.restorePending();
+        if (!this.active && !this.starting) this.update(settleAfterResume);
       }
       return history.ok ? { ok: true, value: { attached } } : history;
     } finally {
@@ -426,7 +454,7 @@ export class AgentChatClient {
     if (this.disposed || this.active || this.starting) return false;
     try {
       const { res, ac, runId } = await this.post('attach');
-      const decision = await this.readDecision(res, ac, runId);
+      const decision = await this.readDecision(res, ac, runId, true);
       return decision.mode === 'run';
     } catch {
       return false;
@@ -565,6 +593,8 @@ export class AgentChatClient {
       run.ac.abort();
     }
     this.active = null;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = undefined;
     this.disposed = true;
     this.listeners.clear();
   }
@@ -706,7 +736,7 @@ export class AgentChatClient {
    * Reads the first events of a response: a control stream (RUN_STARTED, tourbillon.control,
    * RUN_FINISHED) resolves with its value; anything else is a run and is adopted.
    */
-  private readDecision(res: Response, ac: AbortController, runId: string): Promise<Decision> {
+  private readDecision(res: Response, ac: AbortController, runId: string, fromAttach = false): Promise<Decision> {
     return new Promise<Decision>((resolve, reject) => {
       const held: AguiClientEvent[] = [];
       let decided: Decision | null = null;
@@ -725,7 +755,7 @@ export class AgentChatClient {
           return;
         }
         decided = { mode: 'run' };
-        adopted = this.adoptRun(ac, runId, reading, [...held, ev]);
+        adopted = this.adoptRun(ac, runId, reading, [...held, ev], fromAttach);
         resolve(decided);
       });
       reading.then(
@@ -753,6 +783,7 @@ export class AgentChatClient {
     runId: string,
     reading: Promise<void>,
     first: AguiClientEvent[],
+    attached = false,
   ): (e: AguiClientEvent) => void {
     const previous = this.active;
     if (previous) {
@@ -762,11 +793,14 @@ export class AgentChatClient {
     }
     const token = ++this.tokens;
     let terminal = false;
-    const run: OpenRun = { token, ac, runId, done: Promise.resolve() };
+    const run: OpenRun = { token, ac, runId, done: Promise.resolve(), ...(attached ? { attached: true } : {}) };
     this.active = run;
     const onEvent = (ev: AguiClientEvent) => {
       if (this.active !== run || terminal || run.closedLocally) return;
-      if (ev.type === 'RUN_FINISHED' || ev.type === 'RUN_ERROR') terminal = true;
+      if (ev.type === 'RUN_FINISHED' || ev.type === 'RUN_ERROR') {
+        terminal = true;
+        this.attachLosses = 0; // the run reached its end over this stream: the budget is whole again
+      }
       this.update((s) => applyRunEvent(s, ev));
       try {
         this.opts.onRunEvent?.(ev);
@@ -787,6 +821,28 @@ export class AgentChatClient {
     if (sawTerminal || run.closedLocally) return; // ended normally, closed here, or superseded
     if (this.active === run) this.active = null;
     if (this.active !== null) return; // superseded by a newer run
+    // CHAT-RECONNECT: a stream adopted by `attach` died without ending (the reconnect itself dropped,
+    // e.g. iPad Safari's network wake-up): re-attach on a bounded schedule instead of reporting a lost
+    // connection. The disconnect below is shown only once that budget is spent.
+    if (run.attached) {
+      const budget = this.opts.reconnect ?? DEFAULT_RECONNECT;
+      if (this.attachLosses < budget.attempts) {
+        this.attachLosses += 1;
+        this.update((s) => (s.reconnecting ? s : { ...s, reconnecting: true }));
+        this.reconnectTimer = setTimeout(() => {
+          this.reconnectTimer = undefined;
+          if (this.disposed) return;
+          if (this.active || this.starting) {
+            // A run started here meanwhile (e.g. the user sent a message): nothing to re-attach to.
+            this.update((s) => (s.reconnecting ? { ...s, reconnecting: false } : s));
+            return;
+          }
+          void this.startResume();
+        }, Math.max(0, budget.delayMs) * this.attachLosses);
+        return;
+      }
+    }
+    this.attachLosses = 0;
     this.update((s) =>
       endRun(s, 'disconnected', { kind: 'disconnected', message: 'The connection to the agent was lost' }),
     );

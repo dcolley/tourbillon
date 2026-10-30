@@ -13,7 +13,7 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from '
 import { AgentChatClient, type AgentChatClientOptions, type AgentChatSendOptions } from '@/lib/agui/client/agent-chat-client';
 import { initialAgentChatState, type AgentChatState } from '@/lib/agui/client/chat-state';
 import { openAguiThread, type AguiThreadRef } from '@/lib/agui/client/thread-bootstrap';
-import { watchPageResume } from '@/lib/agui/client/page-resume';
+import { watchPageResume, type WatchPageResumeOptions } from '@/lib/agui/client/page-resume';
 
 export type AgentChatPhase = 'connecting' | 'ready' | 'error';
 
@@ -103,6 +103,19 @@ export interface UseAgentChatOptions {
   onThreadOpened?: (thread: AguiThreadRef) => void;
 }
 
+/**
+ * CHAT-RECONNECT: binds the page-resume signals to a chat client (kept out of the hook so the wiring
+ * is testable without React): every time the page comes back (tab shown again after iPad Safari
+ * suspended it, bfcache restore, back online) the client catches up — history reloaded and merged,
+ * open run re-attached, waiting cards restored (lib/agui/client/page-resume.ts, agent-chat-client.ts).
+ */
+export function watchClientResume(
+  client: { resume(): Promise<unknown> },
+  opts: WatchPageResumeOptions = {},
+): () => void {
+  return watchPageResume(() => void client.resume(), opts);
+}
+
 export function useAgentChat({ agentId, threadId, tools, onRunEvent, onThreadOpened }: UseAgentChatOptions) {
   const key = `${agentId}\u0000${threadId ?? ''}`;
   /** Result of opening the thread for `key`; anything else (older key, not yet set) reads as connecting. */
@@ -141,8 +154,9 @@ export function useAgentChat({ agentId, threadId, tools, onRunEvent, onThreadOpe
   const setupError = current?.error ?? null;
   const phase: AgentChatPhase = !current ? 'connecting' : current.client ? 'ready' : 'error';
 
-  // STREAM-1: catch up when the page comes back (the run stream may have been lost meanwhile).
-  useEffect(() => (client ? watchPageResume(() => void client.resume()) : undefined), [client]);
+  // STREAM-1 / CHAT-RECONNECT: catch up when the page comes back (the run stream may have been lost
+  // meanwhile; a parked question must come back answerable, not sit behind a disconnect banner).
+  useEffect(() => (client ? watchClientResume(client) : undefined), [client]);
 
   const state: AgentChatState = useSyncExternalStore(
     client?.subscribe ?? noopSubscribe,
