@@ -35,6 +35,25 @@ function stripComments(code: string): string {
   return code.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
 }
 
+/**
+ * S239-S1 (#239 ACCEPT): slice between `callOpen` (e.g. 'f(') and its matching close
+ * paren, so pins can assert on the ARGUMENTS of a call rather than the whole body.
+ * Call on comment-stripped code only (see stripComments).
+ */
+function callArguments(code: string, callOpen: string): string {
+  const openAt = code.indexOf(callOpen);
+  assert.ok(openAt >= 0, `${callOpen} found in the body slice`);
+  let depth = 1;
+  for (let i = openAt + callOpen.length; i < code.length; i += 1) {
+    if (code[i] === '(') depth += 1;
+    else if (code[i] === ')') {
+      depth -= 1;
+      if (depth === 0) return code.slice(openAt + callOpen.length, i);
+    }
+  }
+  assert.fail(`${callOpen} has no matching close paren in the body slice`);
+}
+
 describe('saveConciergeModel → validateConciergeModelParams wiring (S234-S2)', () => {
   it('the settings page imports the shared validator (not an inline copy)', () => {
     assert.match(
@@ -85,6 +104,25 @@ describe('saveConciergeModel → validateConciergeModelParams wiring (S234-S2)',
       code,
       /params:\s*\{\s*maxContextTokens:\s*formData/,
       'raw formData must not be passed through as params',
+    );
+
+    // S239-S1: the pins above only proved a `validated.params` binding EXISTS somewhere
+    // before the call — a mutant keeping `const params = validated.params;` while
+    // persisting raw formData into the write object (e.g. inline
+    // `params: { maxContextTokens: formData.get(...) }`) still survived them. Assert on
+    // the actual ARGUMENTS of updateCompanyConciergeModel: the persisted value must be
+    // the pinned `params` binding (shorthand or `params: params`), and raw formData must
+    // not appear in the call at all.
+    const args = callArguments(code, 'updateCompanyConciergeModel(');
+    assert.match(
+      args,
+      /(?:^|[{,[]|\s)params\s*(?:[:,]\s*params)?\s*(?:[,}\]])/,
+      'the write must pass the pinned `params` binding (shorthand or params: params) as the params value',
+    );
+    assert.doesNotMatch(
+      args,
+      /\bformData\b/,
+      'no raw formData may appear in the updateCompanyConciergeModel(...) arguments',
     );
   });
 });

@@ -37,17 +37,21 @@ const TEST_AGENT_ID = 'td-agent-1';
  * 9 tests). Per-test isolation is preserved by truncating the fixture tables before each
  * test and reseeding — CASCADE also clears the dependent agents rows.
  *
- * S235-S2 (#235 ACCEPT), reworded per S237-S1 (#237 ACCEPT): TRUNCATE scope note.
- * `TRUNCATE companies CASCADE` empties EVERY table that has an FK to `companies`, whatever
- * its `ON DELETE` action and including rows with a null FK — it does NOT follow "rows
- * reachable via ON DELETE CASCADE". Tables with no FK into `companies` are not reset at
- * all — e.g. system-wide `llm_providers`, which is global and has no companyId column /
- * FK into companies at all (the per-company `company_llm_providers` switch table DOES have
- * one, so it is reset). This fixture only seeds companies + agents, so the truncate is
- * sufficient here, but it is NOT a whole-database reset: any future fixture table without
- * an FK into `companies` would LEAK between tests under this once-per-file migration suite.
- * If such a fixture is added, extend the TRUNCATE below with an explicit table list
- * (adding an FK to companies would also work — any ON DELETE action suffices for TRUNCATE).
+ * S235-S2 (#235 ACCEPT), reworded per S237-S1 (#237 ACCEPT) and S239-S2 (#239 ACCEPT):
+ * TRUNCATE scope note. `TRUNCATE companies CASCADE` empties EVERY table that references
+ * `companies` — directly (whatever its `ON DELETE` action, including rows with a null FK)
+ * OR transitively through an FK chain (CASCADE is transitive: e.g. `cost_events` has no FK
+ * into `companies` at all but hangs off `agents`, so it is emptied too) — it does NOT
+ * follow "rows reachable via ON DELETE CASCADE". Only tables with no direct or transitive
+ * FK path into `companies` are not reset — e.g. system-wide `llm_providers`, which is
+ * global and has no companyId column / FK into companies at all (the per-company
+ * `company_llm_providers` switch table DOES have one, so it is reset). This fixture only
+ * seeds companies + agents, so the truncate is sufficient here, but it is NOT a
+ * whole-database reset: any future fixture table with no direct or transitive FK path into
+ * `companies` would LEAK between tests under this once-per-file migration suite. If such a
+ * fixture is added, extend the TRUNCATE below with an explicit table list (adding an FK
+ * chain that reaches companies would also work — any ON DELETE action suffices for
+ * TRUNCATE CASCADE to follow it).
  */
 let client: PGlite;
 let seededDb: ToolDb;
@@ -104,9 +108,10 @@ describe('Tool Discovery Tools', () => {
   });
 
   beforeEach(async () => {
-    // S235-S2 / S237-S1: empties every table with an FK to companies (any ON DELETE);
-    // FK-less global tables like llm_providers are NOT reset (see scope note above). The
-    // fixture seeds stay inside the FK-referencing set.
+    // S235-S2 / S237-S1 / S239-S2: empties every table with a direct or transitive FK to
+    // companies (any ON DELETE); tables with no FK path to companies at all, like the
+    // global llm_providers, are NOT reset (see scope note above). The fixture seeds stay
+    // inside the FK-referencing set.
     await client.exec('TRUNCATE companies CASCADE');
     await seedFixtureRows();
     setToolDbForTests(seededDb);
