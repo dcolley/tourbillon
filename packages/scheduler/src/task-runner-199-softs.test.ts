@@ -63,7 +63,10 @@
  * (PARALLEL_GATE_TIMEOUT_MS) instead of the runner default, so a loaded gate either gets a
  * genuine slow GREEN or a pointed per-test failure with the offending test named, rather
  * than an opaque whole-file timeout. No behaviour change: serial runs settle far below the
- * ceiling. Same treatment for startup.test.ts's tsx-spawning pin.
+ * ceiling. (The startup.test.ts tsx-spawning pin does NOT carry this option: its body is a
+ * synchronous spawnSync, which node:test's per-test timeout cannot preempt — its real wall
+ * is the spawnSync timeout itself, corrected by S266-S2.) task-runner-208-softs.test.ts
+ * received the same per-test treatment in S266-S3.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';

@@ -29,10 +29,20 @@
  * task-runner-256-softs.test.ts via a fresh child process; S1b stays for the opts-shape half.
  * S2 narrows the two anti-copy bans below from a bare /scheduler/i to the
  * taskCap↔boot-path-tie pattern (FORBIDDEN_TASKCAP_WIRING_CLAIM).
+ *
+ * S266-S1/S4 (#266 ACCEPT soft-pack): S4 moves CAP_ZERO_REFUSAL and
+ * FORBIDDEN_TASKCAP_WIRING_CLAIM into the shared helper ./task-runner-copy-pins.ts (imported
+ * here and by task-runner-256-softs.test.ts — behaviour unchanged, the dedup itself is
+ * verified by typecheck + these pins staying green). S1 tightens the matcher: the old 60-char
+ * proximity window false-REDd on harmless copy that merely MENTIONS a boot-path word near
+ * taskCap; the ban now needs a WIRING VERB in the same clause between the boot-path word and
+ * taskCap (either word order). The match/no-match contract is pinned both directions by the
+ * S266-S1 corpus test at the bottom of this file.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { pollTaskRunner, startTaskRunnerPolling, type TaskRunnerDeps } from './task-runner';
+import { CAP_ZERO_REFUSAL, FORBIDDEN_TASKCAP_WIRING_CLAIM } from './task-runner-copy-pins';
 import type { RunnableChatTaskRow } from '@tourbillon/db';
 import type { HeartbeatJobData } from '@tourbillon/shared';
 import type { WakeResult } from './wake-runner';
@@ -85,22 +95,9 @@ function collectingDeps(rows: RunnableChatTaskRow[], c: Collector): TaskRunnerDe
   } as unknown as TaskRunnerDeps;
 }
 
-const CAP_ZERO_REFUSAL = /task-run capacity zero, refusing/;
-
-/**
- * S256-S2 (#256 ACCEPT soft-pack): the narrowed wiring-claim ban. The old pin used a bare
- * /scheduler/i, which is too broad — it REDs on legitimate future copy that merely
- * MENTIONS a scheduler ("see the scheduler log", "raised from the scheduler"), not on the
- * actual lie. What must stay forbidden is a copy that TIES `opts.taskCap` to the scheduler
- * boot path ("…or have scheduler-main pass opts.taskCap"), because main starts the poller
- * with ZERO args (wiring pinned by scheduler-main-252-softs.test.ts). The 60-char window
- * on each side is generous enough for natural connector words ("pass opts.taskCap through
- * the boot seam" ≈ 45 chars REDs; "pass an explicit opts.taskCap ≥ 1" — the real copy,
- * 63 chars to the nearest boot-path word — stays GREEN) while still catching the
- * plausible mutant wordings.
- */
-const FORBIDDEN_TASKCAP_WIRING_CLAIM =
-  /taskCap[\s\S]{0,60}\b(scheduler|main|boot)\b|\b(scheduler|main|boot)\b[\s\S]{0,60}taskCap/i;
+// CAP_ZERO_REFUSAL and FORBIDDEN_TASKCAP_WIRING_CLAIM are imported from
+// ./task-runner-copy-pins.ts (S266-S4 dedup; S266-S1 tightened matcher — rationale and the
+// match/no-match contract live with the helper plus the S266-S1 corpus test below).
 
 // ─── S252-S1 ─────────────────────────────────────────────────────────────────
 
@@ -193,5 +190,61 @@ test('S252-S2: paused-only queue is cap-independent — identical summary at bud
     assert.equal(s.skippedInactive, 0);
     assert.deepEqual(c.claims, [], `budget ${maxConcurrentRuns}: no claim, attempts untouched`);
     assert.deepEqual(c.jobs, [], `budget ${maxConcurrentRuns}: no wake`);
+  }
+});
+
+// ─── S266-S1 ─────────────────────────────────────────────────────────────────
+
+test('S266-S1: the wiring-claim matcher keeps harmless copy GREEN and real forbidden claims RED (both directions)', () => {
+  // Direction 1 — harmless copy the OLD 60-char proximity window false-REDd: it MENTIONS a
+  // boot-path word within 60 chars of taskCap without ever tying opts.taskCap to the boot
+  // path. Each line here used to break assert.doesNotMatch in S252-S1a/S1b/S256-S1.
+  const HARMLESS = [
+    // The real production refusal line (task-runner.ts :407) — must stay GREEN forever.
+    'task-run capacity zero, refusing — Run Tasks cannot start for this agent while the ' +
+      'effective task cap is 0 (raise TASK_RUNNER_MAX_CONCURRENT_RUNS to ≥ 2, or pass an ' +
+      'explicit opts.taskCap ≥ 1)',
+    // S256-S2 named this shape as the false positive to fix: a mere log pointer.
+    '…or pass an explicit opts.taskCap ≥ 1 (see the scheduler log)',
+    // Past-tense provenance + a later-clause remedy verb — the clause-breaker keeps it GREEN.
+    'the cap was raised from the scheduler defaults; pass opts.taskCap explicitly',
+    // Truthful division-of-labour copy: "main" and "pass opts.taskCap" in separate clauses.
+    'the main tick derives the budget from env; tools may pass opts.taskCap',
+    // Parenthetical boot mention after the remedy.
+    'opts.taskCap is tool-only — see the boot log for the env default',
+    // "setting" is deliberately NOT a wiring verb (innocent "the setting lives in…" copy).
+    'raise TASK_RUNNER_MAX_CONCURRENT_RUNS or pass opts.taskCap — the setting lives in the scheduler config',
+  ];
+  for (const copy of HARMLESS) {
+    assert.doesNotMatch(
+      copy,
+      FORBIDDEN_TASKCAP_WIRING_CLAIM,
+      `harmless copy must stay GREEN (S266-S1 false-positive fix): ${copy}`,
+    );
+  }
+
+  // Direction 2 — the real forbidden claims: a wiring verb in ONE CLAUSE tying taskCap to
+  // the boot path, in BOTH word orders. Mutating the matcher loose again REDs here, so the
+  // narrowing above cannot quietly become a no-op.
+  const FORBIDDEN = [
+    // The S256-S2 documented mutant (boot word → verb → taskCap).
+    'task-run capacity zero, refusing — Run Tasks cannot start for this agent while the ' +
+      'effective task cap is 0 (raise TASK_RUNNER_MAX_CONCURRENT_RUNS to ≥ 2, or have ' +
+      'scheduler-main pass an explicit opts.taskCap ≥ 1)',
+    'the scheduler passes opts.taskCap for you',
+    'or let boot supply the explicit opts.taskCap you need',
+    'the main loop can set opts.taskCap itself',
+    // taskCap → verb → boot word order.
+    'opts.taskCap set at boot covers most cases',
+    'wire opts.taskCap through the scheduler config',
+    // S256-S2 comment's named must-stay-RED shape (≈45 chars between the tokens).
+    'or pass opts.taskCap through the boot seam',
+  ];
+  for (const copy of FORBIDDEN) {
+    assert.match(
+      copy,
+      FORBIDDEN_TASKCAP_WIRING_CLAIM,
+      `forbidden wiring claim must stay RED (S266-S1 non-vacuity): ${copy}`,
+    );
   }
 });
