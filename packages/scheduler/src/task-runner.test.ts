@@ -106,6 +106,23 @@ function fakes(opts: {
 
 const drain = (s: TaskRunPollSummary) => Promise.all(s.started.map((x) => x.done));
 
+/**
+ * Determinism (S249-S2): resolveMaxConcurrentRuns' default param falls through to the REAL
+ * env when raw === undefined — pin/restore TASK_RUNNER_MAX_CONCURRENT_RUNS around a test so
+ * "unset → default 2" tests the parser, not whatever the host machine carries.
+ */
+function withEnv<T>(raw: string | undefined, fn: () => T): T {
+  const prev = process.env.TASK_RUNNER_MAX_CONCURRENT_RUNS;
+  if (raw === undefined) delete process.env.TASK_RUNNER_MAX_CONCURRENT_RUNS;
+  else process.env.TASK_RUNNER_MAX_CONCURRENT_RUNS = raw;
+  try {
+    return fn();
+  } finally {
+    if (prev === undefined) delete process.env.TASK_RUNNER_MAX_CONCURRENT_RUNS;
+    else process.env.TASK_RUNNER_MAX_CONCURRENT_RUNS = prev;
+  }
+}
+
 test('freeTaskRunSlots: the shared budget and the task cap both clamp, never negative', () => {
   // Two heartbeat slots busy → no room for tasks (tasks wait, they never stack a parallel runner).
   assert.equal(freeTaskRunSlots({ total: 2, task: 0 }, 2, 2), 0);
@@ -121,7 +138,9 @@ test('freeTaskRunSlots: the shared budget and the task cap both clamp, never neg
 
 test('wait-when-full: slots busy → the task waits and keeps its attempt budget', async () => {
   const f = fakes({ rows: [row({ taskId: 't1' }), row({ taskId: 't2', position: 1 })], slots: { total: 2, task: 0 } });
-  const s = await pollTaskRunner(f.deps, {});
+  // S249-S2: budget pinned — an unpinned host env of 1 would flip this "budget genuinely
+  // full" deferral into the cap-0 refusal and skippedFull would never tick.
+  const s = await pollTaskRunner(f.deps, { maxConcurrentRuns: 2 });
   assert.equal(s.started.length, 0);
   assert.equal(s.skippedFull, 1);
   assert.deepEqual(f.claims, []); // no claim → attempt budget untouched while waiting
@@ -169,7 +188,9 @@ test('B1: paused/archived agents and companies are skipped BEFORE claim — neve
     row({ taskId: 't-active', position: 9 }), // the control: active agent + active company runs
   ];
   const f = fakes({ rows, slots: { total: 0, task: 0 } });
-  const s = await pollTaskRunner(f.deps, {});
+  // S249-S2: budget pinned — under an unpinned host env of 1 the control row would die in the
+  // cap-0 branch and the "only the status gate stops the inactive rows" claim would be lost.
+  const s = await pollTaskRunner(f.deps, { maxConcurrentRuns: 2 });
   assert.equal(s.polled, 6);
   assert.equal(s.skippedInactive, 5);
   assert.equal(s.skippedFull, 0); // inactive rows are NOT counted as a budget deferral
@@ -184,13 +205,13 @@ test('a failed run re-queues to pending while attempts remain, then parks itself
   const fail = (job: HeartbeatJobData) =>
     Promise.resolve({ runId: job.runId ?? '', status: 'failed' as const, errorText: 'boom' });
   const first = fakes({ rows: [row({ taskId: 't1', attempts: 0 })], wake: fail });
-  const s1 = await pollTaskRunner(first.deps, {});
+  const s1 = await pollTaskRunner(first.deps, { maxConcurrentRuns: 2 }); // S249-S2: budget pinned
   await drain(s1);
   assert.deepEqual(first.settles, [{ taskId: 't1', status: 'pending' }]); // fresh attempt available
   assert.deepEqual(first.progress, ['started:running', 'needs_review:failed']);
 
   const last = fakes({ rows: [row({ taskId: 't2', attempts: 1 })], wake: fail });
-  const s2 = await pollTaskRunner(last.deps, {});
+  const s2 = await pollTaskRunner(last.deps, { maxConcurrentRuns: 2 }); // S249-S2: budget pinned
   await drain(s2);
   assert.deepEqual(last.settles, [{ taskId: 't2', status: 'waiting_on_user' }]); // attempt budget spent → park
 });
@@ -234,7 +255,9 @@ test('S1: company taskRunner.enabled=false rows skip the queue BEFORE claim (B1 
     row({ taskId: 't-on', position: 1 }),
   ];
   const f = fakes({ rows, slots: { total: 0, task: 0 } });
-  const s = await pollTaskRunner(f.deps, {});
+  // S249-S2: budget pinned — the t-on control must actually reach the claim path, which an
+  // unpinned host env of 1 would deny via the cap-0 branch.
+  const s = await pollTaskRunner(f.deps, { maxConcurrentRuns: 2 });
   assert.equal(s.polled, 2);
   assert.equal(s.skippedDisabled, 1);
   assert.equal(s.skippedInactive, 0); // disabled is its own bucket, not "inactive"
@@ -291,7 +314,7 @@ test('S1: company maxAttemptsPerTask drives the claim budget and the park decisi
 
   // attempts=2 used. Default budget (2) parks after the next failure; budget 4 re-queues.
   const strict = fakes({ rows: [row({ taskId: 't-strict', attempts: 2 })], wake: fail });
-  const s1 = await pollTaskRunner(strict.deps, {});
+  const s1 = await pollTaskRunner(strict.deps, { maxConcurrentRuns: 2 }); // S249-S2: budget pinned
   await drain(s1);
   assert.deepEqual(strict.settles, [{ taskId: 't-strict', status: 'waiting_on_user' }]);
 
@@ -299,21 +322,25 @@ test('S1: company maxAttemptsPerTask drives the claim budget and the park decisi
     rows: [row({ taskId: 't-gen', attempts: 2, companySettings: { taskRunner: { maxAttemptsPerTask: 4 } } })],
     wake: fail,
   });
-  const s2 = await pollTaskRunner(generous.deps, {});
+  const s2 = await pollTaskRunner(generous.deps, { maxConcurrentRuns: 2 }); // S249-S2: budget pinned
   await drain(s2);
   assert.deepEqual(generous.claimBudgets, [{ taskId: 't-gen', maxAttempts: 4 }]);
   assert.deepEqual(generous.settles, [{ taskId: 't-gen', status: 'pending' }]); // 3 < 4 → fresh attempt
 });
 
 test('S1: resolveMaxConcurrentRuns — 0 is the kill switch, garbage falls back to 2', () => {
-  assert.equal(resolveMaxConcurrentRuns('0'), 0); // explicit kill switch
-  assert.equal(resolveMaxConcurrentRuns('2'), 2);
-  assert.equal(resolveMaxConcurrentRuns('3.7'), 3);
-  assert.equal(resolveMaxConcurrentRuns(undefined), 2);
-  assert.equal(resolveMaxConcurrentRuns(''), 2); // blank ≠ 0 — blank is "unset"
-  assert.equal(resolveMaxConcurrentRuns('   '), 2);
-  assert.equal(resolveMaxConcurrentRuns('abc'), 2);
-  assert.equal(resolveMaxConcurrentRuns('-1'), 2); // negative is garbage, NOT the switch
+  // S249-S2: `resolveMaxConcurrentRuns(undefined)` falls through to the real env via the
+  // default param — pin the host env UNSET so the unset→2 rows test the parser, not the machine.
+  withEnv(undefined, () => {
+    assert.equal(resolveMaxConcurrentRuns('0'), 0); // explicit kill switch
+    assert.equal(resolveMaxConcurrentRuns('2'), 2);
+    assert.equal(resolveMaxConcurrentRuns('3.7'), 3);
+    assert.equal(resolveMaxConcurrentRuns(undefined), 2);
+    assert.equal(resolveMaxConcurrentRuns(''), 2); // blank ≠ 0 — blank is "unset"
+    assert.equal(resolveMaxConcurrentRuns('   '), 2);
+    assert.equal(resolveMaxConcurrentRuns('abc'), 2);
+    assert.equal(resolveMaxConcurrentRuns('-1'), 2); // negative is garbage, NOT the switch
+  });
 });
 
 test('S1: maxConcurrentRuns=0 stops the poller BEFORE it polls', async () => {
@@ -449,14 +476,16 @@ test('S3: defaults never stack 2 task runs + 1 heartbeat on a budget of 2', asyn
   // Idle agent, three queued tasks: one poll tick may start at most budget-1 = 1 task run.
   const rows = [row({ taskId: 't1', position: 0 }), row({ taskId: 't2', position: 1 }), row({ taskId: 't3', position: 2 })];
   const idle = fakes({ rows, slots: { total: 0, task: 0 } });
-  const s1 = await pollTaskRunner(idle.deps, {});
+  // S249-S2: the budget IS the subject of this test — pin it at 2 instead of inheriting the
+  // module-load env default, which on a TASK_RUNNER_MAX_CONCURRENT_RUNS=1 host would start 0.
+  const s1 = await pollTaskRunner(idle.deps, { maxConcurrentRuns: 2 });
   assert.equal(s1.started.length, 1, 'one tick starts at most budget-1 task runs by default');
   await drain(s1);
 
   // One task run + one heartbeat now live (total 2 of 2): the next tick starts nothing —
   // this is exactly the 3-concurrent hole the reservation closes.
   const busy = fakes({ rows: [row({ taskId: 't2', position: 1 })], slots: { total: 2, task: 1 } });
-  const s2 = await pollTaskRunner(busy.deps, {});
+  const s2 = await pollTaskRunner(busy.deps, { maxConcurrentRuns: 2 }); // S249-S2: budget pinned
   assert.equal(s2.started.length, 0);
   assert.equal(s2.skippedFull, 1);
   assert.deepEqual(busy.claims, [], 'no claim → no attempt budget burned while the budget is full');

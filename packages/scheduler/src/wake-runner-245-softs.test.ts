@@ -79,11 +79,23 @@ describe('S245-S2: wake-runner feeds chatTaskTools the wake-aware string, not a 
 
 describe('S245-S2: harness-adapter passes chatTaskTools through unchanged', () => {
   it('forwards options.chatTaskTools to createTourbillonController verbatim (?? false only)', () => {
+    // S249-S1 (#249): end-anchored. The old prefix-only /…?? false/ stayed GREEN when a ternary
+    // was glued after the default (`?? false ? true : false`) — which folds 'run-task-wake' to
+    // boolean true and re-arms the S243-S2 re-queue trap while every pin above stayed green.
+    // The pass-through must END at the default: a `,`/`;` to end the object property, nothing else.
     assert.match(
       ADAPTER_SRC,
-      /chatTaskTools:\s*options\.chatTaskTools\s*\?\?\s*false/,
+      /chatTaskTools:\s*options\.chatTaskTools\s*\?\?\s*false\s*[,;]\s*$/m,
       'the adapter may only default the value (?? false); any transform in between is where ' +
         "'run-task-wake' would silently die before reaching assembleAgentTools",
+    );
+    // Belt for the exact mutant shape: nothing may dangle after the default — no ternary `?`,
+    // no Boolean()/!! coercion glued on the tail of the pass-through.
+    assert.doesNotMatch(
+      ADAPTER_SRC,
+      /chatTaskTools:\s*options\.chatTaskTools\s*\?\?\s*false\s*(?:\?|Boolean\(|!!)/,
+      '`options.chatTaskTools ?? false ? …` turns every run-task-wake into boolean true — ' +
+        'the end-anchor exists precisely so this mutant cannot hide behind the prefix match',
     );
   });
 

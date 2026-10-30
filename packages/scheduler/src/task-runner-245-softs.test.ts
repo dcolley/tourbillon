@@ -180,7 +180,10 @@ test('S245-S3b: a genuinely-full budget still counts skippedFull (noCapacity sta
   // Guard against the branch swallowing the normal deferral path: budget 2, both slots busy,
   // taskCap 1 — this is transient and must keep its historic accounting.
   const f = fakes({ rows: [row({ taskId: 't1' })], slots: { total: 2, task: 0 } });
-  const s: TaskRunPollSummary = await pollTaskRunner(f.deps, {});
+  // S249-S2: budget pinned, not inherited from the host env. DEFAULT_MAX_CONCURRENT_RUNS is
+  // resolved at module load, so a host TASK_RUNNER_MAX_CONCURRENT_RUNS=1 would silently flip
+  // this "genuinely full budget" scenario into the cap-0 branch (skippedFull 1 → 0).
+  const s: TaskRunPollSummary = await pollTaskRunner(f.deps, { maxConcurrentRuns: 2 });
   assert.equal(s.skippedFull, 1);
   assert.equal(s.skippedNoCapacity, 0);
   assert.equal(f.warns.filter((l) => /capacity zero/.test(l.msg)).length, 0);
