@@ -4,7 +4,7 @@
  * S236-S1: the S233-S3 live opt-in header in task-runner-199-softs.test.ts documented
  *   `-e POSTGRES_PASSWORD=***` while the example URL used `postgres:postgres` —
  *   pasted as written, the shell globs `***` and auth fails. The doc now says
- *   `POSTGRES_PASSWORD=*** (matching the URL) and the pin below SOURCE-CHECKS the
+ *   `POSTGRES_PASSWORD=postgres` (matching the URL) and the pin below SOURCE-CHECKS the
  *   header every run: the documented docker password must equal the example URL's
  *   password (and user, which the `psql -U postgres` line also relies on). Reverting
  *   the doc, or editing one side only, fails this test.

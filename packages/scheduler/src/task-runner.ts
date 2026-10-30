@@ -487,31 +487,55 @@ export interface TaskRunnerPoller {
 }
 
 /**
+ * S238-S3: setInterval()'s delay is a 32-bit SIGNED integer in Node — anything above
+ * 2^31−1 ms overflows and Node resets it to 1 ms (Test probed ~40 fires per 50 ms), i.e. the
+ * very hot loop the S236-S2 floor exists to prevent, arriving from the OTHER end. Both poll
+ * resolvers clamp at this ceiling: a huge `intervalMs` seam or a huge
+ * TASK_RUNNER_POLL_INTERVAL_SEC lands on ~24.8 days (the largest representable delay), never
+ * on 1 ms.
+ */
+export const MAX_POLL_INTERVAL_MS = 2_147_483_647;
+/** Whole seconds whose ×1000 still fits MAX_POLL_INTERVAL_MS (2_147_483 s ≈ 24.8 days). */
+export const MAX_POLL_INTERVAL_SEC = Math.floor(MAX_POLL_INTERVAL_MS / 1000);
+
+/**
  * S236-S2: resolve the poller's setInterval delay. `intervalMs` is an @internal, TEST-ONLY
  * seam (see startTaskRunnerPolling) and is NOT trusted: `0` / `NaN` / negative clamp to ≥1 ms
  * so a mistyped option can never turn the scheduler into a ~1ms hot loop. Production callers
  * omit it and land on `intervalSec * 1000` — the 5s floor / env default. Exported (pure) so
  * the clamp is pinned directly instead of being timing-inferred.
+ *
+ * S238-S3 adds the matching CEILING: finite values above MAX_POLL_INTERVAL_MS clamp to it
+ * (setInterval would overflow them to 1 ms → hot loop). `+Infinity` counts as huge → ceiling,
+ * NOT as garbage; only NaN / −Infinity keep the historic 1 ms garbage floor.
  */
 export function resolvePollIntervalMs(
   intervalMs: number | undefined,
   intervalSec: number,
 ): number {
   const raw = intervalMs ?? intervalSec * 1000;
-  return Number.isFinite(raw) ? Math.max(1, raw) : 1;
+  if (raw === Infinity) return MAX_POLL_INTERVAL_MS;
+  if (!Number.isFinite(raw)) return 1;
+  return Math.min(MAX_POLL_INTERVAL_MS, Math.max(1, raw));
 }
 
 /**
  * S236-S2 (same class, production side): the seconds interval keeps its historic 5s floor, but
  * garbage in TASK_RUNNER_POLL_INTERVAL_SEC used to yield NaN — which setInterval coerces to 1,
  * i.e. the very hot loop the floor exists to prevent. Non-finite input falls back to 30.
+ *
+ * S238-S3 adds the matching CEILING: a huge finite value (TASK_RUNNER_POLL_INTERVAL_SEC=1e7)
+ * used to pass straight through, and its ×1000 ms form overflowed setInterval's int32 to a
+ * 1 ms hot loop. Huge seconds clamp to MAX_POLL_INTERVAL_SEC so `sec * 1000` can never
+ * overflow — the same 24.8-day safe maximum as the ms seam.
  */
 export function resolvePollIntervalSec(
   raw: string | number | undefined,
   fallbackSec = 30,
 ): number {
   const parsed = Number(raw ?? fallbackSec);
-  return Math.max(5, Number.isFinite(parsed) ? parsed : fallbackSec);
+  const sec = Number.isFinite(parsed) ? parsed : fallbackSec;
+  return Math.min(MAX_POLL_INTERVAL_SEC, Math.max(5, sec));
 }
 
 /**
