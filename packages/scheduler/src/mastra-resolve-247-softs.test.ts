@@ -63,6 +63,23 @@
  *     alias form npm:pkg@ver) and REFUSES everything else with the spec in the message —
  *     a manifest edited to an unresolvable form fails loudly instead of silently
  *     comparing a malformed token. No semver.satisfies was invented.
+ *
+ * #259 softs (this pack):
+ *   S259-S1 — declaredPinVersion still stripped a lone EXCLUSIVE comparator: '<1.78.0' and
+ *     '>1.78.0' normalised to '1.78.0', so the exact-equality comparisons PASSED against a
+ *     1.78.0 store although the declared range rules 1.78.0 out (mutants M22/M23 GREEN —
+ *     the rest of what S254-S3 set out to close). It now refuses '<x' / '>x' while
+ *     inclusive forms ('^ ~ >= <= = v') keep resolving; the two loop entries that pinned
+ *     the exclusives GREEN are flipped to assert.throws, and the docstring matches.
+ *   S259-S2 — info: the S251-S1 structural pins are deliberately textual; behaviour-
+ *     preserving seam refactors (M4b re-inlined spawn, M5 precomputed options variable)
+ *     RED on them. A note at the pin says a trip means "update the pin deliberately".
+ *   S259-S3 — info: the childEnv body pin is a text-only presence check — M3b (dead-branch
+ *     delete) passes its regexes and is caught by the echo tests at runtime. The comment
+ *     no longer claims more structural power than the regexes have.
+ *   S259-S4 — cosmetic: the S254-S2 live-manifest assertion moved into its own test so its
+ *     RED names the right soft, and the single-comparator strip matrix now lives once (in
+ *     the S254-S3 test) instead of duplicated loops in S251-S2 and S254-S3.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -150,10 +167,18 @@ function echoResolveEnvViaSharedSeam(specifier: string): { status: number | null
  * (and, being satisfied by the leading '<', made a spec that EXCLUDES 1.78.0 look like it
  * pinned 1.78.0), while 'npm:pkg@1.78.0' / 'workspace:*' never normalised at all and then
  * mis-compared as literal tokens. Rule now: resolve ONLY unambiguous single-version specs
- * (optionally prefixed by one comparator, optionally an npm: alias carrying a concrete
- * version tail) and REFUSE every other form by throwing with the spec in the message.
- * Refuse beats inventing semver resolution: the materialisation test surfaces the throw
- * as a loud failure naming the spec, instead of a misleading compare.
+ * (optionally prefixed by an INCLUSIVE comparator — '^', '~', '>=', '<=', '=', 'v' —
+ * optionally an npm: alias carrying a concrete version tail) and REFUSE every other form
+ * by throwing with the spec in the message. Refuse beats inventing semver resolution: the
+ * materialisation test surfaces the throw as a loud failure naming the spec, instead of a
+ * misleading compare.
+ *
+ * S259-S1: a lone EXCLUSIVE comparator ('<x' / '>x') is not an unambiguous single-version
+ * spec either. The S254-S3 strip still accepted it and normalised '<1.78.0' / '>1.78.0'
+ * to '1.78.0' — then the exact-equality comparisons PASSED against a 1.78.0 store even
+ * though the declared range RULES 1.78.0 OUT (mutants M22/M23 were GREEN). An excluding
+ * range pins nothing for an equality check, so it is refused too; inclusive comparators
+ * ('^ ~ >= <= = v', whose ranges INCLUDE their base version) keep the S251-S2 behaviour.
  */
 function declaredPinVersion(spec: string): string {
   const trimmed = spec.trim();
@@ -170,7 +195,19 @@ function declaredPinVersion(spec: string): string {
     const at = base.indexOf('@', 1);
     base = at === -1 ? '' : base.slice(at + 1);
   }
-  base = base.trim().replace(/^(?:[v=]|>=|<=|>|<|\^|~)?\s*/, '');
+  base = base.trim();
+  // S259-S1: a lone exclusive comparator EXCLUDES its own base version — stripping it
+  // would hand the exact-equality comparisons the very version the spec rules out, so an
+  // excluding range still passed against a store at that version (M22/M23 GREEN).
+  // '>=1.78.0' / '<=1.78.0' INCLUDE 1.78.0 and keep the S251-S2 strip; '<1.78.0' /
+  // '>1.78.0' (and the same padded with whitespace) must refuse, naming the spec.
+  if (/^[<>](?!=)/.test(base)) {
+    throw new Error(
+      `declaredPinVersion: spec '${spec}' carries an exclusive comparator — '<'/'>' rule the base version OUT, so stripping it to '${base.replace(/^[<>]\s*/, '')}' ` +
+        `would let the exact-equality pin PASS against the version the range excludes; declare an exact or inclusive spec (^ ~ >= <= = v) instead`,
+    );
+  }
+  base = base.replace(/^(?:[v=]|>=|<=|>|<|\^|~)?\s*/, '');
   if (!/^\d+\.\d+\.\d+$/.test(base)) {
     throw new Error(
       `declaredPinVersion: spec '${spec}' is not an unambiguous single version (resolved to '${base}') — ` +
@@ -343,6 +380,13 @@ test('S251-S1: childResolve is wired through the single childEnv-built spawn sit
   // and compared literally (no lookahead, no unanchored \\b that would also hit the
   // encoding key); the whole options object must be just this env hand-off plus the
   // encoding, so a second env-shaped key cannot hide in it.
+  //
+  // NOTE (S259-S2): these options pins are deliberately STRUCTURAL/textual, not behavioural.
+  // Mutants M4b (spawn call re-inlined at the site, still passing the stripped builder) and
+  // M5 (the options object hoisted into a precomputed variable that the spawn then passes)
+  // behave EXACTLY like the current code yet RED here — intended. The pins trade refactor
+  // tolerance for mutant bite, so a harmless seam refactor tripping them reads as "update
+  // the pin deliberately", not "found a bug".
   const optsPos = SRC.indexOf('{', SRC.indexOf('process.execPath', sitePos));
   assert.ok(optsPos !== -1, 'the single spawn site must pass an options object');
   const optionsObject = SRC.slice(optsPos, SRC.indexOf('}', optsPos) + 1);
@@ -364,9 +408,14 @@ test('S251-S1: childResolve is wired through the single childEnv-built spawn sit
     'no additional env-shaped key may appear in the spawn options object alongside the childEnv() hand-off',
   );
 
-  // S254-S1: the builder itself must be the strip. A rewire can keep env: childEnv() at
-  // the site and gut the BUILDER (raw spread, missing delete) — the echo tests catch that
-  // behaviourally; this pin catches it structurally with a named assertion.
+  // S254-S1: the builder must CARRY the strip. A rewire can keep the call at the site and
+  // gut the builder (raw copy, missing delete). Be honest about what the two regexes below
+  // actually are (S259-S3): a TEXT-ONLY presence check — the fresh-copy spread and the
+  // NODE_PATH delete tokens appear in the body — that names WHICH half went missing but
+  // cannot see the body's behaviour. Mutants that keep both tokens while changing the
+  // semantics around them (e.g. M3b, deleting a dead branch inside the builder) pass this
+  // pin; the echo tests are what catch those, at runtime, by observing what the child env
+  // actually contains.
   const ceStart = SRC.indexOf('function childEnv(');
   const ceEnd = SRC.indexOf('function spawnChild(', ceStart);
   assert.ok(ceStart !== -1 && ceEnd > ceStart, 'precondition: childEnv is defined above spawnChild');
@@ -410,9 +459,18 @@ test('S251-S2: declared-version comparison stays meaningful when the devDep spec
   // the prefix keeps the pin's intent (installed tree === the declared version) and stays
   // EXACT — deliberately not semver.satisfies, which would wave 1.99.0 through '^1.78.0'.
   assert.equal(declaredPinVersion('1.78.0'), '1.78.0', 'an exact spec normalises to itself');
-  for (const spec of ['^1.78.0', '~1.78.0', '>=1.78.0', '>1.78.0', '<=1.78.0', '<1.78.0', '=1.78.0', 'v1.78.0', ' ^1.78.0 ']) {
-    assert.equal(declaredPinVersion(spec), '1.78.0', `range spec '${spec}' must normalise to its base version`);
+  // S251-S2's own story: INCLUSIVE range prefixes pin their base version instead of RED-ing
+  // against a store-dir name that can never exist. The full single-comparator matrix (every
+  // strip/refuse boundary, including the S259-S1 exclusive refusals) lives once in the
+  // S254-S3 test — duplicated loops here just made REDs ambiguous (S259-S4).
+  for (const spec of ['^1.78.0', '~1.78.0', ' ^1.78.0 ']) {
+    assert.equal(declaredPinVersion(spec), '1.78.0', `range prefix '${spec}' must normalise to its base version`);
   }
+});
+
+test('S254-S2: the live manifest spec survives declaredPinVersion as a concrete version', () => {
+  // (S259-S4: this block used to sit inside the S251-S2 'range prefix' test, so its RED
+  // named the wrong soft — it asserts on the LIVE manifest, which is S254-S2's subject.)
   // S254-S2: the live manifest goes through the SAME declared-version path as every
   // other comparison instead of ending in a second magic literal. A hardcoded literal
   // here re-pins the monorepo version a second time: bump the pin and the materialisation
@@ -441,9 +499,23 @@ test('S254-S3: declaredPinVersion strips unambiguous specs and refuses the forms
   // came back verbatim). The smallest safe change is strip-when-unambiguous / REFUSE
   // otherwise — deliberately no semver.satisfies, which would gut the exact pin.
   //
-  // Unambiguous single-version specs keep resolving (S251-S2 behaviour preserved):
-  for (const spec of ['^1.78.0', '~1.78.0', '>=1.78.0', '>1.78.0', '<=1.78.0', '<1.78.0', '1.78.0', ' v1.78.0 ']) {
+  // Unambiguous single-version specs keep resolving (S251-S2 behaviour preserved). The
+  // full matrix lives HERE, once — the S251-S2 test no longer duplicates it (S259-S4).
+  for (const spec of ['^1.78.0', '~1.78.0', '>=1.78.0', '<=1.78.0', '=1.78.0', 'v1.78.0', '1.78.0', ' v1.78.0 ', ' ^1.78.0 ']) {
     assert.equal(declaredPinVersion(spec), '1.78.0', `single-comparator spec '${spec}' must normalise to its base version`);
+  }
+  // S259-S1: the asymmetric trap the S254-S3 strip still fell into — a lone EXCLUSIVE
+  // comparator normalised to its EXCLUDED base ('<1.78.0' / '>1.78.0' -> '1.78.0'), and
+  // the exact-equality comparisons then PASSED against a 1.78.0 store although the range
+  // rules 1.78.0 out (mutants M22/M23 GREEN). Inclusive comparators include their base
+  // and keep the strip; exclusive ones must refuse. These entries used to sit in the
+  // strip loops above (duplicated across S251-S2 and S254-S3) pinned GREEN — flipped.
+  for (const spec of ['<1.78.0', '>1.78.0', ' <1.78.0 ', '>1.78.0 ']) {
+    assert.throws(
+      () => declaredPinVersion(spec),
+      /exclusive comparator/,
+      `'${spec}' excludes its base version: stripping it would let an EXCLUDING range pass the exact-equality pin; it must refuse, naming the spec`,
+    );
   }
   // npm: ALIAS form: the spec itself carries the concrete version, so it is unambiguous —
   // strip the alias prefix and package name (scoped name included) down to the tail.
