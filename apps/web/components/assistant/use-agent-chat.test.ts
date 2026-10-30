@@ -6,7 +6,7 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { connectAgentChat } from './use-agent-chat';
+import { connectAgentChat, watchClientResume } from './use-agent-chat';
 import { AgentChatClient } from '@/lib/agui/client/agent-chat-client';
 import type { AgentChatItem } from '@/lib/agui/client/chat-state';
 import { controlResponse, createFakeAguiServer, tick, until } from '@/lib/agui/client/testing/fake-agui-server';
@@ -299,6 +299,53 @@ describe('Assistant agent switch shows freshly fetched messages', () => {
       assert.equal(items[items.length - 1], 'msg 25');
       assert.equal(items.length, 25);
       cleanup();
+    });
+  });
+
+  describe('page resume binding (STREAM-1 wiring)', () => {
+    function fakePage() {
+      const make = () => {
+        const listeners = new Map<string, Set<(e: Event) => void>>();
+        return {
+          addEventListener: (t: string, l: (e: Event) => void) => {
+            if (!listeners.has(t)) listeners.set(t, new Set());
+            listeners.get(t)!.add(l);
+          },
+          removeEventListener: (t: string, l: (e: Event) => void) => void listeners.get(t)?.delete(l),
+          dispatch: (t: string, extra: Record<string, unknown> = {}) => {
+            for (const l of listeners.get(t) ?? []) l(Object.assign(new Event(t), extra));
+          },
+        };
+      };
+      const doc = Object.assign(make(), { visibilityState: 'visible' as string });
+      const win = make();
+      let now = 0;
+      return { doc, win, clock: { now: () => now, advance: (ms: number) => void (now += ms) } };
+    }
+
+    it('watchClientResume calls client.resume when the page comes back, and stops on unsubscribe', () => {
+      const { doc, win, clock } = fakePage();
+      let calls = 0;
+      const client = {
+        resume: async () => {
+          calls++;
+          return { ok: true } as const;
+        },
+      };
+      const stop = watchClientResume(client, { document: doc, window: win, now: clock.now, minHiddenMs: 1000 });
+      doc.visibilityState = 'hidden';
+      doc.dispatch('visibilitychange');
+      clock.advance(2500); // iPad Safari backgrounded past the flick threshold
+      doc.visibilityState = 'visible';
+      doc.dispatch('visibilitychange');
+      assert.equal(calls, 1, 'shown again → resume()');
+      win.dispatch('online');
+      assert.equal(calls, 2, 'back online → resume()');
+      win.dispatch('pageshow', { persisted: true });
+      assert.equal(calls, 3, 'bfcache restore → resume()');
+      stop();
+      win.dispatch('online');
+      assert.equal(calls, 3);
     });
   });
 });

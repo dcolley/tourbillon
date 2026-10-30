@@ -4,7 +4,8 @@
  * iPad Safari (and other mobile browsers) suspend a backgrounded tab and its fetches; on return the
  * chat must catch up (reload the thread's messages, re-attach to a run that is still going). Fires on:
  * - `visibilitychange` to visible, after the page was hidden at least `minHiddenMs` (a quick tab flick
- *   on desktop keeps its stream);
+ *   on desktop keeps its stream); the away time is counted from `visibilitychange` to hidden or from
+ *   `pagehide` (Safari may freeze a tab on app switch without ever reporting `hidden`);
  * - `pageshow` restored from the back/forward cache (`persisted`);
  * - `online`.
  * No React here; components/assistant/use-agent-chat.ts binds it to the chat client.
@@ -57,16 +58,23 @@ export function watchPageResume(
     hiddenAt = null;
     if (away >= minHiddenMs) fire('visible');
   };
+  // CHAT-RECONNECT: iPad Safari can freeze a tab on app switch without a `hidden` visibilitychange;
+  // `pagehide` (bfcache suspend) marks the same away state so the return still counts as a resume.
+  const onPageHide = () => {
+    if (hiddenAt === null) hiddenAt = now();
+  };
   const onPageShow = (event: Event) => {
     if ((event as Event & { persisted?: boolean }).persisted) fire('pageshow');
   };
   const onOnline = () => fire('online');
 
   doc?.addEventListener('visibilitychange', onVisibility);
+  win?.addEventListener('pagehide', onPageHide);
   win?.addEventListener('pageshow', onPageShow);
   win?.addEventListener('online', onOnline);
   return () => {
     doc?.removeEventListener('visibilitychange', onVisibility);
+    win?.removeEventListener('pagehide', onPageHide);
     win?.removeEventListener('pageshow', onPageShow);
     win?.removeEventListener('online', onOnline);
   };

@@ -222,6 +222,31 @@ describe('AGUI-1b assistant chat view', () => {
     assert.equal(dismissed, true);
   });
 
+  it('a parked card after a lost stream reads as waiting, without the disconnect banner while reconnecting', () => {
+    const parkedState = {
+      status: 'idle' as const,
+      error: { kind: 'disconnected' as const, message: 'The connection to the agent was lost' },
+      reconnecting: true,
+      pendingTools: [{ toolCallId: 'card-1', toolName: 'askChoice', reason: 'tool_suspended' as const, args: null }],
+      items: [
+        { kind: 'tool' as const, id: 'card-1', name: 'askChoice', argsText: '{"question":"Which?"}', status: 'suspended' as const },
+      ],
+    };
+    const html = renderToStaticMarkup(React.createElement(AgentChatView, props(parkedState)));
+    assert.doesNotMatch(html, /data-error="disconnected"/, 'no disconnect banner while the client is catching up');
+    assert.match(html, /data-parked-widget="card-1"/);
+    assert.match(html, /Waiting for your answer/);
+    assert.doesNotMatch(html, /The connection to the agent was lost/);
+  });
+
+  it('the disconnect banner returns when the client is not reconnecting', () => {
+    const html = renderToStaticMarkup(
+      React.createElement(AgentChatView, props({ error: { kind: 'disconnected', message: 'The connection to the agent was lost' } })),
+    );
+    assert.match(html, /role="alert"[^>]*data-error="disconnected"/);
+    assert.match(html, /The connection to the agent was lost/);
+  });
+
   it('a run cancelled without Stop, and a detached tool approval, show their messages', () => {
     for (const error of [
       { kind: 'cancelled' as const, message: RUN_CANCELLED_MESSAGE },

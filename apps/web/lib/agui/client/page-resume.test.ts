@@ -82,6 +82,22 @@ describe('STREAM-1 watchPageResume', () => {
     assert.equal(calls, 1);
   });
 
+  it('counts a pagehide without a visibilitychange (mobile app switch) as away', () => {
+    const { doc, win, clock } = fakePage();
+    const seen: PageResumeReason[] = [];
+    watchPageResume((r) => seen.push(r), { document: doc, window: win, now: clock.now, minHiddenMs: 1000 });
+    // iPad Safari may freeze the tab on app switch without ever reporting `hidden`.
+    win.dispatch('pagehide');
+    clock.advance(5000);
+    doc.dispatch('visibilitychange'); // back, still reported visible
+    assert.deepEqual(seen, ['visible']);
+    // A quick pagehide/return inside the window is not "away".
+    win.dispatch('pagehide');
+    clock.advance(200);
+    doc.dispatch('visibilitychange');
+    assert.deepEqual(seen, ['visible']);
+  });
+
   it('is a no-op without a document or window (server render)', () => {
     const stop = watchPageResume(() => {}, { document: undefined, window: undefined });
     assert.doesNotThrow(stop);

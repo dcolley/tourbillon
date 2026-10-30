@@ -654,7 +654,7 @@ describe('AGUI-1b AgentChatClient', () => {
 
   describe('STREAM-1 resume (page shown again / back online)', () => {
     /** The fake endpoint plus GET …/messages answered from `stored` (CHAT-PAGE-1: newest `limit`). */
-    function resumable(handler: Parameters<typeof createFakeAguiServer>[0]) {
+    function resumable(handler: Parameters<typeof createFakeAguiServer>[0], extra: Partial<ConstructorParameters<typeof AgentChatClient>[0]> = {}) {
       const stored: unknown[] = [];
       let historyCalls = 0;
       const base = setup(handler);
@@ -679,6 +679,7 @@ describe('AGUI-1b AgentChatClient', () => {
         fetch: fetchImpl,
         newId,
         retry: { attempts: 3, delayMs: 5 },
+        ...extra,
       });
       return { server, client, stored, historyCalls: () => historyCalls };
     }
@@ -777,6 +778,123 @@ describe('AGUI-1b AgentChatClient', () => {
       assert.deepEqual(server.requests.map((r) => r.action), ['attach', 'pending']);
       assert.equal(client.getState().status, 'idle');
       assert.equal(client.isRunOpen, false);
+    });
+
+    // ---- CHAT-RECONNECT: return from a backgrounded tab with a card waiting / a flaky reconnect ----
+
+    const CARD_ARGS = { question: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] };
+    const parkedOnCard = { threadId: THREAD, toolCallId: 'card-1', toolName: 'askChoice', label: 'Which?' };
+    const pendingCards = (req: FakeRequest) =>
+      controlResponse(req.body, {
+        accepted: true,
+        widgets: [{ toolCallId: 'card-1', toolName: 'askChoice', args: CARD_ARGS }],
+        parked: parkedOnCard,
+      });
+
+    it('resume after a lost stream restores the parked card and clears the disconnect before resolving', async () => {
+      const { server, client, stored } = resumable(
+        runAndControls({
+          attach: (req) => controlResponse(req.body, { accepted: false, running: true }),
+          pending: pendingCards,
+        }),
+      );
+      void client.send('pick a plan');
+      await until(() => server.streams.length === 1);
+      const req = server.requests[0];
+      server.streams[0].send(
+        started(req),
+        { type: 'TOOL_CALL_START', toolCallId: 'card-1', toolCallName: 'askChoice' },
+        { type: 'TOOL_CALL_ARGS', toolCallId: 'card-1', delta: JSON.stringify(CARD_ARGS) },
+        { type: 'TOOL_CALL_END', toolCallId: 'card-1' },
+        { type: 'CUSTOM', name: 'tourbillon.tool_suspended', value: { toolCallId: 'card-1', toolName: 'askChoice' } },
+      ); // the run parks on the card; the tab is backgrounded before the interrupt reaches the client
+      await until(() => client.getState().pendingTools.length === 1);
+      server.streams[0].fail(new Error('Load failed'));
+      await client.whenIdle();
+      assert.equal(client.getState().error?.kind, 'disconnected');
+      stored.push(userMsg('su', 'pick a plan'));
+
+      const result = await client.resume();
+      assert.equal(result.ok, true);
+      const st = client.getState();
+      assert.equal(st.error, null, 'the disconnect is cleared by the time resume resolves');
+      assert.equal(st.status, 'idle');
+      assert.equal(st.reconnecting, false);
+      assert.deepEqual(st.pendingTools.map((p) => [p.toolCallId, p.reason]), [['card-1', 'tool_suspended']]);
+      assert.deepEqual(st.parked, { ...parkedOnCard, elsewhere: false });
+      const card = st.items.find((i) => i.kind === 'tool') as Extract<AgentChatItem, { kind: 'tool' }>;
+      assert.equal(card.status, 'suspended', 'the card is answerable again');
+      assert.deepEqual(server.requests.map((r) => r.action), ['run', 'attach', 'pending']);
+    });
+
+    it('an attached stream that dies on a flaky reconnect re-attaches automatically; no sticky disconnect', async () => {
+      const { server, client } = resumable(
+        (req) => (req.action === 'run' || req.action === 'attach' ? 'stream' : controlResponse(req.body, { accepted: true })),
+        { reconnect: { attempts: 3, delayMs: 5 } },
+      );
+      void client.send('first');
+      await until(() => server.streams.length === 1);
+      const run = server.requests[0];
+      server.streams[0].send(started(run), { type: 'TEXT_MESSAGE_START', messageId: 'm', role: 'assistant' }, { type: 'TEXT_MESSAGE_CONTENT', messageId: 'm', delta: 'half' });
+      await until(() => client.getState().status === 'running');
+      server.streams[0].fail(new Error('Load failed')); // backgrounded before RUN_FINISHED
+      await client.whenIdle();
+      assert.equal(client.getState().error?.kind, 'disconnected');
+
+      const resuming = client.resume();
+      await until(() => server.streams.length === 2);
+      server.streams[1].send(started(run), ...text('m', 'half'));
+      assert.deepEqual(await resuming, { ok: true, value: { attached: true } });
+
+      server.streams[1].fail(new Error('Load failed')); // the reconnect itself drops (Safari network wake-up)
+      const observed: AgentChatState[] = [];
+      const un = client.subscribe(() => observed.push(client.getState()));
+      await until(() => server.requests.filter((r) => r.action === 'attach').length === 2, 2000, 'automatic second attach');
+      un();
+      assert.ok(!observed.some((s) => s.error?.kind === 'disconnected'), 'no sticky disconnect while reconnecting');
+      assert.ok(observed.some((s) => s.reconnecting === true), 'the client shows it is catching up');
+      server.streams[2].send(started(run), ...text('m', 'half the whole'));
+      await until(() => assistantText(client.getState()) === 'half the whole', 2000, 'live events after re-attach');
+      server.streams[2].send({ type: 'RUN_FINISHED', threadId: THREAD, runId: run.body.runId, outcome: { type: 'success' } });
+      server.streams[2].close();
+      await client.whenIdle();
+      assert.equal(client.getState().error, null);
+      assert.equal(client.getState().reconnecting, false);
+      assert.equal(assistantText(client.getState()), 'half the whole');
+      assert.equal(server.requests.filter((r) => r.action === 'run').length, 1, 'the run was re-attached, never restarted');
+    });
+
+    it('a re-attached stream that keeps dying reports the lost connection once the budget is spent', async () => {
+      const { server, client } = resumable(
+        (req) => (req.action === 'run' || req.action === 'attach' ? 'stream' : controlResponse(req.body, { accepted: true })),
+        { reconnect: { attempts: 2, delayMs: 5 } },
+      );
+      void client.send('first');
+      await until(() => server.streams.length === 1);
+      const run = server.requests[0];
+      server.streams[0].send(started(run), ...text('m', 'x'));
+      await until(() => client.getState().status === 'running');
+      server.streams[0].fail(new Error('Load failed'));
+      await client.whenIdle();
+      const resuming = client.resume();
+      for (const n of [1, 2, 3]) {
+        await until(() => server.streams.length === n + 1, 2000, `attach stream ${n}`);
+        server.streams[n].send(started(run), ...text('m', 'x'));
+        server.streams[n].fail(new Error('Load failed'));
+        if (n === 1) await resuming;
+      }
+      await until(() => client.getState().error?.kind === 'disconnected', 2000, 'the disconnect is reported after retries');
+      assert.equal(server.requests.filter((r) => r.action === 'attach').length, 3, 'one attach plus two retries');
+      // A later page-resume style resume gets a fresh budget.
+      const again = client.resume();
+      await until(() => server.requests.filter((r) => r.action === 'attach').length === 4, 2000, 'resume after the budget spends re-attaches again');
+      server.streams[4].send(started(run), ...text('m', 'x'));
+      server.streams[4].send(finished(run));
+      server.streams[4].close();
+      assert.equal((await again).ok, true);
+      await client.whenIdle();
+      assert.equal(client.getState().error, null);
+      assert.equal(client.getState().lastOutcome, 'success');
     });
   });
 

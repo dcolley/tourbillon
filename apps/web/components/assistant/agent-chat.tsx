@@ -493,7 +493,7 @@ export function AgentChatView(props: AgentChatViewProps) {
       ) : null}
       </div>
       {parked && <ParkedNotice parked={parked} state={state} props={props} />}
-      {state.error && (
+      {state.error && !state.reconnecting && (
         <div role="alert" className="mx-4 flex items-center justify-between gap-2 rounded-md border border-destructive/40 p-2 text-sm" data-error={state.error.kind}>
           <span>{state.error.message}</span>
           <Button type="button" size="sm" variant="ghost" onClick={props.onDismissError}>
