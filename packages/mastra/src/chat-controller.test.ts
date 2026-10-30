@@ -13,7 +13,7 @@ import { describe, it } from 'node:test';
 
 process.env.DATABASE_URL ??= 'postgres://user:***@127.0.0.1:5432/unused';
 
-import { createChatAgentWithSkills } from './chat-controller';
+import { CHAT_MODE_INSTRUCTIONS, createChatAgentWithSkills } from './chat-controller';
 import { assembleAgentTools } from './agent-factory';
 import { Memory } from '@mastra/memory';
 import type { Agent as AgentRecord, LlmProvider } from '@tourbillon/db';
@@ -226,5 +226,25 @@ describe('Chat ↔ Heartbeat Tool Parity', () => {
         assert.ok(heartbeatToolIds.includes(expected), `heartbeat must include ${expected}`);
       }
     });
+  });
+});
+
+// ─── #242 (CHAT-TASK-HANDOFF): simple-vs-non-trivial handoff wording ────────
+// The Concierge/live chat prompt must tell the agent to hand NON-TRIVIAL asks to addMyTask
+// (async Run Task / taskRunner) and stop in-turn, keep SIMPLE asks live, and never loop the
+// same exploratory tool in chat. These pins fail if the wording is silently deleted.
+
+describe('CHAT_MODE_INSTRUCTIONS — chat-task handoff wording (#242)', () => {
+  it('routes non-trivial asks to addMyTask / Run Task and stops in-turn work', () => {
+    assert.match(CHAT_MODE_INSTRUCTIONS, /Simple vs non-trivial/);
+    assert.match(CHAT_MODE_INSTRUCTIONS, /call \`addMyTask\` with an imperative title/);
+    assert.match(CHAT_MODE_INSTRUCTIONS, /queued for Run Task \/ taskRunner/);
+    assert.match(CHAT_MODE_INSTRUCTIONS, /<task-progress/);
+    assert.match(CHAT_MODE_INSTRUCTIONS, /\*\*STOP\*\*/);
+  });
+
+  it('keeps simple asks in the live turn and bans repeated exploratory tool calls', () => {
+    assert.match(CHAT_MODE_INSTRUCTIONS, /SIMPLE asks/);
+    assert.match(CHAT_MODE_INSTRUCTIONS, /Do \*\*not\*\* call the same exploratory\/read tool repeatedly/);
   });
 });

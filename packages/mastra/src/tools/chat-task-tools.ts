@@ -137,10 +137,16 @@ export const listMyTasksTool = createTool({
 export const addMyTaskTool = createTool({
   id: 'addMyTask',
   description:
-    'Add one or more to-dos to YOUR private chat task list (NOT company issues — do not use ' +
-    'createIssue/createSubtask for chat to-dos). Use when you commit to multi-step work in chat, or ' +
-    'the human asks you to remember to do something. Optional notes may name interested parties to ' +
-    'notify about progress (there is no automatic notifying). Titles are imperative, ≤200 chars.',
+    'Queue work for the async Run Task queue (taskRunner) and record it on YOUR private chat task ' +
+    'list (NOT company issues — do not use createIssue/createSubtask for chat to-dos). Use this ' +
+    'whenever a chat ask is NOT simple — multi-step investigation, planning that adapts across ' +
+    'goals/issues, or anything needing a tool loop: add it here with an imperative title (+ notes ' +
+    'capturing what to do), tell the human it is queued for Run Task, and let taskRunner execute it ' +
+    '— do NOT grind tool loops for it in the live chat turn (progress returns as <task-progress …> ' +
+    'updates). Also use when the human asks you to remember to do something. Simple one-shot asks ' +
+    '(a plain answer, one read, a clarifying question) stay in the live turn. Optional notes may ' +
+    'name interested parties to notify about progress (there is no automatic notifying). ' +
+    'Titles are imperative, ≤200 chars.',
   inputSchema: z.object({
     titles: z
       .array(z.string().min(1).max(CHAT_TASK_TITLE_MAX))
