@@ -16,11 +16,22 @@
  * in this file would not discriminate. The resolved path must live under the scheduler's
  * own installed @mastra/core (pnpm materialises the devDep link into
  * packages/scheduler/node_modules; its realpath is the .pnpm store entry).
+ *
+ * #250 softs (this pack):
+ *   S250-S1 — the discriminating test now spawns through the SAME childEnv() builder as
+ *     childResolve (single-sourced strip), so removing the strip makes the child path RED
+ *     instead of leaving the self-referential env check GREEN.
+ *   S250-S2 — the store pin asserts the realpath'd package.json version EQUALS the declared
+ *     scheduler devDependency, not that an `@mastra+core@` dir merely exists (fake 9.9.9
+ *     used to pass test 1).
+ *   S250-S3 — info: the strip and the `startsWith` assertions are defence-in-depth against
+ *     different failure modes (see childEnv docstring); a parent-side `env -u NODE_PATH`
+ *     does nothing under the npx tsx shim, so the strip has to live here, in the child env.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 
 const PKG_ROOT = path.join(__dirname, '..');
@@ -28,16 +39,33 @@ const PKG_JSON = path.join(PKG_ROOT, 'package.json');
 const SCHEDULER_MASTRA_CORE = path.join(PKG_ROOT, 'node_modules', '@mastra', 'core');
 
 /**
+ * The ONE child-env builder (S250-S1): every spawned child goes through here so the
+ * NODE_PATH strip is single-sourced. The NODE_PATH-discriminating test below asserts on a
+ * child spawned through THIS builder — if it built its own env object it would only be
+ * checking itself, and deleting the strip below would keep that test GREEN.
+ *
+ * S250-S3: the strip here and the realpath-prefixed `startsWith` assertions in the resolve
+ * test are defence-in-depth around different failure modes — the strip stops the pnpm hoist
+ * dir from RESCUING a missing scheduler-local link (the #241 failure mode); `startsWith`
+ * stops a resolve that lands somewhere else legitimate (store drift, hoisted duplicate).
+ * Neither alone is sufficient, so do not prune either one.
+ */
+function childEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.NODE_PATH;
+  return env;
+}
+
+/**
  * Resolve a specifier as a fresh `node` child anchored at packages/scheduler/package.json,
- * with NODE_PATH stripped so the pnpm hoist dir cannot rescue a missing dependency link.
+ * with NODE_PATH stripped (via childEnv) so the pnpm hoist dir cannot rescue a missing
+ * dependency link.
  */
 function childResolve(specifier: string): { status: number | null; stdout: string; stderr: string } {
   const script =
     `process.stdout.write(require('module').createRequire(${JSON.stringify(PKG_JSON)})` +
     `.resolve(${JSON.stringify(specifier)}));`;
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  delete env.NODE_PATH;
-  const proc = spawnSync(process.execPath, ['-e', script], { env, encoding: 'utf8' });
+  const proc = spawnSync(process.execPath, ['-e', script], { env: childEnv(), encoding: 'utf8' });
   return { status: proc.status, stdout: proc.stdout ?? '', stderr: proc.stderr ?? '' };
 }
 
@@ -50,9 +78,37 @@ test('S247-S1: the declared @mastra/core devDep is materialised in packages/sche
     'packages/scheduler/node_modules/@mastra/core must exist — the devDep declared in package.json has to be installed, not hoist-only',
   );
   const real = realpathSync(SCHEDULER_MASTRA_CORE);
+  // S250-S2: pin the DECLARED version, not "any version". Read the scheduler devDep from
+  // package.json (currently 1.78.0) — never hardcode a stale major here. A bare
+  // `/@mastra\+core@/` accepted a fake store entry (9.9.9 passed this test pre-fix; only
+  // the sibling test noticed), so the store directory AND the installed package.json
+  // version must both equal the declared devDep.
+  const schedulerPkg = JSON.parse(readFileSync(PKG_JSON, 'utf8')) as Record<string, unknown>;
+  const declared = (schedulerPkg.devDependencies as Record<string, unknown>)['@mastra/core'];
+  assert.equal(
+    typeof declared,
+    'string',
+    'precondition: packages/scheduler declares @mastra/core in devDependencies (S241-S1 pins the exact value)',
+  );
+  // Capture stops at `_` because pnpm appends a peer suffix to the store dir name
+  // (e.g. `@mastra+core@1.78.0_@grpc+grpc-js@..._<hash>`) — the version is the part before it.
+  const versionInPath = (real.match(/[\\/]node_modules[\\/]\.pnpm[\\/]@mastra\+core@(\d[^_/]*)/) ?? [])[1];
   assert.ok(
-    /[\\/]node_modules[\\/]\.pnpm[\\/]@mastra\+core@/.test(real),
+    versionInPath !== undefined,
     `the scheduler's @mastra/core must resolve into the pnpm store under an @mastra+core@ entry (got ${real})`,
+  );
+  assert.equal(
+    versionInPath,
+    declared,
+    `the .pnpm store entry must be the DECLARED version ${declared}, not any version (store path says ${versionInPath})`,
+  );
+  const installedVersion = (
+    JSON.parse(readFileSync(path.join(real, 'package.json'), 'utf8')) as Record<string, unknown>
+  ).version;
+  assert.equal(
+    installedVersion,
+    declared,
+    `the realpath'd @mastra/core package.json version must equal the declared scheduler devDep ${declared} (installed: ${installedVersion})`,
   );
 });
 
@@ -80,12 +136,22 @@ test('S247-S1: a child node process with NODE_PATH removed resolves @mastra/core
 });
 
 test('S247-S1: the same child resolve is NODE_PATH-discriminating (hoist-only would not pass the link assertion)', () => {
-  // Guards the guard: prove the child env really carries no NODE_PATH, otherwise a shim
-  // environment could let a hoist-only install slip through the tests above.
-  const script = 'process.stdout.write(String(process.env.NODE_PATH));';
-  const env: NodeJS.ProcessEnv = { ...process.env, NODE_PATH: '/pretend/pnpm-hoist-dir' };
-  delete env.NODE_PATH;
-  const proc = spawnSync(process.execPath, ['-e', script], { env, encoding: 'utf8' });
-  assert.equal(proc.status, 0, proc.stderr);
-  assert.equal(proc.stdout, 'undefined', 'child env must have NODE_PATH removed, not merely unset in the parent');
+  // Guards the guard: prove the child env really carries no NODE_PATH. S250-S1: the child
+  // is spawned through the SAME childEnv() builder as childResolve, so this test now
+  // exercises the load-bearing strip. Pre-fix it built its own env object, i.e. it only
+  // checked itself — deleting the strip from childResolve kept it GREEN. The injected
+  // /pretend/pnpm-hoist-dir makes the assertion bite: if anyone drops the `delete` in
+  // childEnv(), the child inherits it and this test goes RED.
+  // withEnv: set/restore so a NODE_PATH present in the host env can never flip the branch.
+  const savedNodePath = process.env.NODE_PATH;
+  process.env.NODE_PATH = '/pretend/pnpm-hoist-dir';
+  try {
+    const script = 'process.stdout.write(String(process.env.NODE_PATH));';
+    const proc = spawnSync(process.execPath, ['-e', script], { env: childEnv(), encoding: 'utf8' });
+    assert.equal(proc.status, 0, proc.stderr);
+    assert.equal(proc.stdout, 'undefined', 'child env must have NODE_PATH removed, not merely unset in the parent');
+  } finally {
+    if (savedNodePath === undefined) delete process.env.NODE_PATH;
+    else process.env.NODE_PATH = savedNodePath;
+  }
 });
