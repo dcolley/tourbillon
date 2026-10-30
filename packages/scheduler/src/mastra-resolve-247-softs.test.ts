@@ -80,6 +80,17 @@
  *   S259-S4 — cosmetic: the S254-S2 live-manifest assertion moved into its own test so its
  *     RED names the right soft, and the single-comparator strip matrix now lives once (in
  *     the S254-S3 test) instead of duplicated loops in S251-S2 and S254-S3.
+ *
+ * #265 softs (this pack):
+ *   S265-S1 — the S259-S1 refusals were pinned only by /exclusive comparator/, which names
+ *     the CATEGORY but not the SPEC: a mutant keeping the guard while genericising the
+ *     message (dropping the interpolated spec) stayed GREEN. The loop now builds its
+ *     matcher from the spec itself — the error must open with `declaredPinVersion: spec
+ *     '<spec>'`, so each entry pins its own name.
+ *   S265-S2 — after the S259-S1 guard, the strip regex still listed the bare '>'/'<'
+ *     alternatives, which the guard makes unreachable (only '>='/'<=' ever reach the
+ *     strip). The dead alts are removed and a readFileSync source pin keeps them removed
+ *     (re-adding them is behaviour-preserving, so no value assertion could see it).
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -207,7 +218,12 @@ function declaredPinVersion(spec: string): string {
         `would let the exact-equality pin PASS against the version the range excludes; declare an exact or inclusive spec (^ ~ >= <= = v) instead`,
     );
   }
-  base = base.replace(/^(?:[v=]|>=|<=|>|<|\^|~)?\s*/, '');
+  // S265-S2: the bare '>'/'<' alternatives here became UNREACHABLE once the S259-S1 guard
+  // above refuses any base starting with a lone exclusive comparator ('>'/'<' not followed
+  // by '='), so only '>='/'<=' ever reach this strip. They were pruned; the source pin in
+  // the S254-S3 test below keeps them pruned (re-adding them is a dead-code mutant that
+  // would re-open the S259-S1 question of what the strip is allowed to swallow).
+  base = base.replace(/^(?:[v=]|>=|<=|\^|~)?\s*/, '');
   if (!/^\d+\.\d+\.\d+$/.test(base)) {
     throw new Error(
       `declaredPinVersion: spec '${spec}' is not an unambiguous single version (resolved to '${base}') — ` +
@@ -511,12 +527,46 @@ test('S254-S3: declaredPinVersion strips unambiguous specs and refuses the forms
   // and keep the strip; exclusive ones must refuse. These entries used to sit in the
   // strip loops above (duplicated across S251-S2 and S254-S3) pinned GREEN — flipped.
   for (const spec of ['<1.78.0', '>1.78.0', ' <1.78.0 ', '>1.78.0 ']) {
+    // S265-S1: /exclusive comparator/ alone only pins the CATEGORY of the refusal — a
+    // mutant that keeps the guard but genericises the message (dropping the interpolated
+    // spec) stayed GREEN while the loop message promised "refuse, naming the spec". Pin
+    // the EXACT shape instead: the message opens with `declaredPinVersion: spec ` and the
+    // raw spec follows in quotes. The pattern is built from the spec itself, so every
+    // loop entry pins its own name.
+    const refusesNamingSpec = new RegExp(
+      'declaredPinVersion: spec ' + "'" + spec.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + "'",
+    );
     assert.throws(
       () => declaredPinVersion(spec),
-      /exclusive comparator/,
+      refusesNamingSpec,
       `'${spec}' excludes its base version: stripping it would let an EXCLUDING range pass the exact-equality pin; it must refuse, naming the spec`,
     );
   }
+  // S265-S2: the strip regex above must carry ONLY what the S259-S1 guard still lets
+  // through. The bare '>'/'<' alternatives were dead code (a lone exclusive comparator
+  // throws before the strip runs; only '>='/'<=' survive the guard) — re-adding them is
+  // behaviour-preserving, so no value-based assertion can see it. Pin the strip line to
+  // its exact source text. (Two backslashes per escape in the literal below: JS source
+  // '\\^' is the two chars \ + ^, exactly what the file holds between replace(/ and ,.)
+  const SRC_STRIP = readFileSync(path.join(__dirname, 'mastra-resolve-247-softs.test.ts'), 'utf8');
+  const stripCallPos = SRC_STRIP.search(/base = base\.replace\(/);
+  assert.ok(stripCallPos !== -1, 'precondition: the strip replace call is present in declaredPinVersion');
+  const stripCall = SRC_STRIP.slice(stripCallPos, SRC_STRIP.indexOf(');', stripCallPos));
+  const expectedStripLine = 'base = base.replace(/^(?:[v=]|>=|<=|\\^|~)?\\s*/, \'\'';
+  assert.equal(
+    stripCall,
+    expectedStripLine,
+    'the strip line must stay byte-exact as the pruned /^(?:[v=]|>=|<=| ... )? strip — only the comparators the S259-S1 guard still allows (expectedStripLine spells the current text); the bare \'>\'/\'<\' alts are unreachable dead code (S265-S2). Codepoints on mismatch: sc=[' +
+      [...stripCall].map((c) => c.codePointAt(0)).join(',') +
+      "] ex=[" +
+      [...expectedStripLine].map((c) => c.codePointAt(0)).join(',') +
+      ']',
+  );
+  const deadAlt = '>' + '|' + '<|';
+  assert.ok(
+    !stripCall.includes(deadAlt),
+    `the strip regex must not list bare '>'/'<' alternatives ('${deadAlt}') — the guard refuses lone exclusives before the strip runs, so those alts are unreachable dead code (S265-S2); the strip-line equality above pins it, this names the mutation`,
+  );
   // npm: ALIAS form: the spec itself carries the concrete version, so it is unambiguous —
   // strip the alias prefix and package name (scoped name included) down to the tail.
   assert.equal(declaredPinVersion('npm:@mastra/core@1.78.0'), '1.78.0', 'an npm: alias with a version tail resolves to that version');
