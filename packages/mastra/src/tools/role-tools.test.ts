@@ -343,4 +343,48 @@ describe('getApprovalTool', () => {
     assert.ok(tool.description.includes('UUID'), 'description pins approval UUID');
     assert.ok(tool.description.includes('TOUR-'), 'description warns against issue keys');
   });
+
+  // S262-S1 should-lock pin for the #262 copy. The substring pin above
+  // (`includes('UUID')` / `includes('TOUR-')`) is satisfied by reversed copy
+  // alone: copy that only scolds TOUR-N keys still contains both substrings.
+  // This test locks the actual UUID wording - the positive instruction to use
+  // the `id` field returned by listApprovals - so TOUR-only copy fails it.
+  it('description locks the UUID-from-listApprovals wording, not just TOUR-N warnings', () => {
+    const tools = ROLE_TOOLS['approvals'] as Record<string, any>;
+    const desc: string = tools.getApprovalTool.description;
+    // Positive instruction: approval UUID tied to the listApprovals id field.
+    assert.match(desc, /approval UUID\s*\(the `id` field from listApprovals\)/);
+    // Issue-key guardrail with a concrete example must remain.
+    assert.match(desc, /issue keys?/i);
+    assert.match(desc, /TOUR-\d+/);
+    // Reversed (pre-#262) copy must not satisfy the pin.
+    assert.doesNotMatch(desc, /by its ID\b/);
+    assert.doesNotMatch(desc, /full details of a single approval/i);
+  });
+
+  // S262-S2: exact pin of the approvalId .describe() text - a silent drift of
+  // the describe string fails the suite. Kept beside the S1 description pin.
+  it('approvalId .describe() text is pinned', () => {
+    const tools = ROLE_TOOLS['approvals'] as Record<string, any>;
+    const field = tools.getApprovalTool.inputSchema.shape.approvalId;
+    assert.equal(
+      field.description,
+      'The approval UUID (the `id` field from listApprovals). Not an issue key like TOUR-123.'
+    );
+  });
+
+  // S262-S3: refuse issue-key shapes at schema validation instead of letting
+  // them round-trip to a server 404. approvals.id is generated only via
+  // createId() = randomUUID() (packages/db/src/utils.ts), so .uuid() admits
+  // every real approval id while rejecting TOUR-622 / arbitrary strings.
+  it('schema refuses issue keys and non-UUID strings', () => {
+    const tools = ROLE_TOOLS['approvals'] as Record<string, any>;
+    const schema = tools.getApprovalTool.inputSchema;
+    const real = schema.safeParse({ approvalId: '6ea1e328-ffff-4000-8000-000000000000' });
+    assert.ok(real.success, 'a real approval UUID passes schema validation');
+    const issueKey = schema.safeParse({ approvalId: 'TOUR-622' });
+    assert.ok(!issueKey.success, 'TOUR-622 is refused at the schema');
+    const nonUuid = schema.safeParse({ approvalId: 'not-a-uuid' });
+    assert.ok(!nonUuid.success, 'a non-UUID string is refused at the schema');
+  });
 });

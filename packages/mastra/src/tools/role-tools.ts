@@ -127,6 +127,7 @@ const getApprovalTool = createTool({
   inputSchema: z.object({
     approvalId: z
       .string()
+      .uuid('approvalId must be an approval UUID (the `id` field from listApprovals), not an issue key like TOUR-123.')
       .describe('The approval UUID (the `id` field from listApprovals). Not an issue key like TOUR-123.'),
   }),
   execute: async (inputData, { requestContext }) => {
