@@ -27,6 +27,8 @@ import {
   setChatTaskPaused,
   setChatTaskStatus,
   updateChatTask,
+  recordChatTaskActivity,
+  chatTaskProductStatus,
   CHAT_TASK_STATUSES,
   isOpenChatTaskStatus,
   type ChatTask,
@@ -108,6 +110,40 @@ const notFound = (id: string) => ({
   error: 'task_not_found',
   message: `No chat task "${id}" in your list. Call listMyTasks to see it.`,
 });
+
+/**
+ * TASK-AUDIT (#258): lifecycle audit row for a human/agent-driven chat-task change (the runner
+ * writes its own claim/start/settle rows from the scheduler). The ACTOR is the agent owning the
+ * list — that is who made the change, whatever chat turn asked for it; the board user who
+ * requested it rides in details.requestedBy when the tool context resolved one. Best-effort:
+ * `recordChatTaskActivity` never throws at this caller (losing an audit row must not lose the
+ * write the human just asked for).
+ */
+async function logToolActivity(
+  scope: ChatTaskScope & { threadId?: string },
+  task: ChatTask,
+  action: 'chat_task.created' | 'chat_task.updated',
+  requestContext: unknown,
+  extra: Record<string, unknown> = {},
+): Promise<void> {
+  const runId = extractToolRuntimeContext(requestContext).runId;
+  await recordChatTaskActivity({
+    companyId: scope.companyId,
+    taskId: task.id,
+    action,
+    actorType: 'agent',
+    actorId: scope.agentId,
+    details: {
+      title: task.title,
+      status: task.status,
+      productStatus: chatTaskProductStatus(task.status),
+      ...(runId ? { runId } : {}),
+      ...(task.sourceThreadId ? { threadId: task.sourceThreadId } : {}),
+      ...(task.requestedByDisplayName ? { requestedBy: task.requestedByDisplayName } : {}),
+      ...extra,
+    },
+  }, { database: toolDb() });
+}
 
 export const listMyTasksTool = createTool({
   id: 'listMyTasks',
@@ -278,19 +314,21 @@ async function runAddMyTask(
   }
   const added: ChatTask[] = [];
   for (const title of titles) {
-    added.push(
-      await addChatTask(
-        scope,
-        {
-          title,
-          notes: inputData.notes,
-          status: inputData.status,
-          sourceThreadId: scope.threadId ?? null,
-          requestedBy: requestingUser(requestContext),
-        },
-        database,
-      ),
+    const task = await addChatTask(
+      scope,
+      {
+        title,
+        notes: inputData.notes,
+        status: inputData.status,
+        sourceThreadId: scope.threadId ?? null,
+        requestedBy: requestingUser(requestContext),
+      },
+      database,
     );
+    added.push(task);
+    // TASK-AUDIT (#258): enqueue = the "queued" entry of the documented lifecycle
+    // (pending stored, product word queued) — one audit row per added task.
+    await logToolActivity(scope, task, 'chat_task.created', requestContext);
   }
   // S245-S3a: resolved AFTER the writes (the task is recorded whatever the queue says) and
   // LIVE per call — a cached controller's build-time flag must never be the last word.
@@ -370,6 +408,12 @@ export const updateMyTaskTool = createTool({
       toolDb(),
     );
     if (!updated) return notFound(inputData.id);
+    // TASK-AUDIT (#258): audit only real status moves (renames/notes stay row-silent).
+    if (inputData.status !== undefined) {
+      await logToolActivity(scope, updated, 'chat_task.updated', requestContext, {
+        changes: { status: { to: updated.status } },
+      });
+    }
     return { ok: true, message: `Task ${updated.id} → ${updated.status}.`, task: row(updated) };
   },
 });
@@ -392,6 +436,11 @@ export const completeMyTaskTool = createTool({
       toolDb(),
     );
     if (!updated) return notFound(inputData.id);
+    // TASK-AUDIT (#258): the settle word — product "done".
+    await logToolActivity(scope, updated, 'chat_task.updated', requestContext, {
+      changes: { status: { to: 'done' } },
+      ...(inputData.note ? { note: inputData.note } : {}),
+    });
     return { ok: true, message: `Task ${updated.id} → done.`, task: row(updated) };
   },
 });
@@ -415,6 +464,11 @@ export const cancelMyTaskTool = createTool({
       toolDb(),
     );
     if (!updated) return notFound(inputData.id);
+    // TASK-AUDIT (#258): drop = a terminal move too, audited like the others.
+    await logToolActivity(scope, updated, 'chat_task.updated', requestContext, {
+      changes: { status: { to: 'cancelled' } },
+      ...(inputData.reason ? { reason: inputData.reason } : {}),
+    });
     return { ok: true, message: `Task ${updated.id} → cancelled.`, task: row(updated) };
   },
 });

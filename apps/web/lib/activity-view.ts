@@ -10,9 +10,9 @@
  */
 import type { ActivityLogEntry } from '@tourbillon/db';
 
-export type ActivityItemKind = 'issue' | 'agent' | 'run' | 'approval' | 'project' | 'goal';
+export type ActivityItemKind = 'issue' | 'agent' | 'run' | 'approval' | 'project' | 'goal' | 'chat_task';
 
-export const ACTIVITY_ITEM_KINDS: readonly ActivityItemKind[] = ['issue', 'agent', 'run', 'approval', 'project', 'goal'];
+export const ACTIVITY_ITEM_KINDS: readonly ActivityItemKind[] = ['issue', 'agent', 'run', 'approval', 'project', 'goal', 'chat_task'];
 
 /** Entity types the item-type filter offers (activity_log.entity_type values). */
 export const ACTIVITY_ENTITY_TYPES = [
@@ -23,6 +23,9 @@ export const ACTIVITY_ENTITY_TYPES = [
   'goal',
   'workspace',
   'llm_provider',
+  // TASK-AUDIT (#258): chat tasks / Run Task lifecycle (chat_task.* actions written by the
+  // chat-task tools and the scheduler task-runner — see packages/db/src/chat-task-activity.ts).
+  'chat_task',
 ] as const;
 export type ActivityEntityType = (typeof ACTIVITY_ENTITY_TYPES)[number];
 
@@ -35,6 +38,8 @@ export interface ActivityLookup {
   approvals: Map<string, { title: string; status: string }>;
   projects: Map<string, { title: string }>;
   goals: Map<string, { title: string }>;
+  /** TASK-AUDIT (#258): chat_tasks titles for the Tasks filter (no detail page → no href). */
+  chatTasks: Map<string, { title: string }>;
 }
 
 export function emptyActivityLookup(): ActivityLookup {
@@ -45,6 +50,7 @@ export function emptyActivityLookup(): ActivityLookup {
     approvals: new Map(),
     projects: new Map(),
     goals: new Map(),
+    chatTasks: new Map(),
   };
 }
 
@@ -133,6 +139,14 @@ const ACTION_LABELS: Record<string, string> = {
   'project.auto_paused': 'Project paused (goal archived)',
   'project.auto_resumed': 'Project resumed (goal reactivated)',
   'workspace.file_write': 'Workspace file written',
+  // TASK-AUDIT (#258): chat task / Run Task lifecycle (see chat-task-activity.ts for the map).
+  'chat_task.created': 'Chat task queued',
+  'chat_task.updated': 'Chat task updated',
+  'chat_task.queued': 'Run Task queued',
+  'chat_task.started': 'Run Task started',
+  'chat_task.done': 'Run Task done',
+  'chat_task.error': 'Run Task failed',
+  'chat_task.parked': 'Run Task parked',
 };
 
 export function formatActivityAction(action: string): string {
@@ -180,6 +194,9 @@ const ENTITY_KIND: Record<string, ActivityItemKind> = {
   project: 'project',
   goal: 'goal',
   heartbeat_run: 'run',
+  // TASK-AUDIT (#258): the chat-task rows carry the lifecycle map's actions; the entity itself
+  // is the chat_tasks row (no detail page — the row names the task, the agent and the run link).
+  chat_task: 'chat_task',
 };
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -210,6 +227,9 @@ export function hrefFor(kind: ActivityItemKind, id: string, lookup: ActivityLook
       return lookup.projects.has(id) ? `/project/${encodeURIComponent(id)}` : null;
     case 'goal':
       return lookup.goals.has(id) ? `/goal/${encodeURIComponent(id)}` : null;
+    case 'chat_task':
+      // No chat-task detail page yet (the board's view is this Activity feed itself).
+      return null;
   }
 }
 
@@ -220,6 +240,7 @@ const UNKNOWN_LABEL: Record<ActivityItemKind, string> = {
   approval: 'Unknown approval',
   project: 'Unknown project',
   goal: 'Unknown goal',
+  chat_task: 'Unknown task',
 };
 
 export function linkFor(kind: ActivityItemKind, id: string, lookup: ActivityLookup): ActivityLink {
@@ -246,6 +267,9 @@ export function linkFor(kind: ActivityItemKind, id: string, lookup: ActivityLook
     case 'goal':
       label = lookup.goals.get(id)?.title ?? null;
       break;
+    case 'chat_task':
+      label = lookup.chatTasks.get(id)?.title ?? null;
+      break;
   }
   return { kind, id, label: label ?? UNKNOWN_LABEL[kind], href: label ? href : null };
 }
@@ -261,6 +285,7 @@ export function collectActivityRefs(entries: ActivityLogEntry[]): ActivityRefs {
     approval: new Set(),
     project: new Set(),
     goal: new Set(),
+    chat_task: new Set(),
   };
   const add = (kind: ActivityItemKind, value: unknown) => {
     if (typeof value === 'string' && value) refs[kind].add(value);
@@ -270,6 +295,9 @@ export function collectActivityRefs(entries: ActivityLogEntry[]): ActivityRefs {
     if (kind) add(kind, entry.entityId);
     if (entry.actorType === 'agent') add('agent', entry.actorId);
     const details = asRecord(entry.details);
+    // TASK-AUDIT (#258): runner rows are system-acted; the OWNING agent rides in details so the
+    // feed can still name and link it (the actor itself would point at 'task-runner').
+    if (entry.entityType === 'chat_task') add('agent', details.agentId);
     for (const [key, kindOf] of Object.entries(ID_FIELDS)) add(kindOf, details[key]);
     for (const [field, change] of Object.entries(asRecord(details.changes))) {
       const kindOf = ID_FIELDS[field];
@@ -310,21 +338,35 @@ function valueFor(field: string, value: unknown, lookup: ActivityLookup): Activi
   return { text: JSON.stringify(value) };
 }
 
-/** "field from → to" lines: from `details.changes` (ACT-1 rows) or the legacy changed-field keys. */
+/**
+ * "field from → to" lines: from `details.changes` (ACT-1 rows) or the legacy changed-field keys.
+ *
+ * TASK-AUDIT (#258): chat_task rows render their status change in the PRODUCT lifecycle words
+ * (queued / running / error / done) carried on the row as `productStatus` / `previousProductStatus`,
+ * not the stored enum — the board audit and the stored machine are documented separately in
+ * packages/db/src/chat-task-activity.ts, and the Activity feed speaks the product vocabulary.
+ */
 export function describeActivityChanges(entry: ActivityLogEntry, lookup: ActivityLookup): ActivityChange[] {
   const details = asRecord(entry.details);
   const out: ActivityChange[] = [];
   const recorded = asRecord(details.changes);
   if (Object.keys(recorded).length > 0) {
+    const isTaskRow = entry.entityType === 'chat_task';
     for (const [field, raw] of Object.entries(recorded)) {
       const label = CHANGE_FIELDS[field];
       if (!label) continue;
       const change = asRecord(raw);
+      let from: unknown = 'from' in change ? change.from : undefined;
+      let to: unknown = change.to;
+      if (isTaskRow && field === 'status') {
+        if ('from' in change) from = str(details.previousProductStatus) ?? change.from;
+        to = str(details.productStatus) ?? change.to;
+      }
       out.push({
         field,
         label,
-        from: 'from' in change ? valueFor(field, change.from, lookup) : null,
-        to: valueFor(field, change.to, lookup),
+        from: from === undefined ? null : valueFor(field, from, lookup),
+        to: valueFor(field, to, lookup),
       });
     }
     return out;
@@ -456,6 +498,8 @@ function relatedOf(entry: ActivityLogEntry, lookup: ActivityLookup, item: Activi
     if (Array.isArray(list)) list.forEach((id) => push('issue', id));
   }
   if (entry.action === 'project.auto_paused' || entry.action === 'project.auto_resumed') push('goal', details.goalId);
+  // TASK-AUDIT (#258): name the owning agent on runner-written (system-actor) task rows.
+  if (entry.entityType === 'chat_task') push('agent', details.agentId);
   return out;
 }
 

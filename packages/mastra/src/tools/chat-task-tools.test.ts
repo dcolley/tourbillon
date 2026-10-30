@@ -211,7 +211,7 @@ import { PGlite } from '@electric-sql/pglite';
 import { drizzle as drizzlePglite } from 'drizzle-orm/pglite';
 import { readMigrationFiles } from 'drizzle-orm/migrator';
 import * as dbSchema from '@tourbillon/db/schema';
-import { addChatTask, listChatTasks, type ChatTaskDb } from '@tourbillon/db';
+import { addChatTask, listChatTasks, activityLog, type ChatTaskDb } from '@tourbillon/db';
 import { pauseMyTaskTool, prioritizeMyTaskTool } from './chat-task-tools';
 
 const MIGRATIONS_DIR = path.join(__dirname, '../../../db/src/migrations');
@@ -641,5 +641,127 @@ describe('resolveRunTaskQueueState — decision matrix (S245-S3a/b, pure)', () =
     await withEnv('2', async () => {
       assert.equal((await resolveRunTaskQueueState('c1', false, readReturning(null))).reason, null);
     });
+  });
+});
+
+// ─── TASK-AUDIT (#258): chat-task lifecycle rows in activity_log ─────────────
+// The board audits the private chat list from the Activity page (item-type "Tasks"), so every
+// agent-visible transition the TOOLS own (enqueue, status moves) must leave a chat_task.* row —
+// actor = the owning agent, details carry the product lifecycle word. Reads stay silent.
+
+async function activityRows(client: PGlite): Promise<Array<Record<string, any>>> {
+  const { rows } = await client.query<{
+    action: string;
+    entity_type: string;
+    entity_id: string;
+    actor_type: string;
+    actor_id: string;
+    details: Record<string, unknown>;
+  }>('select action, entity_type, entity_id, actor_type, actor_id, details from activity_log order by created_at');
+  return rows as Array<Record<string, any>>;
+}
+
+describe('TASK-AUDIT (#258): tool-owned transitions write lifecycle audit rows', () => {
+  it('addMyTask records chat_task.created (product "queued") for each task', async () => {
+    const { client, db } = await seededToolDb();
+    try {
+      setToolDbForTests(db);
+      const res = (await addMyTaskTool.execute!(
+        { titles: ['Draft the runbook', 'Check the backup'] },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.equal(res.ok, true);
+      const rows = await activityRows(client);
+      assert.equal(rows.length, 2, 'one audit row per enqueued task');
+      for (const row of rows) {
+        assert.equal(row.entity_type, 'chat_task');
+        assert.equal(row.action, 'chat_task.created');
+        assert.equal(row.actor_type, 'agent', 'the agent owns its list — actor, not system');
+        assert.equal(row.actor_id, 'a1');
+        assert.equal(row.details.productStatus, 'queued', 'pending stored, product word queued');
+        assert.equal(row.details.threadId, 'thread-1', 'the chat thread rides on the row');
+      }
+      assert.deepEqual(
+        rows.map((r) => r.details.title).sort(),
+        ['Check the backup', 'Draft the runbook'],
+      );
+    } finally {
+      setToolDbForTests(null);
+      await client.close();
+    }
+  });
+
+  it('completeMyTask / cancelMyTask / updateMyTask(status) write chat_task.updated in product words', async () => {
+    const { client, db } = await seededToolDb();
+    try {
+      setToolDbForTests(db);
+      const task = await addChatTask(SCOPE, { title: 'Audit me' }, db);
+      // Reads and renames stay silent...
+      await listMyTasksTool.execute!({}, { requestContext: scopeContext } as never);
+      const renamed = (await updateMyTaskTool.execute!(
+        { id: task.id, title: 'Audit me (renamed)' },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.equal(renamed.ok, true);
+      assert.equal((await activityRows(client)).length, 0, 'no transition → no audit row');
+      // ...status moves do not.
+      const done = (await completeMyTaskTool.execute!(
+        { id: task.id, note: 'shipped' },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.equal(done.ok, true);
+      const updated = (await updateMyTaskTool.execute!(
+        { id: task.id, status: 'waiting_on_user' },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.equal(updated.ok, true);
+      const cancelledTask = await addChatTask(SCOPE, { title: 'Drop me' }, db);
+      await cancelMyTaskTool.execute!(
+        { id: cancelledTask.id, reason: 'not needed' },
+        { requestContext: scopeContext } as never,
+      );
+      const rows = await activityRows(client);
+      assert.equal(rows.length, 3);
+      // Identify by content, not row order (created_at can tie inside one millisecond).
+      const doneRow = rows.find((r) => r.details.changes?.status?.to === 'done')!;
+      const waitingRow = rows.find((r) => r.details.changes?.status?.to === 'waiting_on_user')!;
+      const cancelRow = rows.find((r) => r.entity_id === cancelledTask.id)!;
+      assert.ok(doneRow && waitingRow && cancelRow, `expected 3 distinct rows, got ${JSON.stringify(rows)}`);
+      assert.equal(doneRow.action, 'chat_task.updated');
+      assert.deepEqual(doneRow.details.changes, { status: { to: 'done' } });
+      assert.equal(doneRow.details.productStatus, 'done');
+      assert.equal(waitingRow.details.productStatus, 'error', 'waiting_on_user reads as error to the board');
+      assert.deepEqual(cancelRow.details.changes, { status: { to: 'cancelled' } });
+      assert.equal(cancelRow.details.reason, 'not needed');
+    } finally {
+      setToolDbForTests(null);
+      await client.close();
+    }
+  });
+
+  it('a failing audit write never loses the task (best-effort contract)', async () => {
+    const { client, db } = await seededToolDb();
+    try {
+      // Break ONLY the activity insert: every other table behaves normally.
+      const broken = Object.create(db, {
+        insert: {
+          value: (table: unknown) => {
+            if (table === activityLog) throw new Error('activity db down');
+            return (db as never as { insert: (t: unknown) => never }).insert(table);
+          },
+        },
+      }) as ChatTaskDb;
+      setToolDbForTests(broken);
+      const res = (await addMyTaskTool.execute!(
+        { titles: ['Survive the audit outage'] },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.equal(res.ok, true, 'the task is written even when the audit row cannot be');
+      const tasks = await listChatTasks(SCOPE, {}, db);
+      assert.equal(tasks.length, 1);
+    } finally {
+      setToolDbForTests(null);
+      await client.close();
+    }
   });
 });

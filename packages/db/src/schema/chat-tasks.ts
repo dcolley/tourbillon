@@ -12,6 +12,19 @@ import { createId } from '../utils';
  * (company_id, agent_id) — the same scope as `assistant_active_threads` — so Clear chat
  * (which pins a new Mastra thread) never drops the open tasks. `source_thread_id` is audit
  * only: the Mastra thread the item was created in (no FK — Mastra owns that table).
+ *
+ * TASK-AUDIT (#258) — documented lifecycle vs product (pending → queued → running → error/done):
+ * the STORED status machine below is intentionally NOT renamed (open `listMyTasks` / chat widgets
+ * depend on the words). The product lifecycle is carried by `activity_log` rows
+ * (entity_type 'chat_task'), one per transition, written by `recordChatTaskActivity`
+ * (see `chat-task-activity.ts` for the full action map):
+ *
+ *   pending (enqueued via addMyTask)                 → product "queued"   chat_task.created
+ *   runner claim (pending → in_progress)             → product "queued"   chat_task.queued
+ *   Run Task wake fires                              → product "running"  chat_task.started
+ *   settle succeeded (in_progress → done)            → product "done"     chat_task.done
+ *   settle failed, attempts left (→ pending re-queue)→ product "error"    chat_task.error
+ *   settle failed, exhausted (→ waiting_on_user)     → product "error"    chat_task.parked
  */
 export const CHAT_TASK_STATUSES = ['pending', 'in_progress', 'waiting_on_user', 'done', 'cancelled'] as const;
 

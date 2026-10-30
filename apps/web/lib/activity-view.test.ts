@@ -6,16 +6,19 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type { ActivityLogEntry } from '@tourbillon/db';
 import {
+  ACTIVITY_ENTITY_TYPES,
   buildActivityView,
   collectActivityRefs,
   emptyActivityLookup,
   excerptText,
+  formatActivityAction,
   groupActivityViews,
   hasActiveFilters,
   linkFor,
   parseActivityFilters,
   absoluteTimestamp,
   COMMENT_EXCERPT_CHARS,
+  type ActivityChangeValue,
   type ActivityLookup,
 } from './activity-view';
 
@@ -245,5 +248,91 @@ describe('ACT-1 activity view: filters', () => {
 
   it('absolute timestamp for hover', () => {
     assert.equal(absoluteTimestamp(new Date('2026-10-24T20:32:05.123Z')), '2026-10-24 20:32:05 UTC');
+  });
+});
+
+// ─── TASK-AUDIT (#258): chat_task / Run Task lifecycle rows ──────────────────
+const CHAT_TASK = '88888888-8888-4888-8888-888888888888';
+
+function taskLookup(): ActivityLookup {
+  const l = lookup();
+  l.chatTasks.set(CHAT_TASK, { title: 'Ship the runbook' });
+  return l;
+}
+
+describe('TASK-AUDIT (#258): Tasks are a filterable item type', () => {
+  it('chat_task is offered by the item-type filter and parses', () => {
+    assert.ok(ACTIVITY_ENTITY_TYPES.includes('chat_task'));
+    const f = parseActivityFilters({ type: 'chat_task' });
+    assert.equal(f.entityType, 'chat_task');
+    assert.equal(hasActiveFilters(f), true);
+    assert.equal(f.raw.type, 'chat_task');
+  });
+
+  it('names the task from the lookup (no detail page → no href)', () => {
+    const link = linkFor('chat_task', CHAT_TASK, taskLookup());
+    assert.deepEqual(link, { kind: 'chat_task', id: CHAT_TASK, label: 'Ship the runbook', href: null });
+    const gone = linkFor('chat_task', OTHER_ISSUE, taskLookup());
+    assert.equal(gone.label, 'Unknown task', 'a deleted/foreign task is never a bare id');
+  });
+
+  it('collects the task id and the owning agent off a system-actor runner row', () => {
+    const refs = collectActivityRefs([
+      row({
+        entityType: 'chat_task',
+        entityId: CHAT_TASK,
+        action: 'chat_task.started',
+        actorType: 'system',
+        actorId: 'task-runner',
+        details: { agentId: AGENT, runId: RUN, status: 'in_progress', productStatus: 'running' },
+      }),
+    ]);
+    assert.ok(refs.chat_task.has(CHAT_TASK));
+    assert.ok(refs.agent.has(AGENT), 'the agent lives in details.agentId, not on the actor');
+    assert.ok(refs.run.has(RUN), 'the run link rides in details.runId');
+  });
+
+  it('labels the lifecycle actions as Run Task steps', () => {
+    assert.equal(formatActivityAction('chat_task.queued'), 'Run Task queued');
+    assert.equal(formatActivityAction('chat_task.started'), 'Run Task started');
+    assert.equal(formatActivityAction('chat_task.done'), 'Run Task done');
+    assert.equal(formatActivityAction('chat_task.error'), 'Run Task failed');
+    assert.equal(formatActivityAction('chat_task.parked'), 'Run Task parked');
+    assert.equal(formatActivityAction('chat_task.created'), 'Chat task queued');
+  });
+
+  it('renders a runner settle row: item, product-word status change, agent link, run link', () => {
+    const view = buildActivityView(
+      row({
+        entityType: 'chat_task',
+        entityId: CHAT_TASK,
+        action: 'chat_task.parked',
+        actorType: 'system',
+        actorId: 'task-runner',
+        actorName: 'Task runner',
+        details: {
+          agentId: AGENT,
+          runId: RUN,
+          status: 'waiting_on_user',
+          productStatus: 'error',
+          previousStatus: 'in_progress',
+          previousProductStatus: 'running',
+          changes: { status: { from: 'in_progress', to: 'waiting_on_user' } },
+        },
+      }),
+      taskLookup(),
+    );
+    assert.equal(view.item?.label, 'Ship the runbook');
+    assert.equal(view.item?.href, null);
+    assert.equal(view.actionLabel, 'Run Task parked');
+    // The board reads the product lifecycle words, not the stored enum: running → error.
+    const status = view.changes.find((c) => c.field === 'status');
+    const textOf = (v: ActivityChangeValue): string => ('text' in v ? v.text : '<link>');
+    assert.ok(status);
+    assert.equal(textOf(status!.from!), 'running');
+    assert.equal(textOf(status!.to), 'error');
+    const related = view.related.map((r) => `${r.kind}:${r.label}`);
+    assert.ok(related.includes(`agent:${'CEO'}`), `agent named in related: ${related.join(', ')}`);
+    assert.equal(view.actor.label, 'System (Task runner)');
   });
 });
