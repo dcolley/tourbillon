@@ -411,6 +411,10 @@ export const updateMyTaskTool = createTool({
     // row carries "from → to" like the runner rows (previousStatus/previousProductStatus), and a
     // move to the status the task already holds is not a move at all (no row, per "audit only
     // real status moves").
+    // S269-S4 (#269 softs, known): this read and the write below are SEPARATE statements — a
+    // concurrent move can record a stale `from` or skip the row. Best-effort audit only; task
+    // state is unaffected (the scoped UPDATE still settles from the live row). Same shape in
+    // completeMyTask / cancelMyTask.
     const previous = inputData.status !== undefined
       ? await getChatTask(scope, { id: inputData.id }, toolDb())
       : null;

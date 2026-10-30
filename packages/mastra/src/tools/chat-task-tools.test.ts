@@ -745,6 +745,57 @@ describe('TASK-AUDIT (#258): tool-owned transitions write lifecycle audit rows',
     }
   });
 
+  it('S269-S1 (#269 softs): updateMyTask pins the PRODUCT word on the from-side, not the stored word (M26)', async () => {
+    // The audit case above moves updateMyTask from `done` — a stored word that reads identically
+    // in product words — so a mutant writing the RAW stored status into previousProductStatus
+    // survives there (M26). Pin moves whose two words DIFFER: pending → product 'queued',
+    // in_progress → product 'running'.
+    const { client, db } = await seededToolDb();
+    try {
+      setToolDbForTests(db);
+      const fromQueued = await addChatTask(SCOPE, { title: 'Pin the queued word' }, db);
+      const queuedMove = (await updateMyTaskTool.execute!(
+        { id: fromQueued.id, status: 'waiting_on_user' },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.equal(queuedMove.ok, true);
+
+      const fromRunning = await addChatTask(SCOPE, { title: 'Pin the running word' }, db);
+      await updateMyTaskTool.execute!(
+        { id: fromRunning.id, status: 'in_progress' },
+        { requestContext: scopeContext } as never,
+      );
+      const runningMove = (await updateMyTaskTool.execute!(
+        { id: fromRunning.id, status: 'done' },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.equal(runningMove.ok, true);
+
+      const rows = await activityRows(client);
+      assert.equal(rows.length, 3, 'three real moves → three rows');
+      const queuedRow = rows.find(
+        (r) => r.details.changes?.status?.from === 'pending' && r.details.changes?.status?.to === 'waiting_on_user',
+      );
+      assert.ok(queuedRow, `pending → waiting_on_user row expected, got ${JSON.stringify(rows.map((r) => r.details.changes))}`);
+      assert.equal(queuedRow!.details.previousStatus, 'pending', 'stored word rides on previousStatus…');
+      assert.equal(queuedRow!.details.previousProductStatus, 'queued', '…product word on previousProductStatus');
+
+      const runningRow = rows.find(
+        (r) => r.details.changes?.status?.from === 'in_progress' && r.details.changes?.status?.to === 'done',
+      );
+      assert.ok(runningRow, 'in_progress → done row expected');
+      assert.equal(runningRow!.details.previousStatus, 'in_progress');
+      assert.equal(
+        runningRow!.details.previousProductStatus,
+        'running',
+        'the raw stored word would read "in_progress" here — that is M26',
+      );
+    } finally {
+      setToolDbForTests(null);
+      await client.close();
+    }
+  });
+
   it('a failing audit write never loses the task (best-effort contract)', async () => {
     const { client, db } = await seededToolDb();
     try {
