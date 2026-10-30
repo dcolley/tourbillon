@@ -25,6 +25,9 @@ import {
   resolveEgressBwrapBinds,
   seccompFilterSupported,
 } from './egress-enforcement';
+// S268-S4: sockets/files materialized under the shared host socket root are
+// salted with repo-root+pid so parallel worktrees cannot share one path.
+import { testEgressProxySocketPath } from './egress-socket-test-key';
 
 const filterReady = landlockNetAvailable() && seccompFilterSupported();
 
@@ -490,7 +493,7 @@ describe('bwrap bind policy', () => {
   });
 
   it('non-empty list binds only this run socket, not the shared runtime dir', () => {
-    const socketPath = egressProxySocketPath('co-bind', 'run1');
+    const socketPath = testEgressProxySocketPath('co-bind', 'run1');
     writeFileSync(socketPath, '');
     const binds = resolveEgressBwrapBinds({ proxySocketPath: socketPath });
     assert.deepEqual(binds.extraRwBinds, [socketPath]);
@@ -629,7 +632,7 @@ describe('Landlock + seccomp enforcement', () => {
       origin.listen(0, '127.0.0.1', () => resolve((origin.address() as { port: number }).port));
     });
     const proxy = new EgressProxy({ allowList: ['127.0.0.1'], companyId: 'co-filter' });
-    const socketPath = egressProxySocketPath('co-filter', 't1');
+    const socketPath = testEgressProxySocketPath('co-filter', 't1');
     await proxy.start({ socketPath });
 
     try {

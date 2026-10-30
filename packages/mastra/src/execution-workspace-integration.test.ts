@@ -9,11 +9,12 @@ import type { AddressInfo } from 'node:net';
 import { describe, it, type TestContext } from 'node:test';
 import { LocalSandbox } from '@mastra/core/workspace';
 import { EgressProxy } from './egress-proxy';
+import { classifySystemDnsProbe } from './egress-dns-probe';
+import { testEgressProxySocketPath } from './egress-socket-test-key';
 import type { HostResolver } from './egress-private-ranges';
 import {
   buildEgressFilterEnv,
   buildTourbillonBwrapArgs,
-  egressProxySocketPath,
   getEgressRuntimeDir,
   landlockNetAvailable,
   resolveEgressBwrapBinds,
@@ -71,7 +72,7 @@ describe('Sandbox DNS and /dev/null under filter + bwrap', () => {
       allowList: ['example.org'],
       companyId: 'co-foreign',
     });
-    const foreignSocket = egressProxySocketPath('co-foreign', 'other');
+    const foreignSocket = testEgressProxySocketPath('co-foreign', 'other');
     await foreign.start({ socketPath: foreignSocket });
 
     const planted = join(getEgressRuntimeDir(), 'planted-leak.sock');
@@ -143,7 +144,7 @@ describe('Sandbox DNS and /dev/null under filter + bwrap', () => {
       companyId: 'co-bwrap',
       resolve: resolveHost,
     });
-    const socketPath = egressProxySocketPath('co-bwrap', 'dns');
+    const socketPath = testEgressProxySocketPath('co-bwrap', 'dns');
     await proxy.start({ socketPath });
 
     const env = buildEgressFilterEnv({ proxySocketPath: socketPath });
@@ -203,9 +204,20 @@ describe('Sandbox DNS and /dev/null under filter + bwrap', () => {
   // Real-DNS leg kept as its own test, deterministically SKIPPED when the host
   // has no usable DNS (probe first; no DNS -> skip, never fail). Covers
   // defaultHostResolver end-to-end on gate machines where DNS works.
+  // S268-S2 (Refs #268): a plain dns.lookup only skipped when the lookup
+  // THREW. Fake-IP / sinkhole resolvers answer every name (this gate box
+  // returns 198.18.0.1), so the leg failed with a 500 instead of skipping.
+  // The probe answer set is now classified: private, loopback, 0.0.0.0,
+  // link-local and fake-IP ranges (198.18.0.0/15, TEST-NET, reserved) all
+  // skip too. Classifier + unit tests: egress-dns-probe.ts / .test.ts.
   it('proxy resolves a real hostname through system DNS', { skip: !bwrapAvailable() || !filterReady }, async (t: TestContext) => {
     try {
-      await dnsLookup('example.com');
+      const answers = await dnsLookup('example.com', { all: true });
+      const unusable = classifySystemDnsProbe(answers);
+      if (unusable) {
+        t.skip(`host has no usable DNS: ${unusable}`);
+        return;
+      }
     } catch (err) {
       t.skip(`host has no usable DNS: ${err instanceof Error ? err.message : String(err)}`);
       return;
@@ -215,7 +227,7 @@ describe('Sandbox DNS and /dev/null under filter + bwrap', () => {
       allowList: ['example.com'],
       companyId: 'co-bwrap-real',
     });
-    const socketPath = egressProxySocketPath('co-bwrap-real', 'dns');
+    const socketPath = testEgressProxySocketPath('co-bwrap-real', 'dns');
     await proxy.start({ socketPath });
 
     const env = buildEgressFilterEnv({ proxySocketPath: socketPath });
