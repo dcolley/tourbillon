@@ -2,9 +2,10 @@ import { strict as assert } from 'node:assert';
 import { createServer } from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { describe, it } from 'node:test';
-import { copyFileSync, mkdirSync, symlinkSync, writeFileSync, chmodSync, realpathSync } from 'node:fs';
+import { copyFileSync, mkdirSync, symlinkSync, writeFileSync, chmodSync, realpathSync, rmSync, readFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { EgressProxy } from './egress-proxy';
 import {
   assertCanEnforceEgressAllowList,
@@ -33,14 +34,31 @@ const filterReady = landlockNetAvailable() && seccompFilterSupported();
  * setup. When the checkout itself lives under /tmp, the "outside /tmp" assertion is
  * environmental noise: the guard is correct (compilation must never land in
  * world-writable /tmp) but cannot be observed from a /tmp checkout.
+ *
+ * Exported for the S261-S1 pins below (node:test imports this module directly).
  */
-function libDirUnderTmp(): boolean {
+export function libDirUnderTmp(): boolean {
   try {
     // Resolve symlinks so /tmp -> /private/tmp (macOS) and bind-mount aliases are caught.
     const runtimeDir = realpathSync(getEgressRuntimeDir());
     return runtimeDir === '/tmp' || runtimeDir.startsWith(`${sep}tmp${sep}`);
   } catch {
     return false;
+  }
+}
+
+/** Set/restore env around one assertion block (host env must not leak into branches). */
+function withEnv(vars: Record<string, string>, fn: () => void): void {
+  const saved = new Map<string, string | undefined>();
+  for (const key of Object.keys(vars)) saved.set(key, process.env[key]);
+  try {
+    Object.assign(process.env, vars);
+    fn();
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 }
 
@@ -115,6 +133,114 @@ describe('egress filter artifacts', () => {
     } else {
       assert.equal(abi, null);
     }
+  });
+});
+
+describe('/tmp skip guard (S261-S1)', () => {
+  // Pins for the environmental skip in "compiles the filter outside /tmp into the lib
+  // dir". Without these, an "always-skip" mutant (guard returns true unconditionally)
+  // would survive: the compile test itself silently stops asserting anything. These
+  // tests drive the guard directly under controlled EXECUTION_WORKSPACE_ROOT values so
+  // it must skip ONLY for a genuine /tmp runtime dir and must RUN otherwise.
+
+  const scratchDirs: string[] = [];
+  const here = fileURLToPath(new URL('.', import.meta.url));
+  function scratchRoot(label: string): string {
+    // Literal /tmp, NOT tmpdir(): the guard matches the /tmp prefix specifically and
+    // TMPDIR can point elsewhere (e.g. a scratch dir under $HOME) without changing
+    // what counts as the world-writable /tmp for this guard.
+    const dir = join('/tmp', `tourbillon-s261-s1-${label}-${process.pid}`);
+    scratchDirs.push(dir);
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+  function cleanupScratch(): void {
+    while (scratchDirs.length) {
+      try {
+        rmSync(scratchDirs.pop()!, { recursive: true, force: true });
+      } catch {
+        /* best effort */
+      }
+    }
+  }
+
+  it('skips when the runtime dir genuinely lives under /tmp', () => {
+    try {
+      withEnv({ EXECUTION_WORKSPACE_ROOT: scratchRoot('inside-tmp') }, () => {
+        assert.equal(libDirUnderTmp(), true);
+      });
+    } finally {
+      cleanupScratch();
+    }
+  });
+
+  it('runs (does not skip) for a non-/tmp runtime dir', () => {
+    // An always-skip mutant fails HERE: a genuine non-/tmp runtime dir must report
+    // false so the compile assertion executes (see also the real-compile case below).
+    const root = join(here, `.s261-s1-outside-${process.pid}`);
+    try {
+      mkdirSync(root, { recursive: true });
+      withEnv({ EXECUTION_WORKSPACE_ROOT: root }, () => {
+        assert.equal(libDirUnderTmp(), false);
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves symlinks: a runtime dir symlinked into /tmp still counts as /tmp', () => {
+    // An isAbsolute()-style mutant that inspects the raw path instead of realpathSync
+    // would wrongly report false here (raw path outside /tmp, real target inside).
+    const outside = join(here, `.s261-s1-link-${process.pid}`);
+    const realInside = scratchRoot('link-target');
+    const linkDir = join(outside, '.runtime');
+    try {
+      mkdirSync(outside, { recursive: true });
+      symlinkSync(realInside, linkDir);
+      withEnv({ EXECUTION_WORKSPACE_ROOT: outside }, () => {
+        assert.equal(libDirUnderTmp(), true);
+      });
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+      cleanupScratch();
+    }
+  });
+
+  it('the compile assertion itself runs on this host (runtime dir not under /tmp)', () => {
+    // Guard must not over-skip in the default checkout: with the ambient
+    // EXECUTION_WORKSPACE_ROOT (or its default), the compile test must be live —
+    // it skips (GREEN, vacuous) or fails; it must not silently always skip.
+    if (libDirUnderTmp()) {
+      // This host's checkout genuinely lives under /tmp: the environmental skip is
+      // correct here. The guard-logic pins above still ran and must not over-skip.
+      return;
+    }
+    const lib = ensureEgressLandlockLibrary();
+    assert.ok(lib.startsWith(getEgressLibDir()), lib);
+    assert.ok(!lib.includes('/tmp/'), lib);
+  });
+
+  it('the skip branch stays wired to the guard (source pin)', () => {
+    const src = readFileSync(fileURLToPath(new URL('./egress-enforcement.test.ts', import.meta.url)), 'utf8');
+    const compileTest = src.slice(
+      src.indexOf("it('compiles the filter outside /tmp into the lib dir'"),
+      src.indexOf("it('refuses a tampered filter library'"),
+    );
+    assert.ok(compileTest.length > 0, 'compile test not found');
+    // Exactly one skip, and it sits inside the libDirUnderTmp() guard.
+    const skipCalls = compileTest.match(/t\.skip\(/g) ?? [];
+    assert.equal(skipCalls.length, 1, 'compile test must contain exactly one t.skip()');
+    const guardIdx = compileTest.indexOf('if (libDirUnderTmp())');
+    assert.ok(guardIdx >= 0, 'compile test must gate on libDirUnderTmp()');
+    assert.ok(
+      skipCalls.length === 1 && compileTest.indexOf('t.skip(') > guardIdx,
+      'the only t.skip() must live inside the libDirUnderTmp() guard',
+    );
+    assert.match(compileTest, /if \(libDirUnderTmp\(\)\) \{\s*(\/\/[^\n]*\n\s*)*t\.skip\(/); // guarded skip line, comments allowed
+    assert.ok(
+      compileTest.includes('ensureEgressLandlockLibrary()'),
+      'compile assertion body must remain reachable',
+    );
   });
 });
 
