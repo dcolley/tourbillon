@@ -91,6 +91,17 @@
  *     alternatives, which the guard makes unreachable (only '>='/'<=' ever reach the
  *     strip). The dead alts are removed and a readFileSync source pin keeps them removed
  *     (re-adding them is behaviour-preserving, so no value assertion could see it).
+ *
+ * #270 softs (this pack):
+ *   S270-S1 — S265-S1 REPLACED the /exclusive comparator/ category pin with the
+ *     spec-shape matcher instead of stacking both, so mutant M5 (delete the S259-S1
+ *     exclusive guard entirely) was GREEN again: '<1.78.0' then falls through to the
+ *     generic "not an unambiguous single version" refusal, whose message ALSO opens with
+ *     `declaredPinVersion: spec '<spec>'`, and the loop matcher accepted it. The loop now
+ *     asserts BOTH axes — the message must name the spec (S265-S1 matcher) AND must carry
+ *     'exclusive comparator' (S259-S1 category, restored as a second assert.throws) — so
+ *     a guard deletion REDs on the category axis while honest message rewording that
+ *     keeps the category phrase (M2-style) stays free.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -527,12 +538,17 @@ test('S254-S3: declaredPinVersion strips unambiguous specs and refuses the forms
   // and keep the strip; exclusive ones must refuse. These entries used to sit in the
   // strip loops above (duplicated across S251-S2 and S254-S3) pinned GREEN — flipped.
   for (const spec of ['<1.78.0', '>1.78.0', ' <1.78.0 ', '>1.78.0 ']) {
-    // S265-S1: /exclusive comparator/ alone only pins the CATEGORY of the refusal — a
-    // mutant that keeps the guard but genericises the message (dropping the interpolated
-    // spec) stayed GREEN while the loop message promised "refuse, naming the spec". Pin
-    // the EXACT shape instead: the message opens with `declaredPinVersion: spec ` and the
-    // raw spec follows in quotes. The pattern is built from the spec itself, so every
-    // loop entry pins its own name.
+    // S265-S1 + S270-S1 — BOTH refusal axes pinned, stacked (S270-S1):
+    // (a) naming: the message must name the spec — S265-S1's matcher built from the
+    //     entry itself, so each loop entry pins its own name (kills "guard kept, message
+    //     genericised, spec interpolation dropped").
+    // (b) category: the refusal must be the S259-S1 EXCLUSIVE guard's, not the generic
+    //     single-version fallback's. S265-S1 had swapped (b) out for (a), which left M5
+    //     (delete the guard entirely) GREEN: '<1.78.0' then falls through to the generic
+    //     "not an unambiguous single version" refusal — whose message ALSO opens with
+    //     `declaredPinVersion: spec '<spec>'` — so (a) alone matches it. With (b) here,
+    //     a guard deletion REDs ('exclusive comparator' appears only in the guard's
+    //     message), while honest rewording that keeps the category phrase stays free.
     const refusesNamingSpec = new RegExp(
       'declaredPinVersion: spec ' + "'" + spec.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + "'",
     );
@@ -540,6 +556,11 @@ test('S254-S3: declaredPinVersion strips unambiguous specs and refuses the forms
       () => declaredPinVersion(spec),
       refusesNamingSpec,
       `'${spec}' excludes its base version: stripping it would let an EXCLUDING range pass the exact-equality pin; it must refuse, naming the spec`,
+    );
+    assert.throws(
+      () => declaredPinVersion(spec),
+      /exclusive comparator/,
+      `'${spec}' must refuse through the S259-S1 exclusive guard, not the generic 'not an unambiguous single version' fallback — deleting the guard (M5) fell the spec through to that fallback, which names the spec but never mentions the excluded range`,
     );
   }
   // S265-S2: the strip regex above must carry ONLY what the S259-S1 guard still lets
