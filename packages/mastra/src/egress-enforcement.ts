@@ -338,12 +338,17 @@ export function buildEgressFilterEnv(options: {
   extra?: NodeJS.ProcessEnv;
 }): NodeJS.ProcessEnv {
   const lib = ensureEgressLandlockLibrary();
-  const env: NodeJS.ProcessEnv = {
-    ...options.extra,
+  // S253-S3: `Object.assign`, not an annotated object literal. next/types/global.d.ts declares
+  // `readonly NODE_ENV: 'development' | 'production' | 'test'` as REQUIRED (their own TODO marks it
+  // wrong), so under apps/web's `tsc --noEmit` — which pulls this file in through
+  // `@tourbillon/mastra/chat` — spreading `extra` (whose NODE_ENV is optional) into a
+  // `NodeJS.ProcessEnv` literal fails TS2322. Property assignment skips the readonly check and
+  // optional-to-required widening does not apply, so behaviour is identical in both tsconfigs.
+  const env: NodeJS.ProcessEnv = Object.assign({}, options.extra, {
     LD_PRELOAD: lib,
     TOURBILLON_EGRESS_ENFORCE: '1',
     TOURBILLON_EGRESS_MODE: options.proxySocketPath ? 'proxy' : 'deny',
-  };
+  });
   if (options.proxySocketPath) {
     env.TOURBILLON_EGRESS_PROXY_SOCKET = options.proxySocketPath;
     env.TOURBILLON_EGRESS_PROXY_PORT = String(options.proxyPort ?? EGRESS_PROXY_LOOPBACK_PORT);

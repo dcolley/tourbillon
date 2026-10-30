@@ -5,6 +5,8 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { AgentChatClient } from './agent-chat-client';
 import type { AgentChatItem, AgentChatState } from './chat-state';
 import { parseAguiRequest } from '../run-input';
@@ -1130,6 +1132,43 @@ describe('AGUI-1b AgentChatClient', () => {
         server.streams[1].close();
         await client.whenIdle();
         client.dispose();
+      });
+
+      it('dispose cancels the pending retry timer: a disposed client stays silent past the retry delay', async () => {
+        // S253-S1: the sibling pin above cannot see `clearTimeout` being dropped — the timer
+        // callback, `doResume` and `attachOpenRun` each re-check `disposed`, so any one of them
+        // masks it. This variant makes dispose's cancellation the load-bearing defence: with the
+        // redundant `disposed` guards stripped (mutant verified RED: a second attach request is
+        // recorded), a timer that survived dispose would re-attach. Past the delay, the disposed
+        // client must have touched the endpoint zero times and must not be resuming.
+        const { server, client, attachCount } = budgeted(() => 'stream', { reconnect: { attempts: 3, delayMs: 120 } });
+        await client.open();
+        await until(() => server.streams.length === 1, 2000, 'attach #1');
+        await liveAttach(client, server, 0, 0);
+        server.streams[0].fail(new Error('dropped'));
+        await until(() => client.getState().reconnecting === true, 200, 'retry pending');
+        const requestsAtDispose = server.requests.length;
+        client.dispose();
+        await tick(400); // comfortably past the scheduled retry delay
+        assert.equal(attachCount(), 1, 'the cancelled timer never reaches the endpoint');
+        assert.equal(server.requests.length, requestsAtDispose, 'a disposed client sends no request at all');
+        assert.equal(client.getState().reconnecting, true, 'dispose does not rewrite the last shown state');
+        assert.equal((await client.resume()).ok, false, 'and the disposed client still refuses to resume');
+      });
+    });
+
+    describe('dispose timer cancellation (source pin)', () => {
+      // S253-S1: the behaviour side is masked by redundant `disposed` guards, so pin the
+      // cancellation itself: the dispose body must cancel the pending retry timer AND drop the
+      // handle (the `doResume` finally treats a set handle as "retry pending" — a stale one would
+      // keep the chrome alive). Mutants verified RED: drop the clearTimeout line, drop the
+      // handle reset (each fails one assertion).
+      const src = readFileSync(join(__dirname, 'agent-chat-client.ts'), 'utf8');
+      const disposeBody = src.slice(src.indexOf('dispose(): void {'), src.indexOf('// ---- internals ----'));
+
+      it('dispose clears the pending reconnect timer and drops its handle', () => {
+        assert.match(disposeBody, /if\s*\(this\.reconnectTimer\)\s*clearTimeout\(this\.reconnectTimer\);/);
+        assert.match(disposeBody, /this\.reconnectTimer\s*=\s*undefined;/);
       });
     });
 
