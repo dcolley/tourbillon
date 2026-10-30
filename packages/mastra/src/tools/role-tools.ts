@@ -120,9 +120,14 @@ const listApprovalsTool = createTool({
 
 const getApprovalTool = createTool({
   id: 'getApproval',
-  description: 'Read the full details of a single approval by its ID. Use after listApprovals to inspect a specific prior decision.',
+  description:
+    'Read one board approval by its approval UUID (the `id` field from listApprovals). ' +
+    'Do not pass issue keys (`TOUR-123`, `BUG-...`) - those are company issues; use issue tools or open the issue and follow its linked `boardApprovalId`. ' +
+    'If the human names a TOUR-N, resolve it via listApprovals (e.g. `status: all`, `q: ...`) or the issue first.',
   inputSchema: z.object({
-    approvalId: z.string().describe('The approval ID to fetch'),
+    approvalId: z
+      .string()
+      .describe('The approval UUID (the `id` field from listApprovals). Not an issue key like TOUR-123.'),
   }),
   execute: async (inputData, { requestContext }) => {
     const { companyId } = extractToolRuntimeContext(requestContext);
