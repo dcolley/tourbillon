@@ -13,7 +13,8 @@
     "./widget-tools": "./src/tools/widget-tools.ts"
   },
   "scripts": {
-    "test": "node --import tsx --test src/*.test.ts src/**/*.test.ts"
+    "test": "node --import tsx --test src/*.test.ts src/**/*.test.ts",
+    "type-check": "sh scripts/type-check-gate.sh"
   },
   "dependencies": {
     "@ai-sdk/openai": "catalog:",
@@ -32,6 +33,7 @@
     "@electric-sql/pglite": "^0.5.11",
     "drizzle-orm": "catalog:",
     "tsx": "^4.23.1",
-    "typescript": "catalog:"
+    "typescript": "catalog:",
+    "@types/node": "catalog:"
   }
 }

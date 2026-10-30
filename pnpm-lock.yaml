@@ -337,6 +337,9 @@ importers:
       '@electric-sql/pglite':
         specifier: ^0.5.11
         version: 0.5.11
+      '@types/node':
+        specifier: 'catalog:'
+        version: 26.1.2
       drizzle-orm:
         specifier: 'catalog:'
         version: 0.45.2(@electric-sql/pglite@0.5.11)(@libsql/client@0.17.4(bufferutil@4.1.0))(@opentelemetry/api@1.9.1)(kysely@0.29.2)(pg@8.22.0)(postgres@3.4.9)

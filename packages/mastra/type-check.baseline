@@ -1,0 +1,26 @@
+# packages/mastra type-check baseline (S261-S2)
+#
+# Pre-existing `tsc -p packages/mastra` error count on origin/main at story time
+# (tip 6f1a508, the task-audit merge). This file exists so the mastra type-check can
+# join the root `pnpm type-check` gate WITHOUT fixing main's errors in this PR
+# (no-scope-creep rule). Ratchet the number DOWN as test-file typings are fixed;
+# never ratchet it UP without calling it out in review.
+#
+# The 22 errors are all in src/**/*.test.ts (loose test-fixture typings):
+#   observability/map-span.test.ts            7  (TS2352/TS2353 SpanErrorInfo/UsageStats casts)
+#   observability/resolve-span-error-text.test.ts 6  (TS2353/TS2741 SpanErrorInfo shapes)
+#   abort-clears-running.test.ts              2  (TS2353/TS2339)
+#   qwen-plain-user-guard.test.ts             2  (TS2339 on never)
+#   observability/tourbillon-postgres-exporter.test.ts 2 (TS2353 UsageStats)
+#   concierge-signal.test.ts                  1  (TS2322)
+#   execution-workspace.test.ts               1  (TS1360 AgentRuntimeConfig literal)
+#   observability/assistant-tracing.test.ts   1  (TS2322 fake model stream)
+# Production sources (src/**/*.ts excluding tests) are ERROR-FREE under this tsconfig.
+#
+# Why the tsconfig differs from the scheduler's: no `rootDir` (the scheduler's
+# `rootDir: src` + root tsconfig.base `paths` produce ~140 TS6059 errors from
+# cross-package sources; omitting it keeps mastra covered without inheriting that
+# structural noise), `lib` adds DOM (fetch/ReadableStream/FormData globals the
+# package uses), `types: ["node"]` is explicit because TypeScript 6.0 does not
+# auto-include @types/node here.
+22
