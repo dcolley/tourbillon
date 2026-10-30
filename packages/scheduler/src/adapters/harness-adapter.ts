@@ -58,8 +58,12 @@ export async function runWithHarness(
     allowedMcpServerIds: string[];
     companySettings?: CompanySettings | null;
     abortSignal?: AbortSignal;
-    /** TASK-RUNNER: Run Task wakes also get the private chat-task list tools. */
-    chatTaskTools?: boolean;
+    /**
+     * TASK-RUNNER: Run Task wakes also get the private chat-task list tools.
+     * S243-S2 (#243): 'run-task-wake' selects the wake-aware addMyTask copy (execute the queued
+     * work — do not re-queue via addMyTask).
+     */
+    chatTaskTools?: boolean | 'run-task-wake';
   },
 ): Promise<HarnessRunResult> {
   if (!isHarnessAdapter(agentRecord.adapterType)) {

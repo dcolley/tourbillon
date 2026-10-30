@@ -634,7 +634,9 @@ async function runWake(
               companySettings: parseCompanySettings(company.settings),
               abortSignal: abortController.signal,
               // TASK-RUNNER: Run Task wakes also get the private chat-task list tools.
-              chatTaskTools: wake.kind === 'task',
+              // S243-S2 (#243): 'run-task-wake' picks the wake-aware addMyTask copy — during a
+              // Run Task wake the agent EXECUTES the queued work, never re-queues via addMyTask.
+              chatTaskTools: wake.kind === 'task' ? ('run-task-wake' as const) : false,
             },
           );
 
@@ -982,7 +984,8 @@ export async function runDurableAgentWake(params: {
     maxSteps,
     // TASK-RUNNER: a Run Task additionally gets the private chat-task list tools (to park or
     // complete itself); a Run Heartbeat never does (chat-only invariant — chat-controller.test).
-    chatTaskTools: params.wake.kind === 'task',
+    // S243-S2 (#243): 'run-task-wake' → wake-aware addMyTask copy (execute, do not re-queue).
+    chatTaskTools: params.wake.kind === 'task' ? ('run-task-wake' as const) : false,
   });
 
   const runtimeContext = createHeartbeatRuntimeContext({

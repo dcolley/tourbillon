@@ -134,66 +134,130 @@ export const listMyTasksTool = createTool({
   },
 });
 
-export const addMyTaskTool = createTool({
-  id: 'addMyTask',
-  description:
-    'Queue work for the async Run Task queue (taskRunner) and record it on YOUR private chat task ' +
-    'list (NOT company issues — do not use createIssue/createSubtask for chat to-dos). Use this ' +
-    'whenever a chat ask is NOT simple — multi-step investigation, planning that adapts across ' +
-    'goals/issues, or anything needing a tool loop: add it here with an imperative title (+ notes ' +
-    'capturing what to do), tell the human it is queued for Run Task, and let taskRunner execute it ' +
-    '— do NOT grind tool loops for it in the live chat turn (progress returns as <task-progress …> ' +
-    'updates). Also use when the human asks you to remember to do something. Simple one-shot asks ' +
-    '(a plain answer, one read, a clarifying question) stay in the live turn. Optional notes may ' +
-    'name interested parties to notify about progress (there is no automatic notifying). ' +
-    'Titles are imperative, ≤200 chars.',
-  inputSchema: z.object({
-    titles: z
-      .array(z.string().min(1).max(CHAT_TASK_TITLE_MAX))
-      .min(1)
-      .max(10)
-      .describe('One or more task titles, e.g. ["Draft the runbook", "Check the restore backup"].'),
-    notes: z.string().max(2000).optional().describe('Optional context/next step, or a "notify:" list of interested parties.'),
-    status: statusSchema.optional().describe('Initial status (default pending).'),
-  }),
-  execute: async (inputData, { requestContext }) => {
-    const scope = chatTaskScope(requestContext);
-    if (!scope) return missingScope();
-    const database = toolDb();
-    const titles = inputData.titles.map((t) => t.trim()).filter(Boolean);
-    if (titles.length === 0) {
-      return { error: 'empty_titles', message: 'At least one non-empty task title is required.' };
-    }
-    const open = await countOpenChatTasks(scope, database);
-    if (open + titles.length > CHAT_TASK_LIST_CAP) {
-      return {
-        error: 'task_list_full',
-        message: `Your task list is capped at ${CHAT_TASK_LIST_CAP} open tasks (${open} open now). Finish or cancel some first.`,
-      };
-    }
-    const added: ChatTask[] = [];
-    for (const title of titles) {
-      added.push(
-        await addChatTask(
-          scope,
-          {
-            title,
-            notes: inputData.notes,
-            status: inputData.status,
-            sourceThreadId: scope.threadId ?? null,
-            requestedBy: requestingUser(requestContext),
-          },
-          database,
-        ),
-      );
-    }
-    return {
-      ok: true,
-      message: `Added ${added.length} task${added.length === 1 ? '' : 's'}.`,
-      tasks: added.map(row),
-    };
-  },
+const addMyTaskInputSchema = z.object({
+  titles: z
+    .array(z.string().min(1).max(CHAT_TASK_TITLE_MAX))
+    .min(1)
+    .max(10)
+    .describe('One or more task titles, e.g. ["Draft the runbook", "Check the restore backup"].'),
+  notes: z.string().max(2000).optional().describe('Optional context/next step, or a "notify:" list of interested parties.'),
+  status: statusSchema.optional().describe('Initial status (default pending).'),
 });
+
+/** #242 live-chat copy: queue non-simple work for Run Task, then STOP — no in-turn grind. */
+const ADD_MY_TASK_CHAT_DESCRIPTION =
+  'Queue work for the async Run Task queue (taskRunner) and record it on YOUR private chat task ' +
+  'list (NOT company issues — do not use createIssue/createSubtask for chat to-dos). Use this ' +
+  'whenever a chat ask is NOT simple — multi-step investigation, planning that adapts across ' +
+  'goals/issues, or anything needing a tool loop: add it here with an imperative title (+ notes ' +
+  'capturing what to do), tell the human it is queued for Run Task, and let taskRunner execute it ' +
+  '— do NOT grind tool loops for it in the live chat turn (progress returns as <task-progress …> ' +
+  'updates). Also use when the human asks you to remember to do something. Simple one-shot asks ' +
+  '(a plain answer, one read, a clarifying question) stay in the live turn. Optional notes may ' +
+  'name interested parties to notify about progress (there is no automatic notifying). ' +
+  'Titles are imperative, ≤200 chars.';
+
+/**
+ * S243-S2 (#243 soft-pack): the addMyTask copy registered on background Run Task wakes
+ * (wake kind 'task'). Same id/schema/execute as the chat copy — only the description differs.
+ * A Run Task wake EXECUTES the queued work; calling addMyTask there to re-queue the same work
+ * is always wrong (it would loop the task against itself). The wake kind reaches this copy via
+ * assembleAgentTools({ chatTaskTools: 'run-task-wake' }) — set from wake.kind === 'task' in
+ * packages/scheduler/src/wake-runner.ts.
+ */
+const ADD_MY_TASK_WAKE_DESCRIPTION =
+  'Record a genuinely NEW follow-up on YOUR private chat task list from inside a background ' +
+  'Run Task wake (NOT company issues — do not use createIssue/createSubtask for chat to-dos). ' +
+  'You are EXECUTING a queued task right now: do the work directly with your tools and track it ' +
+  'with updateMyTask / completeMyTask — do NOT call addMyTask to re-queue the work you are ' +
+  'already executing (queueing for Run Task is the live chat turn\'s job; re-queueing here just ' +
+  'loops the task). Only add a task that Run Task should pick up LATER, after this run. ' +
+  'Titles are imperative, ≤200 chars.';
+
+/**
+ * S243-S3 (#243 soft-pack) product rule: addMyTask ALWAYS records the task, but when the
+ * company disabled Run Task (settings.taskRunner.enabled === false) the tool RESULT carries an
+ * operator warning — "queued but Run Task is OFF — enable it or break the ask into simple steps
+ * done live in chat" — so the Concierge never claims a queue that will never drain and never
+ * infinite-loops tools trying to work the ask live instead. Bounded on purpose: no scheduler
+ * change; agent-factory derives the flag with resolveTaskRunnerSettings(), mirroring the
+ * scheduler poller's own enabled check (packages/scheduler/src/task-runner.ts).
+ */
+export const RUN_TASK_DISABLED_WARNING =
+  ' WARNING: this company has Run Task turned OFF (settings taskRunner.enabled=false) — no Run ' +
+  'Task will start for it. Tell the operator to enable Run Task in Settings, or break the ask ' +
+  'into simple steps you can do live in chat.';
+
+async function runAddMyTask(
+  inputData: z.infer<typeof addMyTaskInputSchema>,
+  requestContext: unknown,
+  opts: { runTaskDisabled: boolean },
+) {
+  const scope = chatTaskScope(requestContext);
+  if (!scope) return missingScope();
+  const database = toolDb();
+  const titles = inputData.titles.map((t) => t.trim()).filter(Boolean);
+  if (titles.length === 0) {
+    return { error: 'empty_titles', message: 'At least one non-empty task title is required.' };
+  }
+  const open = await countOpenChatTasks(scope, database);
+  if (open + titles.length > CHAT_TASK_LIST_CAP) {
+    return {
+      error: 'task_list_full',
+      message: `Your task list is capped at ${CHAT_TASK_LIST_CAP} open tasks (${open} open now). Finish or cancel some first.`,
+    };
+  }
+  const added: ChatTask[] = [];
+  for (const title of titles) {
+    added.push(
+      await addChatTask(
+        scope,
+        {
+          title,
+          notes: inputData.notes,
+          status: inputData.status,
+          sourceThreadId: scope.threadId ?? null,
+          requestedBy: requestingUser(requestContext),
+        },
+        database,
+      ),
+    );
+  }
+  return {
+    ok: true,
+    message:
+      `Added ${added.length} task${added.length === 1 ? '' : 's'}.` +
+      (opts.runTaskDisabled ? RUN_TASK_DISABLED_WARNING : ''),
+    ...(opts.runTaskDisabled ? { runTaskDisabled: true } : {}),
+    tasks: added.map(row),
+  };
+}
+
+/**
+ * Build the addMyTask tool for a run context. `context: 'run-task-wake'` swaps in the wake copy
+ * (execute queued work — do not re-queue, S243-S2); `runTaskDisabled` appends the operator
+ * warning to the result (S243-S3). Callers must not mutate the returned tool.
+ */
+export function createAddMyTaskTool(opts?: {
+  context?: 'chat' | 'run-task-wake';
+  runTaskDisabled?: boolean;
+}) {
+  const wake = opts?.context === 'run-task-wake';
+  const runTaskDisabled = opts?.runTaskDisabled === true;
+  return createTool({
+    id: 'addMyTask',
+    description: wake ? ADD_MY_TASK_WAKE_DESCRIPTION : ADD_MY_TASK_CHAT_DESCRIPTION,
+    inputSchema: addMyTaskInputSchema,
+    execute: async (inputData, { requestContext }) =>
+      runAddMyTask(inputData, requestContext, { runTaskDisabled }),
+  });
+}
+
+/** Live-chat registration: queue non-simple work for Run Task, then STOP in-turn. */
+export const addMyTaskTool = createAddMyTaskTool();
+
+/** S243-S2: Run Task wake registration — same tool id, wake-aware description. */
+export const addMyTaskRunTaskWakeTool = createAddMyTaskTool({ context: 'run-task-wake' });
 
 export const updateMyTaskTool = createTool({
   id: 'updateMyTask',
@@ -353,6 +417,15 @@ export const CHAT_TASK_TOOLS = {
   cancelMyTask: cancelMyTaskTool,
   pauseMyTask: pauseMyTaskTool,
   prioritizeMyTask: prioritizeMyTaskTool,
+};
+
+/**
+ * S243-S2: the Run Task wake variant of the group — same seven tools, but addMyTask carries the
+ * wake-aware description (execute the queued work; never re-queue via addMyTask).
+ */
+export const RUN_TASK_WAKE_CHAT_TASK_TOOLS = {
+  ...CHAT_TASK_TOOLS,
+  addMyTask: addMyTaskRunTaskWakeTool,
 };
 
 /** True for ids that belong to the private chat list (guards + toolset labelling). */

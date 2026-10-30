@@ -10,6 +10,7 @@ import {
   modelProviderOverridesFromAgent,
   resolveModelProviderConfig,
   resolveAssignedTools,
+  resolveTaskRunnerSettings,
   resolveObservationalMemoryModel,
   resolveObservationalMemorySettings,
   type AgentRuntimeConfig,
@@ -28,7 +29,7 @@ import {
 import { CONTROL_PLANE_TOOLS } from './tools/control-plane-tools';
 import { ROLE_TOOLS } from './tools/role-tools';
 import { assignableToolsForIds } from './tools/assignable-tools';
-import { CHAT_TASK_TOOLS } from './tools/chat-task-tools';
+import { CHAT_TASK_TOOLS, RUN_TASK_WAKE_CHAT_TASK_TOOLS, createAddMyTaskTool } from './tools/chat-task-tools';
 import {
   formatSkillsCatalogSection,
   prepareAgentSkills,
@@ -211,8 +212,11 @@ export interface AssembleAgentToolsOptions {
    * TASK-1: dashboard-chat only — add the agent's private chat task list tools
    * (chat_tasks). Heartbeat / DurableAgent assemblies never set this, so the five
    * list tools stay out of every non-chat run.
+   * S243-S2 (#243 soft-pack): background Run Task wakes (wake kind 'task') pass
+   * 'run-task-wake' so addMyTask gets the wake-aware copy — during a Run Task wake the agent
+   * EXECUTES the queued work; re-queueing via addMyTask there is wrong (would loop the task).
    */
-  chatTaskTools?: boolean;
+  chatTaskTools?: boolean | 'run-task-wake';
 }
 
 export async function assembleAgentTools(
@@ -262,9 +266,19 @@ export async function assembleAgentTools(
     delete tools.sendToAgentTool;
   }
 
-  // TASK-1: the private per-agent chat task list (chat_tasks) — chat AgentController only.
+  // TASK-1: the private per-agent chat task list (chat_tasks) — chat AgentController + Run Task wakes.
   if (options?.chatTaskTools) {
-    Object.assign(tools, CHAT_TASK_TOOLS);
+    const isRunTaskWake = options.chatTaskTools === 'run-task-wake';
+    // S243-S3: mirror the scheduler poller's enabled check — when the company disabled Run Task
+    // (settings.taskRunner.enabled === false) addMyTask still records the task but its result
+    // warns the operator ("enable it or break the ask into simple steps"). No scheduler change.
+    const runTaskDisabled = !resolveTaskRunnerSettings(companySettings).enabled;
+    Object.assign(tools, isRunTaskWake ? RUN_TASK_WAKE_CHAT_TASK_TOOLS : CHAT_TASK_TOOLS, {
+      addMyTask: createAddMyTaskTool({
+        context: isRunTaskWake ? 'run-task-wake' : 'chat',
+        runTaskDisabled,
+      }),
+    });
   }
 
   // #100: one choke point — no tool result may carry agent runtimeConfig secret values.
