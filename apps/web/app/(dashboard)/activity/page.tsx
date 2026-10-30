@@ -15,6 +15,7 @@ const TYPE_LABELS: Record<string, string> = {
   goal: 'Goals',
   workspace: 'Workspace',
   llm_provider: 'LLM providers',
+  chat_task: 'Tasks',
 };
 
 const fieldClass =

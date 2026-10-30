@@ -11,3 +11,4 @@ export * from './heartbeat-run-reconcile';
 export * from './observability-queries';
 
 export * from './chat-task-queries';
+export * from './chat-task-activity';

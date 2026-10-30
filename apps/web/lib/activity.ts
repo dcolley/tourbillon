@@ -8,6 +8,7 @@ import {
   activityLog,
   agents,
   approvals,
+  chatTasks,
   goals,
   heartbeatRuns,
   issues,
@@ -67,6 +68,15 @@ export async function loadActivityLookup(companyId: string, entries: ActivityLog
           .from(goals)
           .where(and(eq(goals.companyId, companyId), inArray(goals.id, ids(refs.goal))))
           .then((rows) => rows.forEach((r) => lookup.goals.set(r.id, { title: r.title })))
+      : null,
+    // TASK-AUDIT (#258): chat_tasks titles for the Tasks filter (company-scoped like every
+    // other kind — a foreign id stays "Unknown task" with no name, never another company's).
+    refs.chat_task.size > 0
+      ? db
+          .select({ id: chatTasks.id, title: chatTasks.title })
+          .from(chatTasks)
+          .where(and(eq(chatTasks.companyId, companyId), inArray(chatTasks.id, ids(refs.chat_task))))
+          .then((rows) => rows.forEach((r) => lookup.chatTasks.set(r.id, { title: r.title })))
       : null,
   ]);
 

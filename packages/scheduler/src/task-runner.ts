@@ -32,8 +32,12 @@ import {
   claimChatTaskRun,
   finishChatTaskRun,
   reconcileStaleChatTaskRuns,
+  recordChatTaskActivity,
+  chatTaskProductStatus,
+  type ChatTaskActivityAction,
   type ChatTaskDb,
   type ChatTaskReconcileResult,
+  type ChatTaskStatus,
   type RunnableChatTaskRow,
 } from '@tourbillon/db';
 import type { HeartbeatJobData, ResolvedTaskRunnerSettings, TaskRunnerSettings } from '@tourbillon/shared';
@@ -106,6 +110,14 @@ export interface TaskRunnerDeps {
   startWake(job: HeartbeatJobData): Promise<WakeResult>;
   /** Settle the chat_tasks row after the run (only touches in_progress rows). */
   settle(taskId: string, status: 'pending' | 'waiting_on_user' | 'done', note?: string): Promise<void>;
+  /**
+   * TASK-AUDIT (#258): lifecycle audit row for `activity_log` (entity_type 'chat_task').
+   * Optional so existing fakes still satisfy the interface; the production wiring writes through
+   * `recordChatTaskActivity`. Called once per transition: claim (queued), wake fire (started),
+   * settle (done / error / parked). Audit must never block the queue — a throw here is logged,
+   * never propagated (the default impl swallows by contract).
+   */
+  logActivity?(event: ChatTaskActivityEvent): void | Promise<void>;
   /** High-level progress event for the parent chat (SSE chip), never a tool transcript. */
   emitProgress?(event: ChatTaskProgressEvent): void;
   /**
@@ -128,6 +140,54 @@ export interface ChatTaskProgressEvent {
   stage: 'started' | 'done' | 'needs_review';
   status: 'running' | 'succeeded' | 'failed' | 'skipped';
   title: string;
+}
+
+/**
+ * TASK-AUDIT (#258): one Run Task lifecycle audit row (claim / start / settle). The Activity
+ * page's Tasks filter is the board's audit trail for the queue, so the runner writes these
+ * itself — the actor is `system` ('task-runner') and the OWNING agent travels in
+ * `details.agentId` (the view links the agent from there) plus `details.runId` for the run.
+ */
+export interface ChatTaskActivityEvent {
+  companyId: string;
+  agentId: string;
+  chatTaskId: string;
+  runId: string;
+  title: string;
+  action: ChatTaskActivityAction;
+  /** Stored chat_tasks status at this transition (pending / in_progress / ...). */
+  status: string;
+  /** Product lifecycle word (queued / running / error / done) — see chat-task-activity.ts. */
+  productStatus: string;
+  /** Status the row came from, for the "Status from → to" change line. */
+  previousStatus?: string;
+  /** Attempt number this run consumed (claim onward). */
+  attempts?: number;
+  /** Failure text for error/parked rows. */
+  note?: string | null;
+}
+
+/** Settle outcome → audit action (the lifecycle map in packages/db/src/chat-task-activity.ts). */
+export function taskRunSettleActivityAction(settle: 'pending' | 'waiting_on_user' | 'done'): ChatTaskActivityAction {
+  if (settle === 'done') return 'chat_task.done';
+  if (settle === 'pending') return 'chat_task.error';
+  return 'chat_task.parked';
+}
+
+/**
+ * Best-effort lifecycle audit write: an Activity row must never fail (or delay past the tick)
+ * the queue transition it describes. A throw from the injected seam is logged at warn level,
+ * never propagated — matching `recordChatTaskActivity`'s swallow-by-contract behaviour in prod.
+ */
+async function logRunnerActivity(deps: TaskRunnerDeps, event: ChatTaskActivityEvent): Promise<void> {
+  if (!deps.logActivity) return;
+  try {
+    await deps.logActivity(event);
+  } catch (err) {
+    const data = { chatTaskId: event.chatTaskId, action: event.action, error: err instanceof Error ? err.message : String(err) };
+    if (deps.log?.warn) deps.log.warn('task-run activity log failed', data);
+    else deps.log?.info('task-run activity log failed', data);
+  }
 }
 
 /** How many task runs an agent may start right now (never negative). */
@@ -377,6 +437,20 @@ export async function pollTaskRunner(
       const claimed = await deps.claim(task.taskId, runId, maxAttempts);
       if (!claimed) continue; // paused / cancelled / re-prioritised / attempt budget gone
       const job = buildTaskRunWake(task, runId);
+      // TASK-AUDIT (#258): the claim IS the queue hand-off — stored pending → in_progress,
+      // product word still "queued" until the wake actually fires.
+      await logRunnerActivity(deps, {
+        companyId: task.companyId,
+        agentId,
+        chatTaskId: task.taskId,
+        runId,
+        title: task.title,
+        action: 'chat_task.queued',
+        status: 'in_progress',
+        previousStatus: 'pending',
+        productStatus: chatTaskProductStatus('pending'),
+        attempts: task.attempts + 1,
+      });
       deps.emitProgress?.({
         companyId: task.companyId,
         agentId,
@@ -385,6 +459,18 @@ export async function pollTaskRunner(
         stage: 'started',
         status: 'running',
         title: task.title,
+      });
+      // TASK-AUDIT (#258): the wake is firing — product "running" (stored in_progress).
+      await logRunnerActivity(deps, {
+        companyId: task.companyId,
+        agentId,
+        chatTaskId: task.taskId,
+        runId,
+        title: task.title,
+        action: 'chat_task.started',
+        status: 'in_progress',
+        productStatus: chatTaskProductStatus('in_progress'),
+        attempts: task.attempts + 1,
       });
       const done = (async () => {
         let result: WakeResult;
@@ -399,6 +485,21 @@ export async function pollTaskRunner(
         }
         const settle = taskRunSettleStatus(result, task.attempts + 1, maxAttempts);
         await deps.settle(task.taskId, settle, result.errorText);
+        // TASK-AUDIT (#258): settle audit — done / error (retry re-queue) / parked, with the
+        // run link and failure text when the run carried one.
+        await logRunnerActivity(deps, {
+          companyId: task.companyId,
+          agentId,
+          chatTaskId: task.taskId,
+          runId,
+          title: task.title,
+          action: taskRunSettleActivityAction(settle),
+          status: settle,
+          previousStatus: 'in_progress',
+          productStatus: settle === 'done' ? 'done' : 'error',
+          attempts: task.attempts + 1,
+          note: settle === 'done' ? null : result.errorText ?? null,
+        });
         deps.emitProgress?.({
           companyId: task.companyId,
           agentId,
@@ -457,6 +558,11 @@ export function createDefaultTaskRunnerDeps(
   options: DefaultTaskRunnerDepsOptions = {},
 ): TaskRunnerDeps {
   const database = options.database ?? (db as unknown as ChatTaskDb);
+  // HOTFIX (post-#196): production called startTaskRunnerPolling() with no log, so every
+  // poll failure (e.g. the countActiveRuns Date crash) was silent. Default to the scheduler
+  // trace logger so failures surface in scheduler logs. Shared with the TASK-AUDIT onError
+  // below so a failed lifecycle write is never silent either.
+  const log = options.log ?? createTraceLogger('task-run', {});
   return {
     db: database,
     // S3 (#202 ACCEPT softs): list against each company's RESOLVED maxAttemptsPerTask, not a
@@ -482,10 +588,49 @@ export function createDefaultTaskRunnerDeps(
     startWake: options.startWake ?? ((job) => import('./wake-runner').then((m) => m.startTaskWake(job))),
     settle: (taskId, status, note) =>
       finishChatTaskRun(database, { taskId, status, note }).then(() => undefined),
+    // TASK-AUDIT (#258): lifecycle rows for the Activity "Tasks" filter. One row per
+    // transition (queued / started / done / error / parked); the actor is the system writer
+    // ('task-runner') and the owning agent + run ride in details for the view's links.
+    logActivity: (event) =>
+      recordChatTaskActivity(
+        {
+          companyId: event.companyId,
+          taskId: event.chatTaskId,
+          action: event.action,
+          actorType: 'system',
+          actorId: 'task-runner',
+          actorName: 'Task runner',
+          details: {
+            agentId: event.agentId,
+            runId: event.runId,
+            title: event.title,
+            status: event.status,
+            productStatus: event.productStatus,
+            // The Activity feed renders the chat_task status change in PRODUCT words both sides
+            // (see describeActivityChanges); the stored words ride on status/previousStatus.
+            ...(event.previousStatus !== undefined
+              ? {
+                  previousStatus: event.previousStatus,
+                  previousProductStatus: chatTaskProductStatus(event.previousStatus as ChatTaskStatus),
+                }
+              : {}),
+            ...(event.attempts !== undefined ? { attempts: event.attempts } : {}),
+            ...(event.note ? { note: event.note } : {}),
+          },
+        },
+        {
+          database,
+          onError: (err) => {
+            const data = { chatTaskId: event.chatTaskId, error: err instanceof Error ? err.message : String(err) };
+            if (log.warn) log.warn('task-run activity log failed', data);
+            else log.info('task-run activity log failed', data);
+          },
+        },
+      ),
     // HOTFIX (post-#196): production called startTaskRunnerPolling() with no log, so every
     // poll failure (e.g. the countActiveRuns Date crash) was silent. Default to the scheduler
     // trace logger so failures surface in scheduler logs.
-    log: options.log ?? createTraceLogger('task-run', {}),
+    log,
     emitProgress:
       options.emitProgress ??
       ((event) => {
