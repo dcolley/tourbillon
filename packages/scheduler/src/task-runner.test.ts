@@ -169,7 +169,12 @@ test('task cap inside the budget: two busy slots of three → one task may start
 
 test('paused tasks skip the queue even when slots are free', async () => {
   const f = fakes({ rows: [row({ taskId: 't1', paused: true })], slots: { total: 0, task: 0 } });
-  const s = await pollTaskRunner(f.deps, {});
+  // S252-S2: budget pinned — the opts-less form inherited the module-load env default, i.e.
+  // the REAL host env (TASK_RUNNER_MAX_CONCURRENT_RUNS). Under an env of 1 this test does not
+  // flake TODAY (paused rows leave byAgent empty → the tick returns before any cap is
+  // consulted — proven by the ordering pin in task-runner-252-softs.test.ts), but the result
+  // must never depend on what the host carries. Same pattern as the S249-S2 pins.
+  const s = await pollTaskRunner(f.deps, { maxConcurrentRuns: 2 });
   assert.equal(s.polled, 1);
   assert.equal(s.started.length, 0);
   assert.deepEqual(f.jobs, []);

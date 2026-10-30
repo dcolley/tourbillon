@@ -74,6 +74,11 @@ export async function main(logger: Logger, boot: SchedulerBootDeps = productionB
   const staleSweep = boot.startStaleSweepInterval();
   await boot.bootMastraSchedules();
   // TASK-RUNNER: Run Task queue poller — gated through the shared per-agent run budget.
+  // S252-S1 (#252 soft-pack): deliberately ZERO args — no deps, no opts. opts.taskCap is
+  // intentionally NOT wired through this seam (the type is `() => { stop(): void }`), so from
+  // scheduler-main the only cap-0 remedy an operator can turn is the host env
+  // (TASK_RUNNER_MAX_CONCURRENT_RUNS ≥ 2); the opts.taskCap half of the refusal copy in
+  // task-runner.ts is tool/opts-only. Pinned by scheduler-main-252-softs.test.ts.
   const taskRunner = boot.startTaskRunnerPolling();
 
   async function shutdown(): Promise<void> {
