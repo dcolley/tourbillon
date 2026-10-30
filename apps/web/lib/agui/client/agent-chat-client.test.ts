@@ -15,6 +15,7 @@ import {
   tick,
   until,
   type FakeRequest,
+  type OpenStream,
 } from './testing/fake-agui-server';
 
 const THREAD = 'thread-1';
@@ -895,6 +896,315 @@ describe('AGUI-1b AgentChatClient', () => {
       await client.whenIdle();
       assert.equal(client.getState().error, null);
       assert.equal(client.getState().lastOutcome, 'success');
+    });
+
+    // ---- CHAT-RECONNECT softs: retry-budget bookkeeping, reconnecting chrome, attach-death edges ----
+
+    /**
+     * Attach answers scripted per call (1-based); every attach reply is scripted, controls default
+     * to accepted. `runAnswer` overrides the `run` reply (default: an open stream).
+     */
+    function budgeted(
+      attachAnswer: (n: number, req: FakeRequest) => Answer,
+      extra: Partial<ConstructorParameters<typeof AgentChatClient>[0]> = {},
+      runAnswer: (req: FakeRequest) => Answer = () => 'stream',
+    ) {
+      let attaches = 0;
+      const world = resumable((req) => {
+        if (req.action === 'attach') return attachAnswer(++attaches, req);
+        if (req.action === 'run') return runAnswer(req);
+        return controlResponse(req.body, { accepted: true });
+      }, extra);
+      const attachCount = () => world.server.requests.filter((r) => r.action === 'attach').length;
+      return { ...world, attachCount };
+    }
+    const attachReqs = (server: { requests: FakeRequest[] }) => server.requests.filter((r) => r.action === 'attach');
+    /** Makes attach `attachIdx` (0-based) a live run on stream `streamIdx` (decision: run). */
+    const bringUp = (server: { requests: FakeRequest[]; streams: OpenStream[] }, streamIdx: number, attachIdx: number) => {
+      const req = attachReqs(server)[attachIdx];
+      server.streams[streamIdx].send(
+        { type: 'RUN_STARTED', threadId: THREAD, runId: req.body.runId },
+        { type: 'TEXT_MESSAGE_START', messageId: `m-${attachIdx}`, role: 'assistant' },
+        { type: 'TEXT_MESSAGE_CONTENT', messageId: `m-${attachIdx}`, delta: 'live' },
+      );
+    };
+    /**
+     * Script live events and wait until the client has adopted the attach as its open run: the fake
+     * stream delivers queued chunks once the reader is waiting, and adoption is the proof the client
+     * processed them (a `fail()` before that would wipe the unread chunk instead of dropping a live run).
+     */
+    const liveAttach = async (
+      client: AgentChatClient,
+      server: { requests: FakeRequest[]; streams: OpenStream[] },
+      streamIdx: number,
+      attachIdx: number,
+    ) => {
+      // requests are recorded before the handler answers — wait for this attach's stream to exist.
+      await until(() => server.streams.length > streamIdx, 2000, `stream for attach #${attachIdx + 1}`);
+      bringUp(server, streamIdx, attachIdx);
+      await until(() => client.isRunOpen, 2000, `attach #${attachIdx + 1} adopted as the open run`);
+    };
+    const finishAttach = (server: { requests: FakeRequest[]; streams: OpenStream[] }, streamIdx: number, attachIdx: number) => {
+      const req = attachReqs(server)[attachIdx];
+      server.streams[streamIdx].send({ type: 'RUN_FINISHED', threadId: THREAD, runId: req.body.runId, outcome: { type: 'success' } });
+      server.streams[streamIdx].close();
+    };
+
+    describe('re-attach budget bookkeeping', () => {
+      it('a run that finishes over an attached stream renews the budget so a later drop re-attaches again', async () => {
+        const { server, client, attachCount } = budgeted(() => 'stream', { reconnect: { attempts: 1, delayMs: 5 } });
+        await client.open(); // attach #1 (open() does not touch the budget)
+        await until(() => server.streams.length === 1, 2000, 'attach #1');
+        await liveAttach(client, server, 0, 0);
+        server.streams[0].fail(new Error('dropped'));
+        await until(() => attachCount() === 2, 2000, 'the one automatic retry');
+        await liveAttach(client, server, 1, 1);
+        finishAttach(server, 1, 1); // RUN_FINISHED over the attached stream: the budget is whole again
+        await client.whenIdle();
+        await client.open(); // attach #3: a fresh drop must still get its full budget
+        await until(() => attachCount() === 3, 2000, 'attach #3');
+        await liveAttach(client, server, 2, 2);
+        server.streams[2].fail(new Error('dropped'));
+        await until(() => attachCount() === 4, 2000, 'retry available after the finished run');
+        await liveAttach(client, server, 3, 3);
+        finishAttach(server, 3, 3);
+        await client.whenIdle();
+        client.dispose();
+      });
+
+      it('a run that errors over an attached stream renews the budget without a lost-connection report', async () => {
+        const { server, client, attachCount } = budgeted(() => 'stream', { reconnect: { attempts: 1, delayMs: 5 } });
+        await client.open();
+        await until(() => server.streams.length === 1, 2000, 'attach #1');
+        await liveAttach(client, server, 0, 0);
+        server.streams[0].fail(new Error('dropped'));
+        await until(() => attachCount() === 2, 2000, 'the one automatic retry');
+        await liveAttach(client, server, 1, 1);
+        server.streams[1].send({ type: 'RUN_ERROR', message: 'agent exploded' });
+        server.streams[1].close();
+        await client.whenIdle();
+        assert.equal(client.getState().error?.kind, 'run', 'the run error is what is shown, not a lost connection');
+        await client.open();
+        await until(() => attachCount() === 3, 2000, 'attach #3');
+        await liveAttach(client, server, 2, 2);
+        server.streams[2].fail(new Error('dropped'));
+        await until(() => attachCount() === 4, 2000, 'retry available after the errored run');
+        await liveAttach(client, server, 3, 3);
+        finishAttach(server, 3, 3);
+        await client.whenIdle();
+        client.dispose();
+      });
+
+      it('a user-initiated send renews the budget for the next dropped attach', async () => {
+        const { server, client, attachCount } = budgeted(
+          (n, req) => (n === 2 ? controlResponse(req.body, { accepted: false, running: false }) : 'stream'),
+          { reconnect: { attempts: 1, delayMs: 40 } },
+          () => jsonError(409, 'A run is already in progress; send steer or followUp instead'),
+        );
+        await client.open();
+        await until(() => server.streams.length === 1, 2000, 'attach #1');
+        await liveAttach(client, server, 0, 0);
+        server.streams[0].fail(new Error('dropped')); // one loss burned, retry timer pending
+        await until(() => !client.isRunOpen, 2000, 'the dead stream is released');
+        const sent = await client.send('user takes over'); // resets the budget; refused 409 (no stream, no terminal)
+        if (sent.ok) assert.fail('expected the run to be refused');
+        assert.equal(sent.error.kind, 'conflict');
+        await tick(120); // the pending retry stands down (idle here) and shares the reset budget
+        await client.open();
+        await until(() => attachCount() === 3, 2000, 'attach #3');
+        await liveAttach(client, server, 1, 2);
+        server.streams[1].fail(new Error('dropped'));
+        await until(() => attachCount() === 4, 2000, 'retry available after the send');
+        await liveAttach(client, server, 2, 3);
+        finishAttach(server, 2, 3);
+        await client.whenIdle();
+        client.dispose();
+      });
+
+      it('a page resume mid-cycle restarts the budget so the full retry count is available again', async () => {
+        const { server, client, attachCount } = budgeted(() => 'stream', { reconnect: { attempts: 2, delayMs: 5 } });
+        await client.open();
+        await until(() => server.streams.length === 1, 2000, 'attach #1');
+        await liveAttach(client, server, 0, 0);
+        server.streams[0].fail(new Error('dropped')); // 1 of 2 burned
+        await until(() => attachCount() === 2, 2000, 'retry #2');
+        await liveAttach(client, server, 1, 1);
+        const resuming = client.resume(); // page came back: fresh budget, closes #2 and attaches #3
+        await liveAttach(client, server, 2, 2);
+        assert.deepEqual(await resuming, { ok: true, value: { attached: true } });
+        assert.equal(attachCount(), 3);
+        server.streams[2].fail(new Error('dropped')); // burn #1 of the fresh budget
+        await until(() => attachCount() === 4, 2000, 'retry 1 of the fresh budget');
+        await liveAttach(client, server, 3, 3);
+        server.streams[3].fail(new Error('dropped')); // burn #2
+        await until(() => attachCount() === 5, 2500, 'retry 2 of the fresh budget (only a resume reset makes 5 possible)');
+        assert.notEqual(client.getState().error?.kind, 'disconnected', 'the budget was not spent yet');
+        await liveAttach(client, server, 4, 4);
+        finishAttach(server, 4, 4);
+        await client.whenIdle();
+        client.dispose();
+      });
+
+      it('the default budget is 3 growing retries at the 500ms base delay before reporting a lost connection', async () => {
+        const { server, client, attachCount } = budgeted(() => 'stream'); // no reconnect option: defaults
+        await client.open();
+        await until(() => server.streams.length === 1, 2000, 'attach #1');
+        await liveAttach(client, server, 0, 0);
+        const t1 = Date.now();
+        server.streams[0].fail(new Error('dropped'));
+        await tick(250);
+        assert.equal(attachCount(), 1, 'no retry before the base delay (default delayMs 500)');
+        await until(() => attachCount() === 2, 3000, 'retry 1');
+        const gap1 = Date.now() - t1;
+        await liveAttach(client, server, 1, 1);
+        server.streams[1].fail(new Error('dropped'));
+        const t2 = Date.now();
+        await until(() => attachCount() === 3, 5000, 'retry 2');
+        const gap2 = Date.now() - t2;
+        await liveAttach(client, server, 2, 2);
+        server.streams[2].fail(new Error('dropped'));
+        const t3 = Date.now();
+        await until(() => attachCount() === 4, 6000, 'retry 3');
+        const gap3 = Date.now() - t3;
+        await liveAttach(client, server, 3, 3);
+        server.streams[3].fail(new Error('dropped'));
+        await until(() => client.getState().error?.kind === 'disconnected', 3000, 'lost connection after the default budget');
+        assert.equal(attachCount(), 4, 'one attach plus the three default retries');
+        assert.ok(gap1 >= 300, `first wait near the base delay (was ${gap1}ms)`);
+        assert.ok(gap2 >= 700, `second wait grows, delayMs x losses (was ${gap2}ms)`);
+        assert.ok(gap3 >= 1100, `third wait grows further (was ${gap3}ms)`);
+        assert.ok(gap2 > gap1 && gap3 > gap2, 'linear, growing backoff');
+        client.dispose();
+      });
+    });
+
+    describe('reconnecting chrome', () => {
+      it('a dropped attached stream shows the reconnecting chrome while the retry timer is still pending', async () => {
+        const { server, client, attachCount } = budgeted(() => 'stream', { reconnect: { attempts: 3, delayMs: 400 } });
+        await client.open();
+        await until(() => server.streams.length === 1, 2000, 'attach #1');
+        await liveAttach(client, server, 0, 0);
+        server.streams[0].fail(new Error('dropped'));
+        await until(() => client.getState().reconnecting === true, 200, 'the flag is set when the stream dies');
+        assert.equal(attachCount(), 1, 'set by the stream-end handling itself, before the timer fires');
+        assert.notEqual(client.getState().error?.kind, 'disconnected', 'no disconnect shown while the budget has retries left');
+        await until(() => attachCount() === 2, 3000, 'the scheduled retry attaches');
+        await liveAttach(client, server, 1, 1);
+        finishAttach(server, 1, 1);
+        await client.whenIdle();
+        assert.equal(client.getState().reconnecting, false);
+        client.dispose();
+      });
+
+      it('a retry scheduled before dispose never fires after it', async () => {
+        const { server, client, attachCount } = budgeted(() => 'stream', { reconnect: { attempts: 3, delayMs: 150 } });
+        await client.open();
+        await until(() => server.streams.length === 1, 2000, 'attach #1');
+        await liveAttach(client, server, 0, 0);
+        server.streams[0].fail(new Error('dropped'));
+        await until(() => client.getState().reconnecting === true, 200, 'retry pending');
+        client.dispose();
+        await tick(350); // past the scheduled retry delay
+        assert.equal(attachCount(), 1, 'the pending timer is gone and the disposed client re-attaches to nothing');
+        assert.equal((await client.resume()).ok, false, 'a disposed client does not resume');
+      });
+
+      it('a user run started while the retry timer is pending clears the chrome and stands the retry down', async () => {
+        const { server, client, attachCount } = budgeted(() => 'stream', { reconnect: { attempts: 3, delayMs: 60 } });
+        await client.open();
+        await until(() => server.streams.length === 1, 2000, 'attach #1');
+        await liveAttach(client, server, 0, 0);
+        server.streams[0].fail(new Error('dropped'));
+        await until(() => client.getState().reconnecting === true, 200, 'retry pending');
+        const sending = client.send('user takes over now');
+        await until(() => server.requests.some((r) => r.action === 'run'), 2000, 'run request');
+        await sending;
+        await tick(150); // past the timer: a run is open here, so the retry must stand down
+        assert.equal(attachCount(), 1, 'no re-attach: this client owns the run now');
+        assert.equal(client.getState().reconnecting, false, 'the chrome is cleared by the stand-down');
+        const runReq = server.requests.find((r) => r.action === 'run')!;
+        server.streams[1].send(
+          { type: 'RUN_STARTED', threadId: THREAD, runId: runReq.body.runId },
+          { type: 'RUN_FINISHED', threadId: THREAD, runId: runReq.body.runId, outcome: { type: 'success' } },
+        );
+        server.streams[1].close();
+        await client.whenIdle();
+        client.dispose();
+      });
+    });
+
+    describe('attached death around an in-flight resume', () => {
+      it('an attached stream dying just after adoption keeps the chrome up while the retry timer is pending', async () => {
+        const { server, client, attachCount } = budgeted(() => 'stream', { reconnect: { attempts: 3, delayMs: 5 } });
+        await client.open();
+        await until(() => server.streams.length === 1, 2000, 'attach #1');
+        await liveAttach(client, server, 0, 0);
+        server.streams[0].fail(new Error('dropped'));
+        await until(() => attachCount() === 2, 2000, 'retry attach #2');
+        // The retry's attach is adopted (its resume is completing) and the stream drops right after:
+        // the budget is burned and the timer armed around the resume settling — the chrome must be up
+        // for the whole gap until the next attach lands (no window with neither flag nor disconnect).
+        await liveAttach(client, server, 1, 1);
+        server.streams[1].fail(new Error('dropped'));
+        await until(() => !client.isRunOpen, 2000, 'the dead retry attach is released');
+        assert.equal(client.getState().reconnecting, true, 'chrome stays up while the retry timer is pending');
+        assert.notEqual(client.getState().error?.kind, 'disconnected');
+        await until(() => attachCount() === 3, 2000, 'the armed retry still attaches');
+        await liveAttach(client, server, 2, 2);
+        finishAttach(server, 2, 2);
+        await client.whenIdle();
+        assert.equal(client.getState().reconnecting, false, 'the successful attach clears the chrome');
+        assert.equal(client.getState().error, null);
+        client.dispose();
+      });
+
+      it('a retry that fires while a resume is in flight joins it instead of attaching a second time', async () => {
+        const server = createFakeAguiServer((req) =>
+          req.action === 'attach' ? 'stream' : controlResponse(req.body, { accepted: true }),
+        );
+        let hold: Promise<void> | null = null;
+        const fetchImpl = (async (url: string, init: RequestInit) => {
+          if (/\/messages(\?|$)/.test(String(url))) {
+            if (hold) await hold;
+            return new Response(JSON.stringify({ messages: [], hasMore: false }), { headers: { 'Content-Type': 'application/json' } });
+          }
+          return server.fetch(url, init);
+        }) as unknown as typeof fetch;
+        const client = new AgentChatClient({
+          agentId: 'alice',
+          threadId: THREAD,
+          resourceId: RESOURCE,
+          fetch: fetchImpl,
+          newId,
+          retry: { attempts: 3, delayMs: 5 },
+          reconnect: { attempts: 3, delayMs: 8 },
+        });
+        await client.open();
+        await until(() => server.streams.length === 1, 2000, 'attach #1');
+        await liveAttach(client, server, 0, 0);
+        server.streams[0].fail(new Error('dropped')); // burn 1, retry timer armed for 8ms
+        await until(() => client.getState().reconnecting === true, 200, 'retry pending');
+        let release!: () => void;
+        hold = new Promise<void>((r) => (release = r));
+        const resuming = client.resume(); // in flight (history held) when the timer fires
+        await tick(40); // past the retry delay: it must join the in-flight resume, not attach again
+        assert.equal(server.requests.filter((r) => r.action === 'attach').length, 1, 'the fired retry joined the in-flight resume');
+        assert.equal(client.getState().reconnecting, true, 'the chrome covers the joined wait');
+        release();
+        await until(() => server.requests.filter((r) => r.action === 'attach').length === 2, 2000, 'the resumed cycle attaches');
+        assert.equal(server.requests.filter((r) => r.action === 'attach').length, 2, 'one attach for the joined cycle');
+        await liveAttach(client, server, 1, 1);
+        const result = await resuming;
+        assert.equal(result.ok, true);
+        assert.notEqual(client.getState().error?.kind, 'disconnected');
+        server.streams[1].fail(new Error('dropped'));
+        await until(() => server.requests.filter((r) => r.action === 'attach').length === 3, 2000, 'the next drop still re-attaches');
+        await liveAttach(client, server, 2, 2);
+        finishAttach(server, 2, 2);
+        await client.whenIdle();
+        assert.equal(client.getState().reconnecting, false);
+        client.dispose();
+      });
     });
   });
 
