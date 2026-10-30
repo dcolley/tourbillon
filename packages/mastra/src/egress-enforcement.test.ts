@@ -2,9 +2,9 @@ import { strict as assert } from 'node:assert';
 import { createServer } from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { describe, it } from 'node:test';
-import { copyFileSync, mkdirSync, symlinkSync, writeFileSync, chmodSync, realpathSync, rmSync, readFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync, chmodSync, realpathSync, rmSync, readFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { EgressProxy } from './egress-proxy';
 import {
@@ -144,7 +144,6 @@ describe('/tmp skip guard (S261-S1)', () => {
   // it must skip ONLY for a genuine /tmp runtime dir and must RUN otherwise.
 
   const scratchDirs: string[] = [];
-  const here = fileURLToPath(new URL('.', import.meta.url));
   function scratchRoot(label: string): string {
     // Literal /tmp, NOT tmpdir(): the guard matches the /tmp prefix specifically and
     // TMPDIR can point elsewhere (e.g. a scratch dir under $HOME) without changing
@@ -153,6 +152,25 @@ describe('/tmp skip guard (S261-S1)', () => {
     scratchDirs.push(dir);
     mkdirSync(dir, { recursive: true });
     return dir;
+  }
+  function outsideTmpRoot(label: string): string {
+    // S267-S1: an "outside /tmp" fixture must NOT be derived from the checkout
+    // location — when the checkout itself lives under /tmp a sibling of src/ is
+    // still under /tmp and the pin tests would assert nothing (or fail outright).
+    // mkdtemp under /var/tmp (falling back to $HOME) is independent of where the
+    // repo lives; cleaned up via scratchDirs.
+    const bases = ['/var/tmp', homedir()];
+    let lastError: unknown;
+    for (const base of bases) {
+      try {
+        const dir = mkdtempSync(join(base, `tourbillon-s267-s1-${label}-`));
+        scratchDirs.push(dir);
+        return dir;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    throw new Error(`cannot create non-/tmp fixture dir (${bases.join(', ')}): ${String(lastError)}`);
   }
   function cleanupScratch(): void {
     while (scratchDirs.length) {
@@ -174,34 +192,57 @@ describe('/tmp skip guard (S261-S1)', () => {
     }
   });
 
+  it('classifies literal runtime roots: /tmp true, /var/tmp and $HOME false', () => {
+    // S267-S1: location-independent pin of the guard itself, driven by literal
+    // EXECUTION_WORKSPACE_ROOT values. Sub-directories are created inside each
+    // root so getEgressRuntimeDir()'s mkdir does not depend on write access to
+    // the parent itself. An always-skip mutant fails on the /var/tmp and $HOME
+    // cases regardless of where the checkout lives.
+    try {
+      for (const [root, expected] of [
+        [join('/tmp', `tourbillon-s267-s1-literal-${process.pid}`), true],
+        [join(outsideTmpRoot('vartmp'), 'runtime'), false],
+        [join(outsideTmpRoot('home'), 'runtime'), false],
+      ] as Array<[string, boolean]>) {
+        withEnv({ EXECUTION_WORKSPACE_ROOT: root }, () => {
+          assert.equal(libDirUnderTmp(), expected, `guard must report ${expected} for ${root}`);
+        });
+      }
+    } finally {
+      cleanupScratch();
+    }
+  });
+
   it('runs (does not skip) for a non-/tmp runtime dir', () => {
     // An always-skip mutant fails HERE: a genuine non-/tmp runtime dir must report
-    // false so the compile assertion executes (see also the real-compile case below).
-    const root = join(here, `.s261-s1-outside-${process.pid}`);
+    // false so the compile assertion executes (see also the real-compile case
+    // below). The fixture is created OUTSIDE the checkout (S267-S1) so this holds
+    // even when the checkout itself lives under /tmp.
+    const root = outsideTmpRoot('outside');
     try {
-      mkdirSync(root, { recursive: true });
       withEnv({ EXECUTION_WORKSPACE_ROOT: root }, () => {
         assert.equal(libDirUnderTmp(), false);
       });
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      cleanupScratch();
     }
   });
 
   it('resolves symlinks: a runtime dir symlinked into /tmp still counts as /tmp', () => {
     // An isAbsolute()-style mutant that inspects the raw path instead of realpathSync
     // would wrongly report false here (raw path outside /tmp, real target inside).
-    const outside = join(here, `.s261-s1-link-${process.pid}`);
+    // The raw-side fixture is created OUTSIDE the checkout (S267-S1) so the raw path
+    // is genuinely non-/tmp even from a /tmp checkout — otherwise the mutant would
+    // see /tmp raw and pass vacuously.
+    const outside = outsideTmpRoot('link');
     const realInside = scratchRoot('link-target');
     const linkDir = join(outside, '.runtime');
     try {
-      mkdirSync(outside, { recursive: true });
       symlinkSync(realInside, linkDir);
       withEnv({ EXECUTION_WORKSPACE_ROOT: outside }, () => {
         assert.equal(libDirUnderTmp(), true);
       });
     } finally {
-      rmSync(outside, { recursive: true, force: true });
       cleanupScratch();
     }
   });
