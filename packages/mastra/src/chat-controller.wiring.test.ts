@@ -233,6 +233,13 @@ describe('chat assembly call-site wiring (S1)', () => {
  * and compute a `contextBudget` it never used (dead since the CONCIERGE-PARAMS wiring
  * landed in createChatAgentWithSkills/buildChatRunConfig). If a second budget resolution
  * creeps back into createChatController, the count leg and the slice leg both go RED.
+ *
+ * S234-S1 (#234 ACCEPT): the original provider-row leg matched /resolveAgentProviderRow\(/,
+ * which the real call site never hits — it resolves through the deps seam as
+ * `(deps?.resolveProviderRow ?? resolveAgentProviderRow)(…)`, so the closing paren sits
+ * between the name and the `(`. Re-adding only the dead provider-row read (a duplicate DB
+ * read) survived. Both regex shapes below match the seam form AND a plain direct call, so
+ * that mutant now REDs; the budget count leg above still catches the full chain.
  */
 describe('createChatController source pin (S195-S4: no dead contextBudget)', () => {
   const src = readFileSync(join(__dirname, 'chat-controller.ts'), 'utf8');
@@ -247,6 +254,24 @@ describe('createChatController source pin (S195-S4: no dead contextBudget)', () 
     assert.ok(start > 0, 'createChatController found in source');
     const body = src.slice(start);
     assert.doesNotMatch(body, /resolveAgentContextBudget\(/, 'dead contextBudget must not return to createChatController');
-    assert.doesNotMatch(body, /resolveAgentProviderRow\(/, 'its provider resolution was dead too (the chat Agent site is authoritative)');
+    // S234-S1: must match BOTH call shapes — the live `resolveAgentProviderRow)(` seam form
+    // and a plain `resolveAgentProviderRow(` direct call — or a re-added dead read hides
+    // behind the `??` seam. `resolveProviderRow ??` covers seam calls reworked onto the
+    // deps name alone.
+    assert.doesNotMatch(
+      body,
+      /resolveAgentProviderRow\)?\(|resolveProviderRow\s*\?\?/,
+      'its provider resolution was dead too (the chat Agent site is authoritative)',
+    );
+  });
+
+  it('non-vacuity: the LIVE provider resolution still exists at the chat Agent site', () => {
+    // Without this, deleting the live seam call in createChatAgentWithSkills would keep the
+    // doesNotMatch leg green by erasing every match. Pin the exact live shape back in.
+    const live = src.match(/resolveAgentProviderRow\)?\(|resolveProviderRow\s*\?\?/g) ?? [];
+    assert.ok(
+      live.length >= 1,
+      'the live chat provider resolution (resolveAgentProviderRow)( / resolveProviderRow ??) must stay in the file',
+    );
   });
 });
