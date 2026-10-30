@@ -330,19 +330,27 @@ describe('runSchedulerMain: give-up log carries only sanitised fields', () => {
 });
 
 describe('scheduler entry: malformed DATABASE_URL', () => {
-  it('exits 1 with one sanitised line before loading anything that connects', () => {
-    const here = path.dirname(fileURLToPath(import.meta.url));
-    const tsxCli = path.resolve(here, '../node_modules/.bin/tsx');
-    const res = spawnSync(tsxCli, [path.join(here, 'index.ts')], {
-      env: { PATH: process.env.PATH ?? '', DATABASE_URL: `postgres://tb_user:${PW}@db.internal:99999/tourbillon` },
-      encoding: 'utf-8',
-      timeout: 60_000,
-    });
-    const out = `${res.stdout}\n${res.stderr}`;
-    assert.equal(res.status, 1, out);
-    assert.match(out, /failed to start/);
-    assert.match(out, /DATABASE_URL_INVALID/);
-    assert.doesNotMatch(out, /s3cret|db\.internal|postgres:\/\//);
-    assert.doesNotMatch(out, /database not ready; retrying/, 'not retried');
-  });
+  // S256-S3: this pin spawns a real tsx child (full module graph boot). Under a parallel
+  // multi-worktree gate the spawn alone can exceed the old 60 s budget, so both the spawn
+  // budget and the node:test per-test ceiling are raised — behaviour-neutral; serial runs
+  // finish in seconds. A timeout now fails THIS test by name, not the whole file.
+  it(
+    'exits 1 with one sanitised line before loading anything that connects',
+    { timeout: 240_000 },
+    () => {
+      const here = path.dirname(fileURLToPath(import.meta.url));
+      const tsxCli = path.resolve(here, '../node_modules/.bin/tsx');
+      const res = spawnSync(tsxCli, [path.join(here, 'index.ts')], {
+        env: { PATH: process.env.PATH ?? '', DATABASE_URL: `postgres://tb_user:${PW}@db.internal:99999/tourbillon` },
+        encoding: 'utf-8',
+        timeout: 180_000,
+      });
+      const out = `${res.stdout}\n${res.stderr}`;
+      assert.equal(res.status, 1, out);
+      assert.match(out, /failed to start/);
+      assert.match(out, /DATABASE_URL_INVALID/);
+      assert.doesNotMatch(out, /s3cret|db\.internal|postgres:\/\//);
+      assert.doesNotMatch(out, /database not ready; retrying/, 'not retried');
+    },
+  );
 });

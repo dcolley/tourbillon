@@ -14,6 +14,7 @@
   },
   "scripts": {
     "test": "node --import tsx --test src/*.test.ts src/**/*.test.ts",
+    "test:counts": "node scripts/run-tests.mjs",
     "type-check": "sh scripts/type-check-gate.sh"
   },
   "dependencies": {

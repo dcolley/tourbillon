@@ -54,6 +54,16 @@
  *   S233-S6: the real-loop pins no longer sleep (50–11_500 ms): startTaskRunnerPolling gained
  *     an intervalMs test seam (bypasses the 5s floor) and poller.whenTicks(n) — pins await
  *     exact tick counts.
+ *
+ * S256-S3 (#256 ACCEPT soft-pack, parallel gate): under a PARALLEL multi-worktree gate run
+ * this file's cheap tests all finish in seconds and then the always-on PGlite migration
+ * (S233-S1: applyMigrations over the FULL schema, TWICE) starves behind ~30 sibling suites
+ * competing for CPU — file-level failures around 250 s were observed, while the same file
+ * is GREEN serially. The slow pins now carry an explicit per-test timeout
+ * (PARALLEL_GATE_TIMEOUT_MS) instead of the runner default, so a loaded gate either gets a
+ * genuine slow GREEN or a pointed per-test failure with the offending test named, rather
+ * than an opaque whole-file timeout. No behaviour change: serial runs settle far below the
+ * ceiling. Same treatment for startup.test.ts's tsx-spawning pin.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -77,6 +87,16 @@ import type { WakeResult } from './wake-runner';
 
 // task-runner.ts imports @tourbillon/db at module load, which validates DATABASE_URL eagerly.
 process.env.DATABASE_URL ??= 'postgres://unused@127.0.0.1:1/unused';
+
+/**
+ * S256-S3: per-test ceiling for the genuinely slow pins in this file (PGlite full-schema
+ * migration ×2, live-db migration passes). Serial runs finish these well under a minute;
+ * under a parallel multi-worktree gate they starve behind sibling suites and hit the
+ * runner's file-level wall (~250 s observed) with no per-test attribution. An explicit
+ * per-test timeout turns that opaque file failure into either a slow GREEN or a failure
+ * that NAMES the starved test. Comfortably below any outer job wall; behaviour-neutral.
+ */
+const PARALLEL_GATE_TIMEOUT_MS = 240_000;
 
 const C = 'company-1';
 
@@ -569,7 +589,7 @@ function buggyRawDateWhere(cutoff: Date) {
   );
 }
 
-test('S199d (live): countActiveRuns is GREEN end-to-end on real postgres-js — gte binds a pre-serialised ISO string', { skip: liveSkipReason }, async () => {
+test('S199d (live): countActiveRuns is GREEN end-to-end on real postgres-js — gte binds a pre-serialised ISO string', { skip: liveSkipReason, timeout: PARALLEL_GATE_TIMEOUT_MS }, async () => {
   requireLive(); // S233-S3: demanded live but no URL → hard failure, never a silent skip
   const client = liveClient();
   try {
@@ -602,7 +622,7 @@ test('S199d (live): countActiveRuns is GREEN end-to-end on real postgres-js — 
   }
 });
 
-test('S199d (live): the raw-Date sql form stays RED at the same driver boundary — proving why gte is load-bearing', { skip: liveSkipReason }, async () => {
+test('S199d (live): the raw-Date sql form stays RED at the same driver boundary — proving why gte is load-bearing', { skip: liveSkipReason, timeout: PARALLEL_GATE_TIMEOUT_MS }, async () => {
   requireLive(); // S233-S3
   const client = liveClient();
   try {
@@ -665,7 +685,7 @@ function pgliteMigrationTag(client: PGliteLike): MigrationSqlTag {
   return tag;
 }
 
-test('S233-S1: applyMigrations is idempotent — a second pass on the same database is a GREEN no-op (PGlite, always on)', async () => {
+test('S233-S1: applyMigrations is idempotent — a second pass on the same database is a GREEN no-op (PGlite, always on)', { timeout: PARALLEL_GATE_TIMEOUT_MS }, async () => {
   const { PGlite } = dbRequire('@electric-sql/pglite') as { PGlite: new () => PGliteLike };
   const pglite = new PGlite();
   const tag = pgliteMigrationTag(pglite);
@@ -688,7 +708,7 @@ test('S233-S1: applyMigrations is idempotent — a second pass on the same datab
   }
 });
 
-test('S233-S1 (live): two applyMigrations passes on the same live db are GREEN — rerun skips recorded hashes', { skip: liveSkipReason }, async () => {
+test('S233-S1 (live): two applyMigrations passes on the same live db are GREEN — rerun skips recorded hashes', { skip: liveSkipReason, timeout: PARALLEL_GATE_TIMEOUT_MS }, async () => {
   requireLive();
   const client = liveClient();
   try {
