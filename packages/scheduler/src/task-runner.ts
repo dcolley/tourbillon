@@ -335,6 +335,14 @@ export async function pollTaskRunner(
       summary.skippedNoCapacity += 1;
       const lastLoggedAt = opts.deferLogMemory?.get(agentId);
       if (lastLoggedAt === undefined || now() - lastLoggedAt >= deferLogWindowMs) {
+        // S252-S1 (#252 soft-pack): the two remedies below are NOT equally reachable. The env
+        // half is the ONLY knob a scheduler-main boot can turn — main starts the poller with
+        // ZERO args (SchedulerBootDeps types the seam `() => { stop(): void }`), so opts.taskCap
+        // is undefined on every main-shaped tick (pinned: scheduler-main-252-softs.test.ts).
+        // The opts.taskCap half is deliberately tool/opts-only: explicit-opts callers (embedded
+        // pollers, tools, tests) can pass it. The copy must name both (each is real to SOME
+        // caller) and must never claim main can pass opts.taskCap — S252-S1a/S1b RED on such a
+        // copy.
         const msg =
           'task-run capacity zero, refusing — Run Tasks cannot start for this agent while the ' +
           'effective task cap is 0 (raise TASK_RUNNER_MAX_CONCURRENT_RUNS to ≥ 2, or pass an ' +
