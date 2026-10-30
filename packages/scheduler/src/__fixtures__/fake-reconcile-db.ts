@@ -32,6 +32,12 @@ export function fakeReconcileDb(opts: {
    * best-effort contract would then throw instead of settling (which is the point).
    */
   withActivity?: boolean;
+  /**
+   * S263-S3 (#263 softs): with `withActivity`, make the audit insert THROW instead of pushing —
+   * drives the sweep's onAuditError logging path (a broken audit write must be heard, never
+   * silently swallowed, and must never stop the settles).
+   */
+  failActivity?: boolean;
 }): { db: ChatTaskDb; settled: SettledWrite[]; activity: Array<Record<string, unknown>> } {
   const settled: SettledWrite[] = [];
   const activity: Array<Record<string, unknown>> = [];
@@ -63,6 +69,7 @@ export function fakeReconcileDb(opts: {
           // recordChatTaskActivity's shape: insert(table).values(row) — awaited, best-effort.
           insert: () => ({
             values: async (row: Record<string, unknown>) => {
+              if (opts.failActivity) throw new Error('activity db down');
               activity.push(row);
               return [row];
             },

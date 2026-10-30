@@ -620,6 +620,12 @@ export async function reconcileStaleChatTaskRuns(
      * (recordChatTaskActivity never throws here).
      */
     audit?: boolean;
+    /**
+     * S263-S3: a failed audit insert is swallowed by contract — without this sink it is
+     * invisible. The scheduler sweep passes a logger so a broken audit write surfaces in
+     * scheduler logs while the settle itself still goes through (best-effort, never throws).
+     */
+    onAuditError?: (err: unknown, row: StaleChatTaskRunRow) => void;
     now?: Date;
     limit?: number;
   },
@@ -659,7 +665,12 @@ export async function reconcileStaleChatTaskRuns(
             attempts: row.attempts,
             note: 'Run Task lost (worker died or run row missing).',
           },
-        }, { database });
+        }, {
+          database,
+          // S263-S3: never silent — the caller's sink hears about a broken audit insert
+          // (still best-effort: recordChatTaskActivity swallows when no sink is given).
+          ...(opts.onAuditError ? { onError: (err: unknown) => opts.onAuditError!(err, row) } : {}),
+        });
       }
     }
   }

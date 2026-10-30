@@ -34,7 +34,7 @@ import {
   type ChatTask,
   type ChatTaskScope,
 } from '@tourbillon/db';
-import { resolveTaskRunnerSettings, type CompanySettings } from '@tourbillon/shared';
+import { resolveTaskRunnerSettings, createTraceLogger, type CompanySettings } from '@tourbillon/shared';
 import { z } from 'zod';
 import { extractToolRuntimeContext } from './api-client';
 import { getCurrentHeartbeatContext } from '../heartbeat-context';
@@ -117,8 +117,11 @@ const notFound = (id: string) => ({
  * list — that is who made the change, whatever chat turn asked for it; the board user who
  * requested it rides in details.requestedBy when the tool context resolved one. Best-effort:
  * `recordChatTaskActivity` never throws at this caller (losing an audit row must not lose the
- * write the human just asked for).
+ * write the human just asked for). S263-S3: the swallow is never silent — a failed insert warns
+ * through the scheduler-style trace logger, same "…activity log failed" shape as the runner path.
  */
+const auditTracer = createTraceLogger('chat-task-tools', {});
+
 async function logToolActivity(
   scope: ChatTaskScope & { threadId?: string },
   task: ChatTask,
@@ -142,7 +145,15 @@ async function logToolActivity(
       ...(task.requestedByDisplayName ? { requestedBy: task.requestedByDisplayName } : {}),
       ...extra,
     },
-  }, { database: toolDb() });
+  }, {
+    database: toolDb(),
+    onError: (err: unknown) =>
+      auditTracer.warn('chat-task activity log failed', {
+        taskId: task.id,
+        action,
+        error: err instanceof Error ? err.message : String(err),
+      }),
+  });
 }
 
 export const listMyTasksTool = createTool({

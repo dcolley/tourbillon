@@ -733,13 +733,26 @@ export function resolvePollIntervalSec(
  */
 export async function sweepStaleChatTaskRuns(
   database: ChatTaskDb = db as unknown as ChatTaskDb,
+  /**
+   * S263-S3: sink for failed audit writes on the settle rows. Without it a broken activity_log
+   * insert was silently swallowed on the sweep path (only the poller's own rows logged). Defaults
+   * to the scheduler trace logger — same 'task-run activity log failed' line as the runner path.
+   */
+  opts: { log?: TaskRunnerDeps['log'] } = {},
 ): Promise<ChatTaskReconcileResult> {
   const { staleSec } = resolveHeartbeatLivenessConfig();
   const cutoff = new Date(Date.now() - staleSec * 1000);
+  const log = opts.log ?? createTraceLogger('task-run', {});
   return reconcileStaleChatTaskRuns(database, {
     staleCutoff: cutoff,
     // TASK-AUDIT (#258): the sweep's re-queue/park are lifecycle transitions too — audit them.
     audit: true,
+    // S263-S3: best-effort still, but never silent — a lost audit row warns like the runner's.
+    onAuditError: (err, row) => {
+      const data = { chatTaskId: row.taskId, error: err instanceof Error ? err.message : String(err) };
+      if (log.warn) log.warn('task-run activity log failed', data);
+      else log.info('task-run activity log failed', data);
+    },
     // S-soft: park/re-queue on the company's OWN resolved budget (settings.taskRunner.
     // maxAttemptsPerTask, clamped) — the same number the claim used. Budget 1 parks, never
     // re-queues in a loop; a fixed 2 here would re-queue past the company's limit forever.

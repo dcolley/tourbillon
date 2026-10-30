@@ -764,4 +764,44 @@ describe('TASK-AUDIT (#258): tool-owned transitions write lifecycle audit rows',
       await client.close();
     }
   });
+
+  it('S263-S3 (#263 softs): the swallowed tool-side audit failure is LOUD — a warn names the task and error', async () => {
+    const { client, db } = await seededToolDb();
+    try {
+      const task = await addChatTask(SCOPE, { title: 'Report on the outage' }, db);
+      const broken = Object.create(db, {
+        insert: {
+          value: (table: unknown) => {
+            if (table === activityLog) throw new Error('activity db down');
+            return (db as never as { insert: (t: unknown) => never }).insert(table);
+          },
+        },
+      }) as ChatTaskDb;
+      setToolDbForTests(broken);
+
+      const warns: string[] = [];
+      const originalWarn = console.warn;
+      console.warn = (...args: unknown[]) => {
+        warns.push(args.map(String).join(' '));
+      };
+      try {
+        const res = (await completeMyTaskTool.execute!(
+          { id: task.id, note: 'done despite the audit outage' },
+          { requestContext: scopeContext } as never,
+        )) as ToolResult;
+        assert.equal(res.ok, true, 'best-effort contract holds: the settle still lands');
+      } finally {
+        console.warn = originalWarn;
+      }
+      const hit = warns.find((w) => w.includes('chat-task activity log failed'));
+      assert.ok(hit, 'the failed audit insert is logged, not silently swallowed');
+      assert.match(hit!, new RegExp(String(task.id)));
+      assert.match(hit!, /activity db down/, 'the underlying error travels with the line');
+      const [row] = await listChatTasks(SCOPE, { includeClosed: true }, db);
+      assert.equal(row!.status, 'done');
+    } finally {
+      setToolDbForTests(null);
+      await client.close();
+    }
+  });
 });
