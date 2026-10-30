@@ -44,7 +44,7 @@
  *   S233-S3: no CI workflow sets TOURBILLON_TEST_DATABASE_URL, so the live block skips by
  *     default. Exact local run (disposable container — the seed guard REQUIRES a test-named
  *     db):
- *       docker run -d --rm --name tourbillon-test-pg -e POSTGRES_PASSWORD=*** \
+ *       docker run -d --rm --name tourbillon-test-pg -e POSTGRES_PASSWORD=postgres \
  *         -p 5433:5432 postgres:16
  *       docker exec tourbillon-test-pg psql -U postgres -c 'create database tourbillon_test'
  *       TOURBILLON_TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5433/tourbillon_test \
@@ -490,7 +490,12 @@ async function applyMigrations(sqlTag: MigrationSqlTag): Promise<void> {
   const applied = new Set(appliedRows.map((r) => r.hash));
   for (const m of readMigrationFiles({ migrationsFolder })) {
     if (m.folderMillis > whenLatest) break;
-    if (applied.has(m.hash)) continue; // S233-S1: already applied — a rerun must be a no-op
+    // S233-S1: already applied — a rerun must be a no-op. S236-S4: the skip is HASH-only.
+    // Editing an already-applied migration's SQL changes its hash and the file is RE-APPLIED
+    // (`... already exists`) — drizzle's own migrator additionally uses a created_at
+    // high-water mark. Robust fix is a throwaway db per run (never edit shipped migrations);
+    // this test helper deliberately does not invent a second migration ledger.
+    if (applied.has(m.hash)) continue;
     for (const chunk of m.sql) {
       if (chunk.trim()) await sqlTag.unsafe(chunk, [], { prepare: false });
     }
