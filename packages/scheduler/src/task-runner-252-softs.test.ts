@@ -22,6 +22,13 @@
  * the pin below freezes the ordering: a paused-only queue produces the identical summary at
  * budget 1 and budget 2. Moving the cap-0 check ahead of the paused filter (or dropping the
  * filter) makes the budget-1 arm RED.
+ *
+ * S256-S1/S2 (#256 ACCEPT soft-pack addendum): S1b above passes `maxConcurrentRuns: 1`
+ * EXPLICITLY, so it is "main-shaped" only by coincidence — the LITERAL main path (zero opts,
+ * budget inherited from TASK_RUNNER_MAX_CONCURRENT_RUNS=1 at module load) is pinned by
+ * task-runner-256-softs.test.ts via a fresh child process; S1b stays for the opts-shape half.
+ * S2 narrows the two anti-copy bans below from a bare /scheduler/i to the
+ * taskCap↔boot-path-tie pattern (FORBIDDEN_TASKCAP_WIRING_CLAIM).
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -80,6 +87,21 @@ function collectingDeps(rows: RunnableChatTaskRow[], c: Collector): TaskRunnerDe
 
 const CAP_ZERO_REFUSAL = /task-run capacity zero, refusing/;
 
+/**
+ * S256-S2 (#256 ACCEPT soft-pack): the narrowed wiring-claim ban. The old pin used a bare
+ * /scheduler/i, which is too broad — it REDs on legitimate future copy that merely
+ * MENTIONS a scheduler ("see the scheduler log", "raised from the scheduler"), not on the
+ * actual lie. What must stay forbidden is a copy that TIES `opts.taskCap` to the scheduler
+ * boot path ("…or have scheduler-main pass opts.taskCap"), because main starts the poller
+ * with ZERO args (wiring pinned by scheduler-main-252-softs.test.ts). The 60-char window
+ * on each side is generous enough for natural connector words ("pass opts.taskCap through
+ * the boot seam" ≈ 45 chars REDs; "pass an explicit opts.taskCap ≥ 1" — the real copy,
+ * 63 chars to the nearest boot-path word — stays GREEN) while still catching the
+ * plausible mutant wordings.
+ */
+const FORBIDDEN_TASKCAP_WIRING_CLAIM =
+  /taskCap[\s\S]{0,60}\b(scheduler|main|boot)\b|\b(scheduler|main|boot)\b[\s\S]{0,60}taskCap/i;
+
 // ─── S252-S1 ─────────────────────────────────────────────────────────────────
 
 test('S252-S1a: cap-0 refusal names the env remedy and the opts-only remedy without claiming scheduler-main reachability', async () => {
@@ -101,13 +123,15 @@ test('S252-S1a: cap-0 refusal names the env remedy and the opts-only remedy with
   assert.match(refusal.msg, /opts\.taskCap/, 'names the explicit override for opts-aware call sites');
   // Anti-copy claim: the copy must not suggest the opts.taskCap half is reachable from the
   // scheduler boot path. Copy like "…or have scheduler-main pass an explicit opts.taskCap"
-  // (or any wording tying opts.taskCap to scheduler/main) REDs here — the wiring side of the
-  // same honesty is pinned by scheduler-main-252-softs.test.ts (main passes ZERO args).
+  // (or any wording tying opts.taskCap to scheduler/main/boot) REDs here — the wiring side of
+  // the same honesty is pinned by scheduler-main-252-softs.test.ts (main passes ZERO args).
+  // S256-S2: narrowed from a bare /scheduler/i (which REDs on innocent copy merely MENTIONING
+  // a scheduler) to the taskCap↔boot-path tie — see FORBIDDEN_TASKCAP_WIRING_CLAIM.
   assert.doesNotMatch(
     refusal.msg,
-    /scheduler/i,
+    FORBIDDEN_TASKCAP_WIRING_CLAIM,
     'the opts.taskCap remedy is intentionally tool/opts-only — the copy must not claim ' +
-      'scheduler-main (which starts the poller with zero args) can pass it',
+      'the boot path (which starts the poller with zero args) can pass it',
   );
 });
 
@@ -132,7 +156,11 @@ test('S252-S1b: the main-shaped poller path (no opts.taskCap) still lands on the
   for (const refusal of refusals) {
     assert.match(refusal.msg, /TASK_RUNNER_MAX_CONCURRENT_RUNS/, 'env remedy named');
     assert.match(refusal.msg, /opts\.taskCap/, 'opts-only remedy named');
-    assert.doesNotMatch(refusal.msg, /scheduler/i, 'no claim that main can pass opts.taskCap');
+    assert.doesNotMatch(
+      refusal.msg,
+      FORBIDDEN_TASKCAP_WIRING_CLAIM,
+      'no claim that the boot path can pass opts.taskCap (narrowed from /scheduler/i, S256-S2)',
+    );
   }
   assert.deepEqual(c.claims, [], 'the main-shaped cap-0 tick never claims a task');
 });
