@@ -92,32 +92,52 @@ describe('saveConciergeModel → validateConciergeModelParams wiring (S234-S2)',
     // catch-all — any prose mention of validated.params (comments included) used to
     // satisfy the pin while raw formData was actually persisted (mutant M6).
     const code = stripComments(saveConciergeModelBody());
-    assert.match(
-      code,
-      /const\s+params\s*=\s*validated\.params\s*;|params\s*:\s*validated\.params/,
-      'params must be pinned to validated.params (const params = validated.params; or params: validated.params) before the write',
-    );
     const writeAt = code.indexOf('updateCompanyConciergeModel(');
-    const pinAt = code.search(/const\s+params\s*=\s*validated\.params\s*;|params\s*:\s*validated\.params/);
-    assert.ok(pinAt >= 0 && pinAt < writeAt, 'the params pin must sit before updateCompanyConciergeModel(');
+    assert.ok(writeAt >= 0, 'updateCompanyConciergeModel( exists in the body slice');
+    const args = callArguments(code, 'updateCompanyConciergeModel(');
+
+    // S244-S3: the validator result may be pinned either as a statement before the write
+    // (const params = validated.params;) or inline in the call (params: validated.params) —
+    // both are equivalent, so the before-the-write ordering check only applies to the
+    // statement form.
+    const constPinAt = code.search(/const\s+params\s*=\s*validated\.params\s*;/);
+    const pinnedToValidator =
+      (constPinAt >= 0 && constPinAt < writeAt) ||
+      /(?:^|[{,[])\s*params\s*:\s*validated\.params\s*(?:[,}\]]|$)/.test(args);
+    assert.ok(
+      pinnedToValidator,
+      'params must be pinned to validated.params (const params = validated.params; before the write, or params: validated.params inline in the call)',
+    );
     assert.doesNotMatch(
       code,
       /params:\s*\{\s*maxContextTokens:\s*formData/,
       'raw formData must not be passed through as params',
     );
 
-    // S239-S1: the pins above only proved a `validated.params` binding EXISTS somewhere
-    // before the call — a mutant keeping `const params = validated.params;` while
-    // persisting raw formData into the write object (e.g. inline
-    // `params: { maxContextTokens: formData.get(...) }`) still survived them. Assert on
-    // the actual ARGUMENTS of updateCompanyConciergeModel: the persisted value must be
-    // the pinned `params` binding (shorthand or `params: params`), and raw formData must
-    // not appear in the call at all.
-    const args = callArguments(code, 'updateCompanyConciergeModel(');
-    assert.match(
-      args,
-      /(?:^|[{,[]|\s)params\s*(?:[:,]\s*params)?\s*(?:[,}\]])/,
-      'the write must pass the pinned `params` binding (shorthand or params: params) as the params value',
+    // S239-S1 / S244-S2: assert on the actual ARGUMENTS of updateCompanyConciergeModel.
+    // The persisted value must be EXACTLY the pinned binding: `params`, `params: params`
+    // or (S244-S3) `params: validated.params`. S244-S2 closed the loose-token hole: the
+    // key match is anchored to a delimiter position and its value must be the WHOLE
+    // binding, so `params: fallback ?? params` REDs (the trailing `params` in an
+    // expression has no delimiter before it and the key's value is not the binding);
+    // likewise nothing may overwrite the binding after it — no spread (mutant M6:
+    // `params, ...extra` with formData inside `extra`) and no duplicate params key.
+    const paramsBinding = /(?:^|[{,[])\s*params\s*(?::\s*(?:validated\.)?params\s*)?(?=[,}\]]|$)/.exec(args);
+    if (!paramsBinding) {
+      assert.fail(
+        'the write must pass the pinned `params` binding exactly (params, params: params, or params: validated.params) as the params value — params: fallback ?? params must RED',
+      );
+    }
+    const afterBinding = args.slice(paramsBinding.index + paramsBinding[0].length);
+    assert.doesNotMatch(
+      afterBinding,
+      /\.\.\./,
+      'no spread may appear after the params binding and overwrite it (params, ...extra must RED)',
+    );
+    assert.doesNotMatch(
+      afterBinding,
+      /(?:^|[{,[])\s*params\s*:/,
+      'no duplicate params key may redeclare the binding after it (params, params: <other> must RED)',
     );
     assert.doesNotMatch(
       args,

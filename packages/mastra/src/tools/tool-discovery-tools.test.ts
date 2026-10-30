@@ -37,12 +37,17 @@ const TEST_AGENT_ID = 'td-agent-1';
  * 9 tests). Per-test isolation is preserved by truncating the fixture tables before each
  * test and reseeding — CASCADE also clears the dependent agents rows.
  *
- * S235-S2 (#235 ACCEPT), reworded per S237-S1 (#237 ACCEPT) and S239-S2 (#239 ACCEPT):
+ * S235-S2 (#235 ACCEPT), reworded per S237-S1 (#237 ACCEPT), S239-S2 (#239 ACCEPT) and
+ * S244-S1 (#244 ACCEPT):
  * TRUNCATE scope note. `TRUNCATE companies CASCADE` empties EVERY table that references
  * `companies` — directly (whatever its `ON DELETE` action, including rows with a null FK)
- * OR transitively through an FK chain (CASCADE is transitive: e.g. `cost_events` has no FK
- * into `companies` at all but hangs off `agents`, so it is emptied too) — it does NOT
- * follow "rows reachable via ON DELETE CASCADE". Only tables with no direct or transitive
+ * OR transitively through an FK chain (TRUNCATE CASCADE is transitive: a hypothetical
+ * grandchild table that only FKs into `agents` would be emptied too) — it does NOT
+ * follow "rows reachable via ON DELETE CASCADE". There is currently NO transitive-only
+ * table to cite: every company-scoped table also carries a direct `company_id` FK into
+ * `companies` — `cost_events` hangs off `agents` but ALSO has its own direct
+ * `company_id` -> `companies.id` FK (schema/cost-events.ts), so it is reset directly,
+ * not via the chain. Only tables with no direct or transitive
  * FK path into `companies` are not reset — e.g. system-wide `llm_providers`, which is
  * global and has no companyId column / FK into companies at all (the per-company
  * `company_llm_providers` switch table DOES have one, so it is reset). This fixture only
