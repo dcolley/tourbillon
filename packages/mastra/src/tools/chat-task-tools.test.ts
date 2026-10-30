@@ -134,6 +134,18 @@ describe('CHAT_TASK_TOOLS — scope from the request context only (AC5)', () => 
     assert.match(listMyTasksTool.description, /do not call showTaskList/);
     assert.match(listMyTasksTool.description, /at least one task/);
   });
+
+  // #242 (CHAT-TASK-HANDOFF): addMyTask is the queue-for-Run-Task entry point. The copy must keep
+  // sending multi-step chat work to taskRunner instead of a live-turn tool loop, and keep simple
+  // asks in the live turn — deleting any of these clauses silently reverts to in-turn grinding.
+  it('#242: addMyTask queues multi-step work for Run Task instead of executing it live', () => {
+    const d = addMyTaskTool.description ?? '';
+    assert.match(d, /Run Task queue \(taskRunner\)/);
+    assert.match(d, /do NOT grind tool loops for it in the live chat turn/);
+    assert.match(d, /<task-progress/);
+    assert.match(d, /queued for Run Task/);
+    assert.match(d, /Simple one-shot asks/);
+  });
 });
 
 // ─── S7 (#196 soft-pack): the two Run Task controls, driven end-to-end ──────
