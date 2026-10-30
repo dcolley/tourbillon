@@ -233,18 +233,49 @@ describe('Chat ↔ Heartbeat Tool Parity', () => {
 // The Concierge/live chat prompt must tell the agent to hand NON-TRIVIAL asks to addMyTask
 // (async Run Task / taskRunner) and stop in-turn, keep SIMPLE asks live, and never loop the
 // same exploratory tool in chat. These pins fail if the wording is silently deleted.
+//
+// S243-S1 (#243 soft-pack): pins assert the distinctive PREDICATE phrases of each rule, not the
+// section labels/keywords — deleting the actual simple-vs-non-trivial / stop-in-turn /
+// no-repeat-tool clause (or silently softening it) must fail the test, not just renaming it.
 
-describe('CHAT_MODE_INSTRUCTIONS — chat-task handoff wording (#242)', () => {
+describe('CHAT_MODE_INSTRUCTIONS — chat-task handoff wording (#242, S243-S1/S4 pins)', () => {
   it('routes non-trivial asks to addMyTask / Run Task and stops in-turn work', () => {
-    assert.match(CHAT_MODE_INSTRUCTIONS, /Simple vs non-trivial/);
-    assert.match(CHAT_MODE_INSTRUCTIONS, /call \`addMyTask\` with an imperative title/);
+    assert.match(CHAT_MODE_INSTRUCTIONS, /Simple vs non-trivial — hand off to Run Task/);
+    // The NON-TRIVIAL definition itself (not just the "non-trivial" label).
+    assert.match(
+      CHAT_MODE_INSTRUCTIONS,
+      /NON-TRIVIAL asks \(multi-step investigation, planning that adapts across goals\/issues, anything needing a tool loop\)/,
+    );
+    // The anti-grind clause + queue entry point + what the human is told + the stop rule.
+    assert.match(CHAT_MODE_INSTRUCTIONS, /do \*\*not\*\* grind the loop in the interactive turn/);
+    assert.match(CHAT_MODE_INSTRUCTIONS, /call `addMyTask` with an imperative title/);
     assert.match(CHAT_MODE_INSTRUCTIONS, /queued for Run Task \/ taskRunner/);
-    assert.match(CHAT_MODE_INSTRUCTIONS, /<task-progress/);
-    assert.match(CHAT_MODE_INSTRUCTIONS, /\*\*STOP\*\*/);
+    assert.match(CHAT_MODE_INSTRUCTIONS, /progress will come back as `<task-progress …>` updates/);
+    assert.match(CHAT_MODE_INSTRUCTIONS, /then \*\*STOP\*\* — do not keep working it in-turn/);
   });
 
-  it('keeps simple asks in the live turn and bans repeated exploratory tool calls', () => {
-    assert.match(CHAT_MODE_INSTRUCTIONS, /SIMPLE asks/);
-    assert.match(CHAT_MODE_INSTRUCTIONS, /Do \*\*not\*\* call the same exploratory\/read tool repeatedly/);
+  it('keeps simple asks in the live turn and queues the SECOND exploratory call on the same question', () => {
+    // The SIMPLE side must carry its own predicate: one-shot answer lives in the live turn, and
+    // one clarifying read stays live (the "one read" boundary, made explicit — S243-S4).
+    assert.match(CHAT_MODE_INSTRUCTIONS, /SIMPLE asks \(answerable in one shot/);
+    assert.match(CHAT_MODE_INSTRUCTIONS, /one clarifying read on the way to the answer stays live/);
+    assert.match(CHAT_MODE_INSTRUCTIONS, /answer them in this live turn/);
+    // The no-loop rule: repeat ban + the tightened 2nd-call trigger + the queue-not-loop action.
+    assert.match(
+      CHAT_MODE_INSTRUCTIONS,
+      /Do \*\*not\*\* call the same exploratory\/read tool repeatedly in one live chat turn/,
+    );
+    assert.match(CHAT_MODE_INSTRUCTIONS, /\*\*second exploratory call on the same question\*\*/);
+    assert.match(CHAT_MODE_INSTRUCTIONS, /queue it via `addMyTask` instead of looping/);
+  });
+
+  it('S243-S4: autonomous-work suggestion routes to addMyTask / Run Task, NOT Wake / Run heartbeat', () => {
+    // The old competing "using Wake / Run heartbeat" suggestion must stay replaced, not restored
+    // next to the new handoff rule (two contradictory suggestions = the agent flips a coin).
+    assert.match(
+      CHAT_MODE_INSTRUCTIONS,
+      /autonomous work done, suggest assigning an issue or queueing it with `addMyTask` \(background Run Task\)/,
+    );
+    assert.match(CHAT_MODE_INSTRUCTIONS, /do \*\*not\*\* suggest Wake \/ Run heartbeat for chat to-dos/);
   });
 });

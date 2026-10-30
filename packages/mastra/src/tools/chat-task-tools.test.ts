@@ -15,9 +15,13 @@ import { describe, it } from 'node:test';
 import {
   CHAT_TASK_TOOLS,
   CHAT_TASK_TOOL_IDS,
+  RUN_TASK_WAKE_CHAT_TASK_TOOLS,
+  RUN_TASK_DISABLED_WARNING,
   addMyTaskTool,
+  addMyTaskRunTaskWakeTool,
   cancelMyTaskTool,
   completeMyTaskTool,
+  createAddMyTaskTool,
   listMyTasksTool,
   updateMyTaskTool,
 } from './chat-task-tools';
@@ -137,14 +141,59 @@ describe('CHAT_TASK_TOOLS — scope from the request context only (AC5)', () => 
 
   // #242 (CHAT-TASK-HANDOFF): addMyTask is the queue-for-Run-Task entry point. The copy must keep
   // sending multi-step chat work to taskRunner instead of a live-turn tool loop, and keep simple
-  // asks in the live turn — deleting any of these clauses silently reverts to in-turn grinding.
+  // asks in the live turn.
+  // S243-S1 (#243 soft-pack): pins assert the full distinctive CLAUSES, not labels/keywords —
+  // deleting the actual "queue instead of grind" / "simple stays live" wording fails here.
   it('#242: addMyTask queues multi-step work for Run Task instead of executing it live', () => {
     const d = addMyTaskTool.description ?? '';
-    assert.match(d, /Run Task queue \(taskRunner\)/);
+    assert.match(d, /Queue work for the async Run Task queue \(taskRunner\)/);
+    assert.match(d, /whenever a chat ask is NOT simple/);
+    assert.match(d, /anything needing a tool loop/);
+    assert.match(d, /let taskRunner execute it/);
     assert.match(d, /do NOT grind tool loops for it in the live chat turn/);
-    assert.match(d, /<task-progress/);
-    assert.match(d, /queued for Run Task/);
-    assert.match(d, /Simple one-shot asks/);
+    assert.match(d, /progress returns as <task-progress …> updates/);
+    assert.match(d, /Simple one-shot asks \(a plain answer, one read, a clarifying question\) stay in the live turn/);
+  });
+
+  // S243-S2 (#243 soft-pack): the SAME tool id is registered on background Run Task wakes. If the
+  // wake copy kept the queue-for-Run-Task description, a Run Task wake could "queue" its own
+  // work via addMyTask instead of doing it (infinite self-requeue). The wake copy must invert the
+  // instruction: EXECUTE the queued work; addMyTask there is only for a genuinely NEW follow-up.
+  it('S243-S2: the Run Task wake copy of addMyTask says execute the queued work — never re-queue', () => {
+    assert.equal(addMyTaskRunTaskWakeTool.id, 'addMyTask', 'wake copy keeps the tool id');
+    assert.deepEqual(
+      Object.keys(RUN_TASK_WAKE_CHAT_TASK_TOOLS).sort(),
+      Object.keys(CHAT_TASK_TOOLS).sort(),
+      'wake group carries the same seven tools',
+    );
+    const d = addMyTaskRunTaskWakeTool.description ?? '';
+    assert.match(d, /from inside a background Run Task wake/);
+    assert.match(d, /EXECUTING a queued task right now/);
+    assert.match(d, /do NOT call addMyTask to re-queue the work you are already executing/);
+    assert.match(d, /updateMyTask \/ completeMyTask/);
+    assert.match(d, /pick up LATER, after this run/);
+    // The queue-first framing must NOT survive on the wake copy — that is the re-queue trap.
+    assert.doesNotMatch(d, /Queue work for the async Run Task queue/);
+    assert.doesNotMatch(d, /tell the human it is queued for Run Task/);
+    // And the live-chat copy must not carry wake instructions (each context reads only its rule).
+    assert.doesNotMatch(addMyTaskTool.description ?? '', /Run Task wake/);
+  });
+
+  it('S243-S2: assembly wires the wake copy via chatTaskTools: "run-task-wake" (wake-kind seam)', async () => {
+    const chat = await assembleAgentTools(agentTestRecord, { companySettings: null, chatTaskTools: true });
+    const wake = await assembleAgentTools(agentTestRecord, {
+      companySettings: null,
+      chatTaskTools: 'run-task-wake',
+    });
+    const chatAdd = chat.addMyTask as { description: string };
+    const wakeAdd = wake.addMyTask as { description: string };
+    assert.match(chatAdd.description, /Queue work for the async Run Task queue/);
+    assert.doesNotMatch(chatAdd.description, /Run Task wake/);
+    assert.match(wakeAdd.description, /from inside a background Run Task wake/);
+    assert.doesNotMatch(wakeAdd.description, /Queue work for the async Run Task queue/);
+    // Heartbeat assemblies still get none of the chat-task tools (unchanged invariant).
+    const heartbeat = await assembleAgentTools(agentTestRecord, { companySettings: null });
+    for (const id of CHAT_TASK_TOOL_IDS) assert.ok(!(id in heartbeat));
   });
 });
 
@@ -265,6 +314,89 @@ describe('pauseMyTask + prioritizeMyTask — Run Task controls (S7, #196 soft-pa
         { requestContext: scopeContext } as never,
       )) as ToolResult;
       assert.equal(foreign.error, 'task_not_found');
+    } finally {
+      setToolDbForTests(null);
+      await client.close();
+    }
+  });
+});
+
+// ─── S243-S3 (#243 soft-pack): Run Task disabled must not leave a silent queue ──
+// The handoff (#242) assumes taskRunner drains the queue. If the company disabled Run Task
+// (settings.taskRunner.enabled === false — the same check the scheduler poller applies, via
+// resolveTaskRunnerSettings) the Concierge must still not infinite-loop tools: addMyTask records
+// the task and its RESULT carries the operator message ("enable Run Task or break the ask into
+// simple steps done live in chat"). Product rule pinned in code at createAddMyTaskTool.
+
+describe('addMyTask — Run Task disabled fallback (S243-S3)', () => {
+  it('records the task but warns the operator when the company has Run Task OFF', async () => {
+    const { client, db } = await seededToolDb();
+    try {
+      setToolDbForTests(db);
+      const off = createAddMyTaskTool({ runTaskDisabled: true });
+      const res = (await off.execute!(
+        { titles: ['Investigate the flaky deploy'] },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.equal(res.ok, true, 'the task is still recorded — never dropped');
+      assert.equal(res.runTaskDisabled, true);
+      assert.equal(res.message, `Added 1 task.${RUN_TASK_DISABLED_WARNING}`, 'exported warning is the one used');
+      assert.match(res.message, /Run Task turned OFF \(settings taskRunner\.enabled=false\)/);
+      assert.match(res.message, /no Run Task will start/);
+      assert.match(res.message, /enable Run Task in Settings/);
+      assert.match(res.message, /break the ask into simple steps you can do live in chat/);
+      const listed = await listChatTasks(SCOPE, {}, db);
+      assert.ok(listed.some((t) => t.title === 'Investigate the flaky deploy'), 'row actually written');
+    } finally {
+      setToolDbForTests(null);
+      await client.close();
+    }
+  });
+
+  it('no warning when Run Task is enabled (default) — normal queue path untouched', async () => {
+    const { client, db } = await seededToolDb();
+    try {
+      setToolDbForTests(db);
+      const on = createAddMyTaskTool(); // default: Run Task on
+      const res = (await on.execute!(
+        { titles: ['Normal queued work'] },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.equal(res.ok, true);
+      assert.notEqual(res.runTaskDisabled, true);
+      assert.equal(res.message, 'Added 1 task.');
+    } finally {
+      setToolDbForTests(null);
+      await client.close();
+    }
+  });
+
+  it('assembly derives the flag from settings.taskRunner.enabled === false (mirrors the poller)', async () => {
+    const { client, db } = await seededToolDb();
+    try {
+      setToolDbForTests(db);
+      const assemble = (taskRunner: Record<string, unknown> | undefined) =>
+        assembleAgentTools(agentTestRecord, {
+          companySettings: { taskRunner } as never,
+          chatTaskTools: true,
+        });
+      const callAdd = async (tools: Record<string, unknown>) =>
+        (await (tools.addMyTask as { execute: (i: unknown, c: unknown) => Promise<ToolResult> }).execute(
+          { titles: ['Derived check'] },
+          { requestContext: scopeContext },
+        ));
+
+      const off = await callAdd(await assemble({ enabled: false }));
+      assert.equal(off.ok, true);
+      assert.match(off.message, /Run Task turned OFF/);
+
+      const on = await callAdd(await assemble({ enabled: true }));
+      assert.equal(on.ok, true);
+      assert.doesNotMatch(on.message, /Run Task turned OFF/);
+
+      const unset = await callAdd(await assemble(undefined));
+      assert.equal(unset.ok, true);
+      assert.doesNotMatch(unset.message, /Run Task turned OFF/, 'default is enabled, like the poller');
     } finally {
       setToolDbForTests(null);
       await client.close();
