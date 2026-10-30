@@ -1,5 +1,8 @@
 import * as http from 'node:http';
 import * as net from 'node:net';
+// Type-only import: the `node:net` namespace has no exported `Duplex` member (TS2694);
+// the CONNECT socket's structural supertype lives in `node:stream`.
+import type { Duplex } from 'node:stream';
 import { chmodSync, unlinkSync } from 'node:fs';
 import { createTraceLogger } from '@tourbillon/shared';
 import {
@@ -53,7 +56,7 @@ export class EgressProxy {
         this.handleHttpRequest(req, res);
       });
 
-      this.server.on('connect', (req, clientSocket: net.Duplex, head) => {
+      this.server.on('connect', (req, clientSocket: Duplex, head) => {
         this.handleConnect(req, clientSocket, head);
       });
 
@@ -289,13 +292,13 @@ export class EgressProxy {
     req.pipe(proxyReq);
   }
 
-  private handleConnect(req: http.IncomingMessage, clientSocket: net.Duplex, head: Buffer): void {
+  private handleConnect(req: http.IncomingMessage, clientSocket: Duplex, head: Buffer): void {
     void this.handleConnectAsync(req, clientSocket, head);
   }
 
   private async handleConnectAsync(
     req: http.IncomingMessage,
-    clientSocket: net.Duplex,
+    clientSocket: Duplex,
     head: Buffer,
   ): Promise<void> {
     const { host, port } = parseHostPort(req.url || '');
