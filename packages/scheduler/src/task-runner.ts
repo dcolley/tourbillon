@@ -738,6 +738,8 @@ export async function sweepStaleChatTaskRuns(
   const cutoff = new Date(Date.now() - staleSec * 1000);
   return reconcileStaleChatTaskRuns(database, {
     staleCutoff: cutoff,
+    // TASK-AUDIT (#258): the sweep's re-queue/park are lifecycle transitions too — audit them.
+    audit: true,
     // S-soft: park/re-queue on the company's OWN resolved budget (settings.taskRunner.
     // maxAttemptsPerTask, clamped) — the same number the claim used. Budget 1 parks, never
     // re-queues in a loop; a fixed 2 here would re-queue past the company's limit forever.

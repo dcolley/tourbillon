@@ -13,11 +13,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   pollTaskRunner,
+  sweepStaleChatTaskRuns,
   taskRunSettleActivityAction,
   type ChatTaskActivityEvent,
   type TaskRunPollSummary,
   type TaskRunnerDeps,
 } from './task-runner';
+import { fakeReconcileDb, staleRow } from './__fixtures__/fake-reconcile-db';
 import type { RunnableChatTaskRow } from '@tourbillon/db';
 import type { HeartbeatJobData } from '@tourbillon/shared';
 import type { WakeResult } from './wake-runner';
@@ -155,4 +157,26 @@ test('taskRunSettleActivityAction maps the three settle outcomes onto the lifecy
   assert.equal(taskRunSettleActivityAction('done'), 'chat_task.done');
   assert.equal(taskRunSettleActivityAction('pending'), 'chat_task.error');
   assert.equal(taskRunSettleActivityAction('waiting_on_user'), 'chat_task.parked');
+});
+
+test('lifecycle audit: the stale-run sweep audits re-queue (error) and park (lost runs included)', async () => {
+  const f = fakeReconcileDb({
+    stale: [staleRow({ taskId: 't-lost', attempts: 1 }), staleRow({ taskId: 't-dead', attempts: 2 })],
+    withActivity: true,
+  });
+  const result = await sweepStaleChatTaskRuns(f.db);
+  assert.equal(result.requeued, 1);
+  assert.equal(result.parked, 1);
+  assert.equal(f.activity.length, 2, 'one audit row per sweep-settled Run Task');
+  const requeue = f.activity.find((a) => a.action === 'chat_task.error') as Record<string, any>;
+  const park = f.activity.find((a) => a.action === 'chat_task.parked') as Record<string, any>;
+  assert.ok(requeue && park, JSON.stringify(f.activity));
+  assert.equal(requeue.entityId, 't-lost');
+  assert.equal(requeue.details.status, 'pending');
+  assert.equal(requeue.details.productStatus, 'error');
+  assert.equal(requeue.details.runId, 'run-dead', 'the dead run id rides on the row for triage');
+  assert.equal(park.entityId, 't-dead');
+  assert.equal(park.details.status, 'waiting_on_user');
+  assert.equal(requeue.actorType, 'system');
+  assert.equal(requeue.actorId, 'task-runner');
 });

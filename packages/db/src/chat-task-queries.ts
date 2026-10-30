@@ -22,6 +22,7 @@ import { db } from './client';
 import type * as schema from './schema/index';
 import { agents, companies, heartbeatRuns } from './schema/index';
 import { CHAT_TASK_OPEN_STATUSES, chatTasks, type ChatTask, type ChatTaskStatus } from './schema/chat-tasks';
+import { recordChatTaskActivity } from './chat-task-activity';
 
 /** Any Drizzle Postgres database over this schema (the app pool, or an in-memory one in tests). */
 export type ChatTaskDb = PgDatabase<PgQueryResultHKT, typeof schema>;
@@ -612,6 +613,13 @@ export async function reconcileStaleChatTaskRuns(
      * first lost run instead of re-queueing forever. Default budget 2 when unset.
      */
     resolveMaxAttempts?: (companySettings: unknown) => number;
+    /**
+     * TASK-AUDIT (#258): write one activity_log lifecycle row per settled run
+     * (chat_task.error re-queue / chat_task.parked park). Opt-in so the db layer stays
+     * audit-silent for callers that don't want it; the scheduler sweep turns it on. Best-effort
+     * (recordChatTaskActivity never throws here).
+     */
+    audit?: boolean;
     now?: Date;
     limit?: number;
   },
@@ -632,6 +640,27 @@ export async function reconcileStaleChatTaskRuns(
       if (requeue) result.requeued += 1;
       else result.parked += 1;
       result.reconciled.push(row);
+      if (opts.audit) {
+        await recordChatTaskActivity({
+          companyId: row.companyId,
+          taskId: row.taskId,
+          action: requeue ? 'chat_task.error' : 'chat_task.parked',
+          actorType: 'system',
+          actorId: 'task-runner',
+          actorName: 'Task runner',
+          details: {
+            agentId: row.agentId,
+            ...(row.runnerLastRunId ? { runId: row.runnerLastRunId } : {}),
+            title: row.title,
+            status: requeue ? 'pending' : 'waiting_on_user',
+            productStatus: 'error',
+            previousStatus: 'in_progress',
+            previousProductStatus: 'running',
+            attempts: row.attempts,
+            note: 'Run Task lost (worker died or run row missing).',
+          },
+        }, { database });
+      }
     }
   }
   return result;

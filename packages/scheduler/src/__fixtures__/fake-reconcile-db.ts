@@ -25,8 +25,16 @@ export function fakeReconcileDb(opts: {
   stale: StaleChatTaskRunRow[];
   /** notes as the finishChatTaskRun existence read sees them (default: a note seed). */
   existingNotes?: Record<string, string | null>;
-}): { db: ChatTaskDb; settled: SettledWrite[] } {
+  /**
+   * TASK-AUDIT (#258): when true, an `insert` chain is exposed so the scheduler-side lifecycle
+   * audit write (recordChatTaskActivity in sweepStaleChatTaskRuns) runs against the fake; every
+   * insert lands in `activity`. Without it the fake has no insert — a caller that forgot the
+   * best-effort contract would then throw instead of settling (which is the point).
+   */
+  withActivity?: boolean;
+}): { db: ChatTaskDb; settled: SettledWrite[]; activity: Array<Record<string, unknown>> } {
   const settled: SettledWrite[] = [];
+  const activity: Array<Record<string, unknown>> = [];
   let selectCalls = 0;
 
   const chain = (rows: unknown[]): Record<string, unknown> => {
@@ -50,6 +58,17 @@ export function fakeReconcileDb(opts: {
       const notes = opts.existingNotes?.[row.taskId] ?? 'pre-existing notes';
       return chain([{ id: row.taskId, status: 'in_progress', notes }]);
     },
+    ...(opts.withActivity
+      ? {
+          // recordChatTaskActivity's shape: insert(table).values(row) — awaited, best-effort.
+          insert: () => ({
+            values: async (row: Record<string, unknown>) => {
+              activity.push(row);
+              return [row];
+            },
+          }),
+        }
+      : {}),
     update: () => {
       const api: Record<string, unknown> = {};
       let setVal: Record<string, unknown> = {};
@@ -70,7 +89,7 @@ export function fakeReconcileDb(opts: {
     },
   };
 
-  return { db: database as unknown as ChatTaskDb, settled };
+  return { db: database as unknown as ChatTaskDb, settled, activity };
 }
 
 /** A stale-row seed with sensible crashed-run defaults. */
