@@ -203,6 +203,25 @@ export async function setChatTaskStatus(
   return row ?? null;
 }
 
+/**
+ * S263-S4 (#263 softs): read one item from this agent's own list. The tool-side audit row
+ * needs the PRIOR status ("Status queued → done", matching the runner rows' previousProductStatus
+ * pairing), which the post-update row alone cannot give. Same (companyId, agentId) scope as every
+ * other chat-task read — a foreign id is null, never another agent's row.
+ */
+export async function getChatTask(
+  scope: ChatTaskScope,
+  input: { id: string },
+  database: ChatTaskDb = defaultDb,
+): Promise<ChatTask | null> {
+  const [row] = await database
+    .select()
+    .from(chatTasks)
+    .where(and(eq(chatTasks.id, input.id), ...scopeWhere(scope)))
+    .limit(1);
+  return row ?? null;
+}
+
 // ─── TASK-RUNNER ──────────────────────────────────────────────────────────────
 // The async Run Task queue shares the scheduler's per-agent run budget with
 // heartbeats: these reads/writes let the scheduler task-runner poller find
@@ -620,6 +639,12 @@ export async function reconcileStaleChatTaskRuns(
      * (recordChatTaskActivity never throws here).
      */
     audit?: boolean;
+    /**
+     * S263-S3: a failed audit insert is swallowed by contract — without this sink it is
+     * invisible. The scheduler sweep passes a logger so a broken audit write surfaces in
+     * scheduler logs while the settle itself still goes through (best-effort, never throws).
+     */
+    onAuditError?: (err: unknown, row: StaleChatTaskRunRow) => void;
     now?: Date;
     limit?: number;
   },
@@ -659,7 +684,12 @@ export async function reconcileStaleChatTaskRuns(
             attempts: row.attempts,
             note: 'Run Task lost (worker died or run row missing).',
           },
-        }, { database });
+        }, {
+          database,
+          // S263-S3: never silent — the caller's sink hears about a broken audit insert
+          // (still best-effort: recordChatTaskActivity swallows when no sink is given).
+          ...(opts.onAuditError ? { onError: (err: unknown) => opts.onAuditError!(err, row) } : {}),
+        });
       }
     }
   }

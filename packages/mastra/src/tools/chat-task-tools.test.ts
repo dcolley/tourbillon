@@ -728,10 +728,16 @@ describe('TASK-AUDIT (#258): tool-owned transitions write lifecycle audit rows',
       const cancelRow = rows.find((r) => r.entity_id === cancelledTask.id)!;
       assert.ok(doneRow && waitingRow && cancelRow, `expected 3 distinct rows, got ${JSON.stringify(rows)}`);
       assert.equal(doneRow.action, 'chat_task.updated');
-      assert.deepEqual(doneRow.details.changes, { status: { to: 'done' } });
+      // S263-S4: tool rows carry the "from" side too, matching the runner rows' pairing.
+      assert.deepEqual(doneRow.details.changes, { status: { from: 'pending', to: 'done' } });
+      assert.equal(doneRow.details.previousStatus, 'pending');
+      assert.equal(doneRow.details.previousProductStatus, 'queued', 'from-side product word');
       assert.equal(doneRow.details.productStatus, 'done');
       assert.equal(waitingRow.details.productStatus, 'error', 'waiting_on_user reads as error to the board');
-      assert.deepEqual(cancelRow.details.changes, { status: { to: 'cancelled' } });
+      assert.deepEqual(waitingRow.details.changes, { status: { from: 'done', to: 'waiting_on_user' } });
+      assert.equal(waitingRow.details.previousProductStatus, 'done');
+      assert.deepEqual(cancelRow.details.changes, { status: { from: 'pending', to: 'cancelled' } });
+      assert.equal(cancelRow.details.previousStatus, 'pending');
       assert.equal(cancelRow.details.reason, 'not needed');
     } finally {
       setToolDbForTests(null);
@@ -759,6 +765,92 @@ describe('TASK-AUDIT (#258): tool-owned transitions write lifecycle audit rows',
       assert.equal(res.ok, true, 'the task is written even when the audit row cannot be');
       const tasks = await listChatTasks(SCOPE, {}, db);
       assert.equal(tasks.length, 1);
+    } finally {
+      setToolDbForTests(null);
+      await client.close();
+    }
+  });
+
+  it('S263-S3 (#263 softs): the swallowed tool-side audit failure is LOUD — a warn names the task and error', async () => {
+    const { client, db } = await seededToolDb();
+    try {
+      const task = await addChatTask(SCOPE, { title: 'Report on the outage' }, db);
+      const broken = Object.create(db, {
+        insert: {
+          value: (table: unknown) => {
+            if (table === activityLog) throw new Error('activity db down');
+            return (db as never as { insert: (t: unknown) => never }).insert(table);
+          },
+        },
+      }) as ChatTaskDb;
+      setToolDbForTests(broken);
+
+      const warns: string[] = [];
+      const originalWarn = console.warn;
+      console.warn = (...args: unknown[]) => {
+        warns.push(args.map(String).join(' '));
+      };
+      try {
+        const res = (await completeMyTaskTool.execute!(
+          { id: task.id, note: 'done despite the audit outage' },
+          { requestContext: scopeContext } as never,
+        )) as ToolResult;
+        assert.equal(res.ok, true, 'best-effort contract holds: the settle still lands');
+      } finally {
+        console.warn = originalWarn;
+      }
+      const hit = warns.find((w) => w.includes('chat-task activity log failed'));
+      assert.ok(hit, 'the failed audit insert is logged, not silently swallowed');
+      assert.match(hit!, new RegExp(String(task.id)));
+      assert.match(hit!, /activity db down/, 'the underlying error travels with the line');
+      const [row] = await listChatTasks(SCOPE, { includeClosed: true }, db);
+      assert.equal(row!.status, 'done');
+    } finally {
+      setToolDbForTests(null);
+      await client.close();
+    }
+  });
+
+  it('S263-S4 (#263 softs): a no-op status move writes NO audit row (same status is not a transition)', async () => {
+    const { client, db } = await seededToolDb();
+    try {
+      setToolDbForTests(db);
+      const task = await addChatTask(SCOPE, { title: 'Settle once' }, db);
+
+      const first = (await completeMyTaskTool.execute!(
+        { id: task.id },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.equal(first.ok, true);
+      assert.equal((await activityRows(client)).length, 1, 'the real pending → done move is audited');
+
+      // Re-completing an already-done task: still ok for the caller, still no second row.
+      const again = (await completeMyTaskTool.execute!(
+        { id: task.id },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.equal(again.ok, true);
+      assert.equal((await activityRows(client)).length, 1, 'done → done is not a transition');
+
+      // updateMyTask to the status the task already holds: row-silent too.
+      const same = (await updateMyTaskTool.execute!(
+        { id: task.id, status: 'done' },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.equal(same.ok, true);
+      assert.equal((await activityRows(client)).length, 1, 'same-status updateMyTask writes no row');
+
+      // And cancelling a cancelled task the same way.
+      const cancelled = await addChatTask(SCOPE, { title: 'Drop twice' }, db);
+      await cancelMyTaskTool.execute!({ id: cancelled.id }, { requestContext: scopeContext } as never);
+      const cancelRowsBefore = (await activityRows(client)).length;
+      assert.equal(cancelRowsBefore, 2, 'the real pending → cancelled move is audited');
+      const cancelAgain = (await cancelMyTaskTool.execute!(
+        { id: cancelled.id },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.equal(cancelAgain.ok, true);
+      assert.equal((await activityRows(client)).length, 2, 'cancelled → cancelled stays row-silent');
     } finally {
       setToolDbForTests(null);
       await client.close();

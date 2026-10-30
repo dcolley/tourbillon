@@ -21,6 +21,7 @@ import { createTool } from '@mastra/core/tools';
 import {
   addChatTask,
   countOpenChatTasks,
+  getChatTask,
   getCompanySettingsSnapshot,
   listChatTasks,
   prioritizeChatTask,
@@ -34,7 +35,7 @@ import {
   type ChatTask,
   type ChatTaskScope,
 } from '@tourbillon/db';
-import { resolveTaskRunnerSettings, type CompanySettings } from '@tourbillon/shared';
+import { resolveTaskRunnerSettings, createTraceLogger, type CompanySettings } from '@tourbillon/shared';
 import { z } from 'zod';
 import { extractToolRuntimeContext } from './api-client';
 import { getCurrentHeartbeatContext } from '../heartbeat-context';
@@ -117,8 +118,11 @@ const notFound = (id: string) => ({
  * list — that is who made the change, whatever chat turn asked for it; the board user who
  * requested it rides in details.requestedBy when the tool context resolved one. Best-effort:
  * `recordChatTaskActivity` never throws at this caller (losing an audit row must not lose the
- * write the human just asked for).
+ * write the human just asked for). S263-S3: the swallow is never silent — a failed insert warns
+ * through the scheduler-style trace logger, same "…activity log failed" shape as the runner path.
  */
+const auditTracer = createTraceLogger('chat-task-tools', {});
+
 async function logToolActivity(
   scope: ChatTaskScope & { threadId?: string },
   task: ChatTask,
@@ -142,7 +146,15 @@ async function logToolActivity(
       ...(task.requestedByDisplayName ? { requestedBy: task.requestedByDisplayName } : {}),
       ...extra,
     },
-  }, { database: toolDb() });
+  }, {
+    database: toolDb(),
+    onError: (err: unknown) =>
+      auditTracer.warn('chat-task activity log failed', {
+        taskId: task.id,
+        action,
+        error: err instanceof Error ? err.message : String(err),
+      }),
+  });
 }
 
 export const listMyTasksTool = createTool({
@@ -395,6 +407,13 @@ export const updateMyTaskTool = createTool({
   execute: async (inputData, { requestContext }) => {
     const scope = chatTaskScope(requestContext);
     if (!scope) return missingScope();
+    // S263-S4 (#263 softs): read the PRIOR status when a status move is requested — the audit
+    // row carries "from → to" like the runner rows (previousStatus/previousProductStatus), and a
+    // move to the status the task already holds is not a move at all (no row, per "audit only
+    // real status moves").
+    const previous = inputData.status !== undefined
+      ? await getChatTask(scope, { id: inputData.id }, toolDb())
+      : null;
     const updated = await updateChatTask(
       scope,
       {
@@ -409,9 +428,15 @@ export const updateMyTaskTool = createTool({
     );
     if (!updated) return notFound(inputData.id);
     // TASK-AUDIT (#258): audit only real status moves (renames/notes stay row-silent).
-    if (inputData.status !== undefined) {
+    if (inputData.status !== undefined && (!previous || previous.status !== updated.status)) {
       await logToolActivity(scope, updated, 'chat_task.updated', requestContext, {
-        changes: { status: { to: updated.status } },
+        changes: { status: { ...(previous ? { from: previous.status } : {}), to: updated.status } },
+        ...(previous
+          ? {
+              previousStatus: previous.status,
+              previousProductStatus: chatTaskProductStatus(previous.status),
+            }
+          : {}),
       });
     }
     return { ok: true, message: `Task ${updated.id} → ${updated.status}.`, task: row(updated) };
@@ -430,6 +455,8 @@ export const completeMyTaskTool = createTool({
   execute: async (inputData, { requestContext }) => {
     const scope = chatTaskScope(requestContext);
     if (!scope) return missingScope();
+    // S263-S4: prior status for the "from" side; already-done = no move → row-silent.
+    const previous = await getChatTask(scope, { id: inputData.id }, toolDb());
     const updated = await setChatTaskStatus(
       scope,
       { id: inputData.id, status: 'done', note: inputData.note },
@@ -437,10 +464,18 @@ export const completeMyTaskTool = createTool({
     );
     if (!updated) return notFound(inputData.id);
     // TASK-AUDIT (#258): the settle word — product "done".
-    await logToolActivity(scope, updated, 'chat_task.updated', requestContext, {
-      changes: { status: { to: 'done' } },
-      ...(inputData.note ? { note: inputData.note } : {}),
-    });
+    if (!previous || previous.status !== updated.status) {
+      await logToolActivity(scope, updated, 'chat_task.updated', requestContext, {
+        changes: { status: { ...(previous ? { from: previous.status } : {}), to: 'done' } },
+        ...(previous
+          ? {
+              previousStatus: previous.status,
+              previousProductStatus: chatTaskProductStatus(previous.status),
+            }
+          : {}),
+        ...(inputData.note ? { note: inputData.note } : {}),
+      });
+    }
     return { ok: true, message: `Task ${updated.id} → done.`, task: row(updated) };
   },
 });
@@ -458,6 +493,8 @@ export const cancelMyTaskTool = createTool({
   execute: async (inputData, { requestContext }) => {
     const scope = chatTaskScope(requestContext);
     if (!scope) return missingScope();
+    // S263-S4: prior status for the "from" side; already-cancelled = no move → row-silent.
+    const previous = await getChatTask(scope, { id: inputData.id }, toolDb());
     const updated = await setChatTaskStatus(
       scope,
       { id: inputData.id, status: 'cancelled', note: inputData.reason },
@@ -465,10 +502,18 @@ export const cancelMyTaskTool = createTool({
     );
     if (!updated) return notFound(inputData.id);
     // TASK-AUDIT (#258): drop = a terminal move too, audited like the others.
-    await logToolActivity(scope, updated, 'chat_task.updated', requestContext, {
-      changes: { status: { to: 'cancelled' } },
-      ...(inputData.reason ? { reason: inputData.reason } : {}),
-    });
+    if (!previous || previous.status !== updated.status) {
+      await logToolActivity(scope, updated, 'chat_task.updated', requestContext, {
+        changes: { status: { ...(previous ? { from: previous.status } : {}), to: 'cancelled' } },
+        ...(previous
+          ? {
+              previousStatus: previous.status,
+              previousProductStatus: chatTaskProductStatus(previous.status),
+            }
+          : {}),
+        ...(inputData.reason ? { reason: inputData.reason } : {}),
+      });
+    }
     return { ok: true, message: `Task ${updated.id} → cancelled.`, task: row(updated) };
   },
 });

@@ -335,4 +335,32 @@ describe('TASK-AUDIT (#258): Tasks are a filterable item type', () => {
     assert.ok(related.includes(`agent:${'CEO'}`), `agent named in related: ${related.join(', ')}`);
     assert.equal(view.actor.label, 'System (Task runner)');
   });
+
+  it('S263-S4: a tool-side chat_task.updated row renders the status change WITH its from side, in product words', () => {
+    // The tool rows used to carry only `to` ("Status → done" with no prior state); the S263-S4
+    // shape pairs them with previousStatus/previousProductStatus exactly like runner rows.
+    const view = buildActivityView(
+      row({
+        entityType: 'chat_task',
+        entityId: CHAT_TASK,
+        action: 'chat_task.updated',
+        actorType: 'agent',
+        actorId: AGENT,
+        details: {
+          status: 'done',
+          productStatus: 'done',
+          previousStatus: 'pending',
+          previousProductStatus: 'queued',
+          changes: { status: { from: 'pending', to: 'done' } },
+        },
+      }),
+      taskLookup(),
+    );
+    assert.equal(view.actionLabel, 'Chat task updated');
+    const status = view.changes.find((c) => c.field === 'status');
+    const textOf = (v: ActivityChangeValue): string => ('text' in v ? v.text : '<link>');
+    assert.ok(status, 'the tool row renders a status change at all');
+    assert.equal(textOf(status!.from!), 'queued', 'from-side in PRODUCT words (S263-S4)');
+    assert.equal(textOf(status!.to), 'done');
+  });
 });
