@@ -36,6 +36,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { CAP_ZERO_REFUSAL, FORBIDDEN_TASKCAP_WIRING_CLAIM } from './task-runner-copy-pins';
 
 // task-runner.ts (loaded by the child) validates DATABASE_URL at module load; the child
 // inherits this value via the env spread below.
@@ -45,17 +46,16 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const TSX_CLI = path.resolve(HERE, '../node_modules/.bin/tsx');
 const CHILD = path.join(HERE, '__fixtures__', 'main-shaped-zero-opts-child.ts');
 
-const CAP_ZERO_REFUSAL = /task-run capacity zero, refusing/;
-
 /**
  * S256-S2 (shared with task-runner-252-softs.test.ts): the cap-0 copy may NOT tie the
  * opts.taskCap remedy to the scheduler boot path — main starts the poller with ZERO args
  * (pinned by scheduler-main-252-softs.test.ts). Deliberately NARROWER than a plain
- * /scheduler/i: the old broad ban REDs on legitimate future copy that merely mentions a
- * "scheduler log" or the word main; only a taskCap↔boot-path wiring claim is forbidden.
+ * /scheduler/i: only a taskCap↔boot-path wiring CLAIM is forbidden, never a mere mention.
+ * S266-S1 (#266 soft-pack): the matcher now lives in ./task-runner-copy-pins.ts (S266-S4
+ * dedup) and additionally requires a wiring VERB in the same clause between taskCap and the
+ * boot-path word, so harmless nearby copy ("…see the scheduler log") passes — contract
+ * pinned both directions by the S266-S1 corpus test in task-runner-252-softs.test.ts.
  */
-const FORBIDDEN_TASKCAP_WIRING_CLAIM =
-  /taskCap[\s\S]{0,60}\b(scheduler|main|boot)\b|\b(scheduler|main|boot)\b[\s\S]{0,60}taskCap/i;
 
 interface ChildReport {
   defaultMaxConcurrentRuns: number;

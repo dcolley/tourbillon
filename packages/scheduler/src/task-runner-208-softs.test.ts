@@ -39,6 +39,20 @@ process.env.DATABASE_URL ??= 'postgres://unused@127.0.0.1:1/unused';
 // of what the pin actually enforces. Pattern is unchanged from #223 S26b.
 const PIN_RE = /--conditions=tourbillon-test(?=\s|$)/;
 
+/**
+ * S266-S3 (#266 ACCEPT soft-pack, parallel gate): per-test ceiling for the genuinely slow
+ * pins in this file, same treatment task-runner-199-softs.test.ts carries (S256-S3). Both
+ * S5 pins boot a fresh PGlite and apply the FULL migration set before exercising
+ * listRunnable; under a parallel multi-worktree gate they starve behind ~30 sibling suites
+ * competing for CPU and used to surface as an opaque whole-file timeout while the serial
+ * run finishes in seconds. An explicit per-test timeout turns that into either a slow
+ * GREEN or a failure that NAMES the starved test. Behaviour-neutral serially. Applied to
+ * the ASYNC pins only: the two static pins below have fully synchronous bodies, and
+ * node:test's per-test timeout cannot preempt a sync block (S266-S2 lesson) — it would be
+ * a no-op there.
+ */
+const PARALLEL_GATE_TIMEOUT_MS = 240_000;
+
 const dbRequire = createRequire(path.join(__dirname, '../../db/package.json'));
 
 /** Structural surface we actually use — PGlite is not a scheduler dependency, so no types. */
@@ -105,7 +119,7 @@ const B1 = { companyId: 'c2', agentId: 'b1' };
 // spyQueries (#213 S6c) is the shared helper from '@tourbillon/db/test/query-spy' — one
 // driver-boundary spy for the two db chat-task suites and this file.
 
-test('S5: listRunnable end-to-end — resolved per-company budgets travel company read → CASE → rows (real PGlite)', async () => {
+test('S5: listRunnable end-to-end — resolved per-company budgets travel company read → CASE → rows (real PGlite)', { timeout: PARALLEL_GATE_TIMEOUT_MS }, async () => {
   const { client, db } = await freshDb();
   try {
     // c1 budget 1: attempts=1 is OVER budget → must drop out of the listing.
@@ -163,7 +177,7 @@ test('S5: listRunnable end-to-end — resolved per-company budgets travel compan
   }
 });
 
-test('S5: listRunnable with no pending work — empty map, no CASE, empty listing (real PGlite)', async () => {
+test('S5: listRunnable with no pending work — empty map, no CASE, empty listing (real PGlite)', { timeout: PARALLEL_GATE_TIMEOUT_MS }, async () => {
   const { client, db } = await freshDb();
   try {
     // Only a paused row and a done row exist: the company read sees nothing, so the listing

@@ -330,20 +330,23 @@ describe('runSchedulerMain: give-up log carries only sanitised fields', () => {
 });
 
 describe('scheduler entry: malformed DATABASE_URL', () => {
-  // S256-S3: this pin spawns a real tsx child (full module graph boot). Under a parallel
-  // multi-worktree gate the spawn alone can exceed the old 60 s budget, so both the spawn
-  // budget and the node:test per-test ceiling are raised — behaviour-neutral; serial runs
-  // finish in seconds. A timeout now fails THIS test by name, not the whole file.
+  // S256-S3 raised this pin's budget for the parallel multi-worktree gate; S266-S2 corrects
+  // WHICH budget actually governs it. The body is FULLY SYNCHRONOUS — spawnSync blocks the
+  // event loop, so node:test's per-test `{ timeout }` option can never fire mid-body (its
+  // watchdog timer cannot preempt a sync block) and was a no-op. The single real wall is the
+  // spawnSync `timeout` option below: on expiry libuv SIGTERMs the tsx child and spawnSync
+  // returns, so the test fails BY NAME with the captured output instead of the whole file
+  // hitting the runner wall. A raise has to go on SPAWN_TIMEOUT_MS — not on a test option.
+  const SPAWN_TIMEOUT_MS = 180_000;
   it(
     'exits 1 with one sanitised line before loading anything that connects',
-    { timeout: 240_000 },
     () => {
       const here = path.dirname(fileURLToPath(import.meta.url));
       const tsxCli = path.resolve(here, '../node_modules/.bin/tsx');
       const res = spawnSync(tsxCli, [path.join(here, 'index.ts')], {
         env: { PATH: process.env.PATH ?? '', DATABASE_URL: `postgres://tb_user:${PW}@db.internal:99999/tourbillon` },
         encoding: 'utf-8',
-        timeout: 180_000,
+        timeout: SPAWN_TIMEOUT_MS,
       });
       const out = `${res.stdout}\n${res.stderr}`;
       assert.equal(res.status, 1, out);
