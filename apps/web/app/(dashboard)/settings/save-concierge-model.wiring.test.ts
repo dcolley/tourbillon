@@ -24,6 +24,17 @@ function saveConciergeModelBody(): string {
   return body;
 }
 
+/**
+ * S237-S2 (#237 ACCEPT): the persistence pins below must see CODE, not prose. Strip block
+ * and line comments from the body slice so a comment merely mentioning `validated.params`
+ * cannot satisfy them (mutant M6 persisted raw formData + such a comment and survived the
+ * old catch-all regex). Naive strip: `//` inside string literals in this body is only ever
+ * part of `http://`-style URLs, which none of the pins look for.
+ */
+function stripComments(code: string): string {
+  return code.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+}
+
 describe('saveConciergeModel → validateConciergeModelParams wiring (S234-S2)', () => {
   it('the settings page imports the shared validator (not an inline copy)', () => {
     assert.match(
@@ -58,14 +69,20 @@ describe('saveConciergeModel → validateConciergeModelParams wiring (S234-S2)',
   });
 
   it('the persisted params come from the validator result, not raw form data', () => {
-    const body = saveConciergeModelBody();
+    // S237-S2: match on comment-stripped code and no trailing `|validated\.params`
+    // catch-all — any prose mention of validated.params (comments included) used to
+    // satisfy the pin while raw formData was actually persisted (mutant M6).
+    const code = stripComments(saveConciergeModelBody());
     assert.match(
-      body,
-      /params\s*[:=]\s*validated\.params|params,\s*\n?\s*\}\);?[\s\S]{0,40}updateCompanyConciergeModel|validated\.params/,
-      'updateCompanyConciergeModel must persist validated.params (coerced numbers), not raw strings',
+      code,
+      /const\s+params\s*=\s*validated\.params\s*;|params\s*:\s*validated\.params/,
+      'params must be pinned to validated.params (const params = validated.params; or params: validated.params) before the write',
     );
+    const writeAt = code.indexOf('updateCompanyConciergeModel(');
+    const pinAt = code.search(/const\s+params\s*=\s*validated\.params\s*;|params\s*:\s*validated\.params/);
+    assert.ok(pinAt >= 0 && pinAt < writeAt, 'the params pin must sit before updateCompanyConciergeModel(');
     assert.doesNotMatch(
-      body,
+      code,
       /params:\s*\{\s*maxContextTokens:\s*formData/,
       'raw formData must not be passed through as params',
     );
