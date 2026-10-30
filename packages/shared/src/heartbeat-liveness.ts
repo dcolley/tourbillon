@@ -5,6 +5,18 @@ export const DEFAULT_HEARTBEAT_STALE_SEC = 90;
 /** No harness controller progress (tool/model/OM events) within this window → abort wake. */
 export const DEFAULT_HEARTBEAT_PROGRESS_STALE_SEC = 600;
 
+/**
+ * S241-S2: ceiling for every liveness interval, in whole seconds. All three config values
+ * leave the resolver as `sec * 1000` and land in `setInterval` (worker ping) or `setTimeout`
+ * (stale watchdog, harness progress timer). Those delays are int32-signed: above 2^31−1 ms
+ * Node silently resets them to 1 ms — a huge HEARTBEAT_PING_INTERVAL_SEC became a 1 ms ping
+ * hot loop, a huge HEARTBEAT_STALE_SEC an instant-abort watchdog. Same class as the scheduler
+ * poller's MAX_POLL_INTERVAL_MS/SEC (#238 S238-S3); this is the shared-side equivalent because
+ * scheduler→shared is the only legal import direction (scheduler cannot export to shared).
+ * 2_147_483 s × 1000 = 2_147_483_000 ms < 2^31−1, so `sec * 1000` can never overflow.
+ */
+export const MAX_HEARTBEAT_INTERVAL_SEC = 2_147_483;
+
 export interface HeartbeatLivenessConfig {
   pingIntervalMs: number;
   staleSec: number;
@@ -18,9 +30,20 @@ function parsePositiveIntEnv(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw == null || raw.trim() === '') return fallback;
   const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
+  // S241-S2: NaN / negatives keep the historic floor behaviour (warn + fallback);
+  // huge finite values and +Infinity (a 400-digit string parses to Infinity) are NOT
+  // garbage — they clamp to the int32-safe ceiling so `sec * 1000` can never overflow
+  // the setInterval/setTimeout delay into a 1 ms hot loop or instant abort.
+  if (Number.isNaN(parsed) || parsed <= 0) {
     livenessTracer.warn(`invalid ${name}, using default`, { raw, fallback });
     return fallback;
+  }
+  if (parsed > MAX_HEARTBEAT_INTERVAL_SEC) {
+    livenessTracer.warn(`invalid ${name} above int32 ceiling; clamped`, {
+      raw,
+      ceiling: MAX_HEARTBEAT_INTERVAL_SEC,
+    });
+    return MAX_HEARTBEAT_INTERVAL_SEC;
   }
   return parsed;
 }
@@ -33,7 +56,10 @@ export function resolveHeartbeatLivenessConfig(): HeartbeatLivenessConfig {
   );
   const staleSecRaw = parsePositiveIntEnv('HEARTBEAT_STALE_SEC', DEFAULT_HEARTBEAT_STALE_SEC);
   const minStaleSec = pingSec * 2;
-  const staleSec = Math.max(staleSecRaw, minStaleSec);
+  // S241-S2: the 2x-ping floor can itself exceed the int32 ceiling when pingSec is at the
+  // ceiling (2 × 2_147_483 s × 1000 overflows setTimeout → instant-abort watchdog). The
+  // ceiling wins there — a silly config stays timer-safe; sane configs keep the 2x floor.
+  const staleSec = Math.min(MAX_HEARTBEAT_INTERVAL_SEC, Math.max(staleSecRaw, minStaleSec));
 
   if (staleSecRaw < minStaleSec) {
     livenessTracer.warn('HEARTBEAT_STALE_SEC below 2x ping interval; clamped', {
