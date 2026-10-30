@@ -277,5 +277,12 @@ describe('CHAT_MODE_INSTRUCTIONS — chat-task handoff wording (#242, S243-S1/S4
       /autonomous work done, suggest assigning an issue or queueing it with `addMyTask` \(background Run Task\)/,
     );
     assert.match(CHAT_MODE_INSTRUCTIONS, /do \*\*not\*\* suggest Wake \/ Run heartbeat for chat to-dos/);
+    // S245-S1 (#245 gate M7 survivor): the match-pins above only prove the NEW bullet is
+    // present. If the old competing "…or using Wake / Run heartbeat." suggestion were restored
+    // ALONGSIDE the new one, every match-pin still passed and the agent flipped a coin between
+    // two contradictory suggestions. The negative pin makes that restoration RED — note it
+    // targets the old suggestion's exact wording (`using Wake / Run heartbeat`), not the bare
+    // phrase, which legitimately survives inside the new bullet's prohibition clause.
+    assert.doesNotMatch(CHAT_MODE_INSTRUCTIONS, /using Wake \/ Run heartbeat/);
   });
 });
