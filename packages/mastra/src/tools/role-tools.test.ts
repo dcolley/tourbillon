@@ -334,3 +334,13 @@ describe('listAgentsTool', () => {
     assert.ok(withoutInclude.success, 'omitting includeArchived is valid');
   });
 });
+
+describe('getApprovalTool', () => {
+  it('description pins approval UUID and warns against issue keys', () => {
+    const tools = ROLE_TOOLS['approvals'] as Record<string, any>;
+    const tool = tools.getApprovalTool;
+    assert.equal(tool.id, 'getApproval', 'tool id is getApproval');
+    assert.ok(tool.description.includes('UUID'), 'description pins approval UUID');
+    assert.ok(tool.description.includes('TOUR-'), 'description warns against issue keys');
+  });
+});
