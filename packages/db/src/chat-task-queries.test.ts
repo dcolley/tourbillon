@@ -19,6 +19,7 @@ import {
   claimChatTaskRun,
   countOpenChatTasks,
   finishChatTaskRun,
+  getChatTask,
   listChatTasks,
   listPendingChatTaskCompanySettings,
   listRunnableChatTasks,
@@ -139,6 +140,13 @@ describe('chat-task query layer', () => {
       assert.equal((await listChatTasks(A1, {}, db))[0].status, 'pending');
       // Even a correct-scope update addressed by a foreign id (id exists, wrong scope) misses.
       assert.equal(await updateChatTask(A1, { id: other.id, status: 'cancelled' }, db), null);
+
+      // S269-S2 (#269 softs): getChatTask — the S263-S4 audit-read seam — is scope-bound too.
+      // It is harmless today only because the scoped UPDATE behind the tool call after it
+      // returns null; pin the READ itself: a foreign id is null, never another agent's row.
+      assert.equal(await getChatTask(A2, { id: task.id }, db), null, 'foreign agent (same company) reads null');
+      assert.equal(await getChatTask(B1, { id: task.id }, db), null, 'foreign company reads null');
+      assert.equal((await getChatTask(A1, { id: task.id }, db))?.id, task.id, 'the owning scope still reads its row');
     } finally {
       await client.close();
     }
