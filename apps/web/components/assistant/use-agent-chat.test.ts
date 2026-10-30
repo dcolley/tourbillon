@@ -6,6 +6,7 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { connectAgentChat, watchClientResume } from './use-agent-chat';
 import { AgentChatClient } from '@/lib/agui/client/agent-chat-client';
 import type { AgentChatItem } from '@/lib/agui/client/chat-state';
@@ -346,6 +347,27 @@ describe('Assistant agent switch shows freshly fetched messages', () => {
       stop();
       win.dispatch('online');
       assert.equal(calls, 3);
+    });
+
+    it('useAgentChat itself wires watchClientResume to the connected client and returns its cleanup', () => {
+      // Pin the hook-level wiring (not just the exported helper above): removing the effect that
+      // binds page-resume to the client — the line every mount depends on — must fail this test.
+      const source = readFileSync(new URL('./use-agent-chat.ts', import.meta.url), 'utf8');
+      const start = source.indexOf('export function useAgentChat');
+      assert.ok(start >= 0, 'the hook is exported from this module');
+      const hook = source.slice(start);
+      assert.ok(
+        !/\bexport (function|const|class)\b/.test(hook.slice(hook.indexOf('useSyncExternalStore'))),
+        'the slice is the hook body (nothing else exported after it)',
+      );
+      // The binding is an effect keyed on the client, whose expression body returns the unsubscribe
+      // (so React remount/cleanup runs it) — a call hidden elsewhere or a dropped cleanup fails here.
+      assert.match(
+        hook,
+        /useEffect\(\s*\(\)\s*=>\s*\(client \?\s*watchClientResume\(client\)/,
+        'useAgentChat calls watchClientResume(client) in an effect expression (cleanup returned)',
+      );
+      assert.match(hook, /watchClientResume\(client\)[\s\S]{0,40}\[client\]/, 'the binding is keyed on the client');
     });
   });
 });

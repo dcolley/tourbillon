@@ -442,7 +442,11 @@ export class AgentChatClient {
       }
       return history.ok ? { ok: true, value: { attached } } : history;
     } finally {
-      this.update((s) => (s.reconnecting ? { ...s, reconnecting: false } : s));
+      // CHAT-RECONNECT: the adopted stream can die just before this finally (its finishRun already
+      // set the flag and scheduled the retry): keep the chrome while a re-attach timer is pending —
+      // that timer's resume clears it, the active-run branch clears it, or the spent budget below
+      // reports the lost connection (and must clear it, so the banner is not hidden forever).
+      this.update((s) => (s.reconnecting && this.reconnectTimer === undefined ? { ...s, reconnecting: false } : s));
     }
   }
 
@@ -843,9 +847,12 @@ export class AgentChatClient {
       }
     }
     this.attachLosses = 0;
-    this.update((s) =>
-      endRun(s, 'disconnected', { kind: 'disconnected', message: 'The connection to the agent was lost' }),
-    );
+    this.update((s) => ({
+      ...endRun(s, 'disconnected', { kind: 'disconnected', message: 'The connection to the agent was lost' }),
+      // CHAT-RECONNECT: the budget is spent — the flag must not survive here, the banner is hidden
+      // while reconnecting, so a left-over flag would swallow the lost-connection report.
+      reconnecting: false,
+    }));
   }
 
   /** Stops listening to the open run stream from this side (STREAM-1: the endpoint run goes on). */

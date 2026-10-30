@@ -419,7 +419,9 @@ describe('addMyTask — Run Task disabled: LIVE verdict per ask (S243-S3 + S245-
       // dropping the live re-read (the mutant) leaves this RED.
       await setCompanyTaskRunner(client, { enabled: true });
       const staleOn = createAddMyTaskTool({ runTaskDisabled: true });
-      const res = await callAddMyTask(staleOn, 'Work the queue proves enabled');
+      // S249-S2: budget pinned — an unpinned host env ≤ 1 would inject the capacity-zero
+      // warning and fake the very stale-warning this test says is dead.
+      const res = await withEnv('2', () => callAddMyTask(staleOn, 'Work the queue proves enabled'));
       assert.equal(res.ok, true);
       assert.notEqual(res.runTaskDisabled, true, 'no stale warning survives a live enabled read');
       assert.equal(res.message, 'Added 1 task.');
@@ -450,17 +452,21 @@ describe('addMyTask — Run Task disabled: LIVE verdict per ask (S243-S3 + S245-
     const { client, db } = await seededToolDb();
     try {
       setToolDbForTests(withFailingCompanyRead(db));
-      const off = createAddMyTaskTool({ runTaskDisabled: true });
-      const resOff = await callAddMyTask(off, 'Fallback still warns when db is down');
-      assert.equal(resOff.ok, true, 'task write never depends on the settings read');
-      assert.equal(resOff.runTaskDisabled, true, 'better a stale warning than silence');
-      assert.equal(resOff.runTaskDisabledReason, 'company_disabled');
-      assert.match(resOff.message, /Run Task turned OFF/);
+      // S249-S2: budget pinned — the static-fallback=false legs reach the capacity check, so
+      // an unpinned host env ≤ 1 would add a capacity-zero warning these assertions deny.
+      await withEnv('2', async () => {
+        const off = createAddMyTaskTool({ runTaskDisabled: true });
+        const resOff = await callAddMyTask(off, 'Fallback still warns when db is down');
+        assert.equal(resOff.ok, true, 'task write never depends on the settings read');
+        assert.equal(resOff.runTaskDisabled, true, 'better a stale warning than silence');
+        assert.equal(resOff.runTaskDisabledReason, 'company_disabled');
+        assert.match(resOff.message, /Run Task turned OFF/);
 
-      const on = createAddMyTaskTool();
-      const resOn = await callAddMyTask(on, 'Fallback false stays silent too');
-      assert.equal(resOn.ok, true);
-      assert.notEqual(resOn.runTaskDisabled, true);
+        const on = createAddMyTaskTool();
+        const resOn = await callAddMyTask(on, 'Fallback false stays silent too');
+        assert.equal(resOn.ok, true);
+        assert.notEqual(resOn.runTaskDisabled, true);
+      });
     } finally {
       setToolDbForTests(null);
       await client.close();
@@ -484,17 +490,21 @@ describe('addMyTask — Run Task disabled: LIVE verdict per ask (S243-S3 + S245-
           { requestContext: scopeContext },
         ));
 
-      const off = await callAdd(await assemble({ enabled: false }));
-      assert.equal(off.ok, true);
-      assert.match(off.message, /Run Task turned OFF/);
+      // S249-S2: budget pinned — the enabled/unset legs read the real env at the capacity
+      // check; this pins the DERIVATION of the fallback flag, not the host budget.
+      await withEnv('2', async () => {
+        const off = await callAdd(await assemble({ enabled: false }));
+        assert.equal(off.ok, true);
+        assert.match(off.message, /Run Task turned OFF/);
 
-      const on = await callAdd(await assemble({ enabled: true }));
-      assert.equal(on.ok, true);
-      assert.doesNotMatch(on.message, /Run Task turned OFF/);
+        const on = await callAdd(await assemble({ enabled: true }));
+        assert.equal(on.ok, true);
+        assert.doesNotMatch(on.message, /Run Task turned OFF/);
 
-      const unset = await callAdd(await assemble(undefined));
-      assert.equal(unset.ok, true);
-      assert.doesNotMatch(unset.message, /Run Task turned OFF/, 'default is enabled, like the poller');
+        const unset = await callAdd(await assemble(undefined));
+        assert.equal(unset.ok, true);
+        assert.doesNotMatch(unset.message, /Run Task turned OFF/, 'default is enabled, like the poller');
+      });
     } finally {
       setToolDbForTests(null);
       await client.close();
@@ -566,16 +576,21 @@ describe('addMyTask — global task-capacity zero (S245-S3b)', () => {
     }
   });
 
-  it('globalRunTaskCapacityZero mirrors the scheduler parse (env injectable, pure)', () => {
-    assert.equal(globalRunTaskCapacityZero('0'), true, 'kill switch');
-    assert.equal(globalRunTaskCapacityZero('1'), true, 'heartbeat reservation leaves 0');
-    assert.equal(globalRunTaskCapacityZero('1.5'), true, 'trunc → 1');
-    assert.equal(globalRunTaskCapacityZero('2'), false);
-    assert.equal(globalRunTaskCapacityZero('10'), false);
-    assert.equal(globalRunTaskCapacityZero(undefined), false, 'unset → default 2');
-    assert.equal(globalRunTaskCapacityZero('  '), false, 'blank → unset, not 0');
-    assert.equal(globalRunTaskCapacityZero('garbage'), false, 'garbage → default 2');
-    assert.equal(globalRunTaskCapacityZero('-1'), false, 'negative is garbage, not the switch');
+  it('globalRunTaskCapacityZero mirrors the scheduler parse (env injectable, pure)', async () => {
+    // S249-S2: `globalRunTaskCapacityZero(undefined)` falls through to the real env via the
+    // default param — pin the host env UNSET so the unset→default-2 row tests the parser,
+    // not whatever TASK_RUNNER_MAX_CONCURRENT_RUNS the machine happens to carry.
+    await withEnv(undefined, async () => {
+      assert.equal(globalRunTaskCapacityZero('0'), true, 'kill switch');
+      assert.equal(globalRunTaskCapacityZero('1'), true, 'heartbeat reservation leaves 0');
+      assert.equal(globalRunTaskCapacityZero('1.5'), true, 'trunc → 1');
+      assert.equal(globalRunTaskCapacityZero('2'), false);
+      assert.equal(globalRunTaskCapacityZero('10'), false);
+      assert.equal(globalRunTaskCapacityZero(undefined), false, 'unset → default 2');
+      assert.equal(globalRunTaskCapacityZero('  '), false, 'blank → unset, not 0');
+      assert.equal(globalRunTaskCapacityZero('garbage'), false, 'garbage → default 2');
+      assert.equal(globalRunTaskCapacityZero('-1'), false, 'negative is garbage, not the switch');
+    });
   });
 });
 
@@ -592,19 +607,27 @@ describe('resolveRunTaskQueueState — decision matrix (S245-S3a/b, pure)', () =
   });
 
   it('live enabled row clears a static true', async () => {
-    const q = await resolveRunTaskQueueState('c1', true, readReturning({ taskRunner: { enabled: true } }));
-    assert.equal(q.reason, null);
-    assert.equal(q.warning, '');
+    // S249-S2: enabled path consults the global capacity check — pin the budget so a host
+    // TASK_RUNNER_MAX_CONCURRENT_RUNS ≤ 1 cannot replace `null` with `no_task_capacity`.
+    await withEnv('2', async () => {
+      const q = await resolveRunTaskQueueState('c1', true, readReturning({ taskRunner: { enabled: true } }));
+      assert.equal(q.reason, null);
+      assert.equal(q.warning, '');
+    });
   });
 
   it('missing company row (null settings) resolves to the poller default — enabled', async () => {
-    const q = await resolveRunTaskQueueState('c1', true, readReturning(null));
-    assert.equal(q.reason, null, 'null row is a REAL answer, not a read failure: no stale warning');
+    await withEnv('2', async () => {
+      const q = await resolveRunTaskQueueState('c1', true, readReturning(null));
+      assert.equal(q.reason, null, 'null row is a REAL answer, not a read failure: no stale warning');
+    });
   });
 
   it('read failure falls back to the static flag, both directions', async () => {
-    assert.equal((await resolveRunTaskQueueState('c1', true, readThrowing)).reason, 'company_disabled');
-    assert.equal((await resolveRunTaskQueueState('c1', false, readThrowing)).reason, null);
+    await withEnv('2', async () => {
+      assert.equal((await resolveRunTaskQueueState('c1', true, readThrowing)).reason, 'company_disabled');
+      assert.equal((await resolveRunTaskQueueState('c1', false, readThrowing)).reason, null);
+    });
   });
 
   it('capacity zero only speaks when the company switch is on', async () => {

@@ -337,8 +337,8 @@ export async function pollTaskRunner(
       if (lastLoggedAt === undefined || now() - lastLoggedAt >= deferLogWindowMs) {
         const msg =
           'task-run capacity zero, refusing — Run Tasks cannot start for this agent while the ' +
-          'effective task cap is 0 (raise TASK_RUNNER_MAX_CONCURRENT_RUNS to ≥ 2, or set a ' +
-          'company taskRunner.maxConcurrentTasks ≥ 1 with budget headroom)';
+          'effective task cap is 0 (raise TASK_RUNNER_MAX_CONCURRENT_RUNS to ≥ 2, or pass an ' +
+          'explicit opts.taskCap ≥ 1)';
         const data = { agentId, pending: tasks.length, slot, maxConcurrent, taskCap };
         if (deps.log?.warn) deps.log.warn(msg, data);
         else deps.log?.info(msg, data);
