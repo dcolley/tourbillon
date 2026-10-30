@@ -2,12 +2,26 @@ import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 
 // Mock dependencies BEFORE importing the route
+// Shape of a joined session+user row as returned by the route's `limit()` query;
+// `sessionExpiresAt` is nullable/optional because the DB column is nullable and the
+// mock rows below cover the null and undefined branches of the route.
+type SessionUserRow = {
+  sessionId: string;
+  sessionToken: string;
+  sessionExpiresAt?: Date | null;
+  userId: string;
+  userEmail: string;
+  userName: string;
+};
+
 const mockDb = {
   select: mock.fn(() => mockDb),
   from: mock.fn(() => mockDb),
   innerJoin: mock.fn(() => mockDb),
   where: mock.fn(() => mockDb),
-  limit: mock.fn(() => Promise.resolve([])),
+  // Annotated so re-assignments below (rows) stay assignable; inferred from `[]`
+  // alone this is Mock<() => Promise<never[]>> (TS2322 on every row re-assignment).
+  limit: mock.fn<() => Promise<SessionUserRow[]>>(() => Promise.resolve([])),
 };
 
 const mockAuth = {

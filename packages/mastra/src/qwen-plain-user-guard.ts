@@ -279,6 +279,11 @@ export class PinPlainUserAfterTrimProcessor
             promptMessageCount: next.length,
           },
         });
+        // Fail-closed invariant: `abort` throws TripWire and never returns, but
+        // its declared return type does not encode that, so TS cannot narrow
+        // `pinned`. This unreachable assertion keeps the guard fail-closed at
+        // runtime too (TS2345 on the line below without it).
+        throw new Error(`${ZERO_PLAIN_USER_TRIPWIRE}: abort() must never return`);
       }
       next = ensurePinnedPlainUser(next, pinned);
       mutated = true;
