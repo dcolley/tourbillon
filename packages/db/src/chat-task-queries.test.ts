@@ -76,6 +76,14 @@ async function freshDb() {
 const A1 = { companyId: 'c1', agentId: 'a1' };
 const A2 = { companyId: 'c1', agentId: 'a2' };
 const B1 = { companyId: 'c2', agentId: 'b1' };
+/**
+ * S276-S1 (#276 softs): a GHOST scope — agent ids are globally unique in production, so no real
+ * agent ever queries its own agentId under another company. It exists purely to isolate the
+ * `companyId` clause of the scope filter: B1 above cannot do it (its agentId `b1` differs from
+ * every owner's, so an agent-only mutant still reads null). Same agentId, foreign company must
+ * also be null.
+ */
+const B2 = { companyId: 'c2', agentId: 'a1' };
 
 describe('chat-task query layer', () => {
   it('adds to the tail (position), lists open items, and round-trips every status', async () => {
@@ -146,6 +154,10 @@ describe('chat-task query layer', () => {
       // returns null; pin the READ itself: a foreign id is null, never another agent's row.
       assert.equal(await getChatTask(A2, { id: task.id }, db), null, 'foreign agent (same company) reads null');
       assert.equal(await getChatTask(B1, { id: task.id }, db), null, 'foreign company reads null');
+      // S276-S1 (#276 softs): B1 alone let mutant M27c (scope by agentId only, companyId dropped)
+      // survive — b1 matches no owner. The ghost scope keeps the agentId identical to the owner's,
+      // so only the companyId clause can keep this null.
+      assert.equal(await getChatTask(B2, { id: task.id }, db), null, 'same agentId, foreign company reads null');
       assert.equal((await getChatTask(A1, { id: task.id }, db))?.id, task.id, 'the owning scope still reads its row');
     } finally {
       await client.close();
