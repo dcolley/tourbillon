@@ -102,6 +102,27 @@
  *     'exclusive comparator' (S259-S1 category, restored as a second assert.throws) — so
  *     a guard deletion REDs on the category axis while honest message rewording that
  *     keeps the category phrase (M2-style) stays free.
+ *
+ * #273 softs (this pack):
+ *   S273-S1 — the exclusives loop only carried bare/padded specs, where the S259-S1
+ *     guard's argument (the post-alias `base`) equals the pre-alias `trimmed`, so
+ *     mutant M15 (guard testing `trimmed` instead of `base`) was GREEN: with an npm
+ *     alias such as 'npm:@mastra/core@<1.78.0' the guard sees 'npm:...' and never
+ *     fires, and the spec falls through to the generic refusal — which satisfies both
+ *     stacked axes. The loop now carries the npm-alias exclusive form too, so M15 REDs
+ *     on the category axis.
+ *   S273-S2 (nit) — the category axis is a substring match, so mutant M16 (guard
+ *     deleted AND the generic fallback message injected with 'exclusive comparator')
+ *     passed both axes. Each loop entry now ALSO asserts the refusal does NOT carry the
+ *     generic fallback's wording ('not an unambiguous single version'): a disguised
+ *     generic refusal REDs. Honest rewording stays free: the guard message only has to
+ *     keep naming the excluded range (M11 GREEN), and the new axis pins the generic
+ *     wording ONLY negatively — no verbatim generic text is required by (c) itself (M18
+ *     GREEN), and an evasive reword dropping the generic phrase was already killed by
+ *     the pre-existing positive category pins (M16b RED).
+ *   S273-S3 (info) — mutants M9/M10 delete the category assert.throws itself (alone /
+ *     combined with M5) and stay GREEN: a pin cannot guard its own deletion. Known and
+ *     inherent to a test-local helper; documented in the PR body, no code change.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -537,7 +558,11 @@ test('S254-S3: declaredPinVersion strips unambiguous specs and refuses the forms
   // rules 1.78.0 out (mutants M22/M23 GREEN). Inclusive comparators include their base
   // and keep the strip; exclusive ones must refuse. These entries used to sit in the
   // strip loops above (duplicated across S251-S2 and S254-S3) pinned GREEN — flipped.
-  for (const spec of ['<1.78.0', '>1.78.0', ' <1.78.0 ', '>1.78.0 ']) {
+  // S273-S1 adds the npm-alias exclusive form: the guard runs on `base` (the version
+  // tail AFTER the 'npm:pkg@' strip), so this is the only entry where base !== trimmed —
+  // a guard rewired to test `trimmed` (M15) sees 'npm:...', never fires, and the spec
+  // falls through to the generic refusal, RED-ing here on the category axis below.
+  for (const spec of ['<1.78.0', '>1.78.0', ' <1.78.0 ', '>1.78.0 ', 'npm:@mastra/core@<1.78.0']) {
     // S265-S1 + S270-S1 — BOTH refusal axes pinned, stacked (S270-S1):
     // (a) naming: the message must name the spec — S265-S1's matcher built from the
     //     entry itself, so each loop entry pins its own name (kills "guard kept, message
@@ -561,6 +586,21 @@ test('S254-S3: declaredPinVersion strips unambiguous specs and refuses the forms
       () => declaredPinVersion(spec),
       /exclusive comparator/,
       `'${spec}' must refuse through the S259-S1 exclusive guard, not the generic 'not an unambiguous single version' fallback — deleting the guard (M5) fell the spec through to that fallback, which names the spec but never mentions the excluded range`,
+    );
+    // (c) anti-disguise (S273-S2): (b) is a SUBSTRING match, so M16 — guard deleted AND
+    // the generic fallback message injected with 'exclusive comparator' — satisfied both
+    // stacked axes and survived. The refusal must additionally NOT carry the generic
+    // fallback's own wording: a generic refusal wearing the category phrase as a disguise
+    // REDs here. This axis is NEGATIVE-only: it requires no verbatim generic text (an
+    // honest generic reword that keeps the substrings the pre-existing positive category
+    // pins demand, 'unambiguous single version' / 'no single base version', stays GREEN;
+    // one that DROPS them was already RED on those older pins, not here), and the guard
+    // message stays free to reword as long as it keeps naming the excluded range.
+    assert.throws(
+      () => declaredPinVersion(spec),
+      (err: unknown) =>
+        !/not an unambiguous single version/.test((err as Error).message),
+      `'${spec}': the refusal must be the exclusive guard's, not the generic 'not an unambiguous single version' fallback wearing an injected 'exclusive comparator' phrase (M16) — the category axis above is a substring match and cannot tell the two apart alone`,
     );
   }
   // S265-S2: the strip regex above must carry ONLY what the S259-S1 guard still lets
