@@ -38,8 +38,14 @@ const BOOT_PATH = String.raw`\b(?:scheduler|main|boot)\b`;
  * Notably absent: `setting` (matches innocent "the setting lives in…"), `from`/`by`
  * (too common in harmless prepositional copy — "opts.taskCap set by the scheduler" still
  * REDs via `set`; "raised from the scheduler" stays GREEN by design).
+ *
+ * S272-S1 (#272 ACCEPT soft-pack): two inflections in the old alternation were dead
+ * branches — `supply(?:ies|ied)?` needed the y→ies/lied stem change, so it only ever
+ * matched the non-words "supplyies"/"supplyied" while `supplies`/`supplied` slipped
+ * through GREEN; and `provid(?:e|es|ed)` had no `-ing` branch, missing `providing`.
+ * Both fixed here and pinned by the S272-S1 corpus rows in task-runner-252-softs.test.ts.
  */
-const WIRING_VERB = String.raw`\b(?:pass(?:es|ed|ing)?|supply(?:ies|ied)?|forward(?:s|ed|ing)?|set(?:s)?|wir(?:e|es|ed|ing)|configur(?:e|es|ed|ing)|provid(?:e|es|ed)|via|through)\b`;
+const WIRING_VERB = String.raw`\b(?:pass(?:es|ed|ing)?|supp(?:ly|lies|lied)|forward(?:s|ed|ing)?|set(?:s)?|wir(?:e|es|ed|ing)|configur(?:e|es|ed|ing)|provid(?:e|es|ed|ing)|via|through)\b`;
 
 /** Boot-path word → wiring verb (subject position, same clause). */
 const SAME_CLAUSE_TO_VERB = '[^.;:\\u2014\\u2013\\n]{0,25}';
@@ -52,17 +58,57 @@ const TASKCAP_TOKEN = String.raw`(?:opts\.)?taskCap`;
 const SAME_CLAUSE_TO_BOOT = '[^.;:\\u2014\\u2013\\n]{0,15}';
 
 /**
- * The narrowed wiring-claim ban (S256-S2 heritage, S266-S1 tightening). Forbidden shapes —
+ * S272-S2 (#272 ACCEPT soft-pack): the same-clause pin above only glues tokens that sit
+ * CLOSE together, so a wiring verb hiding in a RELATIVE CLAUSE slipped through GREEN —
+ * "opts.taskCap, which the scheduler passes at boot, …" puts `passes` 28+ chars from the
+ * head token (outside both windows), and "…which the scheduler passes the number of slots
+ * as opts.taskCap" widens the verb→object gap past 20 chars. Two extra branches close
+ * that surface WITHOUT touching the same-clause windows (their honest-copy contract is
+ * pinned unchanged by S266-S1):
+ *   1. head-anchored agentive relative: `taskCap … which|that … <boot> <verb>` — the head
+ *      IS the verb's object, so the clause may END at the verb (bounded tail: clause
+ *      terminator, end of string, or a short prepositional tail like "for you"). The
+ *      tail is bounded so a relative whose verb governs some other object stays GREEN
+ *      ("opts.taskCap, which the boot log merely mentions, …" — no wiring verb anyway).
+ *   2. unanchored relative with an EXPLICIT taskCap object: `which|that … <boot> <verb>
+ *      … taskCap` (40-char verb→object window). The boot-path word must sit TIGHT to its
+ *      verb (same filler bound as the same-clause pin), so a relative whose subject is
+ *      some other noun stays GREEN: "the tools, which read opts.taskCap, never see the
+ *      scheduler defaults" has no boot-adjacent wiring verb ("defaults" is 8 chars from
+ *      `scheduler`, outside the filler window).
+ * Passive relatives ("which is supplied by the scheduler") are covered by branch 2 of the
+ * same-clause pin ONCE the S272-S1 inflection fix lands — before it, `is supplied` had no
+ * matching verb and the whole shape escaped.
+ */
+const RELATIVE_PRONOUN = String.raw`(?:which|that)`;
+/** taskCap head → relative pronoun (short copula/attribute span only). */
+const HEAD_TO_RELATIVE = '[^.;:\\u2014\\u2013\\n]{0,20}';
+/** Relative pronoun → boot-path subject of the relative clause. */
+const RELATIVE_TO_AGENT = '[^.;:\\u2014\\u2013\\n]{0,25}';
+/** Boot-path subject → its verb (only "says"/"is"/"for you"-scale filler). */
+const AGENT_TO_VERB = '[^.;:\\u2014\\u2013\\n]{0,5}';
+/** Head-as-object tail: the relative may end shortly after the verb. */
+const VERB_TAIL = '[^.;:\\u2014\\u2013\\n]{0,20}';
+/** Wide verb → explicit taskCap object window (only inside a relative clause). */
+const RELATIVE_VERB_TO_TASKCAP = '[^.;:\\u2014\\u2013\\n]{0,40}';
+
+/**
+ * The narrowed wiring-claim ban (S256-S2 heritage, S266-S1 tightening, S272-S1 inflection
+ * fix, S272-S2 relative clauses). Forbidden shapes —
  * a wiring verb tying the boot path to `taskCap` within one clause, in either word order:
  *   <boot> … <verb> … taskCap   e.g. "have scheduler-main pass an explicit opts.taskCap"
  *   taskCap … <verb> … <boot>   e.g. "opts.taskCap set at boot", "wire opts.taskCap
  *                               through the scheduler"
+ * plus the S272-S2 relative-clause shapes (see the block comment above).
  * The old pattern (/taskCap[\s\S]{0,60}\b(scheduler|main|boot)\b|…/i) demanded only
  * proximity, so harmless mentions within 60 chars false-REDd. See the S266-S1 corpus pin
- * in task-runner-252-softs.test.ts for the accepted match/no-match contract.
+ * in task-runner-252-softs.test.ts for the accepted match/no-match contract (S266-S1
+ * rows), plus the S272-S1/S2 rows for the inflection and relative-clause contract.
  */
 export const FORBIDDEN_TASKCAP_WIRING_CLAIM = new RegExp(
   `${BOOT_PATH}${SAME_CLAUSE_TO_VERB}${WIRING_VERB}${SAME_CLAUSE_TO_TASKCAP}${TASKCAP_TOKEN}` +
-    `|${TASKCAP_TOKEN}${SAME_CLAUSE_TO_TASKCAP}${WIRING_VERB}${SAME_CLAUSE_TO_BOOT}${BOOT_PATH}`,
+    `|${TASKCAP_TOKEN}${SAME_CLAUSE_TO_TASKCAP}${WIRING_VERB}${SAME_CLAUSE_TO_BOOT}${BOOT_PATH}` +
+    `|${TASKCAP_TOKEN}${HEAD_TO_RELATIVE}${RELATIVE_PRONOUN}${RELATIVE_TO_AGENT}${BOOT_PATH}${AGENT_TO_VERB}${WIRING_VERB}(?:${RELATIVE_VERB_TO_TASKCAP}${TASKCAP_TOKEN}|${VERB_TAIL}$|${VERB_TAIL}(?=[,.;:])|${VERB_TAIL}(?=\\s+(?:for|to|it|you|tools?)\\b))` +
+    `|${RELATIVE_PRONOUN}${RELATIVE_TO_AGENT}${BOOT_PATH}${AGENT_TO_VERB}${WIRING_VERB}${RELATIVE_VERB_TO_TASKCAP}${TASKCAP_TOKEN}`,
   'i',
 );
