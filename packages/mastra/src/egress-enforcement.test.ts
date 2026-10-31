@@ -32,6 +32,18 @@ import { testEgressProxySocketPath } from './egress-socket-test-key';
 const filterReady = landlockNetAvailable() && seccompFilterSupported();
 
 /**
+ * S271-S1: pure string classification of an already-realpathed absolute path —
+ * true iff it is /tmp itself or lives under /tmp/. The trailing separator is
+ * load-bearing: "/tmpfoo" is a STRING-PREFIX sibling of /tmp, not inside it.
+ * Split out of libDirUnderTmp so the S271-S1 pins below exercise the decision
+ * as strings with no filesystem and no root fixture — the dropped-sep mutant
+ * (M1) REDs on any host, not only where a top-level /tmpfoo is creatable.
+ */
+export function isTmpRealpath(real: string): boolean {
+  return real === '/tmp' || real.startsWith(`${sep}tmp${sep}`);
+}
+
+/**
  * The compiled filter lives under the execution workspace root
  * (`<workspaceRoot>/.runtime/lib`), which is inside the repo checkout in the normal
  * setup. When the checkout itself lives under /tmp, the "outside /tmp" assertion is
@@ -44,7 +56,7 @@ export function libDirUnderTmp(): boolean {
   try {
     // Resolve symlinks so /tmp -> /private/tmp (macOS) and bind-mount aliases are caught.
     const runtimeDir = realpathSync(getEgressRuntimeDir());
-    return runtimeDir === '/tmp' || runtimeDir.startsWith(`${sep}tmp${sep}`);
+    return isTmpRealpath(runtimeDir);
   } catch {
     return false;
   }
@@ -164,8 +176,9 @@ describe('/tmp skip guard (S261-S1)', () => {
   /** True when realpath(dir) is /tmp itself or lives under /tmp/. */
   function underTmp(dir: string): boolean {
     try {
-      const real = realpathSync(dir);
-      return real === '/tmp' || real.startsWith('/tmp/');
+      // S271-S1: delegates the string decision to isTmpRealpath (same rule the
+      // pure-string pins drive) — one prefix implementation, pinned once.
+      return isTmpRealpath(realpathSync(dir));
     } catch {
       return true; // unreadable base: treat as unsafe, never as a valid non-/tmp base
     }
@@ -321,9 +334,16 @@ describe('/tmp skip guard (S261-S1)', () => {
         // Compare the BASES, not the mkdtemp fixture paths: mkdtemp suffixes make
         // two fixtures under the SAME base look different (an early version of
         // this pin stayed GREEN when the $HOME row was re-pointed at /var/tmp).
-        assert.notEqual(rows[3].resolvedBase, rows[2].resolvedBase, 'the $HOME row must exercise a DIFFERENT base than the /var/tmp row (S267-S6a)');
-        assert.equal(rows[3].resolvedBase, homedir(), `$HOME row must run from homedir(), got ${rows[3].resolvedBase}`);
-        assert.equal(rows[2].resolvedBase, '/var/tmp', `/var/tmp row must run from /var/tmp, got ${rows[2].resolvedBase}`);
+        // S271-S4: look rows up by LABEL, never by hard-coded index — removing
+        // or reordering a row must fail an assertion with a named reason, not
+        // shift rows[3] into a bare TypeError (M12 died only that way).
+        const homeRow = rows.find((row) => row.label === 'literal $HOME');
+        const vartmpRow = rows.find((row) => row.label === 'literal /var/tmp');
+        assert.ok(homeRow, 'the $HOME row must exist by label');
+        assert.ok(vartmpRow, 'the /var/tmp row must exist by label');
+        assert.notEqual(homeRow!.resolvedBase, vartmpRow!.resolvedBase, 'the $HOME row must exercise a DIFFERENT base than the /var/tmp row (S267-S6a)');
+        assert.equal(homeRow!.resolvedBase, homedir(), `$HOME row must run from homedir(), got ${homeRow!.resolvedBase}`);
+        assert.equal(vartmpRow!.resolvedBase, '/var/tmp', `/var/tmp row must run from /var/tmp, got ${vartmpRow!.resolvedBase}`);
       }
       // On a normal host ($HOME outside /tmp) the $HOME row must be exercised —
       // a shared fallback chain re-testing /var/tmp (the mislabel) shows up here
@@ -335,8 +355,11 @@ describe('/tmp skip guard (S261-S1)', () => {
       }
       // /tmpfoo host constraint stays visible in the TAP output without flipping
       // the whole test to SKIP (see note above on why t.skip() is wrong here).
+      // S271-S3: 'exercised' is ALSO a string, so without the !== 'exercised'
+      // guard the root container printed "NOTE: exercised — exercised in the
+      // root container gate instead" — the NOTE belongs to SKIPPED rows only.
       const tmpfooOutcome = rowOutcomes.get('literal /tmpfoo');
-      if (typeof tmpfooOutcome === 'string') {
+      if (typeof tmpfooOutcome === 'string' && tmpfooOutcome !== 'exercised') {
         t.diagnostic(`NOTE: ${tmpfooOutcome} — exercised in the root container gate instead`);
       }
     } finally {
@@ -445,6 +468,42 @@ describe('/tmp skip guard (S261-S1)', () => {
       compileTest.includes('ensureEgressLandlockLibrary()'),
       'compile assertion body must remain reachable',
     );
+  });
+});
+
+describe('pure /tmp prefix classification (S271-S1)', () => {
+  // The /tmpfoo row of the literal-roots pin needs permission to create a
+  // top-level /tmpfoo (root); on non-root hosts and in CI it skips with a
+  // diagnostic, so the dropped-sep mutant survived there unexercised
+  // (S267-S2 PARTIAL). These pins drive the SAME classification isTmpRealpath
+  // implements, as pure strings: no filesystem, no root, deterministic on
+  // every host.
+  it('classifies /tmp roots by string prefix with no filesystem', () => {
+    assert.equal(isTmpRealpath('/tmp'), true);
+    assert.equal(isTmpRealpath('/tmp/x'), true);
+    assert.equal(isTmpRealpath('/tmp/.runtime/lib'), true);
+    // The M1 killers: a guard that dropped the trailing separator reports
+    // these as /tmp and REDs here, as a plain user with no fixtures.
+    assert.equal(isTmpRealpath('/tmpfoo'), false, 'a string-prefix sibling of /tmp is not under /tmp');
+    assert.equal(isTmpRealpath('/tmpfoo/x'), false, 'children of that sibling are not under /tmp either');
+    assert.equal(isTmpRealpath('/tmp-fake'), false);
+    assert.equal(isTmpRealpath('/var/tmp'), false);
+    assert.equal(isTmpRealpath('/'), false);
+    assert.equal(isTmpRealpath(''), false);
+  });
+
+  it('libDirUnderTmp and underTmp delegate to isTmpRealpath (source pins, anti-vacuity)', () => {
+    // If either helper re-implemented the prefix check inline, the string pins
+    // above would pin dead code while the real guards drifted. Pin delegation.
+    const src = readFileSync(fileURLToPath(new URL('./egress-enforcement.test.ts', import.meta.url)), 'utf8');
+    const libFn = src.slice(src.indexOf('export function libDirUnderTmp'), src.indexOf('/** Set/restore env'));
+    assert.ok(libFn.length > 0 && libFn !== src, 'libDirUnderTmp not found for delegation pin');
+    assert.match(libFn, /return\s+isTmpRealpath\(/, 'libDirUnderTmp must delegate the prefix decision to isTmpRealpath');
+    assert.doesNotMatch(libFn, /startsWith\(/, 'libDirUnderTmp must not re-implement the prefix check inline');
+    const underFn = src.slice(src.indexOf('function underTmp'), src.indexOf('function outsideTmpRootAt'));
+    assert.ok(underFn.length > 0 && underFn !== src, 'underTmp not found for delegation pin');
+    assert.match(underFn, /return\s+isTmpRealpath\(/, 'underTmp must delegate the prefix decision to isTmpRealpath');
+    assert.doesNotMatch(underFn, /startsWith\(/, 'underTmp must not re-implement the prefix check inline');
   });
 });
 

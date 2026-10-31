@@ -1,7 +1,9 @@
 import { strict as assert } from 'node:assert';
-import { existsSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
-import { join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 /**
@@ -87,5 +89,73 @@ describe('root type-check covers packages/mastra (S267-S4)', () => {
     // own version there and the gate is version-agnostic at test time.
     const ci = readFileSync(join(repoRoot, '.github', 'workflows', 'ci.yml'), 'utf8');
     assert.match(ci, /run: pnpm type-check/, 'CI must run the root type-check');
+  });
+});
+
+describe('gate behaviour: a non-zero tsc exit must never read as GREEN (S271-S2)', () => {
+  // The S267-S3 no-run guard above is pinned by source regex, but a text-only pin
+  // is dodgeable: M3 kept the guard line verbatim and inserted an early
+  // `exit 0` for any non-zero tsc exit BEFORE it - the regex stayed GREEN while
+  // the gate went back to exiting 0 on a missing tsc. These tests copy the LIVE
+  // gate script into a scratch tree and actually run it (spawn), so the exit
+  // code, not the wording, is the assertion. The copy runs against a scratch
+  // tree (its own type-check.baseline, TSC_ARGS re-pointed), so no real tsc is
+  // ever invoked - cheap, and identical on any POSIX shell host.
+  const gateSrcPath = join(mastraPkgDir, 'scripts', 'type-check-gate.sh');
+
+  function runScratchGate(opts: { tscPath: string; baseline: string; fakeTscSource?: string }): {
+    status: number | null;
+    stdout: string;
+    stderr: string;
+  } {
+    const scratch = mkdtempSync(join(tmpdir(), `tb-gate-s271-s2-${process.pid}-`));
+    try {
+      mkdirSync(join(scratch, 'scripts'), { recursive: true });
+      const gate = readFileSync(gateSrcPath, 'utf8');
+      // Re-point TSC_ARGS at the scratch path (missing file, or the fake tsc).
+      // The gate runs `node $TSC_ARGS ...` from its own dir (dirname $0/..), so
+      // an absolute scratch path survives the cd.
+      const rewritten = gate.replace(/^TSC_ARGS=.*$/m, `TSC_ARGS="${join(scratch, opts.tscPath)}"`);
+      assert.ok(rewritten !== gate && !rewritten.includes('../../node_modules/typescript'), 'TSC_ARGS rewrite must land before the gate is run');
+      writeFileSync(join(scratch, 'scripts', 'type-check-gate.sh'), rewritten, { mode: 0o755 });
+      writeFileSync(join(scratch, 'type-check.baseline'), `${opts.baseline}\n`);
+      if (opts.fakeTscSource !== undefined) {
+        writeFileSync(join(scratch, opts.tscPath), opts.fakeTscSource);
+      }
+      // The gate calls bare `node`; make sure it resolves to this test's node.
+      const env = { ...process.env, PATH: `${dirname(process.execPath)}${delimiter}${process.env.PATH ?? ''}` };
+      const r = spawnSync('sh', [join(scratch, 'scripts', 'type-check-gate.sh')], { encoding: 'utf8', env, timeout: 30_000 });
+      assert.equal(r.error, undefined, `spawning the gate copy failed: ${String(r.error)}`);
+      return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  }
+
+  it('missing tsc + baseline 0 exits non-zero (kills the M3 early-exit bypass)', () => {
+    // Exactly the M3 target configuration: node <missing path> exits non-zero
+    // (MODULE_NOT_FOUND) with ZERO 'error TS' lines and a 0 baseline. The honest
+    // gate fails via the S267-S3 guard; the M3 mutant's early `exit 0` makes
+    // this assertion RED even though the guard text is untouched.
+    const r = runScratchGate({ tscPath: 'no-such-tsc.js', baseline: '0' });
+    assert.notEqual(r.status, 0, `gate went GREEN with a missing tsc and baseline 0: stdout=${r.stdout} stderr=${r.stderr}`);
+    // Pin WHICH failure branch fired (the no-run guard), not any exit 1 -
+    // missing-baseline and over-baseline paths also exit 1 for other reasons.
+    assert.match(r.stderr, /zero 'error TS'/, `expected the zero-diagnostics no-run message, got: ${r.stderr}`);
+  });
+
+  it('a real diagnostics run at the baseline count still exits 0 (not an always-fail gate)', () => {
+    // Positive control: the assertion above must not be satisfiable by a gate
+    // that simply exits 1 unconditionally. A fake tsc exiting 1 WITH one
+    // 'error TS' line, against baseline 1, is a legitimate diagnostics run and
+    // must reach the OK path.
+    const fake = [
+      "process.stdout.write('src/example.ts(1,1): error TS2322: fake diagnostic for the gate test\\n');",
+      'process.exit(1);',
+      '',
+    ].join('\n');
+    const r = runScratchGate({ tscPath: 'fake-tsc.js', baseline: '1', fakeTscSource: fake });
+    assert.equal(r.status, 0, `legitimate baseline run must pass the gate: stdout=${r.stdout} stderr=${r.stderr}`);
+    assert.match(r.stdout, /OK \(1\/1/, `expected the OK line, got: ${r.stdout}`);
   });
 });
