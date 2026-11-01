@@ -1,8 +1,61 @@
 # Company Computer Spike
 
-**Status:** DRAFT — Option A locked (2026-09-30 Derek/PM)  
+**Status:** DRAFT — Option A locked (2026-09-30 Derek/PM); **canonical mounts + per-agent container locked 2026-10-31 (PM + Ops)**  
 **Gating:** ACCEPT/HOLD draft only; HOLD per-agent VMs / shared display / bwrap-as-desktop  
 **Product Lock:** Two-gate model (2026-09-30 Derek/PM) — company config gates host provision; agent config gates agent home
+
+---
+
+## Canonical Mounts + Per-Agent Container (PM + Ops Lock — 2026-10-31)
+
+**This section supersedes every earlier mount/container layout in this document, including
+the Ops first draft (2026-10-29) that placed shared trees under
+`/home/derek/company-computers/<slug>/shared/{home,data}` and mounted a shared overlay at
+`/home/kasm-user/shared`. That draft is DISCARDED — do not implement it, do not revive its
+"do not bind-over `/home`" framing.**
+
+**USE THESE ONLY:**
+
+| Host path | Container path | Scope |
+|---|---|---|
+| `/opt/tourbillon-company-{companyId}/data/` | `/data/` | Shared company workspace (read/write across the company's seats) |
+| `/opt/tourbillon-company-{companyId}/home/{agentUrlKey}/` | `/home/kasm-user/` | Per-agent home, bind **over** the Kasm image home in that agent's seat |
+
+- **One `kasmweb/desktop` container per AGENT** (not multi-seat, not one-per-company).
+  Image pin: `kasmweb/desktop:1.19.0` (constant in `packages/company-computer/src/constants.ts`;
+  bump deliberately with Ops). Container name `cc-<companySlug-or-id>-<agentUrlKey>`.
+  KasmVNC container port 6901; host ports allocated from **6901** upward per live seat.
+  Resource envelope (pinned by tests in `lifecycle.ts`/`lifecycle.test.ts`): shm **512m**,
+  ~**2GiB** memory, ~**1.5 CPU** per seat. **Host-wide seat cap: 4** concurrent
+  non-destroyed seats (`MAX_ACTIVE_SEATS` in `constants.ts`) — a 5th `createSession`
+  answers `seat_cap_exceeded` (HTTP 429) before any host call; an agent reusing its own
+  live seat is never blocked by the cap.
+- The per-agent home bind-over of `/home/kasm-user` is the isolation mechanism: agent A's
+  browser profile, dotfiles and downloads live only in A's host dir. Cross-agent sharing
+  happens exclusively through `/data`.
+- **Two gates still decide everything** (see §0): company `hasComputer === true` AND agent
+  `hasComputer === true`. The `company-computer` toolset alone never bypasses either gate.
+- **Host start is an Ops contract:** the app code refuses every container start unless
+  `CC_ALLOW_START=1` AND the Ops scripts exist in the Ops bin dir
+  (`CC_BIN_DIR`, default `/home/derek/company-computers/bin`): **`cc-ensure-company`**,
+  **`cc-ensure-seat`**, **`cc-teardown-seat`**, **`cc-teardown-company`** (shared helpers in
+  **`cc-lib.sh`**). `/opt` tree creation goes through `cc-ensure-company` only with
+  `CC_APPLY=1` (needs sudo). Do NOT invent other bin paths (e.g.
+  `/opt/tourbillon-company-computer/bin/ensure-*` — not sanctioned). Slice 1 ships app
+  code only — zero seats on Spark1 inventory until Derek enables is the correct steady
+  state; the dry-run HostClient refuses live docker unless BOTH the flag and the scripts
+  exist.
+- **Ops seat inventory `meta.json` — schema 2 (locked):** one per live seat, written by
+  `cc-ensure-seat`. Shape: `containerName`, `hostPort`, `vncPasswordFile` naming a
+  sibling **`vnc_pw`** file at **mode 600** (the VNC password NEVER appears in meta.json),
+  and **object-form** `mounts` (`{ "<hostPath>": "<containerPath>" }` with host paths
+  under `/opt/tourbillon-company-{companyId}/` and targets only `/data` or
+  `/home/kasm-user`). Schema 1 (inline password, array mounts) is rejected by the parser
+  (`packages/company-computer/src/ops-inventory.ts#parseSeatMeta`).
+- Implemented in Slice 1: `packages/company-computer/` (registry API, path helpers,
+  lifecycle against an injected `HostClient`), `company_computer_sessions` + `hasComputer`
+  columns (migration 0025), `company-computer` Tier-2 toolset,
+  `/api/internal/company-computer/*` (run-token auth, both gates checked server-side).
 
 ---
 
@@ -114,6 +167,11 @@ Both coexist. Agents use LocalSandbox for fast ephemeral scripting and Company C
 
 ### Per-Company Compute + Disk
 
+> **Superseded framing (2026-10-31):** for the locked kasmweb MVP there is no shared
+> desktop session and no shared browser profile — each agent gets its own container with
+> its own `/home/kasm-user` bind mount. "Shared" below is limited to the company `data`
+> tree mounted at `/data` and the host machine itself.
+
 One Linux host/VM per company (when company computer is provisioned):
 - Shared CPU, RAM, disk
 - Shared company workspace filesystem (`/company`)
@@ -214,28 +272,31 @@ Provisioning backends are orthogonal to the `hasComputer` gate — the backend d
 
 **Stack:**
 - Docker Engine API on **localhost** (same host as Tourbillon; no Kasm Admin UI required)
-- Kasmweb Docker images: `kasmweb/chrome`, `kasmweb/desktop`, `kasmweb/ubuntu-jammy-desktop`
-- One container per company on localhost; agents with `hasComputer` get `/home/{agentId}` mounts
+- Kasmweb Docker images: `kasmweb/desktop` (**pinned default: `kasmweb/desktop:1.19.0`**), `kasmweb/chrome`
+- **One container per AGENT seat** (per-agent lock 2026-10-31 — see Canonical Mounts section above). Host dirs under `/opt/tourbillon-company-{companyId}/`: `data/` → `/data`, `home/{agentUrlKey}/` → `/home/kasm-user/`
 - KasmVNC embedded in container (noVNC on port 6901 by default)
-- Tourbillon proxies HTTPS iframe/embed; VNC password rotated per provision
+- Tourbillon proxies HTTPS iframe/embed; VNC password rotated per seat (never logged)
 
 **Provision flow:**
-1. Board enables company computer at `/settings/company-computer` → selects image from allowlist (`kasmweb/desktop`, `kasmweb/chrome`, etc.)
-2. Tourbillon backend calls Docker API:
+1. Board enables company computer at `/settings/company-computer` (gate 1) and enables the agent's Computer access (gate 2, agent page)
+2. First `computer*` tool call by that agent creates the seat. Tourbillon backend calls Docker API:
    ```bash
    docker run -d \
-     --name=tourbillon-company-{companyId} \
+     --name=cc-{companySlugOrId}-{agentUrlKey} \
      --shm-size=512m \
      -e VNC_PW={rotated-password} \
      -p 6901:6901 \
-     -v tourbillon-company-{companyId}:/home/kasm-user \
-     kasmweb/ubuntu-jammy-desktop:1.15.0
+     -v /opt/tourbillon-company-{companyId}/data:/data \
+     -v /opt/tourbillon-company-{companyId}/home/{agentUrlKey}:/home/kasm-user \
+     kasmweb/desktop:1.19.0
    ```
+   (Host port allocated from 6901 upward per live seat; directories and start go through
+   the Ops scripts `cc-ensure-company` (CC_APPLY=1, /opt trees) and `cc-ensure-seat`
+   (CC_ALLOW_START=1) under `CC_BIN_DIR` — refused otherwise. Teardown: `cc-teardown-seat`.)
 3. Container boots desktop + KasmVNC in ~5-10 seconds
-4. Backend health-checks `https://localhost:6901` (KasmVNC endpoint)
-5. Record `company_computers` row: `{ companyId, containerId, imageId, vncUrl, vncPassword, status: 'ready' }`
-6. Agents with `hasComputer === true` create `/home/{agentId}` subdirs inside container volume
-7. Return success; Board sees VNC embed in Computer tab
+4. Backend health-checks `https://localhost:{hostPort}` (KasmVNC endpoint)
+5. Record `company_computer_sessions` row: `{ companyId, agentId, agentUrlKey, containerName, image, vncPort, status: 'running', startedAt }`
+6. Return success; Board sees VNC embed in Computer tab
 
 **Images:**
 - **`kasmweb/desktop`** or **`kasmweb/ubuntu-jammy-desktop`** — **Default/preferred (Derek 2026-09-30).** Full XFCE desktop with terminal, file manager, browser. **Recommended for full computer toolset** (terminal + files + browser).
@@ -260,9 +321,9 @@ Provisioning backends are orthogonal to the `hasComputer` gate — the backend d
 **Cons:**
 - **Localhost-only for MVP** (all containers run on same host as Tourbillon; remote DOCKER_HOST is post-MVP)
 - Weaker isolation than VMs (containers share kernel; container escape affects host)
-- Multi-agent DISPLAY inside single container requires `/home/{agentId}` subdirs (not separate X displays per agent — all agents share one desktop session per company)
-- Port allocation required (6901, 6902, 6903… for N companies or dynamic port mapping on localhost; Tourbillon proxy handles routing)
-- Persistent storage requires Docker volumes (`/home/kasm-user` mounted per company)
+- N per-agent containers consume RAM proportional to *active seats* (~1-2GB each when in use) — idle seats are destroyed via `computerCloseSession()` / Board action, not parked
+- Port allocation required (6901, 6902, 6903… one host port per live seat; Tourbillon proxy handles routing)
+- Persistent storage lives on host bind mounts under `/opt/tourbillon-company-{companyId}/` (NOT docker named volumes — Ops owns the trees)
 - Not suitable for high-security multi-tenant SaaS (container escape risk; prefer VM per company for production)
 
 **Tradeoffs:**
@@ -397,9 +458,9 @@ Provisioning backends are orthogonal to the `hasComputer` gate — the backend d
 **MVP architecture:**
 - **Standalone Docker on localhost** (same host as Tourbillon web app and scheduler)
 - Tourbillon-test is a Proxmox VM → Docker runs on **that same VM** (unix socket / local Engine API)
-- **One Docker daemon on localhost runs N company containers** (one per company)
+- **One Docker daemon on localhost runs N agent-seat containers** (one per agent with `hasComputer` whose company is enabled; per-agent lock 2026-10-31)
 - **Remote DOCKER_HOST is post-MVP** (not recommended for MVP; adds network complexity and failure modes)
-- **Default/preferred image:** `kasmweb/desktop` (full toolset: browser + terminal + file manager) or `kasmweb/ubuntu-jammy-desktop`
+- **Default/preferred image:** `kasmweb/desktop:1.19.0` (pinned constant; full toolset: browser + terminal + file manager)
 
 **Rationale:**
 
@@ -428,43 +489,42 @@ import { generatePassword } from './utils';
 
 export async function provisionCompanyComputer(
   companyId: string,
-  imageId: string, // Default: 'kasmweb/desktop' or 'kasmweb/ubuntu-jammy-desktop'
+  agentUrlKey: string,
+  imageId: string = 'kasmweb/desktop:1.19.0', // pinned constant (Slice 1 constants.ts)
 ): Promise<CompanyComputerHost> {
   // Connect to local Docker daemon via unix socket (MVP: localhost only)
   const docker = new Docker({ socketPath: '/var/run/docker.sock' });
   
   // Validate imageId against allowlist
   const ALLOWED_IMAGES = [
-    'kasmweb/ubuntu-jammy-desktop:1.15.0', // Preferred default (full toolset)
-    'kasmweb/desktop:1.15.0',              // Alternative full desktop
-    'kasmweb/chrome:1.15.0',               // Browser-only (not full toolset)
+    'kasmweb/desktop:1.19.0',               // Pinned default (full toolset)
+    'kasmweb/chrome:1.19.0',                // Browser-only (not full toolset)
   ];
   if (!ALLOWED_IMAGES.includes(imageId)) {
     throw new Error(`Image ${imageId} not in allowlist`);
   }
   
-  // Pull image if not present on localhost
+  // Pull image if not present on localhost (Ops ensure script in practice)
   await docker.pull(imageId);
   
-  // Rotate VNC password per provision
+  // Rotate VNC password per seat
   const vncPassword = generatePassword(16);
   
-  // Create container on localhost with persistent volume for /home
+  // Create the per-agent seat with canonical /opt bind mounts (PM+Ops lock)
   const container = await docker.createContainer({
-    name: `tourbillon-company-${companyId}`,
+    name: `cc-${companySlugOrId}-${agentUrlKey}`,
     Image: imageId,
     Env: [`VNC_PW=${vncPassword}`],
     ExposedPorts: { '6901/tcp': {} }, // KasmVNC HTTPS port
     HostConfig: {
-      PortBindings: { '6901/tcp': [{ HostPort: '0' }] }, // dynamic localhost port
+      PortBindings: { '6901/tcp': [{ HostPort: String(hostPort) }] }, // 6901 upward, one per live seat
       ShmSize: 512 * 1024 * 1024, // 512MB shared memory for browser
       Memory: 4 * 1024 * 1024 * 1024, // 4GB RAM limit
       NanoCpus: 2 * 1e9, // 2 CPU cores
-      Mounts: [{
-        Type: 'volume',
-        Source: `tourbillon-company-${companyId}-home`,
-        Target: '/home/kasm-user', // Kasmweb home directory
-      }],
+      Mounts: [
+        { Type: 'bind', Source: `/opt/tourbillon-company-${companyId}/data`, Target: '/data' },
+        { Type: 'bind', Source: `/opt/tourbillon-company-${companyId}/home/${agentUrlKey}`, Target: '/home/kasm-user' },
+      ],
     },
   });
   
@@ -772,6 +832,17 @@ This is **the destination for US-CC5 / Board live-view** for option A (noVNC/Sel
 ---
 
 ## 6. Session Lifecycle
+
+> **Kasmweb-standalone note (locked MVP, 2026-10-31):** the step-by-step Xvnc/WM flows
+> below describe Option A1 on a company VM. For the locked MVP the seat IS the per-agent
+> `kasmweb/desktop` container: **create** = verify both gates → `ensureCompanyDirs` path
+> plan → allocate host port from 6901 → Ops `cc-ensure-seat` starts the container (and
+> writes `meta.json` schema 2 with the sibling `vnc_pw` mode 600 file) → insert
+> `company_computer_sessions` row (`packages/company-computer/src/lifecycle.ts#createSession`,
+> refuses without `CC_ALLOW_START=1`); **resume** = registry lookup + container health probe;
+> **destroy** = Ops `cc-teardown-seat` + row → `status: 'destroyed'` (`#destroySession`).
+> The agent home on the host (`/opt/tourbillon-company-{companyId}/home/{agentUrlKey}`)
+> survives destroy — it is the persistent state.
 
 ### Create Session
 
@@ -1118,7 +1189,7 @@ Initial state: watching (Board sees screen, agent drives)
 
 ### Not in MVP-0
 
-- **Per-agent VMs:** One VM per company, not per agent. Agents share compute but have isolated display sessions. Per-agent VMs may be post-MVP for high-security companies (too expensive for MVP).
+- **Per-agent VMs:** One VM per company, not per agent — but **one container per agent** on that host (per-agent container lock 2026-10-31; a seat container is not a "per-agent VM"). Agents share compute, isolation comes from container + per-agent home bind mount. True per-agent VMs may be post-MVP for high-security companies (too expensive for MVP).
 - **Bwrap-as-desktop:** Do not repurpose LocalSandbox bwrap for GUI isolation. Bwrap is for ephemeral process sandboxing; Company Computer is for durable GUI sessions. Architecture mismatch.
 - **Managed desktop SaaS:** Do not bind to third-party SaaS (Windows 365, Amazon WorkSpaces, etc.) in MVP. Self-hosted Linux VM only. SaaS may be post-MVP for compliance-heavy customers.
 - **Separate desktop-only page:** Computer view is **not** a standalone page at `/agent/{urlKey}/computer`. It is a **chat-adjacent tab** (right panel) visible while chatting with the agent. Product intent: Board watches agent's screen in the same UI where they chat, not a separate navigation destination.
@@ -1344,9 +1415,9 @@ OnFailure=notify-board-session-oom@%n.service
 
 ## Document Metadata
 
-- **Author:** Tourbillon Agent (spike generation)
+- **Author:** Tourbillon Agent (spike generation); Slice 1 update per PM/Ops mount lock
 - **Reviewer:** Derek (PM/Ops), Board
-- **Created:** 2026-09-30
-- **Status:** DRAFT for review — no implementation yet
-- **Epic:** Company Computer MVP (CC1 → CC2 → CC4)
+- **Created:** 2026-09-30 — canonical mounts + per-agent container locked 2026-10-31 (folds #71; shared-overlay Ops draft discarded)
+- **Status:** DRAFT for review — Slice 1 app code landed (package, migration 0025, toolset, internal API, dry-run host); **not enabled on TEST; no live seats**
+- **Epic:** Company Computer MVP (CC1 → CC2 → CC4) — Refs #68 #70 #71
 - **Gating:** HOLD per-agent VMs, HOLD bwrap-as-desktop, ACCEPT draft spike only
