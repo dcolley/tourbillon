@@ -18,6 +18,8 @@ describe('detectTruncatedGeneration', () => {
     await db.insert(companies).values({
       id: testCompanyId,
       name: 'Test Company',
+      slug: 'test-company-truncation',
+      issuePrefix: 'TCT',
       status: 'active',
     });
 
@@ -25,6 +27,7 @@ describe('detectTruncatedGeneration', () => {
       id: testAgentId,
       companyId: testCompanyId,
       name: 'Test Agent',
+      title: 'Test Agent',
       role: 'engineer',
       urlKey: 'test-agent',
       modelId: 'test-model',

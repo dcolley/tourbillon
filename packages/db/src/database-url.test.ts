@@ -58,7 +58,16 @@ describe('checkDatabaseUrl / assertValidDatabaseUrl', () => {
   }
 
   it('requireDatabaseUrl keeps the missing message and validates', () => {
-    assert.throws(() => requireDatabaseUrl('x storage', undefined), /DATABASE_URL is required for x storage/);
+    // `undefined` hits the parameter default (process.env.DATABASE_URL), so a surrounding
+    // DATABASE_URL would leak in and make the "missing" case throw-free. Blank it for the
+    // assertion, restore after.
+    const saved = process.env.DATABASE_URL;
+    delete process.env.DATABASE_URL;
+    try {
+      assert.throws(() => requireDatabaseUrl('x storage', undefined), /DATABASE_URL is required for x storage/);
+    } finally {
+      if (saved !== undefined) process.env.DATABASE_URL = saved;
+    }
     assert.throws(() => requireDatabaseUrl('x', MALFORMED[0]![0]), DatabaseUrlError);
     assert.equal(requireDatabaseUrl('x', GOOD), GOOD);
   });
