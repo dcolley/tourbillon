@@ -103,6 +103,7 @@ export const VALID_BUNDLED_SKILL_IDS = new Set<string>(SKILL_CATALOG.map((s) => 
 export const TOOLSET_SKILL_FILENAMES = [
   'buffer-skills.md',
   'code-execution-skills.md',
+  'company-computer-skills.md',
   'knowledge-graph-skills.md',
 ] as const;
 
@@ -168,6 +169,12 @@ export const TOOLSET_CATALOG = [
     label: 'Knowledge graph memory',
     description:
       'Persistent entity/relation knowledge graph via MCP memory (private and/or company JSONL mounts). Distinct from Mastra conversation memory and issue comments.',
+  },
+  {
+    id: 'company-computer',
+    label: 'Company Computer (GUI desktop seat)',
+    description:
+      'Per-agent KasmVNC desktop (browser + screenshot + click + type) via per-agent kasmweb/desktop containers. Requires BOTH gates: Company Computer enabled in company settings AND this agent\'s Computer access (hasComputer) enabled — this toolset alone grants neither. Availability still needs the Ops host provisioning contract (CC_ALLOW_START); until then seat starts are refused with a clear error. Complements, does not replace, code-execution.',
   },
 ] as const;
 
