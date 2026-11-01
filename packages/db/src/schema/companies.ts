@@ -13,6 +13,9 @@ export const companies = pgTable('companies', {
   spentMonthlyTokens: integer('spent_monthly_tokens').notNull().default(0),
   // Governance
   requiresBoardApprovalForHires: boolean('requires_board_approval_for_hires').notNull().default(true),
+  // Company Computer gate 1: Board enables the company computer at /settings/company-computer.
+  // Seats require BOTH this flag AND the agent's hasComputer (toolset alone never bypasses).
+  hasComputer: boolean('has_computer').notNull().default(false),
   // Company-level allowed MCP server IDs (policy; agents can only use servers on this list)
   allowedMcpServerIds: text('allowed_mcp_server_ids').array().notNull().default([]),
   // Metadata

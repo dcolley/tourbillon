@@ -31,6 +31,9 @@ export const agents = pgTable('agents', {
   assignedToolsets: text('assigned_toolsets').array().notNull().default([]),
   // MCP servers (Tier 3: capability-gated)
   mcpServerIds: text('mcp_server_ids').array().notNull().default([]),
+  // Company Computer gate 2: Board enables per-agent Computer access on the agent page.
+  // Gates the per-agent home dir + desktop seat; the company-computer toolset never bypasses it.
+  hasComputer: boolean('has_computer').notNull().default(false),
   // Budget
   budgetMonthlyTokens: integer('budget_monthly_tokens').notNull().default(500_000),
   spentMonthlyTokens: integer('spent_monthly_tokens').notNull().default(0),

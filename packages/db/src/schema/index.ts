@@ -18,3 +18,4 @@ export * from './assistant-thread-pins';
 export * from './assistant-active-threads';
 export * from './hitl';
 export * from './chat-tasks';
+export * from './company-computer-sessions';
