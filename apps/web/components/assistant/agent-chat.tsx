@@ -64,6 +64,13 @@ import { AgentAvatar } from './agent-avatar';
 import type { AgentAvatarConfig } from '@tourbillon/shared/agent-avatar';
 import { clearAgentChat, type AssistantOmSummary } from '@/lib/assistant/single-chat';
 import { useStickyTranscript } from './use-sticky-transcript';
+import {
+  chatSendKeyHint,
+  DEFAULT_CHAT_SEND_KEY_MODE,
+  resolveSendKeyGesture,
+  type ChatSendKeyMode,
+} from '@/lib/chat-send-key';
+import { useChatSendKeyMode } from '@/components/chat/use-chat-send-key-mode';
 
 const DELIVERY_LABEL: Partial<Record<UserMessageDelivery, string>> = {
   sending: 'Sending…',
@@ -229,6 +236,8 @@ export interface AgentChatViewProps {
   avatar?: AgentAvatarConfig | null;
   /** AGENT-AVATAR-UI: display name for the chat header avatar's initials. */
   agentName?: string;
+  /** CHAT-SEND-KEY: which key sends (the stored preference, from useChatSendKeyMode). */
+  sendKeyMode?: ChatSendKeyMode;
   /** CHAT-PAGE-1: load the previous transcript page (Load previous is shown while `state.history.hasMore`). */
   onLoadPrevious?: () => void;
   /** CHAT-PAGE-1: the scrolling message list (sticky-bottom binding). */
@@ -434,6 +443,9 @@ export function AgentChatView(props: AgentChatViewProps) {
     onWidgetDismiss: props.onWidgetDismiss,
   };
   const runOpen = state.status !== 'idle';
+  // CHAT-SEND-KEY: the host may hold the preference (the container reads it from localStorage);
+  // without it the view keeps today's binding, Enter sends.
+  const sendKeyMode = props.sendKeyMode ?? DEFAULT_CHAT_SEND_KEY_MODE;
   const parked = parkedCard(state, widgets.registry);
   const canSend = draft.trim().length > 0 && state.status !== 'stopping';
   const footers = props.assistantFooter ? feedbackTargets(state.items, runOpen) : null;
@@ -527,6 +539,14 @@ export function AgentChatView(props: AgentChatViewProps) {
           value={draft}
           onChange={(e) => props.onDraftChange(e.target.value)}
           placeholder={runOpen ? 'Send a follow-up or steer the reply' : 'Message the agent'}
+          onKeyDown={(e) => {
+            // CHAT-SEND-KEY: one shared helper decides send / newline for every composer.
+            const gesture = resolveSendKeyGesture(e, { mode: sendKeyMode, runOpen });
+            if (!gesture || !canSend) return;
+            e.preventDefault();
+            if (gesture === 'steer') props.onSteer();
+            else props.onSend();
+          }}
         />
         <div className="flex items-center gap-2">
           {props.modelPicker ? <div data-composer-model-picker>{props.modelPicker}</div> : null}
@@ -541,6 +561,9 @@ export function AgentChatView(props: AgentChatViewProps) {
               : state.reconnecting
                 ? 'Reconnecting…'
                 : STATUS_LABEL[state.status]}
+          </span>
+          <span className="text-xs text-muted-foreground" data-send-key-hint data-send-key-mode={sendKeyMode}>
+            {chatSendKeyHint(sendKeyMode, { running: runOpen })}
           </span>
           <div className="flex-1" />
           {runOpen && (
@@ -640,6 +663,8 @@ export function AgentChat({
   };
   const [draft, setDraft] = React.useState('');
   const [context, setContext] = React.useState<OpenInChatContext | null>(initialContext ?? null);
+  // CHAT-SEND-KEY: the browser's "Send message with" pref; live, so a flip re-binds the composer.
+  const [sendKeyMode] = useChatSendKeyMode();
   // CTX-1: reload the context meter on open, after each turn (back to idle) and on a model change.
   const [modelRev, setModelRev] = React.useState(0);
   const bumpModelRev = React.useCallback(() => setModelRev((n) => n + 1), []);
@@ -697,6 +722,7 @@ export function AgentChat({
       onWidgetAnswer={(id, answer) => void chat.answerWidget(id, answer)}
       onWidgetDismiss={(id) => void chat.dismissWidget(id)}
       onDismissError={chat.clearError}
+      sendKeyMode={sendKeyMode}
       onLoadPrevious={loadPrevious}
       scrollRef={scroll.ref}
       onScroll={scroll.onScroll}

@@ -10,6 +10,7 @@ import { createElement, isValidElement, type ReactElement, type ReactNode } from
 import { renderToStaticMarkup } from 'react-dom/server';
 import { Composer, ComposerView, initialViewState } from './composer';
 import { createComposerController, type ComposerRunStatus } from './composer-controller';
+import type { ChatSendKeyMode } from '@/lib/chat-send-key';
 import { createDraftStore, draftKey, type DraftStorage } from './draft-store';
 
 // tsx compiles .tsx with the classic JSX runtime; components/ui files rely on Next's automatic
@@ -48,7 +49,7 @@ function all(node: ReactNode, out: El[] = []): El[] {
 
 const tick = () => new Promise<void>((r) => setImmediate(r));
 
-function setup(runStatus: ComposerRunStatus = 'idle') {
+function setup(runStatus: ComposerRunStatus = 'idle', sendKeyMode?: ChatSendKeyMode) {
   const calls: string[] = [];
   const storage = new MemoryStorage();
   const c = createComposerController({
@@ -67,6 +68,7 @@ function setup(runStatus: ComposerRunStatus = 'idle') {
     drafts: createDraftStore(storage),
     draftKey: draftKey('alice', 't1'),
     runStatus,
+    sendKeyMode,
   });
   const tree = () => all(ComposerView({ state: c.getState(), controller: c }));
   const html = () => renderToStaticMarkup(createElement(ComposerView, { state: c.getState(), controller: c }));
@@ -234,5 +236,53 @@ describe('CHAT-1 composer view', () => {
     };
     assert.match(renderToStaticMarkup(createElement(Composer, { ...props, threadId: 't1' })), /saved draft text/);
     assert.doesNotMatch(renderToStaticMarkup(createElement(Composer, { ...props, threadId: 't2' })), /saved draft text/);
+  });
+});
+
+describe('CHAT-SEND-KEY composer view', () => {
+  it('the hint under the textarea reflects the mode (default copy unchanged)', () => {
+    assert.match(setup('idle', 'enter_sends').html(), /data-send-key-mode="enter_sends"[^>]*>\s*Enter to send, Shift\+Enter for a new line/);
+    assert.match(setup('idle').html(), /Enter to send, Shift\+Enter for a new line/);
+    assert.match(setup('running', 'enter_sends').html(), /Enter queues, Ctrl\+Enter steers/);
+    assert.match(setup('idle', 'mod_enter_sends').html(), /data-send-key-mode="mod_enter_sends"[^>]*>\s*Ctrl\/Cmd\+Enter to send, Enter for a new line/);
+    assert.match(setup('running', 'mod_enter_sends').html(), /Ctrl\/Cmd\+Enter steers, Enter for a new line/);
+    assert.doesNotMatch(setup('idle', 'mod_enter_sends').html(), /Enter to send, Shift\+Enter/);
+  });
+
+  it('mod_enter_sends: Enter reaches the textarea, Ctrl/Cmd+Enter sends from the view handler', async () => {
+    const s = setup('idle', 'mod_enter_sends');
+    s.byLabel('Message')!.props.onChange({ target: { value: 'typed' } });
+    const newline = { key: 'Enter', nativeEvent: {}, preventDefault: () => { throw new Error('Enter must not be swallowed'); } };
+    s.byLabel('Message')!.props.onKeyDown(newline);
+    await tick();
+    assert.deepEqual(s.calls, [], 'plain Enter did not send in mod_enter_sends');
+
+    let prevented = false;
+    s.byLabel('Message')!.props.onKeyDown({ key: 'Enter', metaKey: true, nativeEvent: {}, preventDefault: () => (prevented = true) });
+    await tick();
+    assert.equal(prevented, true);
+    assert.deepEqual(s.calls, ['send:typed']);
+  });
+
+  it('enter_sends: Ctrl/Cmd+Enter does not send from the view handler', async () => {
+    const s = setup('idle', 'enter_sends');
+    s.byLabel('Message')!.props.onChange({ target: { value: 'typed' } });
+    for (const mod of ['ctrlKey', 'metaKey', 'altKey'] as const) {
+      let prevented = false;
+      s.byLabel('Message')!.props.onKeyDown({ key: 'Enter', [mod]: true, nativeEvent: {}, preventDefault: () => (prevented = true) });
+      await tick();
+      assert.equal(prevented, false, `${mod}+Enter is left alone`);
+      assert.deepEqual(s.calls, [], `${mod}+Enter must not send`);
+    }
+    s.byLabel('Message')!.props.onKeyDown({ key: 'Enter', nativeEvent: {}, preventDefault: pd });
+    await tick();
+    assert.deepEqual(s.calls, ['send:typed'], 'plain Enter still sends in the default mode');
+  });
+
+  it('the mode is live on the rendered view (controller flip re-renders the hint)', async () => {
+    const s = setup('idle', 'enter_sends');
+    assert.match(s.html(), /Enter to send, Shift\+Enter for a new line/);
+    s.c.setSendKeyMode('mod_enter_sends');
+    assert.match(s.html(), /Ctrl\/Cmd\+Enter to send, Enter for a new line/);
   });
 });

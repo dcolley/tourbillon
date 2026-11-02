@@ -88,6 +88,7 @@ function make(opts: Partial<ComposerControllerOptions> & { storage?: MemoryStora
     drafts: opts.drafts ?? createDraftStore(storage),
     draftKey: 'draftKey' in opts ? opts.draftKey : draftKey('alice', 't1'),
     runStatus: opts.runStatus,
+    sendKeyMode: opts.sendKeyMode,
     makeId: () => `id${++n}`,
   });
   return { c, calls: ctl.calls, storage };
@@ -128,17 +129,95 @@ describe('CHAT-1 composer keys', () => {
     assert.equal(calls.length, 0);
   });
 
-  it('Ctrl/Cmd+Enter steers while a run is open, sends when idle', async () => {
+  it('enter_sends (default): a modified Enter never sends, and steers only while a run is open', async () => {
     const { c, calls } = make();
+    assert.equal(c.getState().sendKeyMode, 'enter_sends');
     c.setText('first');
-    c.handleKeyDown(key('Enter', { ctrlKey: true }).e);
+    for (const mod of ['ctrlKey', 'metaKey', 'altKey'] as const) {
+      const k = key('Enter', { [mod]: true });
+      assert.equal(c.handleKeyDown(k.e), false, `${mod}+Enter is left to the browser/OS when idle`);
+      assert.equal(k.prevented(), false, `${mod}+Enter is not even swallowed`);
+    }
     await tick();
-    assert.deepEqual(calls, [{ op: 'send', text: 'first' }]);
+    assert.deepEqual(calls, [], 'no send from a modified Enter in enter_sends');
+
     c.setRunStatus('running');
     c.setText('go left');
-    c.handleKeyDown(key('Enter', { metaKey: true }).e);
+    assert.equal(c.handleKeyDown(key('Enter', { metaKey: true }).e), true, 'the steer gesture still works');
     await tick();
-    assert.deepEqual(calls[1], { op: 'steer', text: 'go left' });
+    assert.deepEqual(calls, [{ op: 'steer', text: 'go left' }]);
+  });
+
+  it('mod_enter_sends: Ctrl/Cmd+Enter sends, Enter writes a newline', async () => {
+    const { c, calls } = make({ sendKeyMode: 'mod_enter_sends' });
+    assert.equal(c.getState().sendKeyMode, 'mod_enter_sends');
+    c.setText('first');
+    const plain = key('Enter');
+    assert.equal(c.handleKeyDown(plain.e), false, 'plain Enter is a newline');
+    assert.equal(plain.prevented(), false, 'the newline reaches the textarea');
+    assert.equal(c.handleKeyDown(key('Enter', { shiftKey: true, ctrlKey: true }).e), false);
+    assert.equal(c.handleKeyDown(key('Enter', { altKey: true }).e), false, 'Alt is not the send gesture');
+    await tick();
+    assert.deepEqual(calls, [], 'nothing was sent by Enter');
+
+    assert.equal(c.handleKeyDown(key('Enter', { metaKey: true }).e), true);
+    await tick();
+    assert.deepEqual(calls, [{ op: 'send', text: 'first' }]);
+
+    c.setText('second');
+    assert.equal(c.handleKeyDown(key('Enter', { ctrlKey: true }).e), true);
+    await tick();
+    assert.deepEqual(calls[1], { op: 'send', text: 'second' });
+  });
+
+  it('mod_enter_sends: Ctrl/Cmd+Enter steers while a run is open, Enter still only breaks a line', async () => {
+    const { c, calls } = make({ sendKeyMode: 'mod_enter_sends', runStatus: 'running' });
+    c.setText('go left');
+    assert.equal(c.handleKeyDown(key('Enter').e), false);
+    await tick();
+    assert.deepEqual(calls, [], 'Enter does not queue either');
+    assert.equal(c.handleKeyDown(key('Enter', { ctrlKey: true }).e), true);
+    await tick();
+    assert.deepEqual(calls, [{ op: 'steer', text: 'go left' }]);
+  });
+
+  it('IME composition is ignored in both modes', async () => {
+    for (const mode of ['enter_sends', 'mod_enter_sends'] as const) {
+      const { c, calls } = make({ sendKeyMode: mode });
+      c.setText('x');
+      assert.equal(c.handleKeyDown(key('Enter', { nativeEvent: { isComposing: true } }).e), false, mode);
+      assert.equal(c.handleKeyDown(key('Enter', { metaKey: true, isComposing: true }).e), false, mode);
+      await tick();
+      assert.deepEqual(calls, [], mode);
+    }
+  });
+
+  it('setSendKeyMode flips the binding live on the same controller; unknown modes fall back', async () => {
+    const { c, calls } = make();
+    c.setText('a');
+    assert.equal(c.handleKeyDown(key('Enter').e), true);
+    await tick();
+    assert.deepEqual(calls, [{ op: 'send', text: 'a' }]);
+
+    c.setSendKeyMode('mod_enter_sends');
+    assert.equal(c.getState().sendKeyMode, 'mod_enter_sends');
+    c.setText('b');
+    assert.equal(c.handleKeyDown(key('Enter').e), false, 'Enter stopped sending after the flip');
+    assert.equal(c.handleKeyDown(key('Enter', { metaKey: true }).e), true, 'Ctrl/Cmd+Enter took over');
+    await tick();
+    assert.deepEqual(calls[1], { op: 'send', text: 'b' });
+
+    c.setSendKeyMode('nonsense');
+    assert.equal(c.getState().sendKeyMode, 'enter_sends', 'an unknown stored value means the default');
+    c.setText('c');
+    assert.equal(c.handleKeyDown(key('Enter').e), true);
+    await tick();
+    assert.deepEqual(calls[2], { op: 'send', text: 'c' });
+  });
+
+  it('an unknown sendKeyMode at construction behaves as the default', () => {
+    const { c } = make({ sendKeyMode: 'enter_then_shift' });
+    assert.equal(c.getState().sendKeyMode, 'enter_sends');
   });
 });
 
