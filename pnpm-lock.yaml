@@ -414,9 +414,6 @@ importers:
 
   packages/shared:
     dependencies:
-      '@tourbillon/db':
-        specifier: workspace:*
-        version: link:../db
       croner:
         specifier: ^10.0.1
         version: 10.0.1

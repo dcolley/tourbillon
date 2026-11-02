@@ -1,9 +1,14 @@
 import { pgTable, text, timestamp, jsonb } from 'drizzle-orm/pg-core';
+import type { HeartbeatStatus } from '@tourbillon/shared/heartbeat-status';
 import { companies } from './companies';
 import { agents } from './agents';
 import { createId } from '../utils';
 
-export type HeartbeatStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'coalesced' | 'skipped';
+// #299 S299-S2: the literal union moved to @tourbillon/shared/heartbeat-status (the
+// shared→db type-only import was the edge that made the db↔shared workspace pair cyclic).
+// Re-exported here so `import type { HeartbeatStatus } from '@tourbillon/db/schema'`
+// keeps resolving, byte-for-byte the same members (column remains plain `text`).
+export type { HeartbeatStatus };
 export type WakeReason =
   | 'timer'
   | 'assignment'

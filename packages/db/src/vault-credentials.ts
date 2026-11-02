@@ -1,10 +1,10 @@
-import { db } from '@tourbillon/db';
-import { vaultSecrets } from '@tourbillon/db/schema';
+import { db } from './client';
+import { vaultSecrets } from './schema/vault-secrets';
 import { eq, and } from 'drizzle-orm';
-import { decryptCredential } from './vault-encryption';
-import { resolveMcpCredential } from './mcp-credentials';
-import type { OAuthTokens } from '@tourbillon/db/schema';
-import type { AgentRuntimeConfig, CompanySettings } from './types';
+import { decryptCredential } from '@tourbillon/shared/vault-encryption';
+import { resolveMcpCredential } from '@tourbillon/shared/mcp-credentials';
+import type { OAuthTokens } from '@tourbillon/shared/vault-types';
+import type { AgentRuntimeConfig, CompanySettings } from '@tourbillon/shared/types';
 
 export interface VaultCredentialContext {
   companyId: string;

@@ -257,13 +257,11 @@ async function recordHeartbeatSkip(
     columns: { status: true, errorText: true },
   });
 
-  if (
-    existing &&
-    (existing.status === 'succeeded' ||
-      existing.status === 'failed' ||
-      existing.status === 'cancelled' ||
-      existing.status === 'skipped')
-  ) {
+  // #299 S299-S1: same shared set as recordHeartbeatFailure above. The old inline list
+  // hand-stated succeeded/failed/cancelled/skipped and omitted `coalesced`, so a late
+  // skip could repaint a coalesced run (and any future terminal member would have needed
+  // a second edit here).
+  if (existing && TERMINAL_HEARTBEAT_STATUSES.has(existing.status)) {
     return;
   }
 

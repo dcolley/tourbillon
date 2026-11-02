@@ -12,7 +12,7 @@ import {
   resolveAgentMcpServerIds,
 } from '@tourbillon/shared/mcp-registry';
 import { resolveMcpServerUrl } from '@tourbillon/shared/mcp-credentials';
-import { resolveVaultSecret } from '@tourbillon/shared/vault-credentials';
+import { resolveVaultSecret } from '@tourbillon/db/vault-credentials';
 import {
   ensureAgentMemoryDir,
   ensureCompanyMemoryDir,
