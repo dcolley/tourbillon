@@ -83,7 +83,7 @@ VAULT_ENCRYPTION_KEY=<64-char-hex-string>
 - Updates `vault_secrets` row with new tokens
 - Sets `needsReauth = true` if refresh fails
 
-**Implementation**: `packages/shared/src/vault-credentials.ts`
+**Implementation**: `packages/db/src/vault-credentials.ts` (import path `@tourbillon/db/vault-credentials`)
 
 ## API Routes
 
