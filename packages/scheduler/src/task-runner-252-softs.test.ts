@@ -38,6 +38,14 @@
  * taskCap; the ban now needs a WIRING VERB in the same clause between the boot-path word and
  * taskCap (either word order). The match/no-match contract is pinned both directions by the
  * S266-S1 corpus test at the bottom of this file.
+ *
+ * S278-S1/S2/S3 (#278 ACCEPT soft-pack): the S278-S1 rows pin the helper's new long-tail
+ * passive branch (the gate-named "opts.taskCap is set automatically when the scheduler
+ * starts" was GREEN through every old branch), S278-S2 pins the supplying/sends/sent/
+ * fills-in verb additions plus the tight `comes from <boot>` compound branch, and S278-S3
+ * closes the gate's surviving M7/M8 mutants by pinning rows that DEPEND on the VERB_TAIL
+ * lookahead alternatives and the 5-char AGENT_TO_VERB bound (the "sets aside" false-RED is
+ * documented there, not pinned).
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -330,4 +338,130 @@ test('S272-S2: wiring verbs in relative clauses RED (head-as-object and wide-win
       `honest relative-clause copy must stay GREEN (S272-S2): ${copy}`,
     );
   }
+});
+
+// ─── S278-S1 / S278-S2 ───────────────────────────────────────────────────────
+
+test('S278-S1: long-tail passives (tight copula, verb past the 15-char window) RED; comma-bounded and beyond-tail honest copy GREEN', () => {
+  // The S272-S2 note named this open shape: "opts.taskCap is set automatically when the
+  // scheduler starts" was GREEN — `set` sits 24 chars from `scheduler` (" automatically
+  // when the "), past the 15-char verb→boot window, and no other branch reaches it. The
+  // helper gained a dedicated tight-copula passive branch (taskCap is|was|… <participle>
+  // …≤30 non-comma chars… <boot>). Dropping that branch REDs a row here — the old
+  // long-tail-passive mutant can no longer survive.
+  const FORBIDDEN = [
+    // The Test-gate named shape (was GREEN through all four old branches).
+    'opts.taskCap is set automatically when the scheduler starts',
+    'opts.taskCap is supplied automatically when main boots',
+    'opts.taskCap is configured automatically when the boot wrapper runs',
+  ];
+  for (const copy of FORBIDDEN) {
+    assert.match(
+      copy,
+      FORBIDDEN_TASKCAP_WIRING_CLAIM,
+      `long-tail passive wiring claim must be RED (S278-S1): ${copy}`,
+    );
+  }
+
+  // Passive-branch contract rows: the tail may not cross a COMMA (honest agent-swaps stay
+  // GREEN even with a boot word just past one), the tail is BOUNDED at 30 chars (the
+  // known-miss beyond it is pinned so the bound cannot silently drift), and the copula
+  // must be TIGHT (an adverb between copula and participle is the other documented
+  // known-miss — loosen the branch to swallow "is usually set by…" and the first two rows
+  // here fail alongside the real lie shapes).
+  const HARMLESS = [
+    'opts.taskCap is set by the tool, not the scheduler',
+    'opts.taskCap is set well before the checks the poller makes against the scheduler default',
+    'opts.taskCap is usually set by tools at tick time',
+  ];
+  for (const copy of HARMLESS) {
+    assert.doesNotMatch(
+      copy,
+      FORBIDDEN_TASKCAP_WIRING_CLAIM,
+      `honest passive-shaped copy must stay GREEN (S278-S1): ${copy}`,
+    );
+  }
+});
+
+test('S278-S2: supplying/sends/sent/fills in RED as wiring verbs; comes from <boot> RED as a tight compound; honest uses GREEN', () => {
+  // S272-S1 stopped at `supplied` — "the scheduler is supplying opts.taskCap" was GREEN.
+  // The decided calls from the brief: `sends`/`sent` and `fills in` join WIRING_VERB as
+  // real wiring verbs; `comes from` does NOT (a bare-verb fold false-REDs the honest
+  // S272-S2 row "opts.taskCap, which is undefined at boot, comes from env later" via the
+  // head-anchored relative $-tail — see COMES_FROM in the helper). Drop any stem or the
+  // compound branch and a row here goes GREEN-for-the-wrong-reason no more.
+  const FORBIDDEN = [
+    'the scheduler is supplying opts.taskCap',
+    'boot is supplying the explicit opts.taskCap',
+    'the scheduler sends opts.taskCap for you',
+    'boot sent the explicit opts.taskCap',
+    'the scheduler fills in opts.taskCap automatically',
+    'opts.taskCap comes from the scheduler defaults',
+  ];
+  for (const copy of FORBIDDEN) {
+    assert.match(
+      copy,
+      FORBIDDEN_TASKCAP_WIRING_CLAIM,
+      `inflected wiring claim must stay RED (S278-S2): ${copy}`,
+    );
+  }
+
+  // Honest near-misses: the new verbs govern something OTHER than taskCap (clause-breakers
+  // do the work), and `comes from` stays GREEN unless a boot word sits TIGHT after it —
+  // the 18-char gap in the denial row exceeds the 15-char compound window.
+  const HARMLESS = [
+    'the scheduler sends log lines; the tool passes opts.taskCap explicitly',
+    'the boot log sends a reminder line; the caller passes opts.taskCap',
+    'the scheduler fills in the missing title; you may pass opts.taskCap yourself',
+    'opts.taskCap comes from env, not from the scheduler',
+  ];
+  for (const copy of HARMLESS) {
+    assert.doesNotMatch(
+      copy,
+      FORBIDDEN_TASKCAP_WIRING_CLAIM,
+      `honest near-miss for the new verbs must stay GREEN (S278-S2): ${copy}`,
+    );
+  }
+});
+
+// ─── S278-S3 ─────────────────────────────────────────────────────────────────
+
+test('S278-S3: the relative VERB_TAIL lookaheads and the 5-char AGENT_TO_VERB bound are non-vacuous', () => {
+  // Gate mutants M7/M8 survived on #272: no corpus row DEPENDS on the VERB_TAIL lookahead
+  // alternatives (the $-alternative shadows them for every short-tail row), and nothing
+  // punished widening AGENT_TO_VERB from 5 to 25 chars. These rows close both holes:
+  //  - FORBIDDEN rows whose tail exceeds 20 chars before end-of-string — only the comma /
+  //    keyword lookaheads reach them, so dropping the lookaheads (M7) slips a row GREEN.
+  //  - the HARMLESS row has its wiring verb 11 chars past the boot subject — inside the
+  //    old 5-char bound it is GREEN, at 25 (M8) the verb binds and it false-REDs.
+  const FORBIDDEN = [
+    // RED only via `VERB_TAIL(?=[,.;:])` — " at boot" then the comma; the $-tail would need
+    // to swallow 30+ chars to reach end-of-string.
+    'opts.taskCap, which the scheduler passes at boot, is a value nobody reads in the logs',
+    // RED only via the keyword lookahead (`to`): "forwards" + " to" at the tail head.
+    'opts.taskCap which the scheduler forwards to the tools is gone from the codebase and nobody misses it',
+  ];
+  for (const copy of FORBIDDEN) {
+    assert.match(
+      copy,
+      FORBIDDEN_TASKCAP_WIRING_CLAIM,
+      `tail-lookahead wiring claim must stay RED (S278-S3 / M7): ${copy}`,
+    );
+  }
+
+  // "sets out to document" is honest copy — the scheduler log documents, it does not
+  // provide. The 11-char boot→verb gap is what keeps it GREEN.
+  assert.doesNotMatch(
+    'opts.taskCap, which the scheduler log merely sets out to document, is read-only',
+    FORBIDDEN_TASKCAP_WIRING_CLAIM,
+    'boot→verb gap of 11 chars must stay GREEN (S278-S3 / M8 AGENT_TO_VERB bound)',
+  );
+
+  // Documented false-RED (info soft, NOT pinned GREEN — the gate probe): "opts.taskCap
+  // that the boot log sets aside is unrelated" REDs via branch 3 because `sets` is a
+  // genuine wiring verb sitting tight after "boot " and the $-tail swallows the 19-char
+  // " aside is unrelated". The matcher cannot tell "sets aside" (idiom, harmless) from
+  // "sets" (provides, lie) without a semantic model; production refusal copy is
+  // unaffected (CAP_ZERO_REFUSAL pins stay GREEN). Left as a documented known false
+  // positive — a per-idiom tail blacklist was judged not worth the fragility.
 });

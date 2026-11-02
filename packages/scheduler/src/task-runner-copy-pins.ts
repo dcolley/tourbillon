@@ -44,8 +44,17 @@ const BOOT_PATH = String.raw`\b(?:scheduler|main|boot)\b`;
  * matched the non-words "supplyies"/"supplyied" while `supplies`/`supplied` slipped
  * through GREEN; and `provid(?:e|es|ed)` had no `-ing` branch, missing `providing`.
  * Both fixed here and pinned by the S272-S1 corpus rows in task-runner-252-softs.test.ts.
+ *
+ * S278-S2 (#278 ACCEPT soft-pack): the stem fix stopped at `supplied` — `supplying` was
+ * still GREEN ("the scheduler is supplying opts.taskCap"), so the supp- alternation gained
+ * a `lying` branch. The three known-miss verbs Test named were DECIDED IN, as real wiring
+ * verbs: `send` / `sends` / `sending` / `sent` ("the scheduler sends opts.taskCap") and
+ * the two-word `fill(s|ed|ing) in` ("the scheduler fills in opts.taskCap"). `comes from`
+ * was NOT added here — see COMES_FROM for why a bare-verb fold false-REDs an honest
+ * relative row; it lives as its own boot-after-compound branch. All pinned by the
+ * S278-S2 corpus rows.
  */
-const WIRING_VERB = String.raw`\b(?:pass(?:es|ed|ing)?|supp(?:ly|lies|lied)|forward(?:s|ed|ing)?|set(?:s)?|wir(?:e|es|ed|ing)|configur(?:e|es|ed|ing)|provid(?:e|es|ed|ing)|via|through)\b`;
+const WIRING_VERB = String.raw`\b(?:pass(?:es|ed|ing)?|supp(?:ly|lies|lied|lying)|send(?:s|ing)?|sent|forward(?:s|ed|ing)?|fill(?:s|ed|ing)?\s+in|set(?:s)?|wir(?:e|es|ed|ing)|configur(?:e|es|ed|ing)|provid(?:e|es|ed|ing)|via|through)\b`;
 
 /** Boot-path word → wiring verb (subject position, same clause). */
 const SAME_CLAUSE_TO_VERB = '[^.;:\\u2014\\u2013\\n]{0,25}';
@@ -93,22 +102,53 @@ const VERB_TAIL = '[^.;:\\u2014\\u2013\\n]{0,20}';
 const RELATIVE_VERB_TO_TASKCAP = '[^.;:\\u2014\\u2013\\n]{0,40}';
 
 /**
+ * S278-S1 (#278 ACCEPT soft-pack): the long-tail PASSIVE — `taskCap is|are|was|were|be(en|ing)?
+ * <participle> … <boot>`, where an adverbial or when-clause tail pushes the boot word past the
+ * 15-char verb→boot window: "opts.taskCap is set automatically when the scheduler starts" was
+ * GREEN (" automatically when the " = 24 chars). Contract pinned by the S278-S1 corpus rows:
+ * the COPULA must sit tight to the token (an adverb between copula and participle — "is
+ * usually set by…" — is a documented known-miss), the TAIL may not cross a comma (honest
+ * agent-swaps stay GREEN: "opts.taskCap is set by the tool, not the scheduler"), and the tail
+ * is bounded at 30 chars (beyond that is a documented known-miss, pinned GREEN).
+ */
+const PASSIVE_COPULA = String.raw`(?:is|are|was|were|be|been|being)\s+`;
+const PASSIVE_TAIL = '[^.;:\\u2014\\u2013\\n,]{0,30}';
+
+/**
+ * S278-S2 (#278 ACCEPT soft-pack): the provenance lie `taskCap comes from <boot>`. Deliberately
+ * NOT folded into WIRING_VERB: a bare `comes from` verb would false-RED the honest S272-S2
+ * relative "opts.taskCap, which is undefined at boot, comes from env later" — inside branch 3
+ * the verb sits tight (", ") after the boot word and the 20-char $-tail reaches end-of-string.
+ * As its own branch the boot word must come AFTER the compound, tight to the same 15-char
+ * window, so "comes from env, not from the scheduler" (18-char gap) stays GREEN and the honest
+ * row stays out of reach on the token side too: the branch reuses the 20-char verb-window, and
+ * the honest row's 30-char gap taskCap→"comes" exceeds it.
+ */
+const COMES_FROM = String.raw`com(?:es?|ed|ing)\s+from\b`;
+
+/**
  * The narrowed wiring-claim ban (S256-S2 heritage, S266-S1 tightening, S272-S1 inflection
- * fix, S272-S2 relative clauses). Forbidden shapes —
+ * fix, S272-S2 relative clauses, S278-S1 long-tail passive, S278-S2 supplying/sends/fills
+ * in/comes from). Forbidden shapes —
  * a wiring verb tying the boot path to `taskCap` within one clause, in either word order:
  *   <boot> … <verb> … taskCap   e.g. "have scheduler-main pass an explicit opts.taskCap"
  *   taskCap … <verb> … <boot>   e.g. "opts.taskCap set at boot", "wire opts.taskCap
  *                               through the scheduler"
- * plus the S272-S2 relative-clause shapes (see the block comment above).
+ * plus the S272-S2 relative-clause shapes (see the block comment above), the S278-S1
+ * tight-copula passive (`taskCap is <participle> … <boot>` past the 15-char window) and the
+ * S278-S2 provenance compound (`taskCap comes from … <boot>`).
  * The old pattern (/taskCap[\s\S]{0,60}\b(scheduler|main|boot)\b|…/i) demanded only
  * proximity, so harmless mentions within 60 chars false-REDd. See the S266-S1 corpus pin
  * in task-runner-252-softs.test.ts for the accepted match/no-match contract (S266-S1
- * rows), plus the S272-S1/S2 rows for the inflection and relative-clause contract.
+ * rows), plus the S272-S1/S2 rows for the inflection and relative-clause contract and the
+ * S278-S1/S2/S3 rows for the passive, provenance and tail/bound non-vacuity contract.
  */
 export const FORBIDDEN_TASKCAP_WIRING_CLAIM = new RegExp(
   `${BOOT_PATH}${SAME_CLAUSE_TO_VERB}${WIRING_VERB}${SAME_CLAUSE_TO_TASKCAP}${TASKCAP_TOKEN}` +
     `|${TASKCAP_TOKEN}${SAME_CLAUSE_TO_TASKCAP}${WIRING_VERB}${SAME_CLAUSE_TO_BOOT}${BOOT_PATH}` +
     `|${TASKCAP_TOKEN}${HEAD_TO_RELATIVE}${RELATIVE_PRONOUN}${RELATIVE_TO_AGENT}${BOOT_PATH}${AGENT_TO_VERB}${WIRING_VERB}(?:${RELATIVE_VERB_TO_TASKCAP}${TASKCAP_TOKEN}|${VERB_TAIL}$|${VERB_TAIL}(?=[,.;:])|${VERB_TAIL}(?=\\s+(?:for|to|it|you|tools?)\\b))` +
-    `|${RELATIVE_PRONOUN}${RELATIVE_TO_AGENT}${BOOT_PATH}${AGENT_TO_VERB}${WIRING_VERB}${RELATIVE_VERB_TO_TASKCAP}${TASKCAP_TOKEN}`,
+    `|${RELATIVE_PRONOUN}${RELATIVE_TO_AGENT}${BOOT_PATH}${AGENT_TO_VERB}${WIRING_VERB}${RELATIVE_VERB_TO_TASKCAP}${TASKCAP_TOKEN}` +
+    `|${TASKCAP_TOKEN}\\s+${PASSIVE_COPULA}${WIRING_VERB}${PASSIVE_TAIL}${BOOT_PATH}` +
+    `|${TASKCAP_TOKEN}${SAME_CLAUSE_TO_TASKCAP}${COMES_FROM}${SAME_CLAUSE_TO_BOOT}${BOOT_PATH}`,
   'i',
 );
