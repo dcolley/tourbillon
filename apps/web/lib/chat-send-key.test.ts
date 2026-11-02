@@ -20,6 +20,7 @@ import {
   resolveSendKeyGesture,
   subscribeChatSendKeyMode,
   writeChatSendKeyMode,
+  type ChatSendKeyMode,
   type SendKeyEventLike,
 } from './chat-send-key';
 
@@ -303,6 +304,37 @@ describe('CHAT-SEND-KEY live subscription', () => {
         offC();
         assert.equal(w.storageListenerCount(), 0, 'and unsubscribing it detaches again');
       }
+    });
+  });
+
+  it('S300-S2: the same callback subscribed twice survives one unsubscribe (per-subscription tokens)', () => {
+    // Fresh window so the handler-count assertions below are about THIS window's listeners.
+    const w = makeFakeWindow();
+    withWindow(w, () => {
+      const seen: ChatSendKeyMode[] = [];
+      const shared = (mode: ChatSendKeyMode) => {
+        seen.push(mode);
+      };
+      // One and the same function subscribed twice (possible for any consumer of the exported
+      // store, though not via useChatSendKeyMode, which passes a fresh closure per subscriber).
+      const offFirst = subscribeChatSendKeyMode(shared);
+      const offSecond = subscribeChatSendKeyMode(shared);
+      assert.equal(w.storageListenerCount(), 1, 'both subscriptions share ONE storage listener on the window');
+
+      // The first subscription leaves; the second still holds the callback.
+      offFirst();
+
+      w.store.set(CHAT_SEND_KEY_STORAGE_KEY, 'mod_enter_sends');
+      w.fireStorage(CHAT_SEND_KEY_STORAGE_KEY);
+      assert.deepEqual(seen, ['mod_enter_sends'], 'the live second subscription still delivers to the shared callback');
+      assert.equal(w.storageListenerCount(), 1, 'the window listener stays attached while one subscription lives');
+
+      // The second subscription leaving must go silent AND detach the shared listener.
+      offSecond();
+      w.store.set(CHAT_SEND_KEY_STORAGE_KEY, 'enter_sends');
+      w.fireStorage(CHAT_SEND_KEY_STORAGE_KEY);
+      assert.deepEqual(seen, ['mod_enter_sends'], 'after the last unsubscribe the callback stops firing');
+      assert.equal(w.storageListenerCount(), 0, 'and the last unsubscribe detaches the window listener');
     });
   });
 });
