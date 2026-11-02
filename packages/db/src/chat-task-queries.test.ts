@@ -225,6 +225,50 @@ describe('chat-task query layer', () => {
   });
 });
 
+// ─── S279-S1 (#279 softs): ghost scope on the WRITE and LIST paths ───────────
+// #276/S276-S1 pinned companyId only on getChatTask (M27c). The same agent-only
+// mutant (drop the companyId clause of scopeWhere) survives on every OTHER
+// scopeWhere consumer as long as the foreign-scope probe also changes agentId:
+// B1 (`c2`/`b1`) matches no owner either way, so M30 (setChatTaskStatus) and
+// M31 (listChatTasks) stayed GREEN. The B2 ghost scope keeps the agentId equal
+// to the owner's — only the companyId clause can keep these RED.
+
+describe('chat-task ghost scope on write + list (S279-S1, #279 softs)', () => {
+  it('M30/M31: same agentId under a foreign company writes and lists NOTHING', async () => {
+    const { client, db } = await freshDb();
+    try {
+      const task = await addChatTask(A1, { title: 'Ghost-scope probe' }, db);
+
+      // M31 (listChatTasks drops companyId): the ghost scope shares agentId 'a1'
+      // with the owner, so an agent-only where-clause lists this row.
+      assert.deepEqual(
+        (await listChatTasks(B2, {}, db)).map((t) => t.id),
+        [],
+        'same agentId, foreign company lists nothing (companyId clause keeps it empty)',
+      );
+      assert.deepEqual(
+        (await listChatTasks(B2, { includeClosed: true }, db)).map((t) => t.id),
+        [],
+        'the ghost list stays empty even with closed items included',
+      );
+
+      // M30 (setChatTaskStatus drops companyId): both the existence read and the
+      // UPDATE are addressed by (id, scope) — an agent-only clause would match
+      // the row and RETURN it. Null, and the row itself must stay untouched.
+      assert.equal(
+        await setChatTaskStatus(B2, { id: task.id, status: 'cancelled', note: 'ghost write' }, db),
+        null,
+        'same agentId, foreign company write returns null',
+      );
+      const untouched = await getChatTask(A1, { id: task.id }, db);
+      assert.equal(untouched?.status, 'pending', 'the ghost write never touched the row');
+      assert.equal(untouched?.notes, null, 'the ghost note was never appended');
+    } finally {
+      await client.close();
+    }
+  });
+});
+
 // ─── TASK-RUNNER query layer (B3, PR #196 hold) ──────────────────────────────
 // The scheduler poller's DB contract: listRunnable finds pending/unpaused/budgeted rows
 // (and carries agent/company status so the poller can skip inactive agents BEFORE claiming),
