@@ -133,11 +133,26 @@ describe('CHAT-SEND-KEY assistant composer', () => {
     }
   });
 
-  it('nothing to send: Enter is not swallowed while the composer is empty', () => {
+  it('S296-S4 nothing to send: the send chord is swallowed, no send, no newline; Shift+Enter still breaks a line', () => {
     const log: CallLog = { sends: 0, steers: 0 };
     const el = composerTextarea(AgentChatView(makeProps(log)));
-    assert.equal(press(el, { key: 'Enter' }), false);
-    assert.deepEqual(log, { sends: 0, steers: 0 });
+    assert.equal(press(el, { key: 'Enter' }), true, 'empty-draft Enter is swallowed, not a newline');
+    assert.equal(press(el, { key: 'Enter', shiftKey: true }), false, 'the non-send chord reaches the textarea');
+    assert.deepEqual(log, { sends: 0, steers: 0 }, 'swallowing must not fire a send');
+
+    const modLog: CallLog = { sends: 0, steers: 0 };
+    const modEl = composerTextarea(AgentChatView(makeProps(modLog, {}, { sendKeyMode: 'mod_enter_sends' })));
+    assert.equal(press(modEl, { key: 'Enter' }), false, 'mod mode: plain Enter is still a newline');
+    assert.equal(press(modEl, { key: 'Enter', metaKey: true }), true, 'mod mode: the empty-draft send chord is swallowed');
+    assert.deepEqual(modLog, { sends: 0, steers: 0 });
+
+    // Stopping: the send chord is swallowed but the canSend gate still refuses the send.
+    const stoppingLog: CallLog = { sends: 0, steers: 0 };
+    const stoppingEl = composerTextarea(
+      AgentChatView(makeProps(stoppingLog, { status: 'stopping' }, { draft: 'text' })),
+    );
+    assert.equal(press(stoppingEl, { key: 'Enter' }), true);
+    assert.deepEqual(stoppingLog, { sends: 0, steers: 0 }, 'no send while stopping');
   });
 
   it('the hint under the composer names the active key', () => {
