@@ -191,4 +191,24 @@ describe('S297-S3 updateAgentRuntimeConfigKeys (PGlite, real jsonb semantics)', 
     await helpers.updateAgentRuntimeConfigKeys('d-1', { clear: ['avatar'] }, {}, database);
     assert.equal(await storedText('d-1'), beforeText);
   });
+
+  it('S306-S1: set OVERWRITES an existing key — set wins over the live document', async () => {
+    // Mutant f (swap the operands of `||` so the live document wins over
+    // jsonb_build_object) survives the rest of this suite: every set above targets a key the
+    // seeded doc does NOT have, where live-wins and set-wins are indistinguishable. This pins
+    // the overwrite case: set { avatar: B } on a row already storing avatar A → B, exactly.
+    const AVATAR_B = { shape: 'circle', color: '#10b981' }; // valid AgentAvatarConfig, ≠ AVATAR
+    assert.notDeepEqual(AVATAR_B, AVATAR);
+    await seedAgent('e-1', { heartbeat: HEARTBEAT, avatar: structuredClone(AVATAR) });
+
+    const updated = await helpers.updateAgentRuntimeConfigKeys('e-1', { set: { avatar: AVATAR_B } }, {}, database);
+    if (!updated) throw new Error('update returned no row');
+
+    const doc = await stored('e-1');
+    assert.deepEqual(doc.avatar, AVATAR_B, 'stored avatar is exactly B');
+    assert.notDeepEqual(doc.avatar, AVATAR, 'seeded avatar A is gone (no live-wins merge)');
+    assert.deepEqual(doc.heartbeat, HEARTBEAT, 'untouched keys survive');
+    // The RETURNING row reflects the post-merge document too.
+    assert.deepEqual((updated.runtimeConfig as Record<string, unknown>).avatar, AVATAR_B);
+  });
 });
