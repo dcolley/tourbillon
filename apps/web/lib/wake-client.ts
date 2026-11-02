@@ -150,6 +150,9 @@ export async function enqueueApprovalWake(data: {
       approvalNote: data.note,
       ...(data.response ? { approvalResponse: data.response } : {}),
       linkedIssueIds: data.linkedIssueIds,
+      // #275: first linked issue kept as a CONTEXT pointer (harness thread + live wake
+      // header). The scheduler no longer applies the assignee check to approval wakes, so
+      // a requester that owns none of the linked issues still runs.
       taskId: data.linkedIssueIds?.[0],
     },
     { deduplicate: false },

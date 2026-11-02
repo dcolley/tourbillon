@@ -51,6 +51,29 @@ describe('buildRetryHeartbeatJobData', () => {
     assert.equal(job.resumeOfRunId, 'run-failed-1');
   });
 
+  it('#275 approval retry keeps wakeReason + taskId + linkedIssueIds (scheduler must NOT assignee-check it)', () => {
+    // The scheduler gates the assignee-mismatch check on wakeReason being task-scoped.
+    // An approval_resolved retry must therefore survive with its reason intact (not
+    // degraded to a task reason) plus the linked-issue context, or the retried requester
+    // wake would die on the same "Task <id> is assigned to agent …, not …" check the
+    // original failed on.
+    const snapshot = {
+      wakeReason: 'approval_resolved',
+      approvalId: 'approval-7',
+      approvalStatus: 'approved',
+      taskId: 'issue-9',
+      linkedIssueIds: ['issue-9', 'issue-10'],
+    };
+    const job = buildRetryHeartbeatJobData(failedRun(snapshot));
+
+    assert.equal(job.wakeReason, 'approval_resolved');
+    assert.equal(job.invocationSource, 'approval_resolved');
+    assert.equal(job.approvalId, 'approval-7');
+    assert.equal(job.taskId, 'issue-9');
+    assert.deepEqual(job.linkedIssueIds, ['issue-9', 'issue-10']);
+    assert.equal(job.resumeOfRunId, 'run-failed-1');
+  });
+
   it('preserves an APR-2 response and non-binary outcome; drops an unknown status', () => {
     const response = { status: 'answered', value: 3, answerType: 'number', decidedBy: { kind: 'group', id: 'board' } };
     const job = buildRetryHeartbeatJobData(

@@ -69,7 +69,10 @@ function approvalResponseParts(data: HeartbeatJobData): string[] {
 
 function leadParts(data: HeartbeatJobData): string[] {
   const parts = [`Wake reason: ${data.wakeReason}`];
-  if (data.taskId) parts.push(`Assigned task ID: ${data.taskId}`);
+  // #275: for approval_resolved the taskId names a LINKED issue (context), never an
+  // assignment — label it as such so the requester is not told to "work" someone else's task.
+  const isApprovalWake = data.wakeReason === 'approval_resolved';
+  if (data.taskId && !isApprovalWake) parts.push(`Assigned task ID: ${data.taskId}`);
   if (data.wakeReason === 'approval_resolved') {
     if (data.approvalId) parts.push(`Approval ID: ${data.approvalId}`);
     if (data.approvalStatus === 'approved' || data.approvalStatus === 'rejected') {
@@ -82,8 +85,13 @@ function leadParts(data: HeartbeatJobData): string[] {
       parts.push(`Board note: ${cap500(note)}`);
     }
     parts.push(...approvalResponseParts(data));
-    if (data.linkedIssueIds?.length) {
-      parts.push(`Linked issue IDs: ${data.linkedIssueIds.join(', ')}`);
+    const linked = data.linkedIssueIds?.length
+      ? data.linkedIssueIds
+      : data.taskId
+        ? [data.taskId]
+        : [];
+    if (linked.length) {
+      parts.push(`Linked issue(s): ${linked.join(', ')}`);
     }
   }
   if (data.wakeReason === 'agent_mail') {

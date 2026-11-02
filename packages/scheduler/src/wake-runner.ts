@@ -154,7 +154,7 @@ interface TokenUsageResult {
 async function publishHeartbeatRunUpdate(
   companyId: string,
   runId: string,
-  status: 'succeeded' | 'failed',
+  status: 'succeeded' | 'failed' | 'skipped',
   agentId: string,
 ): Promise<void> {
   await redisPub.publish(
@@ -231,6 +231,60 @@ async function recordHeartbeatFailure(
 
   await publishHeartbeatRunUpdate(companyId, runId, 'failed', agentId);
 }
+
+/**
+ * #275: the run row is created before the assignee-mismatch check can fire, so a skipped
+ * task wake needs its own terminal record: log and Jobs status must agree on `skipped`
+ * (recordHeartbeatFailure would show a misleading red "failed" for a pre-flight no-op).
+ */
+async function recordHeartbeatSkip(
+  runId: string,
+  reason: string,
+  companyId: string,
+  agentId: string,
+): Promise<void> {
+  if (isMastraTracingEnabled()) {
+    await flushObservability().catch(() => undefined);
+  }
+
+  // Check if already terminal to avoid overwriting operator kill
+  const existing = await db.query.heartbeatRuns.findFirst({
+    where: eq(heartbeatRuns.id, runId),
+    columns: { status: true, errorText: true },
+  });
+
+  if (
+    existing &&
+    (existing.status === 'succeeded' ||
+      existing.status === 'failed' ||
+      existing.status === 'cancelled' ||
+      existing.status === 'skipped')
+  ) {
+    return;
+  }
+
+  await db.update(heartbeatRuns)
+    .set({ status: 'skipped', finishedAt: new Date(), errorText: reason })
+    .where(eq(heartbeatRuns.id, runId));
+
+  await publishHeartbeatRunUpdate(companyId, runId, 'skipped', agentId);
+}
+
+/**
+ * #275: wake reasons where `taskId` means "this agent was assigned this issue" — the only
+ * wakes the assignee-mismatch check may gate on. Mirrors TASK_SCOPED_REASONS in
+ * apps/web/lib/retry-failed-heartbeat.ts (kept in sync deliberately; scheduler cannot
+ * import from web). `approval_resolved` also carries a taskId, but it names a LINKED issue
+ * (context only — the requester usually owns none of them), so checking it failed every
+ * requester wake whose first linked issue belonged to another agent.
+ */
+const TASK_SCOPED_WAKE_REASONS: ReadonlySet<string> = new Set([
+  'assignment',
+  'issue_commented',
+  'issue_comment_mentioned',
+  'issue_blockers_resolved',
+  'issue_children_completed',
+]);
 
 /**
  * Trigger an agent wake. Coalesces concurrent wakes per agent: if a run is active,
@@ -419,7 +473,9 @@ async function runWake(
   }
 
   let assignedIssue: Awaited<ReturnType<typeof db.query.issues.findFirst>> | undefined;
-  if (taskId) {
+  // #275: only task-scoped wakes may be assignee-checked; an approval_resolved taskId is a
+  // linked-issue context pointer, not an assignment.
+  if (taskId && TASK_SCOPED_WAKE_REASONS.has(wakeReason)) {
     assignedIssue = await db.query.issues.findFirst({ where: eq(issues.id, taskId) });
     agentTracer.info('assignment wake target issue', {
       taskId,
@@ -536,8 +592,10 @@ async function runWake(
       expectedAgentId: agentId,
       actualAssigneeAgentId: assignedIssue.assigneeAgentId,
     });
-    await recordHeartbeatFailure(runId, errorText, companyId, agentId);
-    return { runId, status: 'failed', errorText };
+    // #275: a pre-flight guard, not an execution error — the row records `skipped` so log
+    // and Jobs status agree.
+    await recordHeartbeatSkip(runId, errorText, companyId, agentId);
+    return { runId, status: 'skipped', errorText };
   }
 
   // #110: signed, expiring run token. No secret → fail this run cleanly (never mint unsigned).
