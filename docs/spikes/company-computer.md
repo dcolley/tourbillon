@@ -24,7 +24,9 @@ the Ops first draft (2026-10-29) that placed shared trees under
 - **One `kasmweb/desktop` container per AGENT** (not multi-seat, not one-per-company).
   Image pin: `kasmweb/desktop:1.19.0` (constant in `packages/company-computer/src/constants.ts`;
   bump deliberately with Ops). Container name `cc-<companySlug-or-id>-<agentUrlKey>`.
-  KasmVNC container port 6901; host ports allocated from **6901** upward per live seat.
+  KasmVNC container port 6901; host ports allocated from **6901** upward per live seat,
+  **host-wide** (`SessionStore.listActivePorts()` is deliberately NOT company-scoped —
+  every seat binds a port on this one host, so two companies can never share 6901).
   Resource envelope (pinned by tests in `lifecycle.ts`/`lifecycle.test.ts`): shm **512m**,
   ~**2GiB** memory, ~**1.5 CPU** per seat. **Host-wide seat cap: 4** concurrent
   non-destroyed seats (`MAX_ACTIVE_SEATS` in `constants.ts`) — a 5th `createSession`
@@ -48,10 +50,16 @@ the Ops first draft (2026-10-29) that placed shared trees under
 - **Ops seat inventory `meta.json` — schema 2 (locked):** one per live seat, written by
   `cc-ensure-seat`. Shape: `containerName`, `hostPort`, `vncPasswordFile` naming a
   sibling **`vnc_pw`** file at **mode 600** (the VNC password NEVER appears in meta.json),
-  and **object-form** `mounts` (`{ "<hostPath>": "<containerPath>" }` with host paths
-  under `/opt/tourbillon-company-{companyId}/` and targets only `/data` or
-  `/home/kasm-user`). Schema 1 (inline password, array mounts) is rejected by the parser
-  (`packages/company-computer/src/ops-inventory.ts#parseSeatMeta`).
+  and **object-form** `mounts`. The parser (`packages/company-computer/src/ops-inventory.ts#parseSeatMeta`,
+  #282 B1 mount lock) accepts ONLY: top-level keys `schema, containerName, hostPort,
+  vncPasswordFile, mounts` (unknown keys — including a nested `env: { VNC_PW: … }` — are
+  rejected); `vncPasswordFile` as a **bare basename** (no `/`); and exactly the canonical
+  mount pair for ONE company id + ONE agent urlKey, host paths already normalised
+  (no `.`/`..`/`//`): `{ "/opt/tourbillon-company-{id}/data": "/data",
+  "/opt/tourbillon-company-{id}/home/{urlKey}": "/home/kasm-user" }` with `containerName`
+  ending in `-{urlKey}`. Traversal paths, whole-home/company-root binds, swapped or
+  duplicate targets, and two-company seats all fail closed. Schema 1 (inline password,
+  array mounts) is likewise rejected.
 - Implemented in Slice 1: `packages/company-computer/` (registry API, path helpers,
   lifecycle against an injected `HostClient`), `company_computer_sessions` + `hasComputer`
   columns (migration 0025), `company-computer` Tier-2 toolset,
