@@ -5,15 +5,21 @@
  *
  * Same idiom as agent-chat-send-key.test.ts / password-input.test.ts (the repo has no DOM test
  * library): the pane's ChatPaneBody is rendered with react-dom/server, the element tree is
- * captured at createElement, and the textarea's onKeyDown is driven directly. The session hook,
- * the preference hook and the header menu are stubbed by swapping the compiled module exports
- * before the pane is imported (mock.module is ESM-only; tsx runs these tests as CJS), so the
- * pane's OWN handler code is what runs: mode branching, the S296-S4 empty-draft swallow, and the
- * send / steer routing.
+ * captured at createElement, and the textarea's onKeyDown is driven directly.
+ *
+ * S301-S1 (Refs #301): the session hook, the preference hook and the header menu are stubbed
+ * through the pane module's exported `__test__` seam (read at call time, restored in after()),
+ * instead of writing into the require cache — mock.module is ESM-only and tsx compiles these
+ * tests to CJS, so the seam is the supported route. The pane's OWN handler code is what runs:
+ * mode branching, the S296-S4 empty-draft swallow, and the send / steer routing.
+ * S301-S2 (Refs #301): ChatPaneBody is no longer a named export; this file reaches it through the
+ * seam, and the final test pins that no app host touches the test-only surface.
  */
-import { describe, it, before } from 'node:test';
+import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { createRequire } from 'node:module';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { ChatSendKeyMode } from '@/lib/chat-send-key';
@@ -77,39 +83,12 @@ function makeSession() {
   };
 }
 
-const req = createRequire(import.meta.url);
-
-/**
- * tsx compiles these modules to CJS whose exports are non-configurable getters, so the seams are
- * replaced by injecting ready-made exports into the require cache before the pane first loads.
- */
-function stubModule(spec: string, exportsValue: Record<string, unknown>) {
-  const cache = (req('node:module') as { Module: { _cache: Record<string, unknown> } }).Module._cache;
-  const filename = req.resolve(spec);
-  cache[filename] = { id: filename, filename, loaded: true, exports: exportsValue };
-}
-
 describe('S296-S5 Control-Pane composer keydown (DOM level)', () => {
   let ChatPaneBody: (p: Record<string, unknown>) => React.ReactNode;
   let lastCapture: El[] = [];
+  let restore: () => void = () => {};
 
   before(async () => {
-    // Stub the pane's seams (the session, the preference hook, and the header menu) before the
-    // pane is first loaded; the pane reads them as module properties at call time.
-    stubModule('./use-agent-chat-session', {
-      useAgentChatSession: () => makeSession(),
-      chatMessagePlainText: (m: { content?: { parts?: Array<{ type: string; text?: string }> } }) =>
-        (m.content?.parts ?? []).filter((p) => p.type === 'text').map((p) => p.text ?? '').join('\n'),
-      isChatUserMessage: (m: { role: string }) => m.role === 'user',
-      formatChatMessageDateTime: (m: { createdAt?: string }) => m.createdAt ?? null,
-    });
-    stubModule('./use-chat-send-key-mode', {
-      useChatSendKeyMode: () => [stub.mode, () => {}],
-    });
-    stubModule('./chat-send-key-menu', {
-      ChatSendKeyMenu: () => null,
-    });
-
     // tsx compiles JSX with the classic runtime (tsconfig jsx: preserve): agent-chat-pane.tsx
     // resolves React.createElement from the global, so wrapping it captures the element tree.
     (globalThis as { React?: unknown }).React = new Proxy(React, {
@@ -124,8 +103,25 @@ describe('S296-S5 Control-Pane composer keydown (DOM level)', () => {
         return Reflect.get(target, prop);
       },
     });
-    ({ ChatPaneBody } = (await import('./agent-chat-pane')) as never);
+
+    // S301-S1: swap the pane's live dependencies through the module's supported test seam. The
+    // pane reads them at call time, and the seam entries are typed from the pane's imports, so a
+    // renamed hook or import path is a compile error here (not a silent require-cache miss).
+    const mod = await import('./agent-chat-pane');
+    const seam = mod.__test__;
+    const originals = { useChatSendKeyMode: seam.useChatSendKeyMode, ChatSendKeyMenu: seam.ChatSendKeyMenu };
+    restore = () => Object.assign(seam, originals);
+    // The session hook is NOT stubbed: ChatPaneBody receives the session as a prop, and the pure
+    // message helpers run for real over the (empty) message list.
+    seam.useChatSendKeyMode = () => [stub.mode, () => {}];
+    seam.ChatSendKeyMenu = function ChatSendKeyMenuStub() {
+      return React.createElement(React.Fragment);
+    };
+
+    ChatPaneBody = seam.ChatPaneBody as unknown as (p: Record<string, unknown>) => React.ReactNode;
   });
+
+  after(() => restore());
 
   function composerTextarea(): El {
     lastCapture = [];
@@ -217,5 +213,49 @@ describe('S296-S5 Control-Pane composer keydown (DOM level)', () => {
       assert.equal(press(el, { key: 'Enter', metaKey: true, nativeEvent: { isComposing: true } }), false, mode);
       assert.deepEqual([stub.sends, stub.steers], [[], []], mode);
     }
+  });
+
+  it('S301-S2: the test-only pane surface stays test-only (source pin)', () => {
+    // ChatPaneBody is reached ONLY through the pane's __test__ seam, and only from this file:
+    // hosts must render AgentChatPane. Scan every app source file (the same roots the test runner
+    // walks, plus the root-level modules) for references to the private surface. Self-exempt: the
+    // pane defines the seam and this file exercises it — the quoted specifier examples below would
+    // otherwise make the pin flag itself.
+    const root = fileURLToPath(new URL('../..', import.meta.url)); // apps/web
+    const exempt = new Set([
+      'components/chat/agent-chat-pane.tsx', // defines the seam
+      'components/chat/agent-chat-pane-send-key.test.ts', // the only consumer of the pane seam
+      // The container seam from S302-S1 shares the `__test__` name and is pinned to its own
+      // consumer by these same rules there:
+      'components/assistant/agent-chat.tsx',
+      'components/assistant/agent-chat-avatar-header.test.ts',
+    ]);
+    const offenders: string[] = [];
+    const check = (abs: string, relPath: string) => {
+      if (exempt.has(relPath)) return;
+      const src = readFileSync(abs, 'utf8');
+      const touchesSeam =
+        // the body name must never appear outside the pane / this test
+        /\bChatPaneBody\b/.test(src) ||
+        // the seam may only be pulled from the pane container modules
+        (/\b__test__\b/.test(src) && /['"][^'"]*\/agent-chat(-pane)?['"]/.test(src));
+      if (touchesSeam) offenders.push(relPath);
+    };
+    const walk = (dir: string, rel: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
+        const abs = join(dir, entry.name);
+        const relPath = rel ? `${rel}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) walk(abs, relPath);
+        else if (entry.name.endsWith('.ts') || entry.name.endsWith('.tsx')) check(abs, relPath);
+      }
+    };
+    for (const dir of ['app', 'components', 'lib']) walk(join(root, dir), dir);
+    for (const entry of readdirSync(root, { withFileTypes: true })) {
+      if ((entry.name.endsWith('.ts') || entry.name.endsWith('.tsx')) && entry.isFile()) {
+        check(join(root, entry.name), entry.name);
+      }
+    }
+    assert.deepEqual(offenders, [], 'ChatPaneBody / __test__ stay test-only; hosts use AgentChatPane');
   });
 });

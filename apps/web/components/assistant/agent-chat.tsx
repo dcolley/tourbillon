@@ -617,6 +617,20 @@ function threadStartMs(thread: { threadId: string; threadCreatedAt?: string }): 
 }
 
 /**
+ * @internal TEST SEAM ONLY — S302-S1 (Refs #302). Not part of the module's public surface.
+ * These are the container's two live-dependency hooks: agent-chat-avatar-header.test.ts swaps them
+ * for stubs before rendering (the real ones need a browser store / an open AG-UI run), and the
+ * container reads them AT CALL TIME while shipping the real implementations, so no app-visible
+ * behaviour depends on this object. Because the seam is typed from the imports above, renaming
+ * either hook (or its import path) is a compile error in that test rather than a silent
+ * string-match on a require interception.
+ */
+export const __test__ = {
+  useAgentChat,
+  useChatSendKeyMode,
+};
+
+/**
  * Chat with one agent. `agentId` is used for the API calls; `agentKey` (the agent's url key, default
  * `agentId`) for the page link, so the address bar keeps the canonical `/assistant/<url key>`.
  * ASYNC-0: the agent's one conversation (its pinned active thread, Slice B). Clear chat (⋯ menu)
@@ -661,7 +675,9 @@ export function AgentChat({
   // ASYNC-0: after Clear chat, the fresh thread (else the given one, else the agent's pinned active thread).
   const [clearedThreadId, setClearedThreadId] = React.useState<string | undefined>(undefined);
   const activeThreadId = clearedThreadId ?? threadId;
-  const chat = useAgentChat({ agentId, threadId: activeThreadId, tools: CHAT_CARD_TOOLS, onThreadOpened });
+  // S302-S1 (Refs #302): called through this module's test seam (the real hooks, by default) so
+  // the container-level render tests can stub them without require-cache interception.
+  const chat = __test__.useAgentChat({ agentId, threadId: activeThreadId, tools: CHAT_CARD_TOOLS, onThreadOpened });
   const feedback = useThreadFeedback(agentId, chat.thread?.threadId ?? null);
   // Slice B: OM mode for the ⋯ menu, from the thread open (GET …/threads) or the last Clear.
   const [clearedOm, setClearedOm] = React.useState<AssistantOmSummary | undefined>(undefined);
@@ -677,7 +693,7 @@ export function AgentChat({
   const [draft, setDraft] = React.useState('');
   const [context, setContext] = React.useState<OpenInChatContext | null>(initialContext ?? null);
   // CHAT-SEND-KEY: the browser's "Send message with" pref; live, so a flip re-binds the composer.
-  const [sendKeyMode] = useChatSendKeyMode();
+  const [sendKeyMode] = __test__.useChatSendKeyMode();
   // CTX-1: reload the context meter on open, after each turn (back to idle) and on a model change.
   const [modelRev, setModelRev] = React.useState(0);
   const bumpModelRev = React.useCallback(() => setModelRev((n) => n + 1), []);

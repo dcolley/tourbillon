@@ -67,7 +67,9 @@ describe('CHAT-SEND-KEY composer wiring', () => {
     assert.match(ASSISTANT, /const gesture = resolveSendKeyGesture\(e, \{ mode: sendKeyMode, runOpen \}\);/);
     assert.match(ASSISTANT, /if \(gesture === 'steer'\) props\.onSteer\(\);/, 'steer goes to onSteer');
     assert.match(ASSISTANT, /else props\.onSend\(\);/, 'send goes to onSend');
-    assert.match(ASSISTANT, /const \[sendKeyMode\] = useChatSendKeyMode\(\);/, 'the container holds the pref');
+    // S301-S1/S302-S1: the call may ride the module's __test__ seam (the seam holds the real hook
+    // by default; a swapped stub would change behaviour, which is what the render tests exploit).
+    assert.match(ASSISTANT, /const \[sendKeyMode\] = (__test__\.)?useChatSendKeyMode\(\);/, 'the container holds the pref');
     assert.match(ASSISTANT, /sendKeyMode=\{sendKeyMode\}/, 'the view receives it');
   });
 
@@ -78,7 +80,7 @@ describe('CHAT-SEND-KEY composer wiring', () => {
     );
     assert.match(PANE, /if \(gesture === 'steer'\) void steer\(input\);/, 'steer keeps the steer path');
     assert.match(PANE, /else void sendMessage\(input\);/, 'send keeps the send path');
-    assert.match(PANE, /const \[chatSendKeyMode\] = useChatSendKeyMode\(\);/, 'the pane reads the stored pref');
+    assert.match(PANE, /const \[chatSendKeyMode\] = (__test__\.)?useChatSendKeyMode\(\);/, 'the pane reads the stored pref (possibly via the seam)');
     assert.match(PANE, /data-send-key-mode=\{chatSendKeyMode\}/, 'the pane shows the active mode');
   });
 });
@@ -95,7 +97,7 @@ describe('CHAT-SEND-KEY settings control', () => {
   });
 
   it('both chat surfaces mount it', () => {
-    assert.match(PANE, /<ChatSendKeyMenu \/>/, 'the Control-Pane chat header has the control');
+    assert.match(PANE, /<(__test__\.)?ChatSendKeyMenu \/>/, 'the Control-Pane chat header has the control (possibly via the seam)');
     assert.match(ASSISTANT_MENU, /<ChatSendKeyRadioGroup mode=\{sendKeyMode\} onModeChange=\{setSendKeyMode\} \/>/, 'the assistant ⋯ menu has it');
   });
 });
