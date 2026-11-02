@@ -203,6 +203,28 @@ describe('S297-S3 atomic runtimeConfig key writes', () => {
     assert.deepEqual(setPayloads, []);
   });
 
+  it('S306-S2: updateAgentRuntimeConfig({ mail: undefined }) CLEARS the mail key', async () => {
+    // Mutant h (drop `clear.push('mail')` from the `'mail' in patch` branch) survives the rest
+    // of this suite: no other test passes mail at all, and no production caller sends
+    // `mail: undefined` (page.tsx always sends an object). Pin the documented contract
+    // directly: an explicit `mail: undefined` must reach the atomic writer as a CLEAR.
+    row = { ...row, runtimeConfig: { ...doc(), mail: { enabled: true } } };
+
+    const updated = await lib.updateAgentRuntimeConfig('agent-1', { mail: undefined });
+
+    assert.equal('mail' in doc(), false, 'mail key removed from the stored document');
+    assert.equal('mail' in (updated.runtimeConfig as RuntimeConfig), false, 'returned row reflects the clear');
+    assert.equal(setPayloads.length, 1, 'exactly one atomic write');
+    const written = setPayloads[0]!.runtimeConfig as RuntimeConfig;
+    assert.equal('mail' in written, false, 'ops carried a clear, not a set');
+    assert.deepEqual(written.timeout, { heartbeatSec: 300, graceSec: 30 }, 'owned timeout still materialised');
+    assert.deepEqual(written.avatar, AVATAR, 'untouched keys survive');
+
+    // Control for the same branch: a provided mail value still SETS.
+    await lib.updateAgentRuntimeConfig('agent-1', { mail: { enabled: true } });
+    assert.deepEqual(doc().mail, { enabled: true });
+  });
+
   it('updateAgentBudget writes budget + the column, keeping avatar/heartbeat', async () => {
     concurrentAvatarCommit();
     await lib.updateAgentBudget('agent-1', { budgetMonthlyTokens: 1234, enforce: true });
