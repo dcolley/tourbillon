@@ -289,6 +289,17 @@ describe('/tmp skip guard (S261-S1)', () => {
       { root: undefined as unknown as string, expected: false, base: '/var/tmp', label: 'literal /var/tmp' },
       { root: undefined as unknown as string, expected: false, base: homedir(), label: 'literal $HOME' },
     ];
+    // S277-S2: the S271-S4 label lookup covered only $HOME and /var/tmp —
+    // removing the /tmpfoo row (old M12) left every outcome lookup
+    // undefined-tolerant and the test stayed GREEN (verified on base 013edbd).
+    // The M12 killer row must exist BY LABEL too. Unconditional (not inside
+    // the exercised-outcome block below) so the pin holds on every host, and
+    // it keeps the skipIfUnwritable contract that lets non-root hosts skip
+    // the row legitimately.
+    const tmpfooRow = rows.find((row) => row.label === 'literal /tmpfoo');
+    assert.ok(tmpfooRow, "the literal /tmpfoo row must exist by label (S277-S2; M12: deleting it left the test GREEN)");
+    assert.equal(tmpfooRow!.expected, false, 'the /tmpfoo row must expect false (dropped-sep mutant killer)');
+    assert.equal(tmpfooRow!.skipIfUnwritable, true, 'the /tmpfoo row must stay skipIfUnwritable so non-root hosts skip legitimately');
     try {
       for (const row of rows) {
         if (row.base !== undefined) {
@@ -361,6 +372,28 @@ describe('/tmp skip guard (S261-S1)', () => {
       const tmpfooOutcome = rowOutcomes.get('literal /tmpfoo');
       if (typeof tmpfooOutcome === 'string' && tmpfooOutcome !== 'exercised') {
         t.diagnostic(`NOTE: ${tmpfooOutcome} — exercised in the root container gate instead`);
+      }
+      // S277-S3 (pin of the S271-S3 NOTE guard, M6): 'exercised' is a string, so
+      // dropping `&& tmpfooOutcome !== 'exercised'` prints the misleading
+      // "NOTE: exercised — exercised in the root container gate instead" from
+      // the root container and no behaviour check here notices (a diagnostic
+      // never fails a test). Source-pin the guard instead.
+      {
+        const testSrc = readFileSync(fileURLToPath(new URL('./egress-enforcement.test.ts', import.meta.url)), 'utf8');
+        // Needles are assembled by CONCATENATION: a plain regex/string literal
+        // holding the guarded spelling would self-match this very file and keep
+        // the pin GREEN under the M6 mutant (verified). The live `if` below is
+        // the only contiguous occurrence of GUARDED spelling in the file.
+        const GUARDED = "typeof tmpfooOutcome === 'string' && " + "tmpfooOutcome !== 'exercised'";
+        const UNGUARDED_IF = "if (typeof tmpfooOutcome === 'string'" + ") {";
+        assert.ok(
+          testSrc.includes(GUARDED),
+          "S277-S3: the NOTE must be gated on !== 'exercised' (M6: dropping the guard prints 'NOTE: exercised ...' in the root container)",
+        );
+        assert.ok(
+          !testSrc.includes(UNGUARDED_IF),
+          'S277-S3: the unguarded NOTE branch (typeof-only) must not return',
+        );
       }
     } finally {
       cleanupScratch();
@@ -495,15 +528,39 @@ describe('pure /tmp prefix classification (S271-S1)', () => {
   it('libDirUnderTmp and underTmp delegate to isTmpRealpath (source pins, anti-vacuity)', () => {
     // If either helper re-implemented the prefix check inline, the string pins
     // above would pin dead code while the real guards drifted. Pin delegation.
+    // S277-S1: the old ban covered only `startsWith(`, so an inline prefix via
+    // indexOf/slice/split/search, a regex .test()/.match(), or a literal
+    // '/tmp/' beside `return isTmpRealpath(...)` survived (M2x/M3x). Tightened
+    // to (a) an exact shape pin — libDirUnderTmp must stay
+    //   try { const <v> = realpathSync(getEgressRuntimeDir());
+    //         return isTmpRealpath(<v>); } catch { return false; }
+    // with NO other statements (an extra inline-prefix guard beside the return
+    // and a stripped/rewritten catch both RED here), and (b) a banned-token
+    // list that covers every realistic inline-prefix API, not just startsWith.
     const src = readFileSync(fileURLToPath(new URL('./egress-enforcement.test.ts', import.meta.url)), 'utf8');
+    // None of these tokens appear in either pinned function's COMMENTS (the
+    // /tmp-literal ban requires a quote/escape before the slash, so prose like
+    // "so /tmp -> /private/tmp" stays clean), so a banned-token match can only
+    // come from code.
+    const BANNED_TOKENS = /startsWith\(|indexOf\s*\(|\bslice\s*\(|\bsplit\s*\(|\bsearch\s*\(|\.test\s*\(|\.match\s*\(|["'`\\]\/\\?tmp|String\.raw|"tmp"|'tmp'/;
     const libFn = src.slice(src.indexOf('export function libDirUnderTmp'), src.indexOf('/** Set/restore env'));
     assert.ok(libFn.length > 0 && libFn !== src, 'libDirUnderTmp not found for delegation pin');
-    assert.match(libFn, /return\s+isTmpRealpath\(/, 'libDirUnderTmp must delegate the prefix decision to isTmpRealpath');
-    assert.doesNotMatch(libFn, /startsWith\(/, 'libDirUnderTmp must not re-implement the prefix check inline');
+    assert.match(
+      libFn,
+      /try \{[\s\S]*?\bconst\s+\w+\s*=\s*realpathSync\(getEgressRuntimeDir\(\)\);[\s\S]*?return\s+isTmpRealpath\(\w+\);\s*\}\s*catch \{\s*return false;\s*\}/,
+      'libDirUnderTmp must delegate the prefix decision to isTmpRealpath as its only statement besides the realpath capture (S277-S1 shape pin)',
+    );
+    assert.doesNotMatch(libFn, BANNED_TOKENS, 'libDirUnderTmp must not re-implement any inline prefix check (startsWith/indexOf/slice/split/search/regex/literal — S277-S1)');
+    assert.equal((libFn.match(/isTmpRealpath\(/g) ?? []).length, 1, 'libDirUnderTmp must contain exactly one isTmpRealpath call — the delegation (S277-S1)');
     const underFn = src.slice(src.indexOf('function underTmp'), src.indexOf('function outsideTmpRootAt'));
     assert.ok(underFn.length > 0 && underFn !== src, 'underTmp not found for delegation pin');
-    assert.match(underFn, /return\s+isTmpRealpath\(/, 'underTmp must delegate the prefix decision to isTmpRealpath');
-    assert.doesNotMatch(underFn, /startsWith\(/, 'underTmp must not re-implement the prefix check inline');
+    assert.match(
+      underFn,
+      /try \{[\s\S]*?return\s+isTmpRealpath\([\s\S]*?\}\s*catch \{\s*return true;/,
+      'underTmp must delegate the prefix decision to isTmpRealpath inside its try/catch (S277-S1 shape pin)',
+    );
+    assert.doesNotMatch(underFn, BANNED_TOKENS, 'underTmp must not re-implement any inline prefix check (startsWith/indexOf/slice/split/search/regex/literal — S277-S1)');
+    assert.equal((underFn.match(/isTmpRealpath\(/g) ?? []).length, 1, 'underTmp must contain exactly one isTmpRealpath call — the delegation (S277-S1)');
   });
 });
 
