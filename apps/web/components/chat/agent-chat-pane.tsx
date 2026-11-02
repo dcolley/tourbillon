@@ -51,6 +51,9 @@ import {
   CHAT_LAYOUT_MODE_LABELS,
   type ChatLayoutMode,
 } from '@/lib/chat-layout-storage';
+import { chatSendKeyHint, resolveSendKeyGesture } from '@/lib/chat-send-key';
+import { useChatSendKeyMode } from './use-chat-send-key-mode';
+import { ChatSendKeyMenu } from './chat-send-key-menu';
 import {
   chatMessagePlainText,
   formatChatMessageDateTime,
@@ -248,6 +251,8 @@ function ChatPaneBody({
   const [renameTarget, setRenameTarget] = useState<ChatThreadInfo | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ChatThreadInfo | null>(null);
   const [sessionsOpen, setSessionsOpen] = useState(false);
+  // CHAT-SEND-KEY: browser pref for Enter vs Ctrl/Cmd+Enter, shared with the assistant composer.
+  const [chatSendKeyMode] = useChatSendKeyMode();
 
   useEffect(() => {
     setSessionsOpen(readSessionsOpen());
@@ -341,6 +346,7 @@ function ChatPaneBody({
           </DropdownMenu>
         </div>
         <div className="flex shrink-0 items-center gap-0.5">
+          <ChatSendKeyMenu />
           <ChatLayoutModeMenu
             layoutMode={layoutMode}
             onLayoutModeChange={onLayoutModeChange}
@@ -617,10 +623,15 @@ function ChatPaneBody({
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    void sendMessage(input);
-                  }
+                  // CHAT-SEND-KEY: one shared helper decides send / newline for every composer.
+                  const gesture = resolveSendKeyGesture(e, {
+                    mode: chatSendKeyMode,
+                    runOpen: running,
+                  });
+                  if (!gesture || !input.trim()) return;
+                  e.preventDefault();
+                  if (gesture === 'steer') void steer(input);
+                  else void sendMessage(input);
                 }}
                 disabled={connecting}
               />
@@ -646,6 +657,13 @@ function ChatPaneBody({
                 )}
               </div>
             </div>
+            <p
+              className="mt-1 text-xs text-muted-foreground"
+              data-send-key-hint
+              data-send-key-mode={chatSendKeyMode}
+            >
+              {chatSendKeyHint(chatSendKeyMode, { running })}
+            </p>
           </form>
         </div>
       </div>

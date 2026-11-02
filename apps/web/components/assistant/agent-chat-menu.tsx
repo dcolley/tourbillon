@@ -10,8 +10,11 @@ import * as React from 'react';
 import { MoreHorizontal } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { agentChatMenuItems, type AssistantOmSummary, type ClearChatResult } from '@/lib/assistant/single-chat';
+import { ChatSendKeyRadioGroup } from '@/components/chat/chat-send-key-menu';
+import { useChatSendKeyMode } from '@/components/chat/use-chat-send-key-mode';
+import type { ChatSendKeyMode } from '@/lib/chat-send-key';
 
 /** Confirm body (stateless; tested with react-dom/server). */
 export function ClearChatConfirmView({
@@ -62,6 +65,8 @@ export function AgentChatMenu({
   observationalMemory,
   pendingCard,
   onClear,
+  sendKeyMode: sendKeyModeOverride,
+  onSendKeyModeChange,
 }: {
   agentUrlKey: string;
   runOpen: boolean;
@@ -69,10 +74,18 @@ export function AgentChatMenu({
   observationalMemory?: AssistantOmSummary | null;
   pendingCard?: string | null;
   onClear: () => Promise<ClearChatResult>;
+  /** CHAT-SEND-KEY: override the stored pref (hosts/tests that hold it elsewhere). */
+  sendKeyMode?: ChatSendKeyMode;
+  onSendKeyModeChange?: (mode: ChatSendKeyMode) => void;
 }) {
   const [confirming, setConfirming] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  // CHAT-SEND-KEY: "Send message with" lives in this menu, on the same stored pref as every
+  // other composer surface; a flip here re-binds them all live.
+  const [storedSendKeyMode, setStoredSendKeyMode] = useChatSendKeyMode();
+  const sendKeyMode = sendKeyModeOverride ?? storedSendKeyMode;
+  const setSendKeyMode = onSendKeyModeChange ?? setStoredSendKeyMode;
   const items = agentChatMenuItems({ agentUrlKey, runOpen, clearing: busy, observationalMemory });
   const confirm = () => {
     setBusy(true);
@@ -90,6 +103,8 @@ export function AgentChatMenu({
           <MoreHorizontal />
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-56">
+          <ChatSendKeyRadioGroup mode={sendKeyMode} onModeChange={setSendKeyMode} />
+          <DropdownMenuSeparator />
           {items.map((item) =>
             item.href ? (
               <DropdownMenuItem
