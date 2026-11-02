@@ -184,6 +184,11 @@ export interface AgentRuntimeConfig {
     screenshots?: boolean;
   };
   /**
+   * Per-agent avatar (AGENT-AVATAR-UI v1: blob shape + palette colour). Absent = default
+   * initials avatar (today's look). Validated by `parseAgentAvatarConfig` (@tourbillon/shared/agent-avatar).
+   */
+  avatar?: import('./agent-avatar').AgentAvatarConfig;
+  /**
    * Direct messages to other agents (sendToAgent tool).
    * When false, sendToAgent is unavailable. Default: true.
    */

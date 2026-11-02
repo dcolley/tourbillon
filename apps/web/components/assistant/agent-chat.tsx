@@ -60,6 +60,8 @@ import {
   type AgentDm,
 } from '@/lib/assistant/agent-dms';
 import { AgentChatMenu } from './agent-chat-menu';
+import { AgentAvatar } from './agent-avatar';
+import type { AgentAvatarConfig } from '@tourbillon/shared/agent-avatar';
 import { clearAgentChat, type AssistantOmSummary } from '@/lib/assistant/single-chat';
 import { useStickyTranscript } from './use-sticky-transcript';
 
@@ -220,6 +222,13 @@ export interface AgentChatViewProps {
   onOpenDm?: (peerId?: string, messageId?: string) => void;
   /** ASYNC-0: the chat's ⋯ menu (Clear chat, Observational Memory), at the end of the chat chrome. */
   chatMenu?: React.ReactNode;
+  /**
+   * AGENT-AVATAR-UI: the agent's chosen avatar (shape + colour), shown at the head of the chat
+   * chrome bar. Null/undefined keeps today's chrome (no avatar) — the default look is unchanged.
+   */
+  avatar?: AgentAvatarConfig | null;
+  /** AGENT-AVATAR-UI: display name for the chat header avatar's initials. */
+  agentName?: string;
   /** CHAT-PAGE-1: load the previous transcript page (Load previous is shown while `state.history.hasMore`). */
   onLoadPrevious?: () => void;
   /** CHAT-PAGE-1: the scrolling message list (sticky-bottom binding). */
@@ -437,8 +446,11 @@ export function AgentChatView(props: AgentChatViewProps) {
   const rows = mergeDmTranscriptTimeline(state.items, chips);
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-agent-chat data-status={state.status}>
-      {props.dmActivity || props.chatMenu ? (
+      {props.dmActivity || props.chatMenu || props.avatar ? (
         <div className="flex min-h-9 items-center gap-2 border-b px-4 py-1" data-chat-chrome>
+          {props.avatar ? (
+            <AgentAvatar name={props.agentName ?? 'Agent'} config={props.avatar} size="row" />
+          ) : null}
           <div className="min-w-0 flex-1">{props.dmActivity ?? null}</div>
           {props.chatMenu ?? null}
         </div>

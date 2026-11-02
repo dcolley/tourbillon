@@ -25,6 +25,8 @@ export function assistantRouteView(
       agentId={agent.id}
       agentKey={agent.urlKey}
       threadId={threadId ?? undefined}
+      {...(agent.name ? { agentName: agent.name } : {})}
+      {...(agent.avatar !== undefined ? { avatar: agent.avatar } : {})}
       {...(opts.context ? { initialContext: opts.context } : {})}
       {...(opts.companyId ? { companyId: opts.companyId } : {})}
     />

@@ -10,10 +10,14 @@
  * Pure: the server lookup lives in route-server.ts.
  */
 import { assistantAgentPath } from './sidebar';
+import type { AgentAvatarConfig } from '@tourbillon/shared/agent-avatar';
 
 export interface AssistantRouteAgent {
   id: string;
   urlKey: string;
+  /** AGENT-AVATAR-UI: display name and chosen avatar for the chat header (server lookup fills them). */
+  name?: string;
+  avatar?: AgentAvatarConfig | null;
 }
 
 export type AssistantRouteDecision =

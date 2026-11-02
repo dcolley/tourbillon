@@ -5,17 +5,21 @@
 import { notFound, redirect } from 'next/navigation';
 import { and, eq, or } from 'drizzle-orm';
 import { db, agents } from '@tourbillon/db';
+import { agentAvatarFromRuntimeConfig } from '@tourbillon/shared/agent-avatar';
 import { getActiveCompanyOrNull } from '@/lib/company';
 import { cleanRouteSegment, decideAssistantRoute, type AssistantRouteAgent, type AssistantRouteDecision } from './route';
 
 /** The company's agent whose id or url key is `key` (id wins), else null. Never looks outside the company. */
 export async function findCompanyAgentByKey(companyId: string, key: string): Promise<AssistantRouteAgent | null> {
   const rows = await db
-    .select({ id: agents.id, urlKey: agents.urlKey })
+    .select({ id: agents.id, urlKey: agents.urlKey, name: agents.name, runtimeConfig: agents.runtimeConfig })
     .from(agents)
     .where(and(eq(agents.companyId, companyId), or(eq(agents.id, key), eq(agents.urlKey, key))))
     .limit(2);
-  return rows.find((r) => r.id === key) ?? rows[0] ?? null;
+  const row = rows.find((r) => r.id === key) ?? rows[0] ?? null;
+  if (!row) return null;
+  // AGENT-AVATAR-UI: the chat header renders the agent's chosen shape + colour.
+  return { id: row.id, urlKey: row.urlKey, name: row.name, avatar: agentAvatarFromRuntimeConfig(row.runtimeConfig) };
 }
 
 export interface AssistantRouteDeps {

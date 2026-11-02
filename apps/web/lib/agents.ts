@@ -44,6 +44,7 @@ import {
 } from '@tourbillon/shared/company-workspace';
 import { getActiveCompany } from './company';
 import { getCompanyDefaultLlmProviderRecord } from './llm-providers';
+import type { AgentAvatarConfig } from '@tourbillon/shared/agent-avatar';
 import { invalidateChatControllerForAgent } from './chat';
 import { clearIdleThreadOnRuntimeSwitch } from '@tourbillon/mastra';
 import {
@@ -414,6 +415,27 @@ export async function updateAgentRuntimeConfig(
       // Scheduler reconciles Mastra schedules on boot if wake server is down.
     }
   }
+
+  return updated;
+}
+
+/**
+ * AGENT-AVATAR-UI: set or clear the agent's avatar (shape + colour) on `runtimeConfig.avatar`
+ * (existing jsonb — no migration). `null` resets to the default avatar. The write only touches
+ * the `avatar` key: every other runtimeConfig member is preserved as-is.
+ */
+export async function updateAgentAvatar(agentId: string, avatar: AgentAvatarConfig | null): Promise<Agent> {
+  const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+  if (!agent) throw new AgentValidationError('Agent not found.');
+
+  const { avatar: _dropped, ...rest } = (agent.runtimeConfig ?? {}) as AgentRuntimeConfig & { avatar?: unknown };
+  const runtimeConfig = (avatar ? { ...rest, avatar } : rest) as AgentRuntimeConfig;
+
+  const [updated] = await db
+    .update(agents)
+    .set({ runtimeConfig, updatedAt: new Date() })
+    .where(eq(agents.id, agentId))
+    .returning();
 
   return updated;
 }

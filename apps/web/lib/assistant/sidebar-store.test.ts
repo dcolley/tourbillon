@@ -29,6 +29,9 @@ const agent = (id: string, extra: Partial<AssistantAgent> = {}): AssistantAgent 
   active: true,
   status: 'idle',
   pendingApprovals: 0,
+  running: false,
+  waiting: false,
+  avatar: null,
   ...extra,
 });
 const thread = (id: string, agentId: string, extra: Partial<AssistantThread> = {}): AssistantThread => ({

@@ -40,6 +40,9 @@ const agent = (id: string, extra: Partial<AssistantAgent> = {}): AssistantAgent 
   active: true,
   status: 'idle',
   pendingApprovals: 0,
+  running: false,
+  waiting: false,
+  avatar: null,
   ...extra,
 });
 const thread = (id: string, agentId: string, extra: Partial<AssistantThread> = {}): AssistantThread => ({
@@ -198,11 +201,13 @@ describe('UI-2b assistant sidebar view', () => {
     assert.deepEqual(calls, [['dismiss']]);
   });
 
-  it('ASYNC-0: the sidebar loads agents only', async () => {
+  it('ASYNC-0: the sidebar renders agents only (no thread UI); thread lists load for the unread dot', async () => {
     const { readFile } = await import('node:fs/promises');
     const { fileURLToPath } = await import('node:url');
     const src = await readFile(fileURLToPath(new URL('./sidebar.tsx', import.meta.url)), 'utf8');
-    assert.match(src, /useAssistantSidebar\(\{ threadLists: false \}\)/);
+    // AGENT-AVATAR-UI: threadLists is back on — the row's blue dot reads thread unread flags.
+    // No thread *UI* returns: rows stay agents-only.
+    assert.match(src, /useAssistantSidebar\(\{ threadLists: true \}\)/);
     assert.doesNotMatch(src, /agent-thread-list|newThread|setPinned|rename\(/);
   });
 
@@ -294,5 +299,90 @@ describe('UI-2b assistant sidebar view', () => {
         sidebarMod.writeSidebarCollapsed(false);
       }
     });
+  });
+});
+
+/**
+ * AGENT-AVATAR-UI: shape/colour avatars + the two independent dots.
+ * Avatar dot = activity only (green working / yellow waiting / none idle).
+ * Row dot = unread only (blue / none). Both can show at the same time.
+ */
+describe('AGENT-AVATAR-UI sidebar avatars and the two dots', () => {
+  const blob = { shape: 'blob-2', color: '#8b5cf6' } as const;
+
+  it('custom avatar renders the chosen shape + colour; default keeps the plain circle', () => {
+    const list = [
+      agent('ceo', { name: 'Chief Exec', avatar: blob }),
+      agent('eng', { name: 'Builder', role: 'engineer', reportsToId: 'ceo' }),
+    ];
+    const out = html(viewProps(baseState({ agents: list, threads: { ceo: ready([]), eng: ready([]) } })).props);
+    assert.match(out, /data-avatar="custom"/);
+    assert.match(out, /data-avatar-shape="blob-2"/);
+    assert.match(out, /data-avatar-color="#8b5cf6"/);
+    assert.match(out, /<path d="M30 5[^"]*" fill="#8b5cf6">/);
+    assert.match(out, /data-avatar="default"/);
+    assert.match(out, /data-avatar="default"[^>]*bg-muted/);
+  });
+
+  it('row: green avatar dot (working) AND blue row dot (unread) at the same time', () => {
+    const list = [agent('ceo', { name: 'Chief Exec', running: true })];
+    const out = html(
+      viewProps(baseState({ agents: list, threads: { ceo: ready([thread('t1', 'ceo', { unread: true })]) } })).props,
+    );
+    assert.match(out, /bg-emerald-500"[^>]*data-avatar-dot="working"/);
+    assert.match(out, /data-avatar-dot="working"/);
+    assert.match(out, /bg-blue-500"[^>]*data-unread-dot="true"/);
+    assert.match(out, /data-unread-dot="true"/);
+  });
+
+  it('row: yellow avatar dot when waiting; row dot unchanged by activity (independent)', () => {
+    const waitingUnread = html(
+      viewProps(
+        baseState({
+          agents: [agent('ceo', { name: 'Chief Exec', waiting: true, pendingApprovals: 1 })],
+          threads: { ceo: ready([thread('t1', 'ceo', { unread: true })]) },
+        }),
+      ).props,
+    );
+    assert.match(waitingUnread, /data-avatar-dot="waiting"/);
+    assert.match(waitingUnread, /bg-amber-500"[^>]*data-avatar-dot="waiting"/);
+    assert.match(waitingUnread, /data-unread-dot="true"/);
+
+    // Idle + unread: NO avatar dot anywhere, blue row dot present.
+    const idleUnread = html(
+      viewProps(baseState({ agents: [agent('ceo', { name: 'Chief Exec' })], threads: { ceo: ready([thread('t1', 'ceo', { unread: true })]) } })).props,
+    );
+    assert.doesNotMatch(idleUnread, /data-avatar-dot/);
+    assert.match(idleUnread, /data-unread-dot="true"/);
+
+    // Working + read: avatar dot only, no row dot.
+    const workingRead = html(
+      viewProps(baseState({ agents: [agent('ceo', { name: 'Chief Exec', running: true })], threads: { ceo: ready([thread('t1', 'ceo')]) } })).props,
+    );
+    assert.match(workingRead, /data-avatar-dot="working"/);
+    assert.doesNotMatch(workingRead, /data-unread-dot/);
+  });
+
+  it('rail: activity dot on the avatar; unread NEVER appears on the rail (avatars only)', () => {
+    const list = [agent('ceo', { name: 'Chief Exec', running: true, avatar: blob })];
+    const threads = { ceo: ready([thread('t1', 'ceo', { unread: true })]) };
+    const out = html(viewProps(baseState({ agents: list, threads }), { collapsed: true }).props);
+    assert.match(out, /data-agent-rail/);
+    assert.match(out, /data-avatar-dot="working"/);
+    assert.doesNotMatch(out, /data-unread-dot/);
+  });
+
+  it('avatar dot reflects the raw signals, not the stacked status (waiting pill does not steal working)', () => {
+    // Both raw signals on: avatar shows ONE dot, green (run in flight), per the documented tie-break.
+    const out = html(
+      viewProps(
+        baseState({
+          agents: [agent('ceo', { name: 'Chief Exec', running: true, waiting: true, pendingApprovals: 1 })],
+          threads: { ceo: ready([]) },
+        }),
+      ).props,
+    );
+    const dots = out.match(/data-avatar-dot="(working|waiting)"/g) ?? [];
+    assert.deepEqual(dots, ['data-avatar-dot="working"']);
   });
 });

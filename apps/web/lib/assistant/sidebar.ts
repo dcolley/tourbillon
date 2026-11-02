@@ -4,6 +4,7 @@
  */
 
 import { BIDI_CONTROL_CHARS, findUnsafeChars, UNSAFE_CHAR_MESSAGES, ZERO_WIDTH_CHARS } from '@/lib/text/unsafe-chars';
+import type { AgentAvatarConfig } from '@tourbillon/shared/agent-avatar';
 
 /** Threads returned per agent when no limit is given (newest activity first, pinned first). */
 export const ASSISTANT_THREAD_LIST_LIMIT = 50;
@@ -43,6 +44,15 @@ export interface AssistantAgent {
   status: AssistantAgentStatus;
   /** Pending board approvals requested by this agent. */
   pendingApprovals: number;
+  /**
+   * AGENT-AVATAR-UI: raw activity signals, unstacked on purpose — `status` keeps its
+   * waiting-wins priority for the text pill, but the two dots map from these separately
+   * (lib/assistant/presence.ts).
+   */
+  running: boolean;
+  waiting: boolean;
+  /** AGENT-AVATAR-UI: the agent's chosen avatar (runtimeConfig.avatar); null = default look. */
+  avatar: AgentAvatarConfig | null;
 }
 
 export interface AssistantThread {

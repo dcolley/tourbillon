@@ -54,12 +54,12 @@ describe('UI-2 listAssistantAgents', () => {
   });
 
   beforeEach(() => {
-    const a = (id: string, companyId: string, name: string, status = 'active', reportsToId: string | null = null) => ({
-      id, companyId, name, role: 'engineer', title: 'Engineer', urlKey: id, icon: 'bot', reportsToId, status,
+    const a = (id: string, companyId: string, name: string, status = 'active', reportsToId: string | null = null, runtimeConfig: Record<string, unknown> = {}) => ({
+      id, companyId, name, role: 'engineer', title: 'Engineer', urlKey: id, icon: 'bot', reportsToId, status, runtimeConfig,
     });
     store.agents = [
       a('a-idle', 'co-a', 'bob'),
-      a('a-run', 'co-a', 'Alice', 'active', 'a-idle'),
+      a('a-run', 'co-a', 'Alice', 'active', 'a-idle', { avatar: { shape: 'blob-1', color: 'blue' } }),
       a('a-wait', 'co-a', 'Carol', 'paused'),
       a('a-arch', 'co-a', 'Archie', 'archived'),
       a('b-1', 'co-b', 'Other company'),
@@ -91,6 +91,13 @@ describe('UI-2 listAssistantAgents', () => {
     );
     assert.equal(list[0].reportsToId, 'a-idle');
     assert.equal(list[1].icon, 'bot');
+    // AGENT-AVATAR-UI: unstacked signals + chosen avatar ride along.
+    assert.deepEqual(list[0].avatar, { shape: 'blob-1', color: '#3b82f6' });
+    assert.equal(list[0].running, true);
+    assert.equal(list[0].waiting, false);
+    assert.equal(list[1].avatar, null);
+    assert.equal(list[1].running, false);
+    assert.equal(list[2].waiting, true);
   });
 
   it('another company’s runs and approvals never change status', async () => {

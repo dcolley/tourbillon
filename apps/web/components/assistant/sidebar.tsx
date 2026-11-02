@@ -18,6 +18,14 @@ import { usePathname, useRouter } from 'next/navigation';
 import { parseAssistantPath } from '@/lib/assistant/route';
 import { Button } from '@/components/ui/button';
 import type { AssistantAgent } from '@/lib/assistant/sidebar';
+import {
+  AVATAR_ACTIVITY_DOT_CLASS,
+  LIST_UNREAD_DOT_CLASS,
+  agentHasUnread,
+  avatarActivityDot,
+  listUnreadDot,
+} from '@/lib/assistant/presence';
+import { AgentAvatar } from './agent-avatar';
 import { selectionProblem, sidebarSections, type AssistantSidebarState } from '@/lib/assistant/sidebar-store';
 import { useAssistantSidebar } from './use-assistant-sidebar';
 import { assistantChatHref } from '@/lib/assistant/sidebar-api';
@@ -115,6 +123,9 @@ function AgentStatus({ agent }: { agent: AssistantAgent }) {
 
 function AgentRow({ agent, props }: { agent: AssistantAgent; props: AssistantSidebarViewProps }) {
   const current = props.currentAgentKey === agent.urlKey || props.currentAgentKey === agent.id;
+  // AGENT-AVATAR-UI: two independent dots — activity on the avatar, unread on the row.
+  const activity = avatarActivityDot({ running: agent.running, waiting: agent.waiting });
+  const unread = listUnreadDot(agentHasUnread(props.state.threads[agent.id]?.threads));
   return (
     <li data-agent={agent.urlKey} data-current={current ? 'true' : undefined}>
       <div className={`flex items-center gap-1 rounded px-1 py-1 ${current ? 'bg-muted' : 'hover:bg-muted/60'}`}>
@@ -124,15 +135,20 @@ function AgentRow({ agent, props }: { agent: AssistantAgent; props: AssistantSid
           aria-current={current ? 'page' : undefined}
           onClick={(e) => inAppClick(e, () => props.onSelectAgent(agent.id))}
         >
-          <span
-            aria-hidden
-            className="flex size-6 shrink-0 items-center justify-center rounded-full bg-muted text-[0.65rem] font-semibold"
-          >
-            {initials(agent.name)}
-          </span>
+          <AgentAvatar name={agent.name} config={agent.avatar} size="row" activity={activity} />
           <span className="truncate">{agent.name}</span>
           {!agent.active && <span className="text-[0.7rem] text-muted-foreground">Paused</span>}
         </a>
+        {unread && (
+          <>
+            <span
+              aria-hidden
+              className={`size-2 shrink-0 rounded-full ${LIST_UNREAD_DOT_CLASS}`}
+              data-unread-dot="true"
+            />
+            <span className="sr-only">Unread messages</span>
+          </>
+        )}
         <AgentStatus agent={agent} />
       </div>
     </li>
@@ -169,12 +185,7 @@ function CollapseToggle({ props }: { props: AssistantSidebarViewProps }) {
   );
 }
 
-const STATUS_DOT: Partial<Record<AssistantAgent['status'], string>> = {
-  waiting: 'bg-amber-500',
-  running: 'bg-emerald-500',
-};
-
-/** Icon rail: one initials button per agent (same order as the full list), current agent marked. */
+/** Icon rail: one avatar per agent (same order as the full list), current agent marked. */
 function AgentRail({ props }: { props: AssistantSidebarViewProps }) {
   const { state } = props;
   if (state.agents.length === 0) return null;
@@ -186,7 +197,8 @@ function AgentRail({ props }: { props: AssistantSidebarViewProps }) {
     <ul className="flex flex-col items-center gap-1" data-agent-rail>
       {ordered.map((agent) => {
         const current = props.currentAgentKey === agent.urlKey || props.currentAgentKey === agent.id;
-        const dot = STATUS_DOT[agent.status];
+        // AGENT-AVATAR-UI: the rail is avatars only — the activity dot lives here, unread never does.
+        const activity = avatarActivityDot({ running: agent.running, waiting: agent.waiting });
         const label = `${agent.name}${agent.status === 'waiting' ? ' (waiting on you)' : agent.status === 'running' ? ' (running)' : ''}${agent.active ? '' : ' (paused)'}`;
         return (
           <li key={agent.id} data-agent={agent.urlKey} data-current={current ? 'true' : undefined}>
@@ -195,18 +207,29 @@ function AgentRail({ props }: { props: AssistantSidebarViewProps }) {
               aria-label={label}
               title={label}
               aria-current={current ? 'page' : undefined}
-              className={`relative flex size-8 items-center justify-center rounded-full text-[0.65rem] font-semibold ${
-                current ? 'bg-primary text-primary-foreground' : 'bg-muted hover:bg-muted/60'
+              className={`relative flex size-8 items-center justify-center rounded-full ${
+                agent.avatar
+                  ? ''
+                  : `text-[0.65rem] font-semibold ${current ? 'bg-primary text-primary-foreground' : 'bg-muted hover:bg-muted/60'}`
               } ${agent.active ? '' : 'opacity-60'}`}
               onClick={(e) => inAppClick(e, () => props.onSelectAgent(agent.id))}
             >
-              {initials(agent.name)}
-              {dot && (
-                <span
-                  aria-hidden
-                  className={`absolute -right-0.5 -top-0.5 size-2.5 rounded-full ring-2 ring-background ${dot}`}
-                  data-agent-status={agent.status}
-                />
+              {agent.avatar ? (
+                <AgentAvatar name={agent.name} config={agent.avatar} size="rail" activity={activity} />
+              ) : (
+                <>
+                  {initials(agent.name)}
+                  {activity && (
+                    <span
+                      aria-hidden
+                      className={`absolute -right-0.5 -top-0.5 size-2.5 rounded-full ring-2 ring-background ${AVATAR_ACTIVITY_DOT_CLASS[activity]}`}
+                      data-avatar-dot={activity}
+                    />
+                  )}
+                </>
+              )}
+              {current && agent.avatar && (
+                <span aria-hidden className="pointer-events-none absolute inset-0 rounded-full ring-2 ring-primary" data-rail-current="true" />
               )}
             </a>
           </li>
@@ -318,8 +341,10 @@ function useCurrentAgentKey(): string | null {
 }
 
 export function AssistantSidebar() {
-  // ASYNC-0: agents only (no thread lists are loaded).
-  const { store, state } = useAssistantSidebar({ threadLists: false });
+  // ASYNC-0: agents only (no thread trees). AGENT-AVATAR-UI: thread lists are loaded again — the
+  // row's blue unread dot reads the agent's thread unread flags from the store (per-agent lists,
+  // concurrency-limited by the store). No thread UI comes back with them.
+  const { store, state } = useAssistantSidebar({ threadLists: true });
   const router = useRouter();
   const currentAgentKey = useCurrentAgentKey();
   const collapsed = useSidebarCollapsed();

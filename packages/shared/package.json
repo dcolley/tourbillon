@@ -40,6 +40,7 @@
     "./knowledge-graph-config": "./src/knowledge-graph-config.ts",
     "./browser-config": "./src/browser-config.ts",
     "./agent-token": "./src/agent-token.ts",
+    "./agent-avatar": "./src/agent-avatar.ts",
     "./widgets": "./src/widgets.ts",
     "./hitl": "./src/hitl.ts",
     "./hitl-hash": "./src/hitl-hash.ts",
