@@ -170,4 +170,69 @@ describe(`migration ${TAG}`, () => {
       // PGlite in-memory instance is reclaimed with the process (same as sibling migration tests).
     }
   });
+
+  // S282-S1 (mutant M28): the two-gate fail-closed defaults are pinned. Flipping the
+  // migration's DEFAULT to true (or dropping it) must turn this test red — a fresh
+  // row on either table is Computer-less until the Board opts in.
+  it('has_computer is DEFAULT false NOT NULL on BOTH agents and companies', async () => {
+    const client = new PGlite();
+    try {
+      await migrateUp(client);
+
+      // The migration text keeps the exact fail-closed wording on both tables.
+      const up = readFileSync(path.join(MIGRATIONS, `${TAG}.sql`), 'utf8');
+      for (const table of ['companies', 'agents']) {
+        assert.match(
+          up,
+          new RegExp(`ALTER TABLE "${table}" ADD COLUMN "has_computer" boolean DEFAULT false NOT NULL`),
+          `${table}.has_computer must stay "DEFAULT false NOT NULL" in 0025`,
+        );
+      }
+
+      // What Postgres actually built (column metadata, not just the SQL file text).
+      for (const table of ['companies', 'agents']) {
+        const col = await client.query<{ column_default: string | null; is_nullable: string }>(
+          `select column_default, is_nullable from information_schema.columns
+             where table_schema = 'public' and table_name = $1 and column_name = 'has_computer'`,
+          [table],
+        );
+        assert.equal(col.rows.length, 1, `${table}.has_computer column missing`);
+        assert.equal(col.rows[0].column_default, 'false', `${table}.has_computer default`);
+        assert.equal(col.rows[0].is_nullable, 'NO', `${table}.has_computer must be NOT NULL`);
+      }
+
+      // An agents row inserted WITHOUT has_computer comes back false (the M28 pin);
+      // the matching companies column is pinned the same way.
+      await client.exec(`
+        insert into companies (id, name, slug, issue_prefix) values ('c1', 'C', 'c', 'C');
+        insert into agents (id, company_id, name, role, title, url_key) values ('a1', 'c1', 'A', 'ceo', 'T', 'ceo');
+      `);
+      const agent = await client.query<{ has_computer: boolean }>(
+        `select has_computer from agents where id = 'a1'`,
+      );
+      assert.equal(agent.rows[0].has_computer, false, 'agents.has_computer defaults to false');
+      const company = await client.query<{ has_computer: boolean }>(
+        `select has_computer from companies where id = 'c1'`,
+      );
+      assert.equal(company.rows[0].has_computer, false, 'companies.has_computer defaults to false');
+
+      // NOT NULL: an explicit NULL is rejected on both tables.
+      await assert.rejects(
+        client.exec(
+          `insert into agents (id, company_id, name, role, title, url_key, has_computer)
+             values ('a2', 'c1', 'A2', 'ceo', 'T', 'ceo2', NULL)`,
+        ),
+        'agents.has_computer must be NOT NULL',
+      );
+      await assert.rejects(
+        client.exec(
+          `insert into companies (id, name, slug, issue_prefix, has_computer)
+             values ('c2', 'C2', 'c2', 'C2', NULL)`,
+        ),
+        'companies.has_computer must be NOT NULL',
+      );
+    } finally {
+      // PGlite in-memory instance is reclaimed with the process (same as sibling migration tests).
+    }
+  });
 });

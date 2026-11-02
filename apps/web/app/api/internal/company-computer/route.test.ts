@@ -240,4 +240,55 @@ describe('POST /api/internal/company-computer/[action]', () => {
       assert.equal((await json(res)).error, 'not_implemented', action);
     }
   });
+
+  // ---- S282-S2: the VNC password never crosses the HTTP surface (row or refusals) ----
+  it('createSession 200: response body and stored rows carry no VNC password value', async () => {
+    GATES_OPEN();
+    const specs: Array<Record<string, string>> = [];
+    hostClient = {
+      ...createDryRunHostClient({ env: {} }),
+      ensureDirs: async () => {},
+      startContainer: async (spec) => {
+        specs.push({ ...spec.env });
+        return { containerId: 'cid', startedAt: new Date() };
+      },
+      stopAndRemove: async () => {},
+      healthCheck: async () => true,
+      execInContainer: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+      screenshot: async () => ({ imageBase64: 'AA', width: 8, height: 8 }),
+      sendInput: async () => ({ success: true }),
+    };
+    const res = await call('createSession');
+    assert.equal(res.status, 200);
+    assert.equal(specs.length, 1);
+    const pw = specs[0].VNC_PW;
+    assert.ok(pw && pw.length >= 16, 'the host spec carries the generated password (Slice 2 owns it)');
+    assert.ok(!JSON.stringify(await json(res)).includes(pw), 'createSession response leaks the VNC password');
+    for (const row of store.all()) {
+      assert.ok(!JSON.stringify(row).includes(pw), 'stored row leaks the VNC password');
+    }
+    const info = await call('getSessionInfo');
+    assert.ok(!JSON.stringify(await json(info)).includes(pw), 'getSessionInfo response leaks the VNC password');
+  });
+
+  it('createSession 503 (dry-run): refusal body carries no VNC password value', async () => {
+    GATES_OPEN();
+    const specs: Array<Record<string, string>> = [];
+    const inner = createDryRunHostClient({ env: {} });
+    hostClient = {
+      ...inner,
+      async startContainer(spec) {
+        specs.push({ ...spec.env });
+        return inner.startContainer(spec);
+      },
+    };
+    const res = await call('createSession');
+    assert.equal(res.status, 503);
+    assert.equal(specs.length, 1);
+    const pw = specs[0].VNC_PW;
+    assert.ok(pw && pw.length >= 16);
+    const bodyText = await res.text();
+    assert.equal((JSON.parse(bodyText) as Record<string, unknown>).error, 'host_start_refused');
+    assert.ok(!bodyText.includes(pw), 'refusal body leaks the VNC password');
+  });
 });
