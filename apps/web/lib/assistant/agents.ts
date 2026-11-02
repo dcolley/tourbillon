@@ -1,5 +1,6 @@
 import { db, agents, heartbeatRuns, approvals } from '@tourbillon/db';
 import { and, eq, ne } from 'drizzle-orm';
+import { agentAvatarFromRuntimeConfig } from '@tourbillon/shared/agent-avatar';
 import { agentChatStatus, type AssistantAgent } from './sidebar';
 
 /**
@@ -20,6 +21,7 @@ export async function listAssistantAgents(companyId: string): Promise<AssistantA
         icon: agents.icon,
         reportsToId: agents.reportsToId,
         status: agents.status,
+        runtimeConfig: agents.runtimeConfig,
       })
       .from(agents)
       .where(and(eq(agents.companyId, companyId), ne(agents.status, 'archived'))),
@@ -33,7 +35,7 @@ export async function listAssistantAgents(companyId: string): Promise<AssistantA
       .where(and(eq(approvals.companyId, companyId), eq(approvals.status, 'pending'))),
   ]);
 
-  const running = new Set(runningRows.map((r) => r.agentId));
+  const runningSet = new Set(runningRows.map((r) => r.agentId));
   const pending = new Map<string, number>();
   for (const row of pendingRows) {
     if (!row.agentId) continue;
@@ -43,6 +45,8 @@ export async function listAssistantAgents(companyId: string): Promise<AssistantA
   return agentRows
     .map((a) => {
       const pendingApprovals = pending.get(a.id) ?? 0;
+      const running = runningSet.has(a.id);
+      const waiting = pendingApprovals > 0;
       return {
         id: a.id,
         name: a.name,
@@ -52,8 +56,12 @@ export async function listAssistantAgents(companyId: string): Promise<AssistantA
         icon: a.icon ?? null,
         reportsToId: a.reportsToId ?? null,
         active: a.status === 'active',
-        status: agentChatStatus({ running: running.has(a.id), pendingApprovals }),
+        status: agentChatStatus({ running, pendingApprovals }),
         pendingApprovals,
+        // AGENT-AVATAR-UI: unstacked signals for the two dots + the chosen avatar.
+        running,
+        waiting,
+        avatar: agentAvatarFromRuntimeConfig(a.runtimeConfig),
       };
     })
     .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) || a.id.localeCompare(b.id));

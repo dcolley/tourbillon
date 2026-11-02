@@ -26,6 +26,9 @@ const agent = (id: string, name: string, role: string, reportsToId: string | nul
   active: true,
   status: 'idle',
   pendingApprovals: 0,
+  running: false,
+  waiting: false,
+  avatar: null,
 });
 
 const thread = (id: string, at: string | null, extra: Partial<AssistantThread> = {}): AssistantThread => ({

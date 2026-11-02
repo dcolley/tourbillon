@@ -5,7 +5,9 @@ import { db, agents, heartbeatRuns } from '@tourbillon/db';
 import { eq, desc } from 'drizzle-orm';
 import type { AgentRuntimeConfig, ObservationalMemorySettings } from '@tourbillon/shared';
 import { modelProviderOverridesFromAgent, resolveModelProviderConfig, isAgentBudgetEnforced, isAgentBudgetExceeded, agentRuntimeLabel, agentRuntimeFromAdapter, resolveAssignedTools, modelSettingsFromFormData, isCodeExecutionAvailable, formatExecutionWorkspacePathPreview, parseCompanySettings } from '@tourbillon/shared';
-import { AgentValidationError, AGENT_ROLE_OPTIONS, getAgentByUrlKey, listAgentsByUrlKey, updateAgentRuntimeConfig, updateAgentCapabilities, updateAgentBudget, updateAgentInstructions, updateAgentModel, updateAgentModelSettings, updateAgentProfile, updateAgentCodeExecution, cloneAgent, suggestCloneUrlKey } from '@/lib/agents';
+import { AgentValidationError, AGENT_ROLE_OPTIONS, getAgentByUrlKey, listAgentsByUrlKey, updateAgentRuntimeConfig, updateAgentCapabilities, updateAgentBudget, updateAgentInstructions, updateAgentModel, updateAgentModelSettings, updateAgentProfile, updateAgentCodeExecution, updateAgentAvatar, cloneAgent, suggestCloneUrlKey } from '@/lib/agents';
+import { agentAvatarFromRuntimeConfig, parseAgentAvatarConfig } from '@tourbillon/shared/agent-avatar';
+import { AgentAvatar } from '@/components/assistant/agent-avatar';
 import { parseCodeExecutionFormData } from '@/lib/code-execution-config';
 import { actionError, actionSuccess, type ActionResult } from '@/lib/action-result';
 import { AgentDisambiguation } from '@/components/agent-disambiguation';
@@ -23,6 +25,7 @@ import { listRoutinesForAgent, setRoutineEnabled } from '@/lib/routines';
 import { listGoalOptions } from '@/lib/goals';
 import { listProjectOptions } from '@/lib/projects';
 import { AgentDetailTabs } from './agent-detail-tabs';
+import { AgentAvatarSection } from './agent-avatar-form';
 import { AgentOverviewConfigTabs } from './agent-overview-config-tabs';
 import { AgentObservabilityTab } from './agent-observability-tab';
 import { AgentMemoryTab } from './agent-memory-tab';
@@ -97,6 +100,39 @@ async function updateHeartbeatConfig(
   return actionSuccess(
     'Heartbeat settings saved. Ensure pnpm workers:dev is running for automatic heartbeats.',
   );
+}
+
+/**
+ * AGENT-AVATAR-UI: save (or reset, when both fields are blank) the agent's avatar config on
+ * runtimeConfig.avatar. Only the fixed shape/colour sets are accepted (parseAgentAvatarConfig).
+ */
+async function updateAvatarConfig(
+  _prev: ActionResult | null,
+  formData: FormData,
+): Promise<ActionResult> {
+  'use server';
+  await requireBoardSession();
+
+  const agentId = formData.get('agentId') as string;
+  const urlKey = formData.get('urlKey') as string;
+  const shape = ((formData.get('shape') as string) ?? '').trim();
+  const color = ((formData.get('color') as string) ?? '').trim();
+  if (!agentId || !urlKey) return actionError('Missing agent.');
+
+  let parsed: ReturnType<typeof parseAgentAvatarConfig> = null;
+  if (shape || color) {
+    parsed = parseAgentAvatarConfig({ shape, color });
+    if (!parsed) return actionError('Pick a shape and a colour from the choices, or reset to default.');
+  }
+
+  try {
+    await updateAgentAvatar(agentId, parsed);
+  } catch (err) {
+    return actionError(err instanceof AgentValidationError ? err.message : 'Failed to save avatar.');
+  }
+
+  revalidatePath(`/agent/${urlKey}`);
+  return actionSuccess(parsed ? 'Avatar saved.' : 'Avatar reset to default.');
 }
 
 async function updateCapabilities(
@@ -586,6 +622,8 @@ export default async function AgentDetailPage({
   const companyOm = companySettings.observationalMemory ?? null;
   const agentOm = runtime.observationalMemory;
   const agentOmMode = (agentOm?.mode ?? 'inherit') as 'inherit' | 'off' | 'on';
+  // AGENT-AVATAR-UI: chosen shape + colour (null = today's default circle).
+  const avatarConfig = agentAvatarFromRuntimeConfig(agent.runtimeConfig);
 
   return (
     <>
@@ -606,9 +644,13 @@ export default async function AgentDetailPage({
         </Link>
         <div className="flex items-start justify-between mt-2 gap-4">
           <div className="flex items-center gap-4">
-            <div className="w-12 h-12 rounded-full bg-primary/10 flex items-center justify-center text-primary font-bold text-lg">
-              {agent.name.charAt(0)}
-            </div>
+            {avatarConfig ? (
+              <AgentAvatar name={agent.name} config={avatarConfig} size="header" />
+            ) : (
+              <div className="w-12 h-12 rounded-full bg-primary/10 flex items-center justify-center text-primary font-bold text-lg">
+                {agent.name.charAt(0)}
+              </div>
+            )}
             <div>
               <h1 className="text-2xl font-bold tracking-tight">{agent.name}</h1>
               <p className="text-muted-foreground">{agent.title}</p>
@@ -743,6 +785,14 @@ export default async function AgentDetailPage({
                     </div>
                   )}
                 </section>
+
+                <AgentAvatarSection
+                  agentId={agent.id}
+                  urlKey={agent.urlKey}
+                  agentName={agent.name}
+                  initial={avatarConfig}
+                  updateAvatar={updateAvatarConfig}
+                />
 
                 <section className="border rounded-lg p-4 space-y-4">
                   <div>
