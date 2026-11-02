@@ -629,6 +629,8 @@ export function AgentChat({
   threadId,
   initialContext,
   companyId,
+  avatar,
+  agentName,
 }: {
   agentId: string;
   agentKey?: string;
@@ -637,6 +639,14 @@ export function AgentChat({
   companyId?: string;
   /** UI-3: page context from an Open in chat link; sent with the first message unless removed. */
   initialContext?: OpenInChatContext;
+  /**
+   * AGENT-AVATAR-UI (S297-S6): forwarded to the view's chat chrome header — the conditional JSX
+   * spread in assistant-route-view.tsx is not excess-property-checked by TS, so the container must
+   * declare these props itself (untyped extras are silently dropped and the avatar never renders).
+   */
+  avatar?: AgentAvatarConfig | null;
+  /** AGENT-AVATAR-UI: display name for the chat header avatar's initials (forwarded to the view). */
+  agentName?: string;
 }) {
   const linkKey = agentKey ?? agentId;
   // The address bar shows the agent path (never a thread): a reload reopens the agent's current conversation.
@@ -726,6 +736,8 @@ export function AgentChat({
       onWidgetDismiss={(id) => void chat.dismissWidget(id)}
       onDismissError={chat.clearError}
       sendKeyMode={sendKeyMode}
+      avatar={avatar}
+      agentName={agentName}
       onLoadPrevious={loadPrevious}
       scrollRef={scroll.ref}
       onScroll={scroll.onScroll}
