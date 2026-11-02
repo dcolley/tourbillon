@@ -3,7 +3,7 @@ import { companies } from './companies';
 import { agents } from './agents';
 import { createId } from '../utils';
 
-export type HeartbeatStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'coalesced';
+export type HeartbeatStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'coalesced' | 'skipped';
 export type WakeReason =
   | 'timer'
   | 'assignment'

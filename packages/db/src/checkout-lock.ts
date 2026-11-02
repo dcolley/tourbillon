@@ -8,6 +8,7 @@ const TERMINAL_HEARTBEAT_STATUSES = new Set<HeartbeatStatus>([
   'failed',
   'cancelled',
   'coalesced',
+  'skipped',
 ]);
 
 export const CHECKOUT_LOCK_CLEAR_FIELDS = {
