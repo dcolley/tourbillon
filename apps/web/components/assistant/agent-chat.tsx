@@ -530,8 +530,11 @@ export function AgentChatView(props: AgentChatViewProps) {
           onKeyDown={(e) => {
             // CHAT-SEND-KEY: one shared helper decides send / newline for every composer.
             const gesture = resolveSendKeyGesture(e, { mode: sendKeyMode, runOpen });
-            if (!gesture || !canSend) return;
+            if (!gesture) return;
+            // S296-S4: the send chord is always swallowed, even when there is nothing to send
+            // (empty draft / stopping) - no stray newline; the send itself still needs content.
             e.preventDefault();
+            if (!canSend) return;
             if (gesture === 'steer') props.onSteer();
             else props.onSend();
           }}

@@ -124,9 +124,15 @@ describe('CHAT-1 composer keys', () => {
   it('does not send whitespace only', async () => {
     const { c, calls } = make();
     c.setText('   \n ');
-    c.handleKeyDown(key('Enter').e);
+    // S296-S4: the send chord is still swallowed with nothing to send (no stray newline).
+    const k = key('Enter');
+    assert.equal(c.handleKeyDown(k.e), true);
+    assert.equal(k.prevented(), true);
     await tick();
     assert.equal(calls.length, 0);
+    const shift = key('Enter', { shiftKey: true });
+    assert.equal(c.handleKeyDown(shift.e), false);
+    assert.equal(shift.prevented(), false, 'the non-send chord reaches the textarea');
   });
 
   it('enter_sends (default): a modified Enter never sends, and steers only while a run is open', async () => {

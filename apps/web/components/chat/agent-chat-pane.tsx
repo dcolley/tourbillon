@@ -201,7 +201,9 @@ export function AgentChatPane({
   );
 }
 
-function ChatPaneBody({
+// Exported for the S296-S5 DOM-level keydown test (same idiom as the password-input view export);
+// hosts should keep using AgentChatPane.
+export function ChatPaneBody({
   agentName,
   contextType,
   contextTitle,
@@ -628,8 +630,11 @@ function ChatPaneBody({
                     mode: chatSendKeyMode,
                     runOpen: running,
                   });
-                  if (!gesture || !input.trim()) return;
+                  if (!gesture) return;
+                  // S296-S4: the send chord is always swallowed, even with an empty draft - no
+                  // stray newline; there is simply nothing to send / steer yet.
                   e.preventDefault();
+                  if (!input.trim()) return;
                   if (gesture === 'steer') void steer(input);
                   else void sendMessage(input);
                 }}
