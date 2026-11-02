@@ -73,6 +73,18 @@ describe('WID-1 dropped chat controllers release their parked widgets', () => {
           }),
         }),
       },
+      // S297-S3: lib/agents.ts writes single runtimeConfig keys through this atomic helper.
+      // The mock applies the ops jsonb-style (set/clear onto the live document).
+      updateAgentRuntimeConfigKeys: async (
+        _agentId: string,
+        ops: { set?: Record<string, unknown>; clear?: readonly string[] },
+        extraSet: Record<string, unknown> = {},
+      ) => {
+        const runtimeConfig = { ...(AGENT_ROW.runtimeConfig as Record<string, unknown>) };
+        for (const key of ops.clear ?? []) delete runtimeConfig[key];
+        for (const [key, value] of Object.entries(ops.set ?? {})) runtimeConfig[key] = value;
+        return { ...AGENT_ROW, ...structuredClone(extraSet), runtimeConfig };
+      },
     };
     let realRegistry: Registry | undefined;
     Module.prototype.require = function (this: { filename?: string }, id: string) {

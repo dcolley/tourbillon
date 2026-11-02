@@ -528,4 +528,56 @@ describe('UI-2b assistant sidebar store', () => {
       assert.equal(calls.length, before);
     });
   });
+
+  // S297-S5: the sidebar row unread dot reads per-agent thread lists, and `load()` fans out one
+  // listThreads request per agent. These pins measure the request count for N agents and bound
+  // the fan-out: capped concurrency in `load()` + in-flight dedupe in `loadThreads` (a second
+  // caller while a request is running must NOT fire its own).
+  describe('S297-S5 thread-list fan-out (request count, cap, dedupe)', () => {
+    it('N agents fan out to EXACTLY N listThreads requests, at most `concurrency` in flight', async () => {
+      const ids = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'];
+      const agents = ids.map((id) => agent(id));
+      const { calls, fake } = await loaded({ agents }, 3);
+      const listReqs = calls.filter((c) => c.startsWith('threads:'));
+      assert.equal(listReqs.length, ids.length, `fan-out must be exactly one request per agent, got: ${listReqs.join()}`);
+      assert.deepEqual([...listReqs].sort(), ids.map((id) => `threads:${id}-key`).sort());
+      assert.ok(fake.maxInFlight <= 3, `cap breached: ${fake.maxInFlight} in flight`);
+      assert.equal(fake.maxInFlight, 3, 'the cap is the limit of real parallelism (not a hidden serialisation)');
+    });
+
+    it('the default fan-out cap is 3 (N agents still yield exactly N requests)', async () => {
+      const ids = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
+      const { calls, fake } = await loaded({ agents: ids.map((id) => agent(id)) });
+      assert.equal(calls.filter((c) => c.startsWith('threads:')).length, ids.length);
+      assert.equal(fake.maxInFlight, 3, 'default concurrency');
+    });
+
+    it('dedupe: selecting an agent mid-fan-out shares its in-flight request (N agents stay at N requests)', async () => {
+      const fake = fakeApi({ agents: [agent('a'), agent('b')], threads: { a: [thread('a1', 'a')] } });
+      const store = new AssistantSidebarStore({ api: fake.api, concurrency: 2 });
+      const p = store.load();
+      await new Promise((r) => setTimeout(r, 1)); // both fan-out requests are in flight (2ms fake latency)
+      const href = await store.selectAgent('a');
+      await p;
+      const listReqs = fake.calls.filter((c) => c.startsWith('threads:'));
+      assert.equal(listReqs.filter((c) => c === 'threads:a-key').length, 1, 'selectAgent must reuse the running fan-out request');
+      assert.equal(listReqs.length, 2, 'exactly one request per agent (agents + one selectAgent click)');
+      assert.equal(href, '/assistant/a-key/a1', 'shared request renders the identical list');
+      assert.equal(store.getState().threads.a.status, 'ready');
+    });
+
+    it('dedupe: concurrent loadThreads on one agent fire ONE request; a settled one refetches (retry stays fresh)', async () => {
+      const fake = fakeApi({ agents: [agent('a')], threads: { a: [thread('a1', 'a')] } });
+      const store = new AssistantSidebarStore({ api: fake.api });
+      await store.load(); // request 1
+      const countA = () => fake.calls.filter((c) => c === 'threads:a-key').length;
+      const [x, y] = await Promise.all([store.loadThreads('a'), store.loadThreads('a')]); // request 2, shared
+      assert.equal(countA(), 2, 'two racing callers, one request');
+      assert.equal(x?.status, 'ready');
+      assert.equal(y?.status, 'ready');
+      assert.deepEqual(x!.threads.map((t) => t.id), ['a1']);
+      await store.loadThreads('a'); // settled: must refetch, not replay a cached promise
+      assert.equal(countA(), 3, 'a completed request is never deduped against');
+    });
+  });
 });

@@ -144,6 +144,15 @@ export class AssistantSidebarStore {
   private disposed = false;
   /** Bumped by every `load()` and by `dispose()`; a load whose token is stale stops applying results. */
   private loadToken = 0;
+  /**
+   * S297-S5: one in-flight `listThreads` request per agent. `load()` fans out one request per
+   * agent and `selectAgent()` may ask for the same agent's list while that fan-out is still
+   * running; without this map each caller fires its own request (2N+1 requests for N agents on
+   * a Strict Mode remount+click). Callers waiting on the same agent share the one request and
+   * see the identical result, so the rendered lists are unchanged. Settled requests leave the
+   * map — a later `loadThreads` (e.g. retry after an error) still refetches.
+   */
+  private threadsInFlight = new Map<string, Promise<AgentThreadsState | undefined>>();
   private readonly api: AssistantSidebarApi;
   private readonly concurrency: number;
   private readonly threadLists: boolean;
@@ -239,6 +248,19 @@ export class AssistantSidebarStore {
   }
 
   async loadThreads(agentId: string): Promise<AgentThreadsState | undefined> {
+    // S297-S5: share the single in-flight request per agent (see `threadsInFlight`).
+    const pending = this.threadsInFlight.get(agentId);
+    if (pending) return pending;
+    const request = this.fetchThreads(agentId);
+    this.threadsInFlight.set(agentId, request);
+    try {
+      return await request;
+    } finally {
+      if (this.threadsInFlight.get(agentId) === request) this.threadsInFlight.delete(agentId);
+    }
+  }
+
+  private async fetchThreads(agentId: string): Promise<AgentThreadsState | undefined> {
     const agent = this.agent(agentId);
     if (!agent) return undefined;
     this.setThreads(agentId, (t) => ({ ...t, status: 'loading', error: null }));

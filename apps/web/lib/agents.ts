@@ -4,6 +4,7 @@ import {
   companies,
   activityLog,
   assertLlmProviderEnabledForCompany,
+  updateAgentRuntimeConfigKeys,
   type Agent,
 } from '@tourbillon/db';
 import { and, eq } from 'drizzle-orm';
@@ -323,6 +324,12 @@ export async function cloneAgent(input: CloneAgentInput): Promise<Agent> {
   const sourceRuntime = source.runtimeConfig as AgentRuntimeConfig;
   const copyCredentials = input.copyCredentials !== false;
 
+  // S297-S4 (explicit decision): the clone INHERITS the source's avatar. `structuredClone`
+  // copies `avatar` along with every other runtimeConfig member — copy semantics consistent
+  // with the rest of the config (model, heartbeat shape, budgets, …). Only heartbeat is
+  // overridden (disabled) and, when copyCredentials=false, agent-level integration secrets are
+  // stripped; the avatar is neither. Two clones can be told apart by name/urlKey, and the
+  // user can change the clone's avatar on its page (updateAgentAvatar).
   const runtimeConfig: AgentRuntimeConfig = {
     ...structuredClone(sourceRuntime),
     heartbeat: {
@@ -388,24 +395,29 @@ export async function updateAgentRuntimeConfig(
   const mergedHeartbeat = patch.heartbeat
     ? normalizeHeartbeatConfig({ ...current.heartbeat, ...patch.heartbeat })
     : current.heartbeat;
-  const runtimeConfig: AgentRuntimeConfig = {
-    ...current,
-    ...patch,
-    heartbeat: mergedHeartbeat,
-    timeout: { ...current.timeout, ...patch.timeout },
-    model: patch.model !== undefined ? patch.model : current.model,
-  };
 
   if (patch.heartbeat) {
-    const heartbeatError = validateHeartbeatSchedule(runtimeConfig.heartbeat);
+    const heartbeatError = validateHeartbeatSchedule(mergedHeartbeat);
     if (heartbeatError) throw new AgentValidationError(heartbeatError);
   }
 
-  const [updated] = await db
-    .update(agents)
-    .set({ runtimeConfig, updatedAt: new Date() })
-    .where(eq(agents.id, agentId))
-    .returning();
+  // S297-S3: write only the keys this updater owns via one atomic jsonb statement, so a
+  // concurrent save of another key (e.g. avatar) can never be dropped by this stale snapshot.
+  const set: Record<string, unknown> = {
+    // timeout is always rewritten (mirrors the previous whole-object write, which
+    // materialised `timeout: {}` on a row missing the key).
+    timeout: { ...current.timeout, ...patch.timeout },
+  };
+  const clear: string[] = [];
+  if (patch.heartbeat) set.heartbeat = mergedHeartbeat;
+  if (patch.model !== undefined) set.model = patch.model;
+  if ('mail' in patch) {
+    if (patch.mail === undefined) clear.push('mail');
+    else set.mail = patch.mail;
+  }
+
+  const updated = await updateAgentRuntimeConfigKeys(agentId, { set, clear }, { updatedAt: new Date() });
+  if (!updated) throw new AgentValidationError('Agent not found.');
 
   if (patch.heartbeat) {
     try {
@@ -422,20 +434,20 @@ export async function updateAgentRuntimeConfig(
 /**
  * AGENT-AVATAR-UI: set or clear the agent's avatar (shape + colour) on `runtimeConfig.avatar`
  * (existing jsonb — no migration). `null` resets to the default avatar. The write only touches
- * the `avatar` key: every other runtimeConfig member is preserved as-is.
+ * the `avatar` key: every other runtimeConfig member is preserved as-is — atomically, via the
+ * jsonb merge in `updateAgentRuntimeConfigKeys` (S297-S3), never a whole-document rewrite from
+ * this function's (possibly stale) read.
  */
 export async function updateAgentAvatar(agentId: string, avatar: AgentAvatarConfig | null): Promise<Agent> {
   const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
   if (!agent) throw new AgentValidationError('Agent not found.');
 
-  const { avatar: _dropped, ...rest } = (agent.runtimeConfig ?? {}) as AgentRuntimeConfig & { avatar?: unknown };
-  const runtimeConfig = (avatar ? { ...rest, avatar } : rest) as AgentRuntimeConfig;
-
-  const [updated] = await db
-    .update(agents)
-    .set({ runtimeConfig, updatedAt: new Date() })
-    .where(eq(agents.id, agentId))
-    .returning();
+  const updated = await updateAgentRuntimeConfigKeys(
+    agentId,
+    avatar ? { set: { avatar } } : { clear: ['avatar'] },
+    { updatedAt: new Date() },
+  );
+  if (!updated) throw new AgentValidationError('Agent not found.');
 
   return updated;
 }
@@ -458,16 +470,15 @@ export async function updateAgentModelSettings(
     );
   }
 
-  const runtimeConfig: AgentRuntimeConfig = {
-    ...current,
-    model: Object.keys(merged).length > 0 ? merged : undefined,
-  };
-
-  const [updated] = await db
-    .update(agents)
-    .set({ runtimeConfig, updatedAt: new Date() })
-    .where(eq(agents.id, agentId))
-    .returning();
+  // S297-S3: only the `model` key is written (cleared when the patch empties it, matching the
+  // previous whole-object write where the `undefined` member was dropped by JSON.stringify);
+  // concurrent writes to other runtimeConfig keys survive.
+  const updated = await updateAgentRuntimeConfigKeys(
+    agentId,
+    Object.keys(merged).length > 0 ? { set: { model: merged } } : { clear: ['model'] },
+    { updatedAt: new Date() },
+  );
+  if (!updated) throw new AgentValidationError('Agent not found.');
 
   invalidateChatControllerForAgent(agentId);
 
@@ -584,20 +595,22 @@ export async function updateAgentCapabilities(
   };
 
   const mcpCredentials = { ...current.mcpCredentials };
+  // S297-S3: integration keys actually touched by this save (the atomic op set stays minimal).
+  const integrationKeysTouched = new Set<string>();
 
   for (const key of clearIntegrations) {
-    if (key === 'tavilyApiKey') runtimeConfig.tavilyApiKey = undefined;
-    if (key === 'searxngUrl') runtimeConfig.searxngUrl = undefined;
-    if (key === 'searxngApiKey') runtimeConfig.searxngApiKey = undefined;
+    if (key === 'tavilyApiKey') { runtimeConfig.tavilyApiKey = undefined; integrationKeysTouched.add('tavilyApiKey'); }
+    if (key === 'searxngUrl') { runtimeConfig.searxngUrl = undefined; integrationKeysTouched.add('searxngUrl'); }
+    if (key === 'searxngApiKey') { runtimeConfig.searxngApiKey = undefined; integrationKeysTouched.add('searxngApiKey'); }
     if (key === 'bufferApiKey') delete mcpCredentials['buffer-mcp'];
   }
 
   for (const [key, rawValue] of Object.entries(integrations)) {
     const value = rawValue?.trim();
     if (!value) continue;
-    if (key === 'tavilyApiKey') runtimeConfig.tavilyApiKey = value;
-    if (key === 'searxngUrl') runtimeConfig.searxngUrl = value;
-    if (key === 'searxngApiKey') runtimeConfig.searxngApiKey = value;
+    if (key === 'tavilyApiKey') { runtimeConfig.tavilyApiKey = value; integrationKeysTouched.add('tavilyApiKey'); }
+    if (key === 'searxngUrl') { runtimeConfig.searxngUrl = value; integrationKeysTouched.add('searxngUrl'); }
+    if (key === 'searxngApiKey') { runtimeConfig.searxngApiKey = value; integrationKeysTouched.add('searxngApiKey'); }
     if (key === 'bufferApiKey') mcpCredentials['buffer-mcp'] = value;
   }
 
@@ -644,19 +657,53 @@ export async function updateAgentCapabilities(
     runtimeConfig.mcpToolPolicy = Object.keys(nextPolicy).length > 0 ? nextPolicy : undefined;
   }
 
-  const [updated] = await db
-    .update(agents)
-    .set({
+  // S297-S3: the keys this updater owns are written atomically (single jsonb merge statement)
+  // instead of rewriting the whole document from this (possibly stale) read. Keys owned by
+  // other updaters — e.g. `avatar`, `heartbeat` — are never touched here, so a concurrent
+  // save of one of them is never dropped.
+  const runtimeConfigOps = buildCapabilitiesOps(runtimeConfig, {
+    integrationKeysTouched,
+    knowledgeGraphTouched:
+      input.knowledgeGraph !== undefined || !toolsets.includes('knowledge-graph'),
+    mcpToolPolicyTouched: input.mcpToolPolicy !== undefined,
+  });
+
+  const updated = await updateAgentRuntimeConfigKeys(
+    agentId,
+    runtimeConfigOps,
+    {
       assignedSkills,
       assignedToolsets: toolsets,
       mcpServerIds,
-      runtimeConfig,
       updatedAt: new Date(),
-    })
-    .where(eq(agents.id, agentId))
-    .returning();
+    },
+  );
+  if (!updated) throw new AgentValidationError('Agent not found.');
 
   return updated;
+}
+
+/**
+ * S297-S3: translate the capability-owned members of the computed runtimeConfig into per-key
+ * jsonb ops. An owned member assigned `undefined` becomes a clear (the previous whole-object
+ * write dropped `undefined` members via JSON.stringify); owned members never assigned here are
+ * left alone entirely (they merely rode along in the old spread).
+ */
+function buildCapabilitiesOps(
+  runtimeConfig: AgentRuntimeConfig,
+  touched: { integrationKeysTouched: Set<string>; knowledgeGraphTouched: boolean; mcpToolPolicyTouched: boolean },
+): { set: Record<string, unknown>; clear: string[] } {
+  const ownedKeys: string[] = ['assignedTools', 'mcpCredentials', 'browser', ...touched.integrationKeysTouched];
+  if (touched.knowledgeGraphTouched) ownedKeys.push('knowledgeGraph');
+  if (touched.mcpToolPolicyTouched) ownedKeys.push('mcpToolPolicy');
+  const set: Record<string, unknown> = {};
+  const clear: string[] = [];
+  for (const key of ownedKeys) {
+    const value = (runtimeConfig as unknown as Record<string, unknown>)[key];
+    if (value === undefined) clear.push(key);
+    else set[key] = value;
+  }
+  return { set, clear };
 }
 
 export async function updateAgentCodeExecution(
@@ -717,17 +764,19 @@ export async function updateAgentCodeExecution(
     await clearIdleThreadOnRuntimeSwitch(agentId);
   }
 
-  const [updated] = await db
-    .update(agents)
-    .set({
+  // S297-S3: only the `codeExecution` key of runtimeConfig is written, atomically; other keys
+  // (avatar, heartbeat, …) are untouched by this save and survive concurrent writes.
+  const updated = await updateAgentRuntimeConfigKeys(
+    agentId,
+    runtimeConfig.codeExecution === undefined ? { clear: ['codeExecution'] } : { set: { codeExecution: runtimeConfig.codeExecution } },
+    {
       assignedToolsets,
       adapterType,
       adapterConfig,
-      runtimeConfig,
       updatedAt: new Date(),
-    })
-    .where(eq(agents.id, agentId))
-    .returning();
+    },
+  );
+  if (!updated) throw new AgentValidationError('Agent not found.');
 
   await db.insert(activityLog).values({
     companyId: agent.companyId,
@@ -958,25 +1007,21 @@ export async function updateAgentRole(agentId: string, roleInput: string): Promi
     return agent;
   }
 
-  const current = agent.runtimeConfig as AgentRuntimeConfig;
-  const runtimeConfig: AgentRuntimeConfig = {
-    ...current,
-    assignedTools: ROLE_DEFAULT_ASSIGNED_TOOLS[role] ?? [],
-  };
-
   const assignedSkills = await buildAssignedSkills(agent.companyId, role);
 
-  const [updated] = await db
-    .update(agents)
-    .set({
+  // S297-S3: role defaults land on the single `assignedTools` key via an atomic jsonb write;
+  // concurrent saves of other runtimeConfig keys (e.g. avatar) are never clobbered.
+  const updated = await updateAgentRuntimeConfigKeys(
+    agentId,
+    { set: { assignedTools: ROLE_DEFAULT_ASSIGNED_TOOLS[role] ?? [] } },
+    {
       role,
       assignedSkills,
       assignedToolsets: ROLE_DEFAULT_TOOLSETS[role] ?? [],
-      runtimeConfig,
       updatedAt: new Date(),
-    })
-    .where(eq(agents.id, agentId))
-    .returning();
+    },
+  );
+  if (!updated) throw new AgentValidationError('Agent not found.');
 
   return updated;
 }
@@ -1058,20 +1103,14 @@ export async function updateAgentBudget(
   }
 
   const current = agent.runtimeConfig as AgentRuntimeConfig;
-  const runtimeConfig: AgentRuntimeConfig = {
-    ...current,
-    budget: { ...current.budget, enforce: input.enforce },
-  };
 
-  const [updated] = await db
-    .update(agents)
-    .set({
-      budgetMonthlyTokens,
-      runtimeConfig,
-      updatedAt: new Date(),
-    })
-    .where(eq(agents.id, agentId))
-    .returning();
+  // S297-S3: only the `budget` key is written, atomically (row-level columns alongside).
+  const updated = await updateAgentRuntimeConfigKeys(
+    agentId,
+    { set: { budget: { ...current.budget, enforce: input.enforce } } },
+    { budgetMonthlyTokens, updatedAt: new Date() },
+  );
+  if (!updated) throw new AgentValidationError('Agent not found.');
 
   return updated;
 }
@@ -1140,7 +1179,6 @@ export async function updateAgentObservationalMemory(
     }
   }
 
-  const current = agent.runtimeConfig as AgentRuntimeConfig;
   const observationalMemory: AgentRuntimeConfig['observationalMemory'] = {
     mode: input.mode,
   };
@@ -1164,19 +1202,13 @@ export async function updateAgentObservationalMemory(
     observationalMemory.temperature = input.temperature;
   }
 
-  const runtimeConfig: AgentRuntimeConfig = {
-    ...current,
-    observationalMemory,
-  };
-
-  const [updated] = await db
-    .update(agents)
-    .set({
-      runtimeConfig,
-      updatedAt: new Date(),
-    })
-    .where(eq(agents.id, agentId))
-    .returning();
+  // S297-S3: only the `observationalMemory` key is written, atomically.
+  const updated = await updateAgentRuntimeConfigKeys(
+    agentId,
+    { set: { observationalMemory } },
+    { updatedAt: new Date() },
+  );
+  if (!updated) throw new AgentValidationError('Agent not found.');
 
   invalidateChatControllerForAgent(agentId);
 
@@ -1220,7 +1252,7 @@ export async function updateAgentSecrets(
 
   const current = agent.runtimeConfig as AgentRuntimeConfig;
   const existingSecrets = current.secrets ?? {};
-  
+
   const secrets = input.replace
     ? input.secrets
     : { ...existingSecrets, ...input.secrets };
@@ -1235,19 +1267,18 @@ export async function updateAgentSecrets(
     }
   }
 
-  const runtimeConfig: AgentRuntimeConfig = {
-    ...current,
-    secrets: Object.keys(normalizedSecrets).length > 0 ? normalizedSecrets : undefined,
-  };
-
-  const [updated] = await db
-    .update(agents)
-    .set({
-      runtimeConfig,
-      updatedAt: new Date(),
-    })
-    .where(eq(agents.id, agentId))
-    .returning();
+  // S297-S3: only the `secrets` key is written (cleared when emptied, matching the previous
+  // whole-object write that dropped the `undefined` member); other runtimeConfig keys survive
+  // concurrent saves. Merging *inside* `secrets` still reads a snapshot — a concurrent write
+  // of a different secret key can be lost until secrets get their own sub-key merge.
+  const updated = await updateAgentRuntimeConfigKeys(
+    agentId,
+    Object.keys(normalizedSecrets).length > 0
+      ? { set: { secrets: normalizedSecrets } }
+      : { clear: ['secrets'] },
+    { updatedAt: new Date() },
+  );
+  if (!updated) throw new AgentValidationError('Agent not found.');
 
   return updated;
 }
@@ -1264,25 +1295,19 @@ export async function deleteAgentSecrets(
 
   const current = agent.runtimeConfig as AgentRuntimeConfig;
   const existingSecrets = current.secrets ?? {};
-  
+
   const secrets = { ...existingSecrets };
   for (const key of keys) {
     delete secrets[key.trim()];
   }
 
-  const runtimeConfig: AgentRuntimeConfig = {
-    ...current,
-    secrets: Object.keys(secrets).length > 0 ? secrets : undefined,
-  };
-
-  const [updated] = await db
-    .update(agents)
-    .set({
-      runtimeConfig,
-      updatedAt: new Date(),
-    })
-    .where(eq(agents.id, agentId))
-    .returning();
+  // S297-S3: single-key atomic write (see updateAgentSecrets for the intra-key caveat).
+  const updated = await updateAgentRuntimeConfigKeys(
+    agentId,
+    Object.keys(secrets).length > 0 ? { set: { secrets } } : { clear: ['secrets'] },
+    { updatedAt: new Date() },
+  );
+  if (!updated) throw new AgentValidationError('Agent not found.');
 
   return updated;
 }
