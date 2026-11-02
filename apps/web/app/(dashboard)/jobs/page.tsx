@@ -32,6 +32,8 @@ export default async function JobsPage() {
                     highlight={queue.counts.failed > 0}
                   />
                   <CountBadge label="completed" value={queue.counts.completed} />
+                  {/* #295: skipped is a neutral terminal state — never highlight as failure. */}
+                  <CountBadge label="skipped" value={queue.counts.skipped} />
                 </div>
               </CardContent>
             </Card>

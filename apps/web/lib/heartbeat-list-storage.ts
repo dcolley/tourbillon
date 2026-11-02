@@ -6,7 +6,8 @@ export type HeartbeatListFilter =
   | 'succeeded'
   | 'failed'
   | 'queued'
-  | 'in_queue';
+  | 'in_queue'
+  | 'skipped';
 
 export const HEARTBEAT_LIST_FILTERS: Array<{ value: HeartbeatListFilter; label: string }> = [
   { value: 'all', label: 'All' },
@@ -15,6 +16,7 @@ export const HEARTBEAT_LIST_FILTERS: Array<{ value: HeartbeatListFilter; label: 
   { value: 'succeeded', label: 'Succeeded' },
   { value: 'failed', label: 'Failed' },
   { value: 'queued', label: 'Queued' },
+  { value: 'skipped', label: 'Skipped' },
 ];
 
 /** 0 = manual refresh only */
@@ -60,7 +62,7 @@ export function isHeartbeatRefreshInterval(value: number): value is HeartbeatRef
 }
 
 export function isHeartbeatListFilter(value: string): value is HeartbeatListFilter {
-  return ['all', 'running', 'succeeded', 'failed', 'queued', 'in_queue'].includes(value);
+  return ['all', 'running', 'succeeded', 'failed', 'queued', 'in_queue', 'skipped'].includes(value);
 }
 
 /** Map legacy BullMQ / URL state params to heartbeat list filters. */

@@ -14,6 +14,8 @@ export interface QueueCounts {
   failed: number;
   delayed: number;
   paused: number;
+  /** #295: assignee-mismatch task wakes are recorded `skipped`, never `failed`. */
+  skipped: number;
 }
 
 export interface QueueOverviewItem {
@@ -85,7 +87,7 @@ export class JobsError extends Error {
 }
 
 function emptyCounts(): QueueCounts {
-  return { waiting: 0, active: 0, completed: 0, failed: 0, delayed: 0, paused: 0 };
+  return { waiting: 0, active: 0, completed: 0, failed: 0, delayed: 0, paused: 0, skipped: 0 };
 }
 
 export function getQueueMeta(name: string) {
@@ -112,6 +114,7 @@ export async function getQueueOverview(): Promise<{ queues: QueueOverviewItem[];
       else if (row.status === 'failed') counts.failed += 1;
       else if (row.status === 'succeeded') counts.completed += 1;
       else if (row.status === 'queued') counts.waiting += 1;
+      else if (row.status === 'skipped') counts.skipped += 1;
     }
   }
 

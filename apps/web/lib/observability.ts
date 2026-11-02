@@ -33,7 +33,14 @@ function heartbeatRunStatusForRow(
   run: HeartbeatRunSummary | undefined,
 ): ObservabilityEventRow['heartbeatRunStatus'] {
   if (!run) return null;
-  if (run.status === 'running' || run.status === 'succeeded' || run.status === 'failed') {
+  if (
+    run.status === 'running' ||
+    run.status === 'succeeded' ||
+    run.status === 'failed' ||
+    // #295: assignee-mismatch task wakes record `skipped`; surface it like the other
+    // terminal states (neutral, not an error).
+    run.status === 'skipped'
+  ) {
     return run.status;
   }
   return null;
