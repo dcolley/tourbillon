@@ -24,10 +24,26 @@ describe('AGENT-AVATAR-UI avatar activity dot (activity only)', () => {
     assert.equal(avatarActivityDot(signals(true, true)), 'working');
   });
 
-  it('unread never reaches the avatar dot (the mapper has no unread input at all)', () => {
+  it('unread never reaches the avatar dot: no unread flag can change an activity answer', () => {
+    // S297-S2 (Refs #297): behavioural pin replaces the old toString() source regex — the mapper
+    // takes exactly one argument (no unread input at all) AND its answer stays identical when a
+    // caller smuggles an `unread` flag onto the signals object. The sidebar-row test in
+    // components/assistant/sidebar.test.ts pins the same rule end-to-end (idle + unread shows
+    // only the blue row dot, never an avatar dot).
     assert.equal(avatarActivityDot.length, 1);
-    const src = avatarActivityDot.toString();
-    assert.doesNotMatch(src, /unread/i);
+    const cases: Array<[boolean, boolean, 'working' | 'waiting' | null]> = [
+      [true, false, 'working'],
+      [false, true, 'waiting'],
+      [true, true, 'working'],
+      [false, false, null],
+    ];
+    for (const [running, waiting, expected] of cases) {
+      const withoutUnread: AgentActivitySignals = { running, waiting };
+      // Untyped copy with an extra `unread` flag — the shape a buggy caller could post.
+      const withUnread = { ...withoutUnread, unread: true };
+      assert.equal(avatarActivityDot(withoutUnread), expected, `running=${running} waiting=${waiting}`);
+      assert.equal(avatarActivityDot(withUnread), expected, `unread must not move the avatar dot (running=${running} waiting=${waiting})`);
+    }
   });
 });
 
