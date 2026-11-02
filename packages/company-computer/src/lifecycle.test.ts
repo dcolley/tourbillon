@@ -16,8 +16,8 @@ import {
 } from './lifecycle';
 import { InMemorySessionStore } from './session-registry';
 import { createDryRunHostClient } from './host-client';
-import { GateError, HostStartRefusedError, type ComputerContext, type ContainerSpec, type HostClient } from './types';
-import { KASM_IMAGE } from './constants';
+import { GateError, HostBackendUnavailableError, HostStartRefusedError, type ComputerContext, type ContainerSpec, type HostClient } from './types';
+import { GATE_AGENT_NO_COMPUTER, GATE_COMPANY_NOT_PROVISIONED, KASM_IMAGE } from './constants';
 
 function ctx(overrides: Partial<ComputerContext> = {}): ComputerContext {
   return {
@@ -319,5 +319,110 @@ describe('VNC password', () => {
     assert.ok(a.length >= 16 && b.length >= 16);
     assert.match(a, /^[A-Za-z0-9]+$/);
     assert.notEqual(a, b);
+  });
+
+  // ---- S282-S2 (mutants M30/M31): the seat's VNC password lives ONLY in the spec the
+  // HostClient receives (env.VNC_PW -> vnc_pw file is Slice 2). It must never reach the
+  // persisted session row, the returned session object, or any refusal message. ----
+
+  const SESSION_KEYS = [
+    'id', 'companyId', 'agentId', 'agentUrlKey', 'containerName', 'image', 'vncPort', 'status',
+    'createdAt', 'updatedAt', 'startedAt', 'destroyedAt', 'lastActivityAt', 'takeoverStatus', 'takeoverUserId',
+  ].sort();
+
+  /** Mock host that keeps every spec it was handed, so the test knows the generated secret. */
+  function recordingHost() {
+    const specs: ContainerSpec[] = [];
+    const { host } = mockHost({
+      async startContainer(spec: ContainerSpec) {
+        specs.push(structuredClone(spec));
+        return { containerId: 'cid-rec', startedAt: FIXED };
+      },
+    });
+    return { host, specs };
+  }
+
+  it('createSession persists no password: stored row and returned session carry exactly the registry columns, none holding the secret (M30)', async () => {
+    const { host, specs } = recordingHost();
+    const store = new InMemorySessionStore();
+    const session = await createSession(ctx(), deps(store, host));
+    assert.equal(specs.length, 1, 'host saw exactly one start');
+    const pw = specs[0].env.VNC_PW;
+    assert.ok(pw && pw.length >= 16, 'spec.env.VNC_PW carries the generated password (untouched, Slice 2 owns it)');
+
+    assert.deepEqual(Object.keys(session).sort(), SESSION_KEYS, 'returned session: exact registry shape');
+    assert.ok(!JSON.stringify(session).includes(pw), 'returned session serialises the secret');
+
+    const rows = store.all();
+    assert.equal(rows.length, 1);
+    for (const row of rows) {
+      assert.deepEqual(Object.keys(row).sort(), SESSION_KEYS, 'stored row: exact registry shape (no pw field)');
+      assert.ok(!JSON.stringify(row).includes(pw), 'stored row serialises the secret');
+      for (const v of Object.values(row)) {
+        if (typeof v === 'string') assert.notEqual(v, pw, 'a string column holds the VNC password');
+      }
+    }
+  });
+
+  it('gate refusals are the locked wording verbatim — no room for a password value (M31)', async () => {
+    const { host } = recordingHost();
+    await assert.rejects(
+      () => createSession(ctx({ companyHasComputer: false }), { store: new InMemorySessionStore(), hostClient: host }),
+      (err: GateError) => err.message === GATE_COMPANY_NOT_PROVISIONED,
+    );
+    await assert.rejects(
+      () => createSession(ctx({ agentHasComputer: false }), { store: new InMemorySessionStore(), hostClient: host }),
+      (err: GateError) => err.message === GATE_AGENT_NO_COMPUTER,
+    );
+  });
+
+  it('seat-cap refusal is the locked wording verbatim (M31)', async () => {
+    const store = new InMemorySessionStore();
+    for (let i = 1; i <= 4; i++) {
+      store.seed({
+        id: `ccs-${i}`, companyId: 'c-1', agentId: `a-${i}`, agentUrlKey: `bot${i}`,
+        containerName: `cc-acme-bot${i}`, image: KASM_IMAGE, vncPort: 6900 + i, status: 'running',
+        createdAt: FIXED, updatedAt: FIXED, startedAt: FIXED, destroyedAt: null, lastActivityAt: FIXED,
+        takeoverStatus: null, takeoverUserId: null,
+      });
+    }
+    await assert.rejects(
+      () => createSession(ctx({ agentId: 'a-5', agentUrlKey: 'bot5' }), deps(store, recordingHost().host)),
+      (err: Error) =>
+        err.message ===
+        'Company Computer seat cap reached: 4/4 seats active on this host. ' +
+          'Close a seat (computerCloseSession) before opening a new one.',
+    );
+  });
+
+  it('dry-run start refusals (host_start_refused / ops_contract_missing) never quote the generated password (M31)', async () => {
+    for (const env of [{}, { CC_ALLOW_START: '1' }] as const) {
+      const specs: ContainerSpec[] = [];
+      const inner = createDryRunHostClient({ env: { ...env }, opsScriptExists: () => false });
+      const host: HostClient = {
+        ...inner,
+        async startContainer(spec: ContainerSpec) {
+          specs.push(structuredClone(spec));
+          return inner.startContainer(spec);
+        },
+      };
+      let refusal: Error | undefined;
+      try {
+        await createSession(ctx(), { store: new InMemorySessionStore(), hostClient: host, now: () => FIXED });
+      } catch (err) {
+        refusal = err as Error;
+      }
+      assert.ok(refusal, `expected a refusal for env ${JSON.stringify(env)}`);
+      assert.ok(
+        refusal instanceof HostStartRefusedError || refusal instanceof HostBackendUnavailableError,
+        `unexpected refusal: ${String(refusal)}`,
+      );
+      assert.equal(specs.length, 1);
+      const pw = specs[0].env.VNC_PW;
+      assert.ok(pw && pw.length >= 16, 'the dry-run client received the spec with the password');
+      assert.match(refusal.message, /cc-acme-ceo/, 'sanity: the refusal does quote the planned seat');
+      assert.ok(!refusal.message.includes(pw), `refusal message leaks the VNC password: ${refusal.message}`);
+      assert.ok(!String(refusal.stack ?? '').includes(pw), 'refusal stack leaks the VNC password');
+    }
   });
 });

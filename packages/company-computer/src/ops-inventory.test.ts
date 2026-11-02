@@ -225,6 +225,27 @@ describe('seat meta schema 2', () => {
     );
   });
 
+  // S282-S8 (mutant B1-N11): an UNSAFE companyId embedded in the mount path must be
+  // rejected on the companyId guard itself — uppercase, a shell-ish `;`, and `..` —
+  // otherwise the canonical string-concat checks below would happily "match" and a
+  // traversal/quote-laden root would validate.
+  for (const badId of ['C1', 'c1;id', '..']) {
+    it(`rejects an unsafe companyId "${badId}" embedded in the mount host paths`, () => {
+      assert.throws(
+        () =>
+          parseSeatMeta({
+            ...VALID,
+            mounts: {
+              [`/opt/tourbillon-company-${badId}/data`]: '/data',
+              [`/opt/tourbillon-company-${badId}/home/ceo`]: '/home/kasm-user',
+            },
+          }),
+        (err: SeatMetaError) =>
+          err instanceof SeatMetaError && err.message.includes('unsafe companyId'),
+      );
+    });
+  }
+
   it('rejects bad container names and out-of-range host ports', () => {
     assert.throws(() => parseSeatMeta({ ...VALID, containerName: 'kasm-ceo' }), SeatMetaError);
     assert.throws(() => parseSeatMeta({ ...VALID, hostPort: 80 }), SeatMetaError);
