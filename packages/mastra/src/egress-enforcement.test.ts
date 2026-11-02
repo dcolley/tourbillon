@@ -394,6 +394,21 @@ describe('/tmp skip guard (S261-S1)', () => {
           !testSrc.includes(UNGUARDED_IF),
           'S277-S3: the unguarded NOTE branch (typeof-only) must not return',
         );
+        // S283-S2 (pin BEHAVIOUR, not just text; M/P4): the two checks above are
+        // substring-based, so appending `|| tmpfooOutcome === 'exercised'` to
+        // the live condition keeps the GUARDED substring intact and survived
+        // (P4) while flipping behaviour — every exercised row would print the
+        // misleading NOTE. Extract the live `if` condition (its `if (` anchor is
+        // unique: the regex literal here spells the parens escaped, so this file
+        // cannot self-match it) and EVALUATE it for the three outcomes the NOTE
+        // must discriminate: an 'exercised' row and a missing row must NOT
+        // print; a genuine skip-reason string MUST print.
+        const condMatch = testSrc.match(/if \((typeof tmpfooOutcome === 'string'[^\n]*?)\) \{/);
+        assert.ok(condMatch, "S283-S2: the NOTE branch must be an `if` whose condition starts with the typeof check (extraction anchor)");
+        const noteGuard = new Function('tmpfooOutcome', `return (${condMatch![1]});`) as (v: unknown) => boolean;
+        assert.equal(noteGuard('exercised'), false, "S283-S2 (P4 killer): an 'exercised' outcome must not satisfy the NOTE guard (a text-only pin let `|| tmpfooOutcome === 'exercised'` survive)");
+        assert.equal(noteGuard('/tmpfoo: not creatable on this host'), true, 'S283-S2: a genuine skip-reason string must still satisfy the NOTE guard');
+        assert.equal(noteGuard(undefined), false, 'S283-S2: a missing row (undefined outcome) must not satisfy the NOTE guard');
       }
     } finally {
       cleanupScratch();
@@ -537,29 +552,42 @@ describe('pure /tmp prefix classification (S271-S1)', () => {
     // with NO other statements (an extra inline-prefix guard beside the return
     // and a stripped/rewritten catch both RED here), and (b) a banned-token
     // list that covers every realistic inline-prefix API, not just startsWith.
+    // S283-S1: two holes in that pin. (1) The lazy [\s\S]*? gaps in both shape
+    // regexes let an extra statement sit between `try {` and the delegated
+    // return, so the "NO other statements" comment overstated what was
+    // enforced — the P3 mutant (in underTmp: a pre-return
+    // `if (real.includes(TEMPLATE_PREFIX)) return true;` before the return)
+    // survived. (2) The ban missed the template-literal prefix spelling
+    // (backtick + ${sep}tmp) and tmpdir()-based checks, so that mutant's
+    // inline prefix matched none of the banned tokens. Fix: each try body is
+    // pinned ANCHORED — only comment lines may sit between `try {` and the
+    // capture, and between the capture and the delegated return (the gap is
+    // `(?:\/\/[^\n]*\n\s*)*`, which a statement cannot hide in) — and
+    // includes() / the template prefix / tmpdir() join the ban list.
     const src = readFileSync(fileURLToPath(new URL('./egress-enforcement.test.ts', import.meta.url)), 'utf8');
     // None of these tokens appear in either pinned function's COMMENTS (the
     // /tmp-literal ban requires a quote/escape before the slash, so prose like
     // "so /tmp -> /private/tmp" stays clean), so a banned-token match can only
-    // come from code.
-    const BANNED_TOKENS = /startsWith\(|indexOf\s*\(|\bslice\s*\(|\bsplit\s*\(|\bsearch\s*\(|\.test\s*\(|\.match\s*\(|["'`\\]\/\\?tmp|String\.raw|"tmp"|'tmp'/;
+    // come from code. S283-S1 additions (includes(, the `${sep}tmp template
+    // prefix, tmpdir() likewise appear in neither slice's prose.
+    const BANNED_TOKENS = /startsWith\(|indexOf\s*\(|\bslice\s*\(|\bsplit\s*\(|\bsearch\s*\(|\.test\s*\(|\.match\s*\(|["'`\\]\/\\?tmp|String\.raw|"tmp"|'tmp'|includes\s*\(|`\$\{sep\}tmp|tmpdir\s*\(/;
     const libFn = src.slice(src.indexOf('export function libDirUnderTmp'), src.indexOf('/** Set/restore env'));
     assert.ok(libFn.length > 0 && libFn !== src, 'libDirUnderTmp not found for delegation pin');
     assert.match(
       libFn,
-      /try \{[\s\S]*?\bconst\s+\w+\s*=\s*realpathSync\(getEgressRuntimeDir\(\)\);[\s\S]*?return\s+isTmpRealpath\(\w+\);\s*\}\s*catch \{\s*return false;\s*\}/,
-      'libDirUnderTmp must delegate the prefix decision to isTmpRealpath as its only statement besides the realpath capture (S277-S1 shape pin)',
+      /try \{\s*(?:\/\/[^\n]*\n\s*)*\bconst\s+\w+\s*=\s*realpathSync\(getEgressRuntimeDir\(\)\);\s*(?:\/\/[^\n]*\n\s*)*return\s+isTmpRealpath\(\w+\);\s*\}\s*catch \{\s*return false;\s*\}/,
+      'libDirUnderTmp try body must be EXACTLY the realpath capture plus the delegated return — comment lines only in the gaps, no room for an extra statement (S277-S1 shape pin, S283-S1 anchored)',
     );
-    assert.doesNotMatch(libFn, BANNED_TOKENS, 'libDirUnderTmp must not re-implement any inline prefix check (startsWith/indexOf/slice/split/search/regex/literal — S277-S1)');
+    assert.doesNotMatch(libFn, BANNED_TOKENS, 'libDirUnderTmp must not re-implement any inline prefix check (startsWith/indexOf/slice/split/search/regex/includes/template-prefix/tmpdir/literal — S277-S1, S283-S1)');
     assert.equal((libFn.match(/isTmpRealpath\(/g) ?? []).length, 1, 'libDirUnderTmp must contain exactly one isTmpRealpath call — the delegation (S277-S1)');
     const underFn = src.slice(src.indexOf('function underTmp'), src.indexOf('function outsideTmpRootAt'));
     assert.ok(underFn.length > 0 && underFn !== src, 'underTmp not found for delegation pin');
     assert.match(
       underFn,
-      /try \{[\s\S]*?return\s+isTmpRealpath\([\s\S]*?\}\s*catch \{\s*return true;/,
-      'underTmp must delegate the prefix decision to isTmpRealpath inside its try/catch (S277-S1 shape pin)',
+      /try \{\s*(?:\/\/[^\n]*\n\s*)*return\s+isTmpRealpath\(realpathSync\(dir\)\);\s*\}\s*catch \{\s*return true;/,
+      'underTmp try body must be EXACTLY the delegated return — comment lines only before it, no room for a pre-return statement (S277-S1 shape pin, S283-S1 anchored; P3 mutant: a pre-return includes() guard)',
     );
-    assert.doesNotMatch(underFn, BANNED_TOKENS, 'underTmp must not re-implement any inline prefix check (startsWith/indexOf/slice/split/search/regex/literal — S277-S1)');
+    assert.doesNotMatch(underFn, BANNED_TOKENS, 'underTmp must not re-implement any inline prefix check (startsWith/indexOf/slice/split/search/regex/includes/template-prefix/tmpdir/literal — S277-S1, S283-S1)');
     assert.equal((underFn.match(/isTmpRealpath\(/g) ?? []).length, 1, 'underTmp must contain exactly one isTmpRealpath call — the delegation (S277-S1)');
   });
 });
