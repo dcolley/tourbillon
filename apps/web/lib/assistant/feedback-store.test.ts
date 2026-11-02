@@ -3,7 +3,7 @@
  * with no read before the write. '@tourbillon/db' is replaced by a recorder (as in thread-store.test.ts);
  * the same statements are also run on PGlite (Postgres in-process) to check the jsonb merge.
  */
-import { describe, it, before, beforeEach } from 'node:test';
+import { describe, it, before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
@@ -16,7 +16,7 @@ const dialect = new PgDialect();
 const executed: Array<{ sql: string; params: unknown[] }> = [];
 let nextRows: unknown[] = [];
 /** When set, statements run on this PGlite instance instead of the recorder. */
-let pg: { query: (sql: string, params: unknown[]) => Promise<{ rows: unknown[] }>; exec: (sql: string) => Promise<unknown> } | null = null;
+let pg: { query: (sql: string, params: unknown[]) => Promise<{ rows: unknown[] }>; exec: (sql: string) => Promise<unknown>; close: () => Promise<void> } | null = null;
 
 describe('OBS-2 feedback store', () => {
   let store: typeof import('./feedback-store');
@@ -45,7 +45,23 @@ describe('OBS-2 feedback store', () => {
   beforeEach(() => {
     executed.length = 0;
     nextRows = [{ id: 't1' }];
+  });
+
+  // S304-S4: every sibling PGlite suite closes its instance (activity-company-scope,
+  // heartbeats-skipped-filter, jobs-queue-overview-skipped, observability-skipped-run-status);
+  // this file leaked the WASM instance, whose live handles keep the process past the end of
+  // the file — under full-suite parallel load that surfaced as a FILE-level failure (the
+  // three tests themselves never failed). Close it for real in afterEach/after.
+  afterEach(async () => {
+    const instance = pg;
     pg = null;
+    await instance?.close();
+  });
+
+  after(async () => {
+    const instance = pg;
+    pg = null;
+    await instance?.close();
   });
 
   const scope = { threadId: 't1', resourceId: 'company-c1:chat:free', agentId: 'a1' };
