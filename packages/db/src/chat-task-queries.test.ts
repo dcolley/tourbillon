@@ -269,6 +269,138 @@ describe('chat-task ghost scope on write + list (S279-S1, #279 softs)', () => {
   });
 });
 
+// ─── S288-S1 (#288 softs): ghost scope on the REMAINING scopeWhere consumers ──
+// S276-S1/S279-S1 pinned companyId only on getChatTask, setChatTaskStatus and
+// listChatTasks. Test's #288 gate re-probed the agent-only scopeWhere mutant (drop
+// the companyId clause, keep agentId) against every OTHER consumer and all stayed
+// GREEN — B1 (`c2`/`b1`) changes agentId too, so the mutant never has to match an
+// owner. Same B2 ghost scope as S279-S1 (same agentId, foreign company): only the
+// companyId clause of scopeWhere can keep these assertions RED-under-mutant.
+
+describe('chat-task ghost scope on the remaining scopeWhere consumers (S288-S1, #288 softs)', () => {
+  it('S288-S1a: updateChatTask with the ghost scope returns null and leaves the owner row untouched', async () => {
+    const { client, db } = await freshDb();
+    try {
+      const task = await addChatTask(A1, { title: 'Owner row', notes: 'owner notes' }, db);
+
+      // Agent-only where-clause would match (id, agentId), UPDATE the row, and
+      // RETURN it — null is only reachable through the companyId clause.
+      assert.equal(
+        await updateChatTask(B2, { id: task.id, title: 'Ghost title', notes: 'ghost note', status: 'done' }, db),
+        null,
+        'same agentId, foreign company update returns null',
+      );
+      const untouched = await getChatTask(A1, { id: task.id }, db);
+      assert.equal(untouched?.title, 'Owner row', 'the ghost update never renamed the row');
+      assert.equal(untouched?.notes, 'owner notes', 'the ghost note never replaced the owner notes');
+      assert.equal(untouched?.status, 'pending', 'the ghost status write never flipped the row to done');
+      assert.equal(untouched?.completedAt, null, 'the ghost done-write never stamped completedAt');
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('S288-S1b: setChatTaskPaused with the ghost scope returns null and never pauses the owner row', async () => {
+    const { client, db } = await freshDb();
+    try {
+      const task = await addChatTask(A1, { title: 'Owner row' }, db);
+
+      assert.equal(
+        await setChatTaskPaused(B2, { id: task.id, paused: true }, db),
+        null,
+        'same agentId, foreign company pause returns null',
+      );
+      const untouched = await getChatTask(A1, { id: task.id }, db);
+      assert.equal(untouched?.paused, false, 'the ghost pause never stuck on the owner row');
+      // The runnable queue still sees the owner row — the pause did not take effect.
+      assert.ok(
+        (await listRunnableChatTasks(db, {})).some((r) => r.taskId === task.id),
+        'the owner row stays runnable after the ghost pause',
+      );
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('S288-S1c: prioritizeChatTask with the ghost scope returns null and never moves the owner row', async () => {
+    const { client, db } = await freshDb();
+    try {
+      const first = await addChatTask(A1, { title: 'First' }, db); // position 0
+      const target = await addChatTask(A1, { title: 'Target' }, db); // position 1
+
+      // BOTH halves of prioritizeChatTask are scope-bound and both must be probed:
+      // the head read (min position over the scope) and the delegating updateChatTask.
+      // Agent-only, the head read sees the owner rows, the update matches the row and
+      // returns it — null plus an unchanged position is the companyId clause working.
+      assert.equal(
+        await prioritizeChatTask(B2, { id: target.id }, db),
+        null,
+        'same agentId, foreign company prioritise returns null',
+      );
+      const listed = await listChatTasks(A1, {}, db);
+      assert.deepEqual(
+        listed.map((t) => [t.id, t.position]),
+        [[first.id, 0], [target.id, 1]],
+        'the owner rows keep their positions — the ghost prioritise had no effect',
+      );
+
+      // Explicit-position form goes through the same scoped update, not the head read.
+      assert.equal(
+        await prioritizeChatTask(B2, { id: target.id, position: -5 }, db),
+        null,
+        'same agentId, foreign company explicit-position prioritise returns null',
+      );
+      assert.equal(
+        (await getChatTask(A1, { id: target.id }, db))?.position,
+        1,
+        'the explicit ghost position never landed on the owner row',
+      );
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('S288-S1d: countOpenChatTasks with the ghost scope is 0 while the owner has open tasks', async () => {
+    const { client, db } = await freshDb();
+    try {
+      await addChatTask(A1, { title: 'Open one' }, db);
+      await addChatTask(A1, { title: 'Open two' }, db);
+      const closed = await addChatTask(A1, { title: 'Closed', status: 'done' }, db);
+      assert.equal(await countOpenChatTasks(A1, db), 2, 'the owner counts its two open rows (control)');
+
+      // Agent-only, the count reads the owner rows through agentId 'a1' and returns 2
+      // (3 with a dropped status filter) — 0 is only reachable via the companyId clause.
+      assert.equal(await countOpenChatTasks(B2, db), 0, 'same agentId, foreign company counts zero');
+      void closed;
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('S288-S1e: addChatTask with the ghost scope starts at position 0 even with owner rows present', async () => {
+    const { client, db } = await freshDb();
+    try {
+      await addChatTask(A1, { title: 'Owner first' }, db); // position 0
+      await addChatTask(A1, { title: 'Owner second' }, db); // position 1
+
+      // The tail-position read (max position + 1) is the only scope-bound step in
+      // addChatTask — the INSERT values come straight from the scope. Agent-only, the
+      // ghost read sees the owner rows (max 1) and starts at 2; the companyId clause
+      // makes the read empty, so the ghost row starts at 0 like a fresh list.
+      const ghost = await addChatTask(B2, { title: 'Ghost tail' }, db);
+      assert.equal(ghost.position, 0, 'the ghost scope tail read is empty — position restarts at 0');
+      assert.equal(ghost.companyId, 'c2', 'the ghost row belongs to the ghost company');
+      assert.deepEqual(
+        (await listChatTasks(A1, { includeClosed: true }, db)).map((t) => t.position),
+        [0, 1],
+        'the owner list is untouched — the ghost row never joined it',
+      );
+    } finally {
+      await client.close();
+    }
+  });
+});
+
 // ─── TASK-RUNNER query layer (B3, PR #196 hold) ──────────────────────────────
 // The scheduler poller's DB contract: listRunnable finds pending/unpaused/budgeted rows
 // (and carries agent/company status so the poller can skip inactive agents BEFORE claiming),
