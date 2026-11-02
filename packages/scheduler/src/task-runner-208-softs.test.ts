@@ -340,16 +340,25 @@ test('S24a pin: scheduler test script keeps the working belt --conditions=tourbi
 // literals themselves, so deleting one would silently return that pin to the opaque
 // whole-file parallel-gate timeout the treatment was added to kill. Same source-reading
 // shape as the S236-S1 HELPER_SRC pins, pointed at this file.
+// S278-S4 (#278 ACCEPT soft-pack, info → hardened): the original pin counted every
+// `timeout: PARALLEL_GATE_TIMEOUT_MS` occurrence in the file, so gate mutant M12 (drop one
+// real option + add a prose comment containing the literal) kept the count at 2 and
+// survived. The count is now anchored to real `test(` CALL SITES — a line must start with
+// `test(` and carry the option object — so prose, the regex source below, and even
+// commented-out fixtures (`// test(…`) can no longer mask a dropped option. A spoof would
+// have to be a genuine `test(`-prefixed line, i.e. itself a call site under the pin.
 test('S272-S3 pin: both async PGlite pins carry the PARALLEL_GATE_TIMEOUT_MS per-test timeout', () => {
   const SRC = readFileSync(__filename, 'utf8');
-  // The const declaration has no `timeout:` prefix and the header note names the constant
-  // bare — only real per-test options match (note: keep this test's own prose from
-  // containing the literal option form, or the expected count shifts).
-  const carried = SRC.match(/\btimeout:\s*PARALLEL_GATE_TIMEOUT_MS\b/g) ?? [];
+  // `^` (m flag) anchors each match to a test( call site — the two async pins open their
+  // option object on the same line as the test name. Note: this test's own body must not
+  // sit on a `test(`-prefixed line carrying the option literal (the regex source line
+  // starts indented with `const carried`, so it is safe by construction).
+  const carried = SRC.match(/^test\(.*?\{\s*timeout:\s*PARALLEL_GATE_TIMEOUT_MS\s*\}/gm) ?? [];
   assert.equal(
     carried.length,
     2,
     'the two async listRunnable pins must each keep their PARALLEL_GATE_TIMEOUT_MS per-test ' +
-      'option (S266-S3) — dropping one starves it into the opaque file-level wall under a parallel gate',
+      'option (S266-S3) — dropping one starves it into the opaque file-level wall under a ' +
+      'parallel gate; a matching prose comment cannot mask it (S278-S4 call-site anchor)',
   );
 });
