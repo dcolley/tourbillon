@@ -2,6 +2,18 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import { ROLE_TOOLS } from './role-tools';
 
+describe('company-computer toolset (Slice 1)', () => {
+  it('is registered as its own toolset id, separate from browser/code-execution', () => {
+    const cc = ROLE_TOOLS['company-computer'];
+    assert.ok(cc, 'company-computer toolset exists');
+    assert.notEqual(cc, ROLE_TOOLS['browser']);
+    assert.notEqual(cc, ROLE_TOOLS['code-execution']);
+    assert.ok('computerOpenBrowserTool' in cc, 'openBrowser tool attached');
+    assert.ok('computerScreenshotTool' in cc, 'screenshot tool attached');
+    assert.ok('computerCloseSessionTool' in cc, 'closeSession tool attached');
+  });
+});
+
 describe('createAgentTool', () => {
   it('is defined and exported in rosterTools', () => {
     const rosterTools = ROLE_TOOLS['roster'];

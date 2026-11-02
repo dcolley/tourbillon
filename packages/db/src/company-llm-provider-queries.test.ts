@@ -365,7 +365,12 @@ describe('migration 0018 (company_llm_providers)', () => {
     const { client, database } = await freshDb(schema, WHEN_0018);
     try {
       assert.equal(await tableExists(client, 'company_llm_providers'), true);
-      await database.insert(schema.companies).values({ id: 'c1', name: 'C', slug: 'c', issuePrefix: 'C' });
+      // Seed with raw SQL: a DB frozen at 0018 predates columns added by later
+      // migrations, so a drizzle insert built from the CURRENT schema would reference
+      // columns this point-in-time database does not have.
+      await client.exec(
+        `insert into companies (id, name, slug, issue_prefix) values ('c1', 'C', 'c', 'C')`,
+      );
       await database
         .insert(schema.llmProviders)
         .values({ id: 'p1', name: 'P', type: 'lmstudio', baseURL: 'http://p.test/v1' });

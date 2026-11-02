@@ -10,7 +10,8 @@
     "./mcp-tools": "./src/tools/mcp-tools.ts",
     "./first-frame-capture": "./src/first-frame-capture.ts",
     "./concierge-signal": "./src/concierge-signal.ts",
-    "./widget-tools": "./src/tools/widget-tools.ts"
+    "./widget-tools": "./src/tools/widget-tools.ts",
+    "./tools-api-client": "./src/tools/api-client.ts"
   },
   "scripts": {
     "test": "node --import tsx --test src/*.test.ts src/**/*.test.ts",
@@ -26,6 +27,7 @@
     "@mastra/memory": "1.36.0",
     "@mastra/observability": "1.18.4",
     "@mastra/pg": "1.30.0",
+    "@tourbillon/company-computer": "workspace:*",
     "@tourbillon/db": "workspace:*",
     "@tourbillon/shared": "workspace:*",
     "zod": "catalog:"

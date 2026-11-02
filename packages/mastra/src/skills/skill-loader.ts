@@ -27,6 +27,7 @@ function getToolsetSkillsTemplateDir(): string {
 const TOOLSET_SKILL_FILES: Record<string, string> = {
   buffer: 'buffer-skills.md',
   'code-execution': 'code-execution-skills.md',
+  'company-computer': 'company-computer-skills.md',
   'knowledge-graph': 'knowledge-graph-skills.md',
 };
 

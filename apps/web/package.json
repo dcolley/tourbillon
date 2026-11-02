@@ -28,6 +28,7 @@
     "@hono/node-server": "^2.0.12",
     "@mdxeditor/editor": "^4.1.1",
     "@tailwindcss/postcss": "^4.3.3",
+    "@tourbillon/company-computer": "workspace:*",
     "@tourbillon/db": "workspace:*",
     "@tourbillon/mastra": "workspace:*",
     "@tourbillon/shared": "workspace:*",

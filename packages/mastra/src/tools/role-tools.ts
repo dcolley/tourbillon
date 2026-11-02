@@ -1,5 +1,6 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
+import { COMPANY_COMPUTER_TOOLS } from '@tourbillon/company-computer/tools';
 import { HITL_REQUEST_SPEC, hitlRequestFields, parseHitlRequestForIngest } from '@tourbillon/shared/hitl';
 import { extractToolRuntimeContext, tracedAgentFetch } from './api-client';
 import { NITTER_TOOLS } from './nitter-tools';
@@ -445,4 +446,8 @@ export const ROLE_TOOLS: Record<string, Record<string, unknown>> = {
   // browser provider attached to the Agent (agent-factory → buildAgentBrowser), not from
   // this map; the empty entry registers the toolset id for tool assembly.
   browser: {},
+  // Per-agent KasmVNC desktop seat (Slice 1). Tools call /api/internal/company-computer/*,
+  // which enforces BOTH gates (company hasComputer AND agent hasComputer) server-side —
+  // attaching this toolset never grants Computer access by itself.
+  'company-computer': COMPANY_COMPUTER_TOOLS,
 };
