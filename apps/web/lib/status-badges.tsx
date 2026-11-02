@@ -28,11 +28,19 @@ const STATUS_VARIANTS: Record<string, BadgeVariant> = {
   archived: 'ghost',
   pending_approval: 'secondary',
   done: 'default',
+  // #295: a skipped wake (e.g. assignee-mismatch task wake) is a neutral terminal
+  // state — same muted treatment as paused/expired, never the destructive colour.
+  skipped: 'ghost',
 };
 
-export function StatusBadge({ status }: { status: string }) {
+/** Resolved separately so the status→variant table is testable without React. */
+export function statusBadgeVariant(status: string): BadgeVariant {
   const normalized = status.toLowerCase().replace(/\s+/g, '_');
-  const variant = STATUS_VARIANTS[normalized] ?? 'outline';
+  return STATUS_VARIANTS[normalized] ?? 'outline';
+}
+
+export function StatusBadge({ status }: { status: string }) {
+  const variant = statusBadgeVariant(status);
 
   return <Badge variant={variant}>{status.replace(/_/g, ' ')}</Badge>;
 }

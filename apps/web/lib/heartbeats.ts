@@ -58,6 +58,8 @@ function runStatusCondition(filter: HeartbeatListFilter) {
       return eq(heartbeatRuns.status, 'failed');
     case 'queued':
       return eq(heartbeatRuns.status, 'queued');
+    case 'skipped':
+      return eq(heartbeatRuns.status, 'skipped');
     default:
       return undefined;
   }
