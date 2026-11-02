@@ -398,14 +398,37 @@ describe('/tmp skip guard (S261-S1)', () => {
         // substring-based, so appending `|| tmpfooOutcome === 'exercised'` to
         // the live condition keeps the GUARDED substring intact and survived
         // (P4) while flipping behaviour — every exercised row would print the
-        // misleading NOTE. Extract the live `if` condition (its `if (` anchor is
-        // unique: the regex literal here spells the parens escaped, so this file
-        // cannot self-match it) and EVALUATE it for the three outcomes the NOTE
-        // must discriminate: an 'exercised' row and a missing row must NOT
-        // print; a genuine skip-reason string MUST print.
-        const condMatch = testSrc.match(/if \((typeof tmpfooOutcome === 'string'[^\n]*?)\) \{/);
-        assert.ok(condMatch, "S283-S2: the NOTE branch must be an `if` whose condition starts with the typeof check (extraction anchor)");
-        const noteGuard = new Function('tmpfooOutcome', `return (${condMatch![1]});`) as (v: unknown) => boolean;
+        // misleading NOTE. Extract the live `if` condition and EVALUATE it for
+        // the three outcomes the NOTE must discriminate: an 'exercised' row and
+        // a missing row must NOT print; a genuine skip-reason string MUST print.
+        // S289-S2: the old extraction was String.match — the FIRST textual
+        // match in the file — and its "anchor is unique" claim was false: the
+        // UNGUARDED_IF string literal above also matches the pattern (that is
+        // how P4d died, via a bare SyntaxError from new Function, not a clear
+        // assert), and a `//`-comment decoy carrying the correct guarded text
+        // hijacked the match so a mutated live `if` survived (P4f). Fix: anchor
+        // at line start with the m flag so `//`-prefixed lines and mid-line
+        // string literals cannot match, assert EXACTLY ONE match, and assert
+        // the extracted condition COMPILES via a named assert.
+        const condMatches = [...testSrc.matchAll(/^\s*if \((typeof tmpfooOutcome === 'string'[^\n]*?)\) \{/gm)];
+        assert.equal(
+          condMatches.length,
+          1,
+          'S289-S2: exactly ONE line-initial `if` whose condition starts with the typeof check must exist — zero means the live branch was rewritten away (P4d shape), more than one means a second live-`if`-shaped line exists (comment-prefixed decoys are excluded by the ^ anchor and never counted)',
+        );
+        const condText = condMatches[0][1];
+        let noteGuardCompileError: unknown = null;
+        let noteGuardFn: unknown = null;
+        try {
+          noteGuardFn = new Function('tmpfooOutcome', `return (${condText});`);
+        } catch (err) {
+          noteGuardCompileError = err;
+        }
+        assert.ok(
+          noteGuardCompileError === null,
+          `S289-S2: the extracted condition must compile as an expression (P4d: a non-compiling capture means the anchor matched a string literal, not the live if) — captured ${JSON.stringify(condText)}: ${String(noteGuardCompileError)}`,
+        );
+        const noteGuard = noteGuardFn as (v: unknown) => boolean;
         assert.equal(noteGuard('exercised'), false, "S283-S2 (P4 killer): an 'exercised' outcome must not satisfy the NOTE guard (a text-only pin let `|| tmpfooOutcome === 'exercised'` survive)");
         assert.equal(noteGuard('/tmpfoo: not creatable on this host'), true, 'S283-S2: a genuine skip-reason string must still satisfy the NOTE guard');
         assert.equal(noteGuard(undefined), false, 'S283-S2: a missing row (undefined outcome) must not satisfy the NOTE guard');
@@ -564,6 +587,13 @@ describe('pure /tmp prefix classification (S271-S1)', () => {
     // capture, and between the capture and the delegated return (the gap is
     // `(?:\/\/[^\n]*\n\s*)*`, which a statement cannot hide in) — and
     // includes() / the template prefix / tmpdir() join the ban list.
+    // S289-S1: even that anchor left the FUNCTION PREFIX unpinned — assert.match
+    // searches, so an N4/N5-style inline prefix check placed BEFORE `try` that
+    // uses none of the BANNED_TOKENS (e.g. `dir.at(1)==='t' && dir.at(2)==='m'
+    // && dir.at(3)==='p'`) survived in both helpers. Each shape pin now STARTS
+    // at the function signature (`function libDirUnderTmp(): boolean {` /
+    // `function underTmp(dir: string): boolean {`), so nothing but whitespace
+    // and comment lines can sit in front of `try`.
     const src = readFileSync(fileURLToPath(new URL('./egress-enforcement.test.ts', import.meta.url)), 'utf8');
     // None of these tokens appear in either pinned function's COMMENTS (the
     // /tmp-literal ban requires a quote/escape before the slash, so prose like
@@ -575,8 +605,8 @@ describe('pure /tmp prefix classification (S271-S1)', () => {
     assert.ok(libFn.length > 0 && libFn !== src, 'libDirUnderTmp not found for delegation pin');
     assert.match(
       libFn,
-      /try \{\s*(?:\/\/[^\n]*\n\s*)*\bconst\s+\w+\s*=\s*realpathSync\(getEgressRuntimeDir\(\)\);\s*(?:\/\/[^\n]*\n\s*)*return\s+isTmpRealpath\(\w+\);\s*\}\s*catch \{\s*return false;\s*\}/,
-      'libDirUnderTmp try body must be EXACTLY the realpath capture plus the delegated return — comment lines only in the gaps, no room for an extra statement (S277-S1 shape pin, S283-S1 anchored)',
+      /function libDirUnderTmp\(\): boolean \{\s*(?:\/\/[^\n]*\n\s*)*try \{\s*(?:\/\/[^\n]*\n\s*)*\bconst\s+\w+\s*=\s*realpathSync\(getEgressRuntimeDir\(\)\);\s*(?:\/\/[^\n]*\n\s*)*return\s+isTmpRealpath\(\w+\);\s*\}\s*catch \{\s*return false;\s*\}/,
+      'libDirUnderTmp must be EXACTLY signature + try + the realpath capture plus the delegated return — signature-anchored so no statement can sit in front of try, comment lines only in the gaps (S277-S1 shape pin, S283-S1 anchored body, S289-S1 signature anchor)',
     );
     assert.doesNotMatch(libFn, BANNED_TOKENS, 'libDirUnderTmp must not re-implement any inline prefix check (startsWith/indexOf/slice/split/search/regex/includes/template-prefix/tmpdir/literal — S277-S1, S283-S1)');
     assert.equal((libFn.match(/isTmpRealpath\(/g) ?? []).length, 1, 'libDirUnderTmp must contain exactly one isTmpRealpath call — the delegation (S277-S1)');
@@ -584,8 +614,8 @@ describe('pure /tmp prefix classification (S271-S1)', () => {
     assert.ok(underFn.length > 0 && underFn !== src, 'underTmp not found for delegation pin');
     assert.match(
       underFn,
-      /try \{\s*(?:\/\/[^\n]*\n\s*)*return\s+isTmpRealpath\(realpathSync\(dir\)\);\s*\}\s*catch \{\s*return true;/,
-      'underTmp try body must be EXACTLY the delegated return — comment lines only before it, no room for a pre-return statement (S277-S1 shape pin, S283-S1 anchored; P3 mutant: a pre-return includes() guard)',
+      /function underTmp\(dir: string\): boolean \{\s*(?:\/\/[^\n]*\n\s*)*try \{\s*(?:\/\/[^\n]*\n\s*)*return\s+isTmpRealpath\(realpathSync\(dir\)\);\s*\}\s*catch \{\s*return true;/,
+      'underTmp must be EXACTLY signature + try + the delegated return — signature-anchored so no statement can sit in front of try, comment lines only in the gaps (S277-S1 shape pin, S283-S1 anchored body, S289-S1 signature anchor; N4/N5 mutants: a pre-try .at()-style prefix check)',
     );
     assert.doesNotMatch(underFn, BANNED_TOKENS, 'underTmp must not re-implement any inline prefix check (startsWith/indexOf/slice/split/search/regex/includes/template-prefix/tmpdir/literal — S277-S1, S283-S1)');
     assert.equal((underFn.match(/isTmpRealpath\(/g) ?? []).length, 1, 'underTmp must contain exactly one isTmpRealpath call — the delegation (S277-S1)');
