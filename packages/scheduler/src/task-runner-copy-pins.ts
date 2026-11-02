@@ -106,10 +106,20 @@ const RELATIVE_VERB_TO_TASKCAP = '[^.;:\\u2014\\u2013\\n]{0,40}';
  * <participle> … <boot>`, where an adverbial or when-clause tail pushes the boot word past the
  * 15-char verb→boot window: "opts.taskCap is set automatically when the scheduler starts" was
  * GREEN (" automatically when the " = 24 chars). Contract pinned by the S278-S1 corpus rows:
- * the COPULA must sit tight to the token (an adverb between copula and participle — "is
- * usually set by…" — is a documented known-miss), the TAIL may not cross a comma (honest
- * agent-swaps stay GREEN: "opts.taskCap is set by the tool, not the scheduler"), and the tail
- * is bounded at 30 chars (beyond that is a documented known-miss, pinned GREEN).
+ * the COPULA must sit tight to the token, the TAIL may not cross a comma (honest agent-swaps
+ * stay GREEN: "opts.taskCap is set by the tool, not the scheduler"), and the tail is bounded
+ * at 30 chars (beyond that is a documented known-miss, pinned GREEN).
+ *
+ * S284-S1 (#284 ACCEPT soft-pack): the tight-copula half of that contract was claimed but
+ * never actually pinned — an adverb slot (`(?:is|are|…)\s+(?:\w+\s+)?`) left every old row
+ * GREEN, and narrowing the alternation to bare `is` only moved the gate-named `is` rows.
+ * The corpus now carries both load-bearing rows: the adverbial "…is usually set automatically
+ * when the scheduler starts" stays GREEN only while the copula is tight (dies under the adverb
+ * mutant), and the `was` row "…was set automatically when the scheduler started" stays RED
+ * only while the alternation covers `was` (dies under the is-only mutant). An adverb between
+ * copula and participle remains the documented known-miss (the matcher has no adverb slot by
+ * design; the corpus row "…is usually set by tools at tick time" is pinned GREEN — it would
+ * stay GREEN regardless, since that row has no BOOT_PATH token to reach).
  */
 const PASSIVE_COPULA = String.raw`(?:is|are|was|were|be|been|being)\s+`;
 const PASSIVE_TAIL = '[^.;:\\u2014\\u2013\\n,]{0,30}';
