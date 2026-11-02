@@ -17,7 +17,22 @@ import {
   type TaskProgressBridgeDeps,
   type TaskProgressEvent,
 } from './task-progress-signals';
-import { TASK_PROGRESS_SSE_TYPE as SHARED_TASK_PROGRESS_SSE_TYPE } from '@tourbillon/shared/types';
+import {
+  TASK_PROGRESS_SSE_TYPE as SHARED_TASK_PROGRESS_SSE_TYPE,
+  TASK_PROGRESS_STATUSES,
+  type TaskProgressStatus,
+} from '@tourbillon/shared/types';
+
+// S307-S2 compile gate (runs under apps/web `tsc --noEmit`): exhaustive map over the SHARED
+// union - shrinking it makes the excess key RED, growing it RED on the missing key. This is
+// the live type-level tie between the web consumer and @tourbillon/shared/types.
+const statusCoverage: Record<TaskProgressStatus, true> = {
+  running: true,
+  succeeded: true,
+  failed: true,
+  skipped: true,
+};
+void statusCoverage;
 import {
   cancelQueuedConciergeSignals,
   type TaskProgressSignalPayload,
@@ -429,4 +444,25 @@ test('S304-S2: the narrow-accept-set rationale comment exists and the extra word
   assert.match(src, /S304-S2[\s\S]*?cancelled[\s\S]*?ChatTaskProgressEvent/, 'the comment must name both extra statuses and the publisher type');
   assert.ok(!code.includes('coalesced'), 'coalesced must stay out of executable code (comment-only)');
   assert.ok(!code.includes('cancelled'), 'cancelled must stay out of executable code (comment-only)');
+});
+
+// ─── S307-S2 (#304 softs): the accept set IS the shared union, no local copy ──────────────
+
+test('S307-S2: parser accepts exactly the shared TASK_PROGRESS_STATUSES (accept set == shared union)', () => {
+  // The tuple expectation is HARD-CODED here (not derived from the tuple), so shrinking the
+  // shared union goes RED on this assert, and re-forking the parser onto a narrower local
+  // accept set (dropping one word) goes RED on the parse loop below. Mutant evidence: delete
+  // 'skipped' from either side -> this test fails (runtime), plus tsc catches the shared drop
+  // via the statusCoverage map (shared test) and the concierge-signal 'skipped' comparison.
+  // The parser consumes the shared binding (S307-S2): its accept set is isTaskProgressStatus,
+  // backed by this very tuple - no local copy of the four words exists in the module (the
+  // S304-S2 static guard above keeps the rejected words out of code too).
+  assert.deepEqual([...TASK_PROGRESS_STATUSES].sort(), ['failed', 'running', 'skipped', 'succeeded']);
+  for (const status of ['running', 'succeeded', 'failed', 'skipped'] as const) {
+    const parsed = parseTaskProgressMessage(
+      JSON.stringify({ type: 'chat_task_progress', ...event(), stage: 'done', status }),
+    );
+    assert.ok(parsed, `shared status '${status}' must parse (parser must not drift below the shared union)`);
+    assert.equal(parsed.status, status);
+  }
 });

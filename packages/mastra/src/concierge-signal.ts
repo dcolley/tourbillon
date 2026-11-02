@@ -14,6 +14,10 @@
  * owns the long-lived AgentController sessions, and the bridge that calls these lives there.
  */
 
+// S307-S2 (#304 softs): type-only subpath import (no runtime barrel side effects) - the
+// shared union keeps publisher (scheduler) and parser (web) on one status contract.
+import type { TaskProgressStatus } from '@tourbillon/shared/types';
+
 /** Tag name the free-chat concierge sees on Run Task progress signals. */
 export const TASK_PROGRESS_TAG_NAME = 'task-progress';
 
@@ -126,7 +130,7 @@ export async function cancelQueuedConciergeSignals(
 /**
  * The Run Task progress event the scheduler emits (structurally ChatTaskProgressEvent from
  * packages/scheduler task-runner — kept structural so packages/mastra never imports the
- * scheduler).
+ * scheduler; the STATUS union itself is single-sourced in @tourbillon/shared, S307-S2).
  */
 export interface TaskProgressEventShape {
   companyId: string;
@@ -134,7 +138,7 @@ export interface TaskProgressEventShape {
   chatTaskId: string;
   runId: string;
   stage: 'started' | 'done' | 'needs_review';
-  status: 'running' | 'succeeded' | 'failed' | 'skipped';
+  status: TaskProgressStatus;
   title: string;
 }
 
