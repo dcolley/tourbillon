@@ -1,0 +1,259 @@
+/**
+ * S304-S1 — vault-encryption write-back in packages/db comes from shared (Refs #304).
+ *
+ * vault-credentials.ts had three OAuth token-refresh write-back sites that used a
+ * `require` of `./vault-encryption` — a module that does not exist in packages/db
+ * (it lives at `@tourbillon/shared/vault-encryption`). `next build` reported three
+ * Module-not-found warnings against this file, and the write-back throws at runtime:
+ * the failing require lands inside the try/catch, so MODULE_NOT_FOUND is swallowed
+ * and resolveVaultSecret returns null instead of persisting the refreshed tokens.
+ *
+ * Pin (task-runner-<n>-softs convention — readFileSync source pins plus a
+ * require-cache-stubbed behaviour pin; the repo avoids mock.module):
+ *  1. The file contains no require-call at all, and never mentions the local
+ *     module path (the forbidden spelling is assembled by concatenation below so
+ *     this test file never holds it contiguously — the rg gate over packages/db
+ *     must stay empty).
+ *  2. encryptCredential is imported from '@tourbillon/shared/vault-encryption'.
+ *  3. Exactly three write-back sites assign encryptCredential(refreshed); one in
+ *     each of the agent / company_user / company scope slices.
+ *  4. Behaviour: for each scope, an expired OAuth credential refreshes and the
+ *     captured encryptedValue round-trips through the SHARED decryptCredential
+ *     back to the refreshed tokens.
+ *
+ * Mutant (per the brief): revert any of the three sites to a require of the local
+ * module. That REDs the no-require-call pins (whole file + the site's slice + the
+ * count-3 canonical pin) and the behaviour test for that scope — the require
+ * throws inside the try, the catch returns null, no write-back is captured.
+ */
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { describe, it, after, afterEach } from 'node:test';
+import type { OAuthTokens } from '@tourbillon/shared/vault-types';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const SRC = readFileSync(path.join(HERE, 'vault-credentials.ts'), 'utf8');
+
+// Forbidden spellings, assembled by concatenation so THIS file never contains a
+// contiguous match for the build/gate grep (rg "require\(['\"]\./vault-encryption").
+const Q = String.fromCharCode(39);
+const LOCAL_MODULE_NEEDLE = './vault-' + 'encryption';
+const LOCAL_REQUIRE_NEEDLE = 'require' + '(' + Q + LOCAL_MODULE_NEEDLE + Q + ')';
+// require-call detector (regex source carries escapes, so it never matches itself).
+const REQUIRE_CALL = new RegExp('require' + '\\s*\\(');
+
+// aes-256-gcm key: 64 hex chars -> 32 bytes (same fixture as vault-resolution.test.ts).
+const savedVaultKey = process.env.VAULT_ENCRYPTION_KEY;
+process.env.VAULT_ENCRYPTION_KEY = '0123456789abcdef'.repeat(4);
+// refreshOAuthToken bails out early ("GitHub OAuth credentials not configured")
+// unless both client credentials are present — set/restore around this suite.
+const savedGithubId = process.env.GITHUB_OAUTH_CLIENT_ID;
+const savedGithubSecret = process.env.GITHUB_OAUTH_CLIENT_SECRET;
+process.env.GITHUB_OAUTH_CLIENT_ID = 'test-client-id';
+process.env.GITHUB_OAUTH_CLIENT_SECRET = 'test-client-secret';
+
+const require_ = createRequire(import.meta.url);
+
+interface UpdatePatch {
+  encryptedValue?: string;
+  needsReauth?: boolean;
+  updatedAt?: Date;
+}
+const updatePatches: UpdatePatch[] = [];
+let nextCredentialRow: Record<string, unknown> | null = null;
+
+// Fake db: vault-credentials only ever calls findFirst / update().set().where().
+const fakeDb = {
+  query: {
+    vaultSecrets: {
+      findFirst: async () => nextCredentialRow,
+    },
+  },
+  update: () => ({
+    set: (patch: UpdatePatch) => {
+      updatePatches.push(patch);
+      return { where: () => Promise.resolve() };
+    },
+  }),
+};
+
+// Seed the require-cache for the live './client' (it builds a postgres pool at
+// module load and validates DATABASE_URL) BEFORE requiring the module under test,
+// so the write-back paths never touch a socket. Same recipe as
+// packages/scheduler/src/scheduler-main.test.ts.
+{
+  const clientPath = require_.resolve('./client');
+  require_.cache[clientPath] = {
+    id: clientPath,
+    filename: clientPath,
+    loaded: true,
+    exports: { db: fakeDb },
+    children: [],
+    paths: [],
+  } as unknown as NodeJS.Require['cache'][string];
+}
+
+type VaultCredentialsModule = typeof import('./vault-credentials');
+type VaultEncryptionModule = typeof import('@tourbillon/shared/vault-encryption');
+const vault = require_('./vault-credentials') as VaultCredentialsModule;
+const { encryptCredential, decryptCredential } = require_(
+  '@tourbillon/shared/vault-encryption',
+) as VaultEncryptionModule;
+
+after(() => {
+  if (savedVaultKey === undefined) delete process.env.VAULT_ENCRYPTION_KEY;
+  else process.env.VAULT_ENCRYPTION_KEY = savedVaultKey;
+  if (savedGithubId === undefined) delete process.env.GITHUB_OAUTH_CLIENT_ID;
+  else process.env.GITHUB_OAUTH_CLIENT_ID = savedGithubId;
+  if (savedGithubSecret === undefined) delete process.env.GITHUB_OAUTH_CLIENT_SECRET;
+  else process.env.GITHUB_OAUTH_CLIENT_SECRET = savedGithubSecret;
+});
+
+const originalFetch = globalThis.fetch;
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+  updatePatches.length = 0;
+  nextCredentialRow = null;
+});
+
+function stubTokenEndpoint(accessToken: string): void {
+  globalThis.fetch = (async () => ({
+    ok: true,
+    json: async () => ({
+      access_token: accessToken,
+      refresh_token: 'rt-refreshed',
+      expires_in: 3600,
+      scope: 'repo',
+    }),
+  })) as unknown as typeof fetch;
+}
+
+function expiredOauthRow(id: string): Record<string, unknown> {
+  return {
+    id,
+    authType: 'oauth',
+    needsReauth: false,
+    encryptedValue: encryptCredential({
+      accessToken: 'expired-access',
+      refreshToken: 'rt-old',
+      expiresAt: Date.now() - 60_000,
+    }),
+  };
+}
+
+async function expectRefreshedWriteBack(
+  ctx: Parameters<VaultCredentialsModule['resolveVaultSecret']>[0],
+  expectedAccessToken: string,
+): Promise<void> {
+  const result = await vault.resolveVaultSecret(ctx);
+  assert.ok(
+    result !== null && typeof result === 'object',
+    'expected refreshed OAuthTokens (a reverted write-back site throws inside the ' +
+      'try/catch and resolveVaultSecret returns null)',
+  );
+  const tokens = result as OAuthTokens;
+  assert.equal(tokens.accessToken, expectedAccessToken);
+  assert.equal(tokens.refreshToken, 'rt-refreshed');
+  assert.equal(tokens.scope, 'repo');
+  assert.equal(typeof tokens.expiresAt, 'number');
+  assert.ok((tokens.expiresAt as number) > Date.now());
+
+  assert.equal(updatePatches.length, 1, 'exactly one write-back to vaultSecrets');
+  const patch = updatePatches[0];
+  assert.equal(patch.needsReauth, false);
+  assert.equal(typeof patch.encryptedValue, 'string');
+  // Round-trips through the SHARED decrypt -> proves the persisted value was
+  // produced by the shared encryptCredential under the same VAULT_ENCRYPTION_KEY.
+  assert.deepEqual(decryptCredential(patch.encryptedValue as string), tokens);
+}
+
+function sliceBetween(start: string, end: string): string {
+  const i = SRC.indexOf(start);
+  assert.notEqual(i, -1, `start anchor missing: ${start}`);
+  const j = SRC.indexOf(end, i);
+  assert.notEqual(j, -1, `end anchor missing after start: ${end}`);
+  return SRC.slice(i, j);
+}
+
+describe('vault-credentials-304-softs — encryptCredential comes from shared (Refs #304)', () => {
+  describe('source pins', () => {
+    it('contains no require-call and never names the local vault-encryption module', () => {
+      assert.equal(
+        REQUIRE_CALL.test(SRC),
+        false,
+        'vault-credentials.ts must import its crypto helpers, not require them',
+      );
+      assert.ok(!SRC.includes(LOCAL_REQUIRE_NEEDLE));
+      assert.ok(!SRC.includes(LOCAL_MODULE_NEEDLE));
+    });
+
+    it('imports encryptCredential from @tourbillon/shared/vault-encryption', () => {
+      assert.match(
+        SRC,
+        /import\s*\{[^}]*\bencryptCredential\b[^}]*\}\s*from\s*'@tourbillon\/shared\/vault-encryption'/,
+      );
+    });
+
+    it('has exactly three encryptCredential(refreshed) write-back sites', () => {
+      const sites = SRC.match(/encryptedValue:\s*encryptCredential\(refreshed\)/g) ?? [];
+      assert.equal(sites.length, 3, 'one per scope (agent / company_user / company)');
+    });
+
+    it('each scope slice writes back via encryptCredential with no require', () => {
+      const slices: Array<[string, string, string]> = [
+        ['agent', "eq(vaultSecrets.scope, 'agent')", 'Failed to decrypt agent credential'],
+        [
+          'company_user',
+          "eq(vaultSecrets.scope, 'company_user')",
+          'Failed to decrypt user credential',
+        ],
+        ['company', "eq(vaultSecrets.scope, 'company')", 'Failed to decrypt company credential'],
+      ];
+      for (const [label, start, end] of slices) {
+        const slice = sliceBetween(start, end);
+        assert.match(
+          slice,
+          /encryptedValue:\s*encryptCredential\(refreshed\)/,
+          `${label} scope must encrypt the refreshed tokens via the shared helper`,
+        );
+        assert.equal(
+          REQUIRE_CALL.test(slice),
+          false,
+          `${label} scope write-back must not fall back to a require`,
+        );
+      }
+    });
+  });
+
+  describe('behaviour — OAuth refresh write-back persists shared-encrypted tokens', () => {
+    it('agent scope', async () => {
+      nextCredentialRow = expiredOauthRow('cred-agent');
+      stubTokenEndpoint('fresh-agent');
+      await expectRefreshedWriteBack(
+        { companyId: 'c-1', serverId: 'github-mcp', agentId: 'a-1' },
+        'fresh-agent',
+      );
+    });
+
+    it('company_user scope', async () => {
+      nextCredentialRow = expiredOauthRow('cred-user');
+      stubTokenEndpoint('fresh-user');
+      await expectRefreshedWriteBack(
+        { companyId: 'c-1', serverId: 'github-mcp', userId: 'u-1' },
+        'fresh-user',
+      );
+    });
+
+    it('company scope', async () => {
+      nextCredentialRow = expiredOauthRow('cred-company');
+      stubTokenEndpoint('fresh-company');
+      await expectRefreshedWriteBack(
+        { companyId: 'c-1', serverId: 'github-mcp' },
+        'fresh-company',
+      );
+    });
+  });
+});
