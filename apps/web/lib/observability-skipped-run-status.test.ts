@@ -1,27 +1,30 @@
 /**
- * S295-S3 (#295 soft): observability rows must surface `heartbeatRunStatus: 'skipped'`.
+ * S295-S3 / S298-S1 (#295, #298): observability rows must surface every terminal
+ * heartbeat run status via `heartbeatRunStatus`.
  *
- * `heartbeatRunStatusForRow` in lib/observability.ts whitelisted running/succeeded/
- * failed and mapped everything else — including the new #295 `skipped` status — to
- * null, so an observability row linked to a skipped run showed NO run status.
- * Pinned against PGlite (real migrations, real loader): one event per linked run
- * status, plus an orphan event.
+ * `heartbeatRunStatusForRow` in lib/observability.ts originally whitelisted only
+ * running/succeeded/failed: #295 added `skipped`, and S298-S1 (#298) added
+ * `coalesced` and `cancelled` so every terminal HeartbeatStatus maps through — an
+ * event linked to a terminal run never shows a null run status. Pinned against
+ * PGlite (real migrations, real loader): one event per linked run status, plus an
+ * orphan event (no linked run → null).
  *
- * Mutant (S295-S3 gate M4): drop `run.status === 'skipped'` from the whitelist →
- * the skipped row maps to null → RED. M5 (remove 'skipped' from the
- * ObservabilityEventRow union in observability-types.ts) is a compile-time pin:
- * the tsc assertion at the bottom of this file plus the whitelist's return type
- * turn it RED for `pnpm -r type-check` (tsx strips types at test time).
+ * Mutants (S298-S1 gate): drop `run.status === 'coalesced'` (or 'cancelled') from
+ * the whitelist → that row maps to null → RED. Legacy M4 (S295-S3): drop 'skipped'
+ * → RED. M5-style compile-time union pins at the bottom of this file turn removing
+ * a literal from ObservabilityEventRow['heartbeatRunStatus'] RED for
+ * `pnpm -r type-check` (tsx strips types at test time).
  *
- * Scope note: `coalesced` still maps to null — kept as-is deliberately (noted in
- * this PR's body; widening scope was explicitly declined).
+ * S298-S2 (#298) note: `heartbeatRunStatus` is API/MCP-visible only — no apps/web
+ * UI renders it (documented on the field itself); rendering it is a separate story.
  */
 import { describe, it, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
+import { TERMINAL_HEARTBEAT_STATUSES } from '@tourbillon/shared/terminal-heartbeat-statuses';
 
-process.env.DATABASE_URL ??= 'postgres://unused@127.0.0.1:1/unused';
+process.env.DATABASE_URL ??= 'postgres://unused@127.0.0.1/unused';
 
 const dbRequire = createRequire(join(__dirname, '../../../packages/db/package.json'));
 const { PGlite } = dbRequire('@electric-sql/pglite');
@@ -42,19 +45,21 @@ async function seededDb() {
     insert into agents (id, company_id, name, role, title, url_key) values
       ('a1', 'c1', 'Atlas', 'engineer', 'The Engineer', 'atlas');
     insert into heartbeat_runs (id, company_id, agent_id, invocation_source, status, error_text) values
-      ('r-running',  'c1', 'a1', 'assignment', 'running',   null),
-      ('r-succeeded','c1', 'a1', 'assignment', 'succeeded', null),
-      ('r-failed',   'c1', 'a1', 'assignment', 'failed',    'boom'),
-      ('r-skipped',  'c1', 'a1', 'assignment', 'skipped',   'Task issue-9 is assigned to agent other, not a1'),
-      ('r-coalesced','c1', 'a1', 'timer',      'coalesced', 'coalesced into a newer wake');
+      ('r-running',   'c1', 'a1', 'assignment', 'running',   null),
+      ('r-succeeded', 'c1', 'a1', 'assignment', 'succeeded', null),
+      ('r-failed',    'c1', 'a1', 'assignment', 'failed',    'boom'),
+      ('r-skipped',   'c1', 'a1', 'assignment', 'skipped',   'Task issue-9 is assigned to agent other, not a1'),
+      ('r-coalesced', 'c1', 'a1', 'timer',      'coalesced', 'coalesced into a newer wake'),
+      ('r-cancelled', 'c1', 'a1', 'on_demand',  'cancelled', 'operator force-killed the wake');
     insert into agent_observability_events
       (id, company_id, trace_id, span_id, event_type, name, status, heartbeat_run_id, occurred_at) values
-      ('e-1', 'c1', 'tr-run', 'sp-1', 'agent_run', 'wake-running',  'ok', 'r-running',   '2026-11-01T00:01:00Z'),
-      ('e-2', 'c1', 'tr-run', 'sp-2', 'agent_run', 'wake-ok',       'ok', 'r-succeeded', '2026-11-01T00:02:00Z'),
-      ('e-3', 'c1', 'tr-run', 'sp-3', 'agent_run', 'wake-failed',   'ok', 'r-failed',    '2026-11-01T00:03:00Z'),
-      ('e-4', 'c1', 'tr-run', 'sp-4', 'agent_run', 'wake-skipped',  'ok', 'r-skipped',   '2026-11-01T00:04:00Z'),
-      ('e-5', 'c1', 'tr-run', 'sp-5', 'agent_run', 'wake-coalesced','ok', 'r-coalesced', '2026-11-01T00:05:00Z'),
-      ('e-6', 'c1', 'tr-run', 'sp-6', 'agent_run', 'wake-orphan',   'ok', null,          '2026-11-01T00:06:00Z');
+      ('e-1', 'c1', 'tr-run', 'sp-1', 'agent_run', 'wake-running',   'ok', 'r-running',   '2026-11-01T00:01:00Z'),
+      ('e-2', 'c1', 'tr-run', 'sp-2', 'agent_run', 'wake-ok',        'ok', 'r-succeeded', '2026-11-01T00:02:00Z'),
+      ('e-3', 'c1', 'tr-run', 'sp-3', 'agent_run', 'wake-failed',    'ok', 'r-failed',    '2026-11-01T00:03:00Z'),
+      ('e-4', 'c1', 'tr-run', 'sp-4', 'agent_run', 'wake-skipped',   'ok', 'r-skipped',   '2026-11-01T00:04:00Z'),
+      ('e-5', 'c1', 'tr-run', 'sp-5', 'agent_run', 'wake-coalesced', 'ok', 'r-coalesced', '2026-11-01T00:05:00Z'),
+      ('e-7', 'c1', 'tr-run', 'sp-7', 'agent_run', 'wake-cancelled', 'ok', 'r-cancelled', '2026-11-01T00:07:00Z'),
+      ('e-6', 'c1', 'tr-run', 'sp-6', 'agent_run', 'wake-orphan',    'ok', null,          '2026-11-01T00:06:00Z');
   `);
   return { client, db: drizzle(client) };
 }
@@ -76,8 +81,8 @@ async function loadObservability(db: unknown) {
 }
 
 // One client for the whole file: node's module cache binds the intercepted `db`
-// into the imported module on FIRST load, so a second seeded client per test
-// would silently keep querying the closed first one.
+// into the imported module on FIRST load, so re-importing with a second seeded
+// client would silently keep querying the closed first one.
 let shared: { client: InstanceType<typeof PGlite>; observability: Awaited<ReturnType<typeof loadObservability>> } | null = null;
 async function sharedObservability() {
   if (!shared) {
@@ -90,30 +95,36 @@ after(async () => {
   await shared?.client.close();
 });
 
-describe('observability heartbeatRunStatus: skipped maps through (S295-S3, #295)', () => {
-  it('listObservabilityEvents exposes skipped (and keeps siblings + coalesced as-is)', async () => {
+describe('observability heartbeatRunStatus: every terminal run status maps through (S295-S3 + S298-S1)', () => {
+  it('listObservabilityEvents exposes running + every terminal status; orphan stays null', async () => {
     const { observability } = await sharedObservability();
     const result = await observability.listObservabilityEvents({
       companyId: 'c1',
       pageSize: 50,
     });
     const byName = new Map(result.events.map((e) => [e.name, e]));
-    assert.equal(result.total, 6);
-
-    const skipped = byName.get('wake-skipped');
-    assert.ok(skipped);
-    // M4 bait: removing 'skipped' from the whitelist yields null here.
-    assert.equal(skipped!.heartbeatRunStatus, 'skipped');
-    assert.ok(
-      skipped!.heartbeatRunErrorText?.includes('assigned to agent'),
-      'the skip reason must ride along for triage',
-    );
+    assert.equal(result.total, 7);
 
     assert.equal(byName.get('wake-running')!.heartbeatRunStatus, 'running');
     assert.equal(byName.get('wake-ok')!.heartbeatRunStatus, 'succeeded');
     assert.equal(byName.get('wake-failed')!.heartbeatRunStatus, 'failed');
-    assert.equal(byName.get('wake-coalesced')!.heartbeatRunStatus, null,
-      'coalesced handling kept as-is (out of scope, noted in PR body)');
+
+    // Per-terminal-status pins (S298-S1): skipped, coalesced and cancelled all map —
+    // dropping any whitelist line in heartbeatRunStatusForRow goes RED.
+    for (const status of TERMINAL_HEARTBEAT_STATUSES) {
+      const row = byName.get(`wake-${status === 'succeeded' ? 'ok' : status}`);
+      assert.ok(row, `seed event for '${status}' must exist`);
+      assert.equal(row!.heartbeatRunStatus, status, `'${status}' must map through, not null`);
+    }
+
+    const skipped = byName.get('wake-skipped');
+    assert.ok(
+      skipped!.heartbeatRunErrorText?.includes('assigned to agent'),
+      'the skip reason must ride along for triage',
+    );
+    assert.ok(byName.get('wake-coalesced')!.heartbeatRunErrorText?.includes('coalesced'));
+    assert.ok(byName.get('wake-cancelled')!.heartbeatRunErrorText?.includes('force-killed'));
+
     assert.equal(byName.get('wake-orphan')!.heartbeatRunStatus, null);
     assert.equal(byName.get('wake-orphan')!.heartbeatRunErrorText, null);
   });
@@ -132,8 +143,14 @@ describe('observability heartbeatRunStatus: skipped maps through (S295-S3, #295)
   });
 });
 
-// M5 compile-time pin (checked by `pnpm -r type-check`, not at tsx runtime):
-// the row union in observability-types.ts must admit 'skipped'.
+// M5-style compile-time pins (checked by `pnpm -r type-check`, not at tsx runtime):
+// the row union in observability-types.ts must admit every terminal status literal.
 const _skippedUnionPin: import('./observability-types').ObservabilityEventRow['heartbeatRunStatus'] =
   'skipped';
+const _coalescedUnionPin: import('./observability-types').ObservabilityEventRow['heartbeatRunStatus'] =
+  'coalesced';
+const _cancelledUnionPin: import('./observability-types').ObservabilityEventRow['heartbeatRunStatus'] =
+  'cancelled';
 void _skippedUnionPin;
+void _coalescedUnionPin;
+void _cancelledUnionPin;

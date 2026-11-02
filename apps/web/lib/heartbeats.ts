@@ -60,6 +60,11 @@ function runStatusCondition(filter: HeartbeatListFilter) {
       return eq(heartbeatRuns.status, 'queued');
     case 'skipped':
       return eq(heartbeatRuns.status, 'skipped');
+    // S298-S1 (#298): without these cases the filters would silently degrade to 'all'.
+    case 'coalesced':
+      return eq(heartbeatRuns.status, 'coalesced');
+    case 'cancelled':
+      return eq(heartbeatRuns.status, 'cancelled');
     default:
       return undefined;
   }

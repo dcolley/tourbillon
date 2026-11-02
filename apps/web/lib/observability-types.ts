@@ -28,7 +28,21 @@ export interface ObservabilityEventRow {
   outputPreview: string | null;
   payload: Record<string, unknown>;
   errorText: string | null;
-  heartbeatRunStatus: 'running' | 'succeeded' | 'failed' | 'skipped' | null;
+  /**
+   * Status of the linked heartbeat run (null when the event has no linked run, or the
+   * run's status is not a known HeartbeatStatus). S298-S2 (#298): this field is
+   * API/MCP-visible only (consumed via /api/observability and the MCP route) — no UI
+   * in apps/web renders it today; rendering it would be a separate story.
+   */
+  heartbeatRunStatus:
+    | 'running'
+    | 'succeeded'
+    | 'failed'
+    | 'skipped'
+    // S298-S1 (#298): symmetric with skipped — every terminal HeartbeatStatus maps.
+    | 'coalesced'
+    | 'cancelled'
+    | null;
   heartbeatRunErrorText: string | null;
   durationMs: number | null;
   inputTokens: number | null;

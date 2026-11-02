@@ -16,6 +16,13 @@ export interface QueueCounts {
   paused: number;
   /** #295: assignee-mismatch task wakes are recorded `skipped`, never `failed`. */
   skipped: number;
+  /**
+   * S298-S1 (#298): `coalesced` and `cancelled` are valid HeartbeatStatus terminal
+   * states (see @tourbillon/shared/terminal-heartbeat-statuses) — counted symmetric
+   * with `skipped` so a terminal run lands in a visible bucket instead of vanishing.
+   */
+  coalesced: number;
+  cancelled: number;
 }
 
 export interface QueueOverviewItem {
@@ -87,7 +94,17 @@ export class JobsError extends Error {
 }
 
 function emptyCounts(): QueueCounts {
-  return { waiting: 0, active: 0, completed: 0, failed: 0, delayed: 0, paused: 0, skipped: 0 };
+  return {
+    waiting: 0,
+    active: 0,
+    completed: 0,
+    failed: 0,
+    delayed: 0,
+    paused: 0,
+    skipped: 0,
+    coalesced: 0,
+    cancelled: 0,
+  };
 }
 
 export function getQueueMeta(name: string) {
@@ -115,6 +132,10 @@ export async function getQueueOverview(): Promise<{ queues: QueueOverviewItem[];
       else if (row.status === 'succeeded') counts.completed += 1;
       else if (row.status === 'queued') counts.waiting += 1;
       else if (row.status === 'skipped') counts.skipped += 1;
+      // S298-S1 (#298): symmetric with `skipped` — every terminal HeartbeatStatus
+      // gets its own bucket so nothing silently vanishes from the overview.
+      else if (row.status === 'coalesced') counts.coalesced += 1;
+      else if (row.status === 'cancelled') counts.cancelled += 1;
     }
   }
 

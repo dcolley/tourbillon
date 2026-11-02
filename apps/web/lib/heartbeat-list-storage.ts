@@ -7,7 +7,11 @@ export type HeartbeatListFilter =
   | 'failed'
   | 'queued'
   | 'in_queue'
-  | 'skipped';
+  | 'skipped'
+  // S298-S1 (#298): coalesced/cancelled are valid HeartbeatStatus terminal states —
+  // filterable like `skipped` so every terminal status has a list view.
+  | 'coalesced'
+  | 'cancelled';
 
 export const HEARTBEAT_LIST_FILTERS: Array<{ value: HeartbeatListFilter; label: string }> = [
   { value: 'all', label: 'All' },
@@ -17,6 +21,8 @@ export const HEARTBEAT_LIST_FILTERS: Array<{ value: HeartbeatListFilter; label: 
   { value: 'failed', label: 'Failed' },
   { value: 'queued', label: 'Queued' },
   { value: 'skipped', label: 'Skipped' },
+  { value: 'coalesced', label: 'Coalesced' },
+  { value: 'cancelled', label: 'Cancelled' },
 ];
 
 /** 0 = manual refresh only */
@@ -62,7 +68,17 @@ export function isHeartbeatRefreshInterval(value: number): value is HeartbeatRef
 }
 
 export function isHeartbeatListFilter(value: string): value is HeartbeatListFilter {
-  return ['all', 'running', 'succeeded', 'failed', 'queued', 'in_queue', 'skipped'].includes(value);
+  return [
+    'all',
+    'running',
+    'succeeded',
+    'failed',
+    'queued',
+    'in_queue',
+    'skipped',
+    'coalesced',
+    'cancelled',
+  ].includes(value);
 }
 
 /** Map legacy BullMQ / URL state params to heartbeat list filters. */
