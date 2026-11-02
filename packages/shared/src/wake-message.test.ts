@@ -79,6 +79,34 @@ describe('WC1 newest-first fill, chronological display', () => {
 });
 
 describe('wake message modes', () => {
+  it('#275 approval_resolved labels the linked issues, never an Assigned task ID', () => {
+    const m = buildWakeMessage(
+      job([], {
+        wakeReason: 'approval_resolved',
+        approvalId: 'appr-9',
+        approvalStatus: 'approved',
+        taskId: 'issue-9',
+        linkedIssueIds: ['issue-9', 'issue-10'],
+      }),
+    );
+    assert.ok(m.includes('Linked issue(s): issue-9, issue-10'), m);
+    assert.ok(!m.includes('Assigned task ID'), m);
+  });
+
+  it('#275 approval_resolved with only a taskId still says Linked issue(s)', () => {
+    const m = buildWakeMessage(
+      job([], { wakeReason: 'approval_resolved', approvalId: 'appr-9', approvalStatus: 'approved', taskId: 'issue-9' }),
+    );
+    assert.ok(m.includes('Linked issue(s): issue-9'), m);
+    assert.ok(!m.includes('Assigned task ID'), m);
+  });
+
+  it('#275 assignment wake keeps the Assigned task ID label (unchanged)', () => {
+    const m = buildWakeMessage(job([]));
+    assert.ok(m.includes('Assigned task ID: task-1'), m);
+    assert.ok(!m.includes('Linked issue(s)'), m);
+  });
+
   it('approval_resolved: LIVE STATE header comes after the Board note', () => {
     const m = buildWakeMessage(
       job(ten.slice(0, 2), { wakeReason: 'approval_resolved', approvalId: 'appr-1', approvalStatus: 'approved', approvalNote: 'Go ahead.' }),
