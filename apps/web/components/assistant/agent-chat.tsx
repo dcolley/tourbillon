@@ -546,6 +546,9 @@ export function AgentChatView(props: AgentChatViewProps) {
             // S296-S4: the send chord is always swallowed, even when there is nothing to send
             // (empty draft / stopping) - no stray newline; the send itself still needs content.
             e.preventDefault();
+            // S301-S3 (Refs #301, PM decision): while `stopping` the swallowed press stays SILENT -
+            // no second send/steer, no toast, no composer "stopping" hint. Pinned by
+            // agent-chat-stopping-silent.test.ts; do not add press feedback here.
             if (!canSend) return;
             if (gesture === 'steer') props.onSteer();
             else props.onSend();
