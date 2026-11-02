@@ -80,6 +80,15 @@ export function writeChatSendKeyMode(mode: ChatSendKeyMode): void {
 
 type ChatSendKeyListener = (mode: ChatSendKeyMode) => void;
 
+/**
+ * Live subscribers, keyed by PER-SUBSCRIPTION TOKEN rather than callback identity: every
+ * `subscribeChatSendKeyMode` call wraps its callback in a fresh closure before adding it, so two
+ * subscriptions of the SAME function are two distinct entries and each unsubscribe removes only
+ * its own. A registry keyed by function identity (the original) would merge the two subscriptions
+ * into one Set entry, and the first unsubscribe would silence the callback while its second
+ * subscription - and its window-listener ref - was still live (S300-S2). Not reachable via
+ * `useChatSendKeyMode` today (each subscriber passes its own closure), but the store is exported.
+ */
 const listeners = new Set<ChatSendKeyListener>();
 
 function emit(mode: ChatSendKeyMode): void {
@@ -105,23 +114,34 @@ const storageListenerRefs = new Map<StorageListenerHost, number>();
 
 /**
  * Subscribe to preference changes (same-tab writes and other tabs' `storage` events). Returns an
- * idempotent unsubscribe function. All subscriptions against a window share ONE `storage` listener
- * (the DOM would dedupe the identical handler anyway), ref-counted so it stays attached while any
- * subscriber lives and is dropped only once the last one unsubscribes.
+ * idempotent unsubscribe function. Each subscription registers its own token (see `listeners`),
+ * so the same callback may safely subscribe twice and each unsubscribe affects only its own
+ * subscription. All subscriptions against a window share ONE `storage` listener (the DOM would
+ * dedupe the identical handler anyway), ref-counted so it stays attached while any subscriber
+ * lives and is dropped only once the last one unsubscribes.
  */
 export function subscribeChatSendKeyMode(listener: ChatSendKeyListener): () => void {
-  listeners.add(listener);
+  // The fresh closure is the per-subscription token (see `listeners`): two subscriptions of the
+  // same callback are two distinct entries, so one unsubscribe cannot silence the other (S300-S2).
+  const token: ChatSendKeyListener = (mode) => listener(mode);
+  listeners.add(token);
   const owner: StorageListenerHost | null = typeof window === 'undefined' ? null : window;
   let released = false;
   if (owner) {
     const refs = (storageListenerRefs.get(owner) ?? 0) + 1;
     storageListenerRefs.set(owner, refs);
+    // The `refs === 1` gate is DOCUMENTED INTENT, not behaviour the tests can distinguish:
+    // addEventListener with the identical module-level handler is deduped (by the DOM per window,
+    // and by the fake window's Set in lib/chat-send-key.test.ts), so attaching unconditionally on
+    // every subscribe would keep the whole suite green (the equivalent mutant from S300-S1). The
+    // gate makes the one-listener-per-window invariant explicit; do not "simplify" it away
+    // expecting a pin to catch the regression, because none will.
     if (refs === 1) owner.addEventListener('storage', onStorageEvent);
   }
   return () => {
     if (released) return; // a double unsubscribe must not eat another subscriber's ref
     released = true;
-    listeners.delete(listener);
+    listeners.delete(token);
     if (!owner) return;
     const refs = (storageListenerRefs.get(owner) ?? 1) - 1;
     if (refs > 0) {
