@@ -93,17 +93,43 @@ function onStorageEvent(event: StorageEvent): void {
 }
 
 /**
+ * Live subscriber count per window for the shared `storage` listener. The DOM dedupes the identical
+ * module-level handler, so a window carries exactly ONE `storage` listener no matter how many
+ * subscribers attach it — unsubscribing therefore cannot simply `removeEventListener`: the first
+ * composer to unmount would tear the listener down for every remaining subscriber and cross-tab
+ * sync would go dead until something remounted (S296-S3). Attach on the first subscriber of a
+ * window, detach only when its last one leaves.
+ */
+type StorageListenerHost = Pick<Window, 'addEventListener' | 'removeEventListener'>;
+const storageListenerRefs = new Map<StorageListenerHost, number>();
+
+/**
  * Subscribe to preference changes (same-tab writes and other tabs' `storage` events). Returns an
- * unsubscribe function. Each subscription holds its own `storage` listener (the DOM dedupes the
- * identical handler per window), so a subscription always hears the window it was created against.
+ * idempotent unsubscribe function. All subscriptions against a window share ONE `storage` listener
+ * (the DOM would dedupe the identical handler anyway), ref-counted so it stays attached while any
+ * subscriber lives and is dropped only once the last one unsubscribes.
  */
 export function subscribeChatSendKeyMode(listener: ChatSendKeyListener): () => void {
   listeners.add(listener);
-  const owner = typeof window === 'undefined' ? null : window;
-  owner?.addEventListener('storage', onStorageEvent);
+  const owner: StorageListenerHost | null = typeof window === 'undefined' ? null : window;
+  let released = false;
+  if (owner) {
+    const refs = (storageListenerRefs.get(owner) ?? 0) + 1;
+    storageListenerRefs.set(owner, refs);
+    if (refs === 1) owner.addEventListener('storage', onStorageEvent);
+  }
   return () => {
+    if (released) return; // a double unsubscribe must not eat another subscriber's ref
+    released = true;
     listeners.delete(listener);
-    owner?.removeEventListener('storage', onStorageEvent);
+    if (!owner) return;
+    const refs = (storageListenerRefs.get(owner) ?? 1) - 1;
+    if (refs > 0) {
+      storageListenerRefs.set(owner, refs);
+    } else {
+      storageListenerRefs.delete(owner);
+      owner.removeEventListener('storage', onStorageEvent);
+    }
   };
 }
 

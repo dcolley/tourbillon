@@ -33,6 +33,8 @@ interface FakeWindow {
   removeEventListener(type: string, handler: StorageEventHandler): void;
   /** Fire a `storage` event, as another tab would. */
   fireStorage(key: string | null): void;
+  /** How many `storage` handlers are currently attached (the DOM Set-like dedup). */
+  storageListenerCount(): number;
   store: Map<string, string>;
   failNextSet?: boolean;
   failRead?: boolean;
@@ -68,6 +70,7 @@ function makeFakeWindow(initial?: Partial<Record<string, string>>): FakeWindow {
     fireStorage: (key) => {
       for (const h of [...(handlers.get('storage') ?? [])]) h({ key });
     },
+    storageListenerCount: () => handlers.get('storage')?.size ?? 0,
     store,
   };
   return win;
@@ -261,6 +264,46 @@ describe('CHAT-SEND-KEY live subscription', () => {
     } finally {
       off();
     }
+  });
+
+  it('S296-S3: the shared window listener is ref-counted — a survivor hears cross-tab writes after another subscriber leaves', () => {
+    // Fresh window so the handler-count assertions below are about THIS window's listeners.
+    const w = makeFakeWindow();
+    withWindow(w, () => {
+      const seenA: string[] = [];
+      const seenB: string[] = [];
+      const offA = subscribeChatSendKeyMode((m) => seenA.push(m));
+      const offB = subscribeChatSendKeyMode((m) => seenB.push(m));
+      assert.equal(w.storageListenerCount(), 1, 'subscribers share ONE storage listener on the window');
+
+      // A unmounts (thread switch, pane close) — and does it twice, as a sloppy caller may.
+      offA();
+      offA();
+
+      // The cross-tab write must still reach the survivor: the DOM dedupes the identical handler,
+      // so if A's unsubscribe tore it down, B would hear nothing until something remounted.
+      w.store.set(CHAT_SEND_KEY_STORAGE_KEY, 'mod_enter_sends');
+      w.fireStorage(CHAT_SEND_KEY_STORAGE_KEY);
+      assert.deepEqual(seenB, ['mod_enter_sends'], 'B still hears the cross-tab write after A left');
+      assert.deepEqual(seenA, [], 'the unsubscribed listener stays silent');
+
+      // The last subscriber leaving must actually detach (no leaked window listener)…
+      offB();
+      assert.equal(w.storageListenerCount(), 0, 'the last unsubscribe detaches the shared listener');
+
+      // …and a later subscriber must re-attach it.
+      const seenC: string[] = [];
+      const offC = subscribeChatSendKeyMode((m) => seenC.push(m));
+      try {
+        assert.equal(w.storageListenerCount(), 1, 'a new subscriber re-attaches the listener');
+        w.store.set(CHAT_SEND_KEY_STORAGE_KEY, 'enter_sends');
+        w.fireStorage(CHAT_SEND_KEY_STORAGE_KEY);
+        assert.deepEqual(seenC, ['enter_sends']);
+      } finally {
+        offC();
+        assert.equal(w.storageListenerCount(), 0, 'and unsubscribing it detaches again');
+      }
+    });
   });
 });
 
