@@ -55,6 +55,16 @@ export function parseTaskProgressMessage(raw: string): TaskProgressEvent | null 
   const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
   const stage = str(e.stage);
   const status = str(e.status);
+  // S304-S2 (#304): this accept set is deliberately narrower than the heartbeat read paths —
+  // S298-S1 counts/filters/maps coalesced/cancelled, but those are heartbeat_runs ROW statuses,
+  // not statuses of THIS channel. The scheduler cannot emit coalesced/cancelled here: the only
+  // publisher is task-runner's emitProgress (packages/scheduler/src/task-runner.ts), whose
+  // ChatTaskProgressEvent.status is exactly the four words below — `started` uses the 'running'
+  // literal and done/needs_review carry WakeResult.status ('succeeded' | 'failed' | 'skipped':
+  // a coalesced wake resolves as 'skipped', a force-kill persists 'failed'), and a cancelled
+  // chat task never reaches emitProgress (the claim guard returns false -> continue).
+  // Pinned by task-progress-signals.test.ts (behaviour + this comment); widen only if the
+  // publisher type widens, in the same commit as the scheduler change.
   if (
     (stage !== 'started' && stage !== 'done' && stage !== 'needs_review') ||
     (status !== 'running' && status !== 'succeeded' && status !== 'failed' && status !== 'skipped')
