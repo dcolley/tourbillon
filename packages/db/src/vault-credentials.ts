@@ -1,7 +1,7 @@
 import { db } from './client';
 import { vaultSecrets } from './schema/vault-secrets';
 import { eq, and } from 'drizzle-orm';
-import { decryptCredential } from '@tourbillon/shared/vault-encryption';
+import { decryptCredential, encryptCredential } from '@tourbillon/shared/vault-encryption';
 import { resolveMcpCredential } from '@tourbillon/shared/mcp-credentials';
 import type { OAuthTokens } from '@tourbillon/shared/vault-types';
 import type { AgentRuntimeConfig, CompanySettings } from '@tourbillon/shared/types';
@@ -43,7 +43,7 @@ export async function resolveVaultSecret(
               await db
                 .update(vaultSecrets)
                 .set({
-                  encryptedValue: require('./vault-encryption').encryptCredential(refreshed),
+                  encryptedValue: encryptCredential(refreshed),
                   needsReauth: false,
                   updatedAt: new Date(),
                 })
@@ -86,7 +86,7 @@ export async function resolveVaultSecret(
               await db
                 .update(vaultSecrets)
                 .set({
-                  encryptedValue: require('./vault-encryption').encryptCredential(refreshed),
+                  encryptedValue: encryptCredential(refreshed),
                   needsReauth: false,
                   updatedAt: new Date(),
                 })
@@ -124,7 +124,7 @@ export async function resolveVaultSecret(
             await db
               .update(vaultSecrets)
               .set({
-                encryptedValue: require('./vault-encryption').encryptCredential(refreshed),
+                encryptedValue: encryptCredential(refreshed),
                 needsReauth: false,
                 updatedAt: new Date(),
               })
