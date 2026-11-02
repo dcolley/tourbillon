@@ -46,6 +46,13 @@
  * closes the gate's surviving M7/M8 mutants by pinning rows that DEPEND on the VERB_TAIL
  * lookahead alternatives and the 5-char AGENT_TO_VERB bound (the "sets aside" false-RED is
  * documented there, not pinned).
+ *
+ * S284-S1 (#284 ACCEPT soft-pack): the S278-S1 note claimed the tight-copula contract was
+ * pinned by rows that in fact never move — no row caught a copula loosened to swallow an
+ * optional adverb (`(?:is|are|…)\s+(?:\w+\s+)?` stayed GREEN on every old row), and no row
+ * caught the copula alternation narrowing to bare `is`. The S278-S1 corpus now pins BOTH
+ * sides of the tight copula: an adverbial row that stays GREEN only while the copula is
+ * tight, and a `was` row that stays RED only while the alternation covers it.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -354,6 +361,9 @@ test('S278-S1: long-tail passives (tight copula, verb past the 15-char window) R
     'opts.taskCap is set automatically when the scheduler starts',
     'opts.taskCap is supplied automatically when main boots',
     'opts.taskCap is configured automatically when the boot wrapper runs',
+    // S284-S1: the `was` inflection — RED only while PASSIVE_COPULA covers more than bare
+    // `is`. Narrow the alternation to `is` and this row slips GREEN (gate mutant S1e).
+    'opts.taskCap was set automatically when the scheduler started',
   ];
   for (const copy of FORBIDDEN) {
     assert.match(
@@ -366,13 +376,23 @@ test('S278-S1: long-tail passives (tight copula, verb past the 15-char window) R
   // Passive-branch contract rows: the tail may not cross a COMMA (honest agent-swaps stay
   // GREEN even with a boot word just past one), the tail is BOUNDED at 30 chars (the
   // known-miss beyond it is pinned so the bound cannot silently drift), and the copula
-  // must be TIGHT (an adverb between copula and participle is the other documented
-  // known-miss — loosen the branch to swallow "is usually set by…" and the first two rows
-  // here fail alongside the real lie shapes).
+  // must be TIGHT — no adverb slot between copula and participle. The old note here
+  // claimed an adverb-loosened copula (`(?:is|are|…)\s+(?:\w+\s+)?`) would fail "the
+  // first two rows"; measured on tip (and as gate mutant S1b), it fails NEITHER: the
+  // comma row can't bind past its comma in any copula shape, and the known-miss row
+  // (`…is usually set by tools at tick time`) carries NO BOOT_PATH token at all
+  // (scheduler|main|boot — `tools` is not one), so the passive branch can never bind it
+  // in any copula shape — the gate's own words: "no boot word, so it can never match".
+  // The real tight-copula pin is the S284-S1 adverbial row below: its boot word sits 24
+  // chars past the participle (inside the tail bound), so it stays GREEN only while the
+  // copula is tight and flips RED the moment an adverb slot is added (gate mutant S1b).
   const HARMLESS = [
     'opts.taskCap is set by the tool, not the scheduler',
     'opts.taskCap is set well before the checks the poller makes against the scheduler default',
     'opts.taskCap is usually set by tools at tick time',
+    // S284-S1: adverb between copula and participle stays a known-miss ONLY because the
+    // copula is tight — this row is what dies if the copula gains an adverb slot.
+    'opts.taskCap is usually set automatically when the scheduler starts',
   ];
   for (const copy of HARMLESS) {
     assert.doesNotMatch(

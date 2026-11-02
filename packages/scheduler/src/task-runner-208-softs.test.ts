@@ -347,13 +347,43 @@ test('S24a pin: scheduler test script keeps the working belt --conditions=tourbi
 // `test(` and carry the option object — so prose, the regex source below, and even
 // commented-out fixtures (`// test(…`) can no longer mask a dropped option. A spoof would
 // have to be a genuine `test(`-prefixed line, i.e. itself a call site under the pin.
+// S284-S2 (#284 ACCEPT soft-pack, info → hardened): the call-site count alone was still
+// spoofable — gate mutants M12c/M12d survived by moving a test(…{ timeout: … }) line to
+// COLUMN 0 inside a block comment or a template string: line-anchored `^test\(` cannot
+// tell a real call from those. Two closures here, no parser needed:
+//   1. STRIPPED match — block comments and template literals are blanked from the source
+//      before the count, and BOTH the raw and the stripped source must count exactly 2.
+//      Raw-vs-stripped equality is precisely the M12c/M12d discriminator.
+//   2. NAMED call sites — each S5 pin's own test('<name>', { timeout: … }) line must
+//      appear (on the stripped source), so a spoof can never SUBSTITUTE for a named pin
+//      that lost its option: the spoof adds to the count while the named match goes
+//      missing. Caveats, documented: the stripper is naive (block comment, then template
+//      literal — no string/regex awareness), so this comment block itself must never
+//      contain unbalanced star-slash tokens or unbalanced backticks outside a block
+//      comment, and renaming a pin without updating the names below REDs — that coupling
+//      is deliberate. A crafted block comment with a nested delimiter could desync the
+//      pairing; desync can only ADD stripped matches (or break the file for node too),
+//      which the raw-vs-stripped equality and the named checks catch.
 test('S272-S3 pin: both async PGlite pins carry the PARALLEL_GATE_TIMEOUT_MS per-test timeout', () => {
   const SRC = readFileSync(__filename, 'utf8');
-  // `^` (m flag) anchors each match to a test( call site — the two async pins open their
-  // option object on the same line as the test name. Note: this test's own body must not
-  // sit on a `test(`-prefixed line carrying the option literal (the regex source line
-  // starts indented with `const carried`, so it is safe by construction).
-  const carried = SRC.match(/^test\(.*?\{\s*timeout:\s*PARALLEL_GATE_TIMEOUT_MS\s*\}/gm) ?? [];
+  const CARRIED_RE = /^test\(.*?\{\s*timeout:\s*PARALLEL_GATE_TIMEOUT_MS\s*\}/gm;
+  const S5_NAMES = [
+    'S5: listRunnable end-to-end — resolved per-company budgets travel company read → CASE → rows (real PGlite)',
+    'S5: listRunnable with no pending work — empty map, no CASE, empty listing (real PGlite)',
+  ];
+
+  // Naive stripper: block comments then template literals. Delimiters inside strings are
+  // rare enough here (none today); see the caveat in the header note above.
+  const stripped = SRC.replace(/\/\*[\s\S]*?\*\//g, '').replace(/`[\s\S]*?`/g, '');
+
+  // (1) Call-site count on BOTH views — a column-0 `test(` line hidden in a block comment
+  // or template string matches raw but not stripped (S284-S2 vs M12c/M12d). `^` (m flag)
+  // anchors each match to a test( call site — the two async pins open their option object
+  // on the same line as the test name. Note: this test's own body must not sit on a
+  // `test(`-prefixed line carrying the option literal (the regex sources below stay
+  // indented, so they are safe by construction).
+  const carriedRaw = SRC.match(CARRIED_RE) ?? [];
+  const carried = stripped.match(CARRIED_RE) ?? [];
   assert.equal(
     carried.length,
     2,
@@ -361,4 +391,27 @@ test('S272-S3 pin: both async PGlite pins carry the PARALLEL_GATE_TIMEOUT_MS per
       'option (S266-S3) — dropping one starves it into the opaque file-level wall under a ' +
       'parallel gate; a matching prose comment cannot mask it (S278-S4 call-site anchor)',
   );
+  assert.equal(
+    carriedRaw.length,
+    carried.length,
+    'no extra column-0 call-site match may live inside a block comment or template string ' +
+      '(S284-S2: raw and stripped call-site counts must agree — M12c/M12d spoof shape)',
+  );
+
+  // (2) Named call sites — each S5 pin's OWN test( line must carry the option; the count
+  // above alone could be kept at 2 by a spoof while a real pin lost its timeout. The
+  // names are matched against their single-quoted literal form, regex-escaped.
+  for (const name of S5_NAMES) {
+    // Names contain no ' or backslash today; assert that invariant rather than build a
+    // full string-escape layer, then regex-escape and match the literal single-quoted form.
+    assert.ok(!name.includes("'") && !name.includes('\\'), `pin name is quote-safe: ${name}`);
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const named = stripped.match(
+      new RegExp(`^test\\('${escaped}'\\.?,\\s*\\{\\s*timeout:\\s*PARALLEL_GATE_TIMEOUT_MS\\s*\\}`, 'm'),
+    );
+    assert.ok(
+      named,
+      `the pin '${name}' must keep its own { timeout: PARALLEL_GATE_TIMEOUT_MS } option at its call site (S284-S2)`,
+    );
+  }
 });
