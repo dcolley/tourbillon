@@ -143,6 +143,28 @@ async function seedThread(threadId: string, opts: { resourceId?: string; agentId
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * S303-S4 / S304-S4: poll a condition with a WATCHDOG budget, not a pacing budget.
+ *
+ * The stub model paces chunks with one setTimeout per chunk (chunkDelayMs), and the
+ * detached/queued runs chain several such streams plus Mastra queue drain. Under the
+ * full-suite parallel run (~100 tsx test processes over the host's cores) those timers
+ * are starved — a nominal 1.2 s chunk pump can stretch several-fold. The old fixed
+ * 3 s / 4 s budgets were sized for a serial machine, which is exactly why these tests
+ * pass alone but flake under full-suite load.
+ *
+ * The loop returns the instant the condition flips, so a generous watchdog costs
+ * nothing when healthy; it only bounds a genuine hang (with a clearer message than the
+ * assert that used to fire against the stale condition). No assertion is weakened: the
+ * caller still asserts the FULL expected content (deepEqual on ends, equal on
+ * modelCalls) after this returns.
+ */
+async function waitUntil(label: string, cond: () => boolean, budgetMs = 20_000): Promise<void> {
+  const until = Date.now() + budgetMs;
+  while (!cond() && Date.now() < until) await sleep(10);
+  if (!cond()) throw new Error(`timed out after ${budgetMs}ms waiting for ${label}`);
+}
+
 /** STREAM-1: waits for this session's run on the thread to end (a detached run goes on after its client). */
 async function waitIdle(threadId: string) {
   for (let i = 0; i < 200; i++) {
@@ -411,8 +433,7 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
           }
         },
       });
-      const until = Date.now() + 3000;
-      while (ends.length === 0 && Date.now() < until) await new Promise((r) => setTimeout(r, 10));
+      await waitUntil("the detached run's agent_end reason", () => ends.length > 0);
       assert.deepEqual(ends, ['complete']);
       await waitIdle('agui-thread-5');
     });
@@ -470,8 +491,7 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
         await request('alice', input('agui-thread-detached-abort', { forwardedProps: { tourbillon: { action: 'abort' } } }, '')),
       );
       assert.equal(ctl[1].value.accepted, true);
-      const until = Date.now() + 3000;
-      while (ends.length === 0 && Date.now() < until) await sleep(10);
+      await waitUntil("the detached run's agent_end reason", () => ends.length > 0);
       assert.deepEqual(ends, ['aborted']);
       await waitIdle('agui-thread-detached-abort');
     });
@@ -793,8 +813,7 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
           }
         },
       });
-      const until = Date.now() + 4000;
-      while (stub.modelCalls < 2 && Date.now() < until) await sleep(10);
+      await waitUntil('the queued follow-up model call (stub.modelCalls === 2)', () => stub.modelCalls >= 2);
       assert.equal(stub.modelCalls, 2, 'the queued follow-up runs after the client has gone');
       await waitIdle('agui-thread-drop');
     });
@@ -814,8 +833,7 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
           }
         },
       });
-      const until = Date.now() + 4000;
-      while (stub.modelCalls < 2 && Date.now() < until) await sleep(10);
+      await waitUntil('the Mastra follow-up model call (stub.modelCalls === 2)', () => stub.modelCalls >= 2);
       assert.equal(stub.modelCalls, 2, 'the Mastra follow-up runs after the client has gone');
       await waitIdle('agui-thread-mastra-q');
     });
