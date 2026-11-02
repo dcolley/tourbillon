@@ -83,16 +83,14 @@ export function createDrizzleSessionStore(): SessionStore {
         .returning();
       return updated[0] ? rowToSession(updated[0]) : null;
     },
-    async listActivePorts(companyId: string): Promise<number[]> {
+    async listActivePorts(): Promise<number[]> {
+      // Host-wide (no companyId filter): all seats bind ports on this one host, so
+      // the allocator must see every live seat's port, not just its own company's
+      // (#282 B2 — c1 and c2 must never both get 6901).
       const rows = await db
         .select({ vncPort: companyComputerSessions.vncPort })
         .from(companyComputerSessions)
-        .where(
-          and(
-            eq(companyComputerSessions.companyId, companyId),
-            inArray(companyComputerSessions.status, [...ACTIVE_STATUSES]),
-          ),
-        );
+        .where(inArray(companyComputerSessions.status, [...ACTIVE_STATUSES]));
       return rows.map((r) => r.vncPort);
     },
     async countActiveSessions(): Promise<number> {

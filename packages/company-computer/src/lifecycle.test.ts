@@ -130,7 +130,7 @@ describe('createSession (mocked host)', () => {
       createdAt: FIXED, updatedAt: FIXED, startedAt: null, destroyedAt: FIXED, lastActivityAt: null,
       takeoverStatus: null, takeoverUserId: null,
     });
-    assert.equal(await allocatePort(store, 'c-1'), 6901, 'destroyed frees its port');
+    assert.equal(await allocatePort(store), 6901, 'destroyed frees its port');
 
     store.seed({
       id: 'live', companyId: 'c-1', agentId: 'a-8', agentUrlKey: 'eng',
@@ -138,7 +138,31 @@ describe('createSession (mocked host)', () => {
       createdAt: FIXED, updatedAt: FIXED, startedAt: FIXED, destroyedAt: null, lastActivityAt: null,
       takeoverStatus: null, takeoverUserId: null,
     });
-    assert.equal(await allocatePort(store, 'c-1'), 6902, 'live seat holds its port');
+    assert.equal(await allocatePort(store), 6902, 'live seat holds its port');
+  });
+
+  it('port allocation is HOST-WIDE: two companies never share a port (#282 B2)', async () => {
+    const { host } = mockHost();
+    const store = new InMemorySessionStore();
+    let n = 0;
+    const d = { store, hostClient: host, now: () => new Date(FIXED.getTime()), newSessionId: () => `ccs-hw-${++n}` };
+    // Company c-1 takes the first port from PORT_BASE.
+    const first = await createSession(ctx({ companyId: 'c-1', agentId: 'a-1', agentUrlKey: 'ceo' }), d);
+    assert.equal(first.vncPort, 6901);
+    // A DIFFERENT company's seat must skip 6901 even though its own company holds no ports.
+    const second = await createSession(
+      ctx({ companyId: 'c-2', agentId: 'b-1', agentUrlKey: 'ceo', companySlug: 'other' }),
+      d,
+    );
+    assert.equal(second.vncPort, 6902, 'host-wide allocation: c-2 cannot reuse c-1\'s 6901');
+    // A third seat (same company as the first) keeps climbing too.
+    const third = await createSession(
+      ctx({ companyId: 'c-1', agentId: 'a-2', agentUrlKey: 'cto' }),
+      d,
+    );
+    assert.equal(third.vncPort, 6903);
+    const ports = store.all().map((s) => s.vncPort);
+    assert.equal(new Set(ports).size, ports.length, 'all live host ports unique from PORT_BASE');
   });
 
   it('buildContainerSpec binds ONLY the two canonical mounts over /data and /home/kasm-user', () => {

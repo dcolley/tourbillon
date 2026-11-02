@@ -30,8 +30,9 @@ export interface SessionStore {
     sessionId: string,
     patch: Partial<Omit<ComputerSession, 'id' | 'companyId' | 'agentId'>>,
   ): Promise<ComputerSession | null>;
-  /** Ports held by non-destroyed sessions of this company (port allocator input). */
-  listActivePorts(companyId: string): Promise<number[]>;
+  /** Ports held by ALL non-destroyed sessions on this HOST (host-wide, not
+   *  company-scoped: every seat binds a port on the same host — #282 B2). */
+  listActivePorts(): Promise<number[]>;
   /** Host-wide count of non-destroyed seats (MAX_ACTIVE_SEATS cap input). */
   countActiveSessions(): Promise<number>;
 }

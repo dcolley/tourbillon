@@ -49,9 +49,11 @@ export function generateVncPassword(length = 24): string {
     .slice(0, length);
 }
 
-/** Host port allocation: PORT_BASE upward, skipping ports held by live sessions. */
-export async function allocatePort(store: SessionStore, companyId: string): Promise<number> {
-  const taken = new Set(await store.listActivePorts(companyId));
+/** Host port allocation: PORT_BASE upward, skipping ports held by ANY live seat on
+ *  this host (host-wide like countActiveSessions — two companies must never share a
+ *  port; #282 B2). */
+export async function allocatePort(store: SessionStore): Promise<number> {
+  const taken = new Set(await store.listActivePorts());
   let port = PORT_BASE;
   while (taken.has(port)) port += 1;
   return port;
@@ -110,7 +112,7 @@ export async function createSession(ctx: ComputerContext, deps: LifecycleDeps): 
   ]);
 
   const image = deps.image ?? KASM_IMAGE;
-  const vncPort = await allocatePort(deps.store, ctx.companyId);
+  const vncPort = await allocatePort(deps.store);
   const spec = { ...buildContainerSpec(ctx, vncPort, image) };
 
   const started = await deps.hostClient.startContainer(spec); // dry-run refuses here

@@ -62,10 +62,10 @@ export class InMemorySessionStore implements SessionStore {
     return this.clone(next);
   }
 
-  async listActivePorts(companyId: string): Promise<number[]> {
+  async listActivePorts(): Promise<number[]> {
     const ports: number[] = [];
     for (const row of this.rows.values()) {
-      if (row.companyId === companyId && ACTIVE_STATUSES.has(row.status)) ports.push(row.vncPort);
+      if (ACTIVE_STATUSES.has(row.status)) ports.push(row.vncPort);
     }
     return ports;
   }
