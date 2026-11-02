@@ -207,7 +207,7 @@ export function formatApprovalDecisionComment(input: {
 export interface ApprovalWakeTarget {
   agentId: string;
   role: 'requester' | 'assignee';
-  /** Linked issue ids for this wake; the first one becomes the wake's task. */
+  /** Linked issue ids carried as wake context (#275: "Linked issue(s)" in the message, not an assignment). */
   issueIds: string[];
 }
 
