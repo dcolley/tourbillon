@@ -39,7 +39,11 @@ function heartbeatRunStatusForRow(
     run.status === 'failed' ||
     // #295: assignee-mismatch task wakes record `skipped`; surface it like the other
     // terminal states (neutral, not an error).
-    run.status === 'skipped'
+    run.status === 'skipped' ||
+    // S298-S1 (#298): coalesced/cancelled are terminal too — every terminal
+    // HeartbeatStatus maps through, none silently becomes null.
+    run.status === 'coalesced' ||
+    run.status === 'cancelled'
   ) {
     return run.status;
   }

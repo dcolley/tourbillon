@@ -1,8 +1,8 @@
 import Link from 'next/link';
 import { PageHeader } from '@/components/page-header';
-import { Badge } from '@/components/ui/badge';
 import { Card, CardContent } from '@/components/ui/card';
 import { getQueueOverview } from '@/lib/jobs';
+import { QueueCountBadges } from './queue-count-badges';
 
 export default async function JobsPage() {
   const { queues } = await getQueueOverview();
@@ -23,39 +23,12 @@ export default async function JobsPage() {
                   <h2 className="font-semibold">{queue.label}</h2>
                   <p className="text-sm text-muted-foreground">{queue.description}</p>
                 </div>
-                <div className="flex flex-wrap gap-2">
-                  <CountBadge label="waiting" value={queue.counts.waiting} />
-                  <CountBadge label="active" value={queue.counts.active} />
-                  <CountBadge
-                    label="failed"
-                    value={queue.counts.failed}
-                    highlight={queue.counts.failed > 0}
-                  />
-                  <CountBadge label="completed" value={queue.counts.completed} />
-                  {/* #295: skipped is a neutral terminal state — never highlight as failure. */}
-                  <CountBadge label="skipped" value={queue.counts.skipped} />
-                </div>
+                <QueueCountBadges counts={queue.counts} />
               </CardContent>
             </Card>
           </Link>
         ))}
       </div>
     </div>
-  );
-}
-
-function CountBadge({
-  label,
-  value,
-  highlight,
-}: {
-  label: string;
-  value: number;
-  highlight?: boolean;
-}) {
-  return (
-    <Badge variant={highlight ? 'destructive' : 'secondary'}>
-      {label}: {value}
-    </Badge>
   );
 }
