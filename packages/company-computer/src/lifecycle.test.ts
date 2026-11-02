@@ -364,7 +364,12 @@ describe('VNC password', () => {
     }
   });
 
-  it('gate refusals are the locked wording verbatim — no room for a password value (M31)', async () => {
+  // Wording pin only, NOT a leak pin: both gates throw in createSession BEFORE
+  // buildContainerSpec/generateVncPassword run, so no password exists yet at this point
+  // and this test structurally cannot observe a pw leak. The actual leak pins for the
+  // start refusals live in 'dry-run start refusals ... (M31)' below (package suite) and
+  // in apps/web/app/api/internal/company-computer/route.test.ts (S290-S1, both 503s).
+  it('gate refusals are the locked wording verbatim — wording pin only, gates fire before pw exists (M31)', async () => {
     const { host } = recordingHost();
     await assert.rejects(
       () => createSession(ctx({ companyHasComputer: false }), { store: new InMemorySessionStore(), hostClient: host }),

@@ -271,6 +271,36 @@ describe('POST /api/internal/company-computer/[action]', () => {
     assert.ok(!JSON.stringify(await json(info)).includes(pw), 'getSessionInfo response leaks the VNC password');
   });
 
+  // S290-S1: the ops_contract_missing 503 (CC_ALLOW_START=1, no Ops seat script) needs its
+  // own route-level leak pin — the dry-run host_start_refused pin below does not cover it,
+  // and the packages/company-computer suite alone leaves the route green under M31b.
+  it('createSession 503 (ops_contract_missing): refusal body carries no VNC password value', async () => {
+    GATES_OPEN();
+    const specs: Array<Record<string, string>> = [];
+    const inner = createDryRunHostClient({ env: { CC_ALLOW_START: '1' }, opsScriptExists: () => false });
+    hostClient = {
+      ...inner,
+      async startContainer(spec) {
+        specs.push({ ...spec.env });
+        return inner.startContainer(spec);
+      },
+    };
+    const res = await call('createSession');
+    assert.equal(res.status, 503);
+    assert.equal(specs.length, 1);
+    const pw = specs[0].VNC_PW;
+    assert.ok(pw && pw.length >= 16);
+    const bodyText = await res.text();
+    const body = JSON.parse(bodyText) as Record<string, unknown>;
+    assert.equal(body.error, 'ops_contract_missing');
+    assert.ok(String(body.message).includes('cc-acme-ceo'), 'sanity: the refusal does quote the planned seat');
+    assert.ok(!bodyText.includes(pw), 'refusal body leaks the VNC password');
+    for (const key of Object.keys(body)) {
+      assert.doesNotMatch(key.toLowerCase(), /vnc|password|_pw$|^pw$/, `body carries a password-like field "${key}"`);
+      assert.notEqual(key.toLowerCase(), 'vnc_pw', 'body carries a vnc_pw field');
+    }
+  });
+
   it('createSession 503 (dry-run): refusal body carries no VNC password value', async () => {
     GATES_OPEN();
     const specs: Array<Record<string, string>> = [];
