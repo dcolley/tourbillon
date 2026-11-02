@@ -1,4 +1,4 @@
-import type { HeartbeatStatus } from '@tourbillon/db/schema';
+import type { HeartbeatStatus } from './heartbeat-status';
 
 /**
  * #295 S295-S1 / S295-S4: the single source of truth for terminal `heartbeat_runs`

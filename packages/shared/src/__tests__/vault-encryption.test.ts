@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { encryptCredential, decryptCredential, sanitizeForLogging } from '../vault-encryption';
-import type { OAuthTokens } from '@tourbillon/db/schema';
+import type { OAuthTokens } from '../vault-types';
 
 beforeAll(() => {
   process.env.VAULT_ENCRYPTION_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';

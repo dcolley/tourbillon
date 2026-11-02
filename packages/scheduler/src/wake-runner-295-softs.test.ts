@@ -15,6 +15,13 @@
  *  and must not publish a red SSE update. `running` stays settleable (that is what the
  *  stale sweeps rely on).
  *
+ *  S299-S1 (#299) — recordHeartbeatSkip's guard must read the SAME shared set (it
+ *  hand-listed succeeded/failed/cancelled/skipped and omitted `coalesced`, so a late skip
+ *  could repaint a coalesced run). Per-status pins below: for every terminal status the
+ *  #275 assignee-mismatch pre-flight must be a true no-op — no row update at all
+ *  (status, errorText, finishedAt untouched) and no `skipped` SSE fan-out. `queued`
+ *  stays settleable so the pins cannot be satisfied by a guard that always returns.
+ *
  * Fake-DB pattern copied from wake-runner-assignee-275.test.ts (Module.prototype.require
  * swap scoped to scheduler modules).
  */
@@ -278,6 +285,73 @@ describe('#295 wake-runner task-scoped assignee gate + terminal failure guard (f
       assert.ok(row.finishedAt instanceof Date);
       assert.ok(
         published.some((p) => p.message.includes('"status":"failed"')),
+        'the flip must fan out over SSE',
+      );
+    });
+  });
+
+  describe('S299-S1: recordHeartbeatSkip never overwrites a terminal run', () => {
+    // Drive the #275 assignee-mismatch pre-flight (task-scoped wake on an issue owned by
+    // another agent) against a pre-seeded terminal row. recordHeartbeatSkip must be a
+    // true no-op for EVERY member of the shared terminal set.
+    const mismatchedWake = () => ({
+      agentId: 'agent-requester',
+      companyId: 'company-a',
+      invocationSource: 'assignment',
+      wakeReason: 'assignment',
+      taskId: 'issue-1',
+      runId: 'run-299',
+    }) as never;
+
+    const seedRunRow = (status: string) => {
+      store.heartbeatRuns = [{
+        id: 'run-299', companyId: 'company-a', agentId: 'agent-requester',
+        invocationSource: 'assignment', status, startedAt: new Date(),
+        lastSeenAt: null, finishedAt: null, errorText: null,
+      }];
+    };
+
+    for (const status of ['succeeded', 'failed', 'cancelled', 'coalesced', 'skipped'] as const) {
+      it(`a '${status}' run is NOT repainted 'skipped' and publishes no SSE update`, async () => {
+        assert.ok(
+          TERMINAL_HEARTBEAT_STATUSES.has(status),
+          `'${status}' must stay in the shared terminal set`,
+        );
+        seedRunRow(status);
+
+        const result = await triggerWake(mismatchedWake());
+        assert.equal(result.status, 'skipped', 'the pre-flight still reports the skip');
+        assert.equal(result.runId, 'run-299');
+
+        const row = store.heartbeatRuns[0]!;
+        assert.equal(
+          row.status,
+          status,
+          `recordHeartbeatSkip overwrote a terminal '${status}' run — a late skip must ` +
+            `never repaint an operator kill, a coalesced run, or an earlier record`,
+        );
+        assert.equal(row.errorText, null, 'the terminal record must not be rewritten');
+        assert.equal(row.finishedAt, null, 'the terminal record must not be rewritten');
+        assert.equal(
+          published.some((p) => p.message.includes('"status":"skipped"')),
+          false,
+          `no 'skipped' fan-out for an already-${status} run: ${JSON.stringify(published)}`,
+        );
+      });
+    }
+
+    it("a 'queued' run IS still settled to 'skipped' (the #275 pre-flight record works)", async () => {
+      seedRunRow('queued');
+
+      const result = await triggerWake(mismatchedWake());
+      assert.equal(result.status, 'skipped');
+
+      const row = store.heartbeatRuns[0]!;
+      assert.equal(row.status, 'skipped', 'a queued row must be settled by the skip recorder');
+      assert.match(String(row.errorText), /assigned to agent agent-other/);
+      assert.ok(row.finishedAt instanceof Date);
+      assert.ok(
+        published.some((p) => p.message.includes('"status":"skipped"')),
         'the flip must fan out over SSE',
       );
     });

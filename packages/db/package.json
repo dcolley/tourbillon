@@ -8,6 +8,7 @@
     ".": "./src/index.ts",
     "./schema": "./src/schema/index.ts",
     "./database-url": "./src/database-url.ts",
+    "./vault-credentials": "./src/vault-credentials.ts",
     "./test/query-spy": {
       "tourbillon-test": "./src/test/query-spy.ts"
     }

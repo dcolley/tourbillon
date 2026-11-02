@@ -4,6 +4,12 @@ import { companies } from './companies';
 import { agents } from './agents';
 import { user } from './users';
 import { createId } from '../utils';
+import type { OAuthTokens } from '@tourbillon/shared/vault-types';
+
+// #299 S299-S2: the interface moved to @tourbillon/shared/vault-types (byte-identical) so
+// @tourbillon/shared no longer needs to import @tourbillon/db for it. Re-exported here so
+// `import type { OAuthTokens } from '@tourbillon/db/schema'` keeps resolving.
+export type { OAuthTokens };
 
 export const vaultSecrets = pgTable(
   'vault_secrets',
@@ -42,10 +48,3 @@ export const vaultSecretsRelations = relations(vaultSecrets, ({ one }) => ({
 
 export type VaultSecret = typeof vaultSecrets.$inferSelect;
 export type NewVaultSecret = typeof vaultSecrets.$inferInsert;
-
-export interface OAuthTokens {
-  accessToken: string;
-  refreshToken?: string;
-  expiresAt?: number;
-  scope?: string;
-}

@@ -10,6 +10,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./types": "./src/types.ts",
+    "./heartbeat-status": "./src/heartbeat-status.ts",
     "./heartbeat-liveness": "./src/heartbeat-liveness.ts",
     "./task-scoped-wake-reasons": "./src/task-scoped-wake-reasons.ts",
     "./terminal-heartbeat-statuses": "./src/terminal-heartbeat-statuses.ts",
@@ -37,7 +38,7 @@
     "./mcp-config": "./src/mcp-config.ts",
     "./mcp-credentials": "./src/mcp-credentials.ts",
     "./vault-encryption": "./src/vault-encryption.ts",
-    "./vault-credentials": "./src/vault-credentials.ts",
+    "./vault-types": "./src/vault-types.ts",
     "./knowledge-graph": "./src/knowledge-graph.ts",
     "./knowledge-graph-config": "./src/knowledge-graph-config.ts",
     "./browser-config": "./src/browser-config.ts",
@@ -50,7 +51,6 @@
     "./iregexp": "./src/iregexp.ts"
   },
   "dependencies": {
-    "@tourbillon/db": "workspace:*",
     "croner": "^10.0.1",
     "drizzle-orm": "catalog:",
     "zod": "catalog:"
