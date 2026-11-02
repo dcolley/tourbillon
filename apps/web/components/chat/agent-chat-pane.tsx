@@ -201,9 +201,13 @@ export function AgentChatPane({
   );
 }
 
-// Exported for the S296-S5 DOM-level keydown test (same idiom as the password-input view export);
-// hosts should keep using AgentChatPane.
-export function ChatPaneBody({
+/**
+ * S301-S1/S2 (Refs #301): the body is no longer part of the module's public surface — the DOM-level
+ * keydown test reaches it (and swaps its two live dependencies) through the single `__test__` seam
+ * exported after this component. Hosts must keep using AgentChatPane; the no-host-imports pin lives
+ * in agent-chat-pane-send-key.test.ts.
+ */
+function ChatPaneBody({
   agentName,
   contextType,
   contextTitle,
@@ -254,7 +258,9 @@ export function ChatPaneBody({
   const [deleteTarget, setDeleteTarget] = useState<ChatThreadInfo | null>(null);
   const [sessionsOpen, setSessionsOpen] = useState(false);
   // CHAT-SEND-KEY: browser pref for Enter vs Ctrl/Cmd+Enter, shared with the assistant composer.
-  const [chatSendKeyMode] = useChatSendKeyMode();
+  // S301-S1: called through the module's test seam (the real hook, by default) so the DOM-level
+  // keydown test can drive mode branching without touching the module cache.
+  const [chatSendKeyMode] = __test__.useChatSendKeyMode();
 
   useEffect(() => {
     setSessionsOpen(readSessionsOpen());
@@ -348,7 +354,7 @@ export function ChatPaneBody({
           </DropdownMenu>
         </div>
         <div className="flex shrink-0 items-center gap-0.5">
-          <ChatSendKeyMenu />
+          <__test__.ChatSendKeyMenu />
           <ChatLayoutModeMenu
             layoutMode={layoutMode}
             onLayoutModeChange={onLayoutModeChange}
@@ -693,6 +699,21 @@ export function ChatPaneBody({
     </>
   );
 }
+
+/**
+ * @internal TEST SEAM ONLY — S301-S1/S2 (Refs #301). Not part of the pane's public surface.
+ * `ChatPaneBody` is exposed (read-only by convention) for the DOM-level keydown test in
+ * agent-chat-pane-send-key.test.ts; the two dependency entries are its stub points — the test
+ * swaps them before rendering, and the component reads them AT CALL TIME while shipping the real
+ * implementations, so no app-visible behaviour depends on this object. Because the seam is typed
+ * from the imports above, renaming either dependency (or the body) is a compile error in the test
+ * rather than a silent require-cache miss (S301-S1). The no-host-imports pin lives in that test.
+ */
+export const __test__ = {
+  ChatPaneBody,
+  useChatSendKeyMode,
+  ChatSendKeyMenu,
+};
 
 function RenameChatThreadDialog({
   open,
