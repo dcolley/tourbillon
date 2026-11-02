@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import type { WakeReason } from '@tourbillon/shared';
+import { TASK_SCOPED_WAKE_REASONS } from '@tourbillon/shared';
 import { buildRetryHeartbeatJobData } from './retry-failed-heartbeat';
 
 function failedRun(contextSnapshot: unknown) {
@@ -137,5 +139,70 @@ describe('buildRetryHeartbeatJobData', () => {
     assert.equal(job.wakeReason, 'on_demand');
     assert.equal(job.agentId, 'agent-1');
     assert.equal(job.companyId, 'company-1');
+  });
+
+  // #295 S295-S2: per-member mutation coverage for the shared task-scoped set. Before this
+  // soft only `assignment` reached the task-scoped branch, so dropping
+  // `issue_comment_mentioned` / `issue_blockers_resolved` / `issue_children_completed` from
+  // the set survived the suite — the retry silently degraded to a context-free replay
+  // (reason kept, taskId/payload guard gone), and the scheduler retried a task wake without
+  // the payload it rebuilds the wake message from. The membership pin makes a vanished
+  // per-member test RED instead of silently shrinking coverage; VALID_WAKE_REASONS gates
+  // BEFORE the task-scoped branch, so dropping a member there degrades the retry too.
+  describe('#295 S295-S2 task-scoped members (shared set)', () => {
+    const CANONICAL_TASK_SCOPED = [
+      'assignment',
+      'issue_commented',
+      'issue_comment_mentioned',
+      'issue_blockers_resolved',
+      'issue_children_completed',
+    ];
+
+    it('the shared set is exactly the canonical five (membership pin)', () => {
+      assert.deepEqual(
+        [...TASK_SCOPED_WAKE_REASONS].sort(),
+        [...CANONICAL_TASK_SCOPED].sort(),
+        'dropping a member here also removes its behavioural test below — this assertion is ' +
+          'what turns the drop RED instead of silently shrinking coverage',
+      );
+    });
+
+    for (const reason of CANONICAL_TASK_SCOPED) {
+      it(`'${reason}' retry keeps reason + taskId + wakePayloadJson (task-scoped)`, () => {
+        assert.ok(TASK_SCOPED_WAKE_REASONS.has(reason as WakeReason), `'${reason}' must stay task-scoped`);
+        const snapshot = {
+          wakeReason: reason,
+          taskId: 'issue-7',
+          wakePayloadJson: `{"issue":{"id":"issue-7"},"wakeReason":"${reason}"}`,
+          linkedIssueIds: ['issue-7'],
+        };
+
+        const job = buildRetryHeartbeatJobData(failedRun(snapshot));
+
+        assert.equal(
+          job.wakeReason,
+          reason,
+          `'${reason}' fell through the task-scoped branch — VALID_WAKE_REASONS or the shared set ` +
+            `lost the member and the retry degraded to a context-free replay`,
+        );
+        assert.equal(job.invocationSource, reason);
+        assert.equal(job.taskId, 'issue-7');
+        assert.equal(job.wakePayloadJson, snapshot.wakePayloadJson);
+        assert.deepEqual(job.linkedIssueIds, ['issue-7']);
+      });
+
+      it(`'${reason}' retry without a payload degrades to on_demand (guarded, not replayed bare)`, () => {
+        const job = buildRetryHeartbeatJobData(failedRun({ wakeReason: reason, taskId: 'issue-7' }));
+
+        assert.equal(
+          job.wakeReason,
+          'on_demand',
+          `'${reason}' took the context-free path — a task wake replayed without its payload ` +
+            `would reach the scheduler missing the wake message context it is scoped to`,
+        );
+        assert.equal(job.taskId, undefined);
+        assert.equal(job.wakePayloadJson, undefined);
+      });
+    }
   });
 });

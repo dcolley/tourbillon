@@ -1,15 +1,8 @@
 import { db } from './client';
 import { issues } from './schema/issues';
-import { heartbeatRuns, type HeartbeatStatus } from './schema/heartbeat-runs';
+import { heartbeatRuns } from './schema/heartbeat-runs';
+import { TERMINAL_HEARTBEAT_STATUSES } from '@tourbillon/shared';
 import { eq } from 'drizzle-orm';
-
-const TERMINAL_HEARTBEAT_STATUSES = new Set<HeartbeatStatus>([
-  'succeeded',
-  'failed',
-  'cancelled',
-  'coalesced',
-  'skipped',
-]);
 
 export const CHECKOUT_LOCK_CLEAR_FIELDS = {
   checkoutRunId: null,
