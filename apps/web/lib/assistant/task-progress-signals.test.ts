@@ -379,3 +379,54 @@ test('S210a: the re-export module contains no local chat_task_progress string li
   assert.match(src, /import\s*\{[^}]*TASK_PROGRESS_SSE_TYPE[^}]*\}\s*from\s*'@tourbillon\/shared\/types'/);
   assert.match(src, /export\s*\{\s*TASK_PROGRESS_SSE_TYPE\s*\}/);
 });
+
+// ─── S304-S2 (#304 softs): coalesced/cancelled are heartbeat-row statuses, NOT channel statuses ─
+
+test('parse: coalesced/cancelled are NOT accepted (S304-S2 — S298-S1 asymmetry is deliberate)', () => {
+  // S298-S1 widened the heartbeat READ paths (jobs/observability/filters) to coalesced and
+  // cancelled; this parser must stay at the four statuses the scheduler can actually publish
+  // on chat_task_progress (task-runner's ChatTaskProgressEvent.status union, and WakeResult
+  // for the done/needs_review emit — 'skipped' covers coalesced, 'failed' covers force-kill).
+  // Behaviour pin: a payload carrying a heartbeat-only status is dropped, never signalled.
+  for (const status of ['coalesced', 'cancelled']) {
+    assert.equal(
+      parseTaskProgressMessage(
+        JSON.stringify({ type: 'chat_task_progress', ...event(), stage: 'done', status }),
+      ),
+      null,
+      `${status} is a heartbeat_runs row status, not a chat_task_progress status — must not parse`,
+    );
+    // ...and it stays dropped from the non-terminal stage too.
+    assert.equal(
+      parseTaskProgressMessage(
+        JSON.stringify({ type: 'chat_task_progress', ...event(), stage: 'started', status }),
+      ),
+      null,
+      `${status} must not parse on a started event either`,
+    );
+  }
+});
+
+test('S304-S2: the narrow-accept-set rationale comment exists and the extra words stay comment-only', () => {
+  // Two-sided static guard on the module source:
+  //  (1) the S304-S2 comment exists — it carries the WHY (scheduler publisher's
+  //      ChatTaskProgressEvent.status union + WakeResult mapping) so a future reader does not
+  //      "fix the asymmetry" blindly. Mutant: delete the comment -> RED.
+  //  (2) coalesced/cancelled appear NOWHERE in the module's code (comment-stripped) — the
+  //      parser accept set stays at the four published statuses. Mutant: widen the accept set
+  //      in code -> RED (a widening must come with the scheduler-side publisher change, and
+  //      this pin forces that conversation).
+  const src = readFileSync(fileURLToPath(new URL('./task-progress-signals.ts', import.meta.url)), 'utf8');
+  const code = src
+    .replace(/\/\*[\s\S]*?\*\//g, ' ') // block comments
+    .replace(/^\s*\/\/.*$/gm, ' '); // line comments
+  assert.match(
+    src,
+    /\/\/[^\n]*S304-S2[^\n]*\n(?:\s*\/\/[^\n]*\n)*[^\n]*coalesced/,
+    'the S304-S2 rationale comment above the parse accept set must exist (it explains why ' +
+      "coalesced/cancelled cannot arrive on this channel — task-runner's ChatTaskProgressEvent)",
+  );
+  assert.match(src, /S304-S2[\s\S]*?cancelled[\s\S]*?ChatTaskProgressEvent/, 'the comment must name both extra statuses and the publisher type');
+  assert.ok(!code.includes('coalesced'), 'coalesced must stay out of executable code (comment-only)');
+  assert.ok(!code.includes('cancelled'), 'cancelled must stay out of executable code (comment-only)');
+});

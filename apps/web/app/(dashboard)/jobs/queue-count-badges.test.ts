@@ -78,3 +78,66 @@ describe('jobs card: zero-valued neutral counters are hidden (S298-S3, #298)', (
     ]);
   });
 });
+
+// ─── S304-S3 (#304 softs): badge VARIANTS — neutral counters never destructive, failed>0 is ───
+
+describe('jobs card: badge variants (S304-S3, #304)', () => {
+  let QueueCountBadges: Badges;
+
+  before(async () => {
+    (globalThis as { React?: unknown }).React = React;
+    ({ QueueCountBadges } = (await import('./queue-count-badges')) as never);
+  });
+
+  const base: QueueCounts = {
+    waiting: 0,
+    active: 0,
+    completed: 0,
+    failed: 0,
+    delayed: 0,
+    paused: 0,
+    skipped: 0,
+    coalesced: 0,
+    cancelled: 0,
+  };
+
+  // The shadcn Badge destructive variant is the ONLY class source carrying `bg-destructive`
+  // (the shared base classes mention destructive solely under aria-invalid:/focus-visible:
+  // modifiers, never as bg-*), so it is the variant witness in static markup.
+  const badgeSpan = (html: string, text: string): string => {
+    const m = html.match(new RegExp(`<span[^>]*>${text}</span>`));
+    assert.ok(m, `badge '${text}' must render`);
+    return m[0];
+  };
+
+  it('failed badge is destructive iff failed > 0, neutral at failed = 0', () => {
+    const zeroHtml = renderToStaticMarkup(
+      React.createElement(QueueCountBadges, { counts: { ...base } }),
+    );
+    const zeroFailed = badgeSpan(zeroHtml, 'failed: 0');
+    assert.ok(!zeroFailed.includes('bg-destructive'), 'failed: 0 must be neutral (secondary)');
+    assert.ok(zeroFailed.includes('bg-secondary'), 'failed: 0 must carry the secondary variant');
+
+    const failHtml = renderToStaticMarkup(
+      React.createElement(QueueCountBadges, { counts: { ...base, failed: 2 } }),
+    );
+    assert.match(
+      badgeSpan(failHtml, 'failed: 2'),
+      /bg-destructive/,
+      'failed > 0 must render the destructive variant',
+    );
+  });
+
+  it('neutral counters (skipped/coalesced/cancelled + core) never render destructive', () => {
+    const html = renderToStaticMarkup(
+      React.createElement(QueueCountBadges, {
+        counts: { ...base, waiting: 4, active: 1, completed: 5, skipped: 2, coalesced: 1, cancelled: 3 },
+      }),
+    );
+    // failed stays 0 here, so NO badge may wear destructive while only neutral counts are hot.
+    assert.ok(!html.includes('bg-destructive'), 'neutral counters must never be destructive');
+    for (const label of ['skipped: 2', 'coalesced: 1', 'cancelled: 3']) {
+      assert.ok(badgeSpan(html, label).includes('bg-secondary'), `${label} must be secondary`);
+    }
+  });
+});
