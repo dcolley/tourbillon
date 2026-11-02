@@ -42,6 +42,13 @@ import type { Agent as AgentRecord } from '@tourbillon/db';
 import { randomUUID } from 'crypto';
 import { AgentTokenConfigError, mintRunToken, runTokenTtlSec } from '@tourbillon/shared/agent-token';
 import { runWithHarness, type HarnessRunResult } from './adapters/harness-adapter';
+import { dispatchHermesHeartbeat } from './adapters/hermes-adapter';
+import {
+  deriveHermesCallbackBaseUrl,
+  isHermesHarnessBind,
+  parseHermesHarnessBind,
+  type HermesHarnessBind,
+} from '@tourbillon/shared/hermes-harness';
 import { redisPub } from './redis-pub';
 import {
   awaitWithAbort,
@@ -518,6 +525,20 @@ async function runWake(
     providerRecord,
   );
 
+  // #281: external Hermes bind (adapterConfig.harness === 'hermes'). A malformed bind fails
+  // this run LOUDLY below — never a silent fall back to the in-product AgentController harness.
+  let hermesBind: HermesHarnessBind | null = null;
+  let hermesBindError: string | null = null;
+  let hermesCallbackBaseUrl: string | null = null;
+  if (isHarnessAdapter(agentRecord.adapterType) && isHermesHarnessBind(agentRecord.adapterConfig)) {
+    try {
+      hermesBind = parseHermesHarnessBind(agentRecord.adapterConfig);
+      hermesCallbackBaseUrl = deriveHermesCallbackBaseUrl(hermesBind.callbackBaseUrl);
+    } catch (err) {
+      hermesBindError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
   // WC1–6: wake message built at run start. With the live context on, the header is read from the
   // DB now (fresher than the enqueue-time payload); if that read fails the run continues on the
   // T1-only message (newest-first comments) and logs wake_context_failed.
@@ -566,6 +587,17 @@ async function runWake(
           }
         : {}),
       modelId: agentRecord.modelId ?? null,
+      // #281: external Hermes runs record the bind mode + phone-home origin on the run row
+      // (never the token — the session token lives only in the envelope sent to the harness).
+      ...(hermesBind
+        ? {
+            harness: {
+              kind: 'hermes',
+              mode: hermesBind.mode,
+              callbackBaseUrl: hermesCallbackBaseUrl,
+            },
+          }
+        : {}),
     },
     startedAt: runStartedAt,
     lastSeenAt: runStartedAt,
@@ -577,6 +609,13 @@ async function runWake(
     runTracer.warn('failed: no LLM provider enabled for company', { providerId: agentRecord.providerId });
     await recordHeartbeatFailure(runId, providerUnavailableError, companyId, agentId);
     return { runId, status: 'failed', errorText: providerUnavailableError };
+  }
+
+  // #281: half-configured Hermes bind → terminal failure, not a silent in-product fallback.
+  if (hermesBindError) {
+    runTracer.error('failed: invalid Hermes harness bind', { error: hermesBindError });
+    await recordHeartbeatFailure(runId, hermesBindError, companyId, agentId);
+    return { runId, status: 'failed', errorText: hermesBindError };
   }
 
   if (assignedIssue && assignedIssue.assigneeAgentId !== agentId) {
@@ -671,7 +710,29 @@ async function runWake(
     async () => {
       try {
         if (isHarnessAdapter(agentRecord.adapterType)) {
-          const harnessResult = await runWithHarness(
+          // #281: an external Hermes bind takes the wake instead of the in-product
+          // AgentController. The heartbeat envelope ALWAYS carries callbackUrl + session token
+          // (buildHermesHeartbeatEnvelope fails closed otherwise).
+          const harnessResult: HarnessRunResult = hermesBind
+            ? await dispatchHermesHeartbeat(
+                {
+                  wake,
+                  wakeMessage,
+                  runId,
+                  apiKey,
+                  goalId: issueForTask?.goalId ?? undefined,
+                  projectId: issueForTask?.projectId ?? undefined,
+                },
+                {
+                  bind: hermesBind,
+                  callbackBaseUrl: hermesCallbackBaseUrl ?? '',
+                  timeoutSec: effectiveHeartbeatTimeoutSec(
+                    (agentRecord.runtimeConfig as AgentRuntimeConfig | null)?.timeout?.heartbeatSec,
+                  ),
+                  abortSignal: abortController.signal,
+                },
+              )
+            : await runWithHarness(
             agentRecord,
             {
               wake,
@@ -724,24 +785,29 @@ async function runWake(
 
           // Check for truncated generation (finishReason: length) BEFORE parking.
           // Harness also emits observability events that may show truncation.
-          const { detectTruncatedGeneration } = await import('@tourbillon/db');
-          const truncationCheck = await detectTruncatedGeneration(runId);
-          if (truncationCheck.truncated) {
-            runTracer.error('harness wake truncated', {
-              finishReason: truncationCheck.finishReason,
-              errorText: truncationCheck.errorText,
-            });
-            // Record as error without parking
-            await db.update(heartbeatRuns)
-              .set({
-                status: 'failed',
-                finishedAt: new Date(),
+          // #281: an external Hermes dispatch writes no Mastra spans, so the span scan is
+          // in-product-only work — skip it for Hermes runs (usage/truncation reporting over
+          // the callback is a later pack).
+          if (!hermesBind) {
+            const { detectTruncatedGeneration } = await import('@tourbillon/db');
+            const truncationCheck = await detectTruncatedGeneration(runId);
+            if (truncationCheck.truncated) {
+              runTracer.error('harness wake truncated', {
+                finishReason: truncationCheck.finishReason,
                 errorText: truncationCheck.errorText,
-                traceId: harnessResult.traceId ?? undefined,
-                harnessRunId: harnessResult.harnessRunId ?? undefined,
-              })
-              .where(eq(heartbeatRuns.id, runId));
-            return { runId, status: 'failed', errorText: truncationCheck.errorText };
+              });
+              // Record as error without parking
+              await db.update(heartbeatRuns)
+                .set({
+                  status: 'failed',
+                  finishedAt: new Date(),
+                  errorText: truncationCheck.errorText,
+                  traceId: harnessResult.traceId ?? undefined,
+                  harnessRunId: harnessResult.harnessRunId ?? undefined,
+                })
+                .where(eq(heartbeatRuns.id, runId));
+              return { runId, status: 'failed', errorText: truncationCheck.errorText };
+            }
           }
 
           // Only park if run completed successfully (no failure, no truncation)
