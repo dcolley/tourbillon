@@ -2,6 +2,8 @@ export * from './types';
 export * from './constants';
 export * from './issue-assignee';
 export * from './heartbeat-liveness';
+export * from './task-scoped-wake-reasons';
+export * from './terminal-heartbeat-statuses';
 export * from './heartbeat-schedule-mode';
 export * from './heartbeat-schedule';
 export * from './timeout-config';

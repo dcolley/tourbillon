@@ -33,6 +33,8 @@ import {
   createTraceLogger,
   canForceKillHeartbeat,
   effectiveHeartbeatTimeoutSec,
+  TASK_SCOPED_WAKE_REASONS,
+  TERMINAL_HEARTBEAT_STATUSES,
 } from '@tourbillon/shared';
 import { durableWakeOutcomeFromTripwire } from './durable-wake-outcome';
 import { buildRunWakeMessage, createDrizzleWakeContextRepo } from './wake-context';
@@ -220,8 +222,10 @@ async function recordHeartbeatFailure(
     columns: { status: true, errorText: true },
   });
 
-  // Do not overwrite if already terminal
-  if (existing && (existing.status === 'succeeded' || existing.status === 'failed' || existing.status === 'cancelled')) {
+  // Do not overwrite if already terminal (#295 S295-S4: one shared set with the db
+  // checkout-lock stale-run rule — `skipped` and `coalesced` included, so a late failure
+  // never repaints a pre-flight skip or a coalesced run red).
+  if (existing && TERMINAL_HEARTBEAT_STATUSES.has(existing.status)) {
     return;
   }
 
@@ -270,21 +274,13 @@ async function recordHeartbeatSkip(
   await publishHeartbeatRunUpdate(companyId, runId, 'skipped', agentId);
 }
 
-/**
- * #275: wake reasons where `taskId` means "this agent was assigned this issue" — the only
- * wakes the assignee-mismatch check may gate on. Mirrors TASK_SCOPED_REASONS in
- * apps/web/lib/retry-failed-heartbeat.ts (kept in sync deliberately; scheduler cannot
- * import from web). `approval_resolved` also carries a taskId, but it names a LINKED issue
- * (context only — the requester usually owns none of them), so checking it failed every
- * requester wake whose first linked issue belonged to another agent.
- */
-const TASK_SCOPED_WAKE_REASONS: ReadonlySet<string> = new Set([
-  'assignment',
-  'issue_commented',
-  'issue_comment_mentioned',
-  'issue_blockers_resolved',
-  'issue_children_completed',
-]);
+// #275 / #295 S295-S2: the task-scoped wake-reason set lives in @tourbillon/shared
+// (TASK_SCOPED_WAKE_REASONS, imported above) — the single source of truth also consumed by
+// apps/web/lib/retry-failed-heartbeat.ts. `approval_resolved` also carries a taskId, but it
+// names a LINKED issue (context only — the requester usually owns none of them), so
+// assignee-checking it failed every requester wake whose first linked issue belonged to
+// another agent. Parity is pinned in
+// packages/shared/src/task-scoped-wake-reasons.test.ts.
 
 /**
  * Trigger an agent wake. Coalesces concurrent wakes per agent: if a run is active,

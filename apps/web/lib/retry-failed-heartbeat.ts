@@ -1,4 +1,5 @@
 import type { ApprovalOutcomeStatus, ApprovalWakeResponse, HeartbeatJobData, WakeReason } from '@tourbillon/shared';
+import { TASK_SCOPED_WAKE_REASONS } from '@tourbillon/shared';
 
 const APPROVAL_OUTCOMES: ReadonlySet<string> = new Set(['approved', 'rejected', 'answered', 'declined', 'cancelled', 'expired']);
 const RESPONSE_STATUSES: ReadonlySet<string> = new Set(['answered', 'declined', 'cancelled', 'expired']);
@@ -31,14 +32,14 @@ function approvalResponseOf(value: unknown): ApprovalWakeResponse | undefined {
  *   triggerAgentHeartbeat in apps/web/lib/heartbeat.ts).
  */
 
-/** Wake reasons that need a taskId + payload to be useful on the scheduler side. */
-const TASK_SCOPED_REASONS: ReadonlySet<string> = new Set([
-  'assignment',
-  'issue_commented',
-  'issue_comment_mentioned',
-  'issue_blockers_resolved',
-  'issue_children_completed',
-]);
+/**
+ * Wake reasons that need a taskId + payload to be useful on the scheduler side — the shared
+ * set (#295 S295-S2, @tourbillon/shared/task-scoped-wake-reasons), the SAME one the
+ * scheduler gates its assignee-mismatch check on. VALID_WAKE_REASONS below must stay the
+ * union of TASK_SCOPED_WAKE_REASONS + CONTEXT_FREE_REASONS + approval_resolved; parity is
+ * pinned in packages/shared/src/task-scoped-wake-reasons.test.ts and the per-member retry
+ * tests below.
+ */
 
 /** Reasons that carry no task/approval context and can be replayed as-is. */
 const CONTEXT_FREE_REASONS: ReadonlySet<string> = new Set([
@@ -124,7 +125,7 @@ export function buildRetryHeartbeatJobData(
 
   // Task-scoped retry: preserve reason + payload so the scheduler can rebuild
   // the wake message from wakePayloadJson / refetch comments via taskId.
-  if (TASK_SCOPED_REASONS.has(wakeReasonRaw)) {
+  if (TASK_SCOPED_WAKE_REASONS.has(wakeReasonRaw as WakeReason)) {
     if (taskId && payloadJson) {
       return {
         ...base,

@@ -21,6 +21,7 @@
     "migrate-mcp": "tsx scripts/migrate-mcp-to-vault.ts"
   },
   "dependencies": {
+    "@tourbillon/shared": "workspace:*",
     "drizzle-orm": "catalog:",
     "postgres": "^3.4.9"
   },

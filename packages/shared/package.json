@@ -11,6 +11,8 @@
     ".": "./src/index.ts",
     "./types": "./src/types.ts",
     "./heartbeat-liveness": "./src/heartbeat-liveness.ts",
+    "./task-scoped-wake-reasons": "./src/task-scoped-wake-reasons.ts",
+    "./terminal-heartbeat-statuses": "./src/terminal-heartbeat-statuses.ts",
     "./heartbeat-schedule": "./src/heartbeat-schedule.ts",
     "./heartbeat-schedule-mode": "./src/heartbeat-schedule-mode.ts",
     "./constants": "./src/constants.ts",
