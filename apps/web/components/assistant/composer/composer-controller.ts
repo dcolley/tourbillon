@@ -2,7 +2,10 @@
  * CHAT-1: composer state and behaviour, framework-free (the React view in composer.tsx subscribes
  * with useSyncExternalStore). Tested directly, without a DOM.
  *
- * - Text: multiline; Enter sends, Shift+Enter is a newline, Enter during IME composition is ignored.
+ * - Text: multiline; the send key follows the CHAT-SEND-KEY preference (lib/chat-send-key):
+ *   `enter_sends` (default) sends on Enter and leaves Shift+Enter as a newline; `mod_enter_sends`
+ *   sends on Ctrl/Cmd+Enter and leaves Enter as a newline. Enter during IME composition is always
+ *   ignored, and Ctrl/Cmd/Alt+Enter only ever steers an open run — it never sends in `enter_sends`.
  * - Attachments: picker, paste and drag-drop all go through addFiles → checked against
  *   lib/chat-attachments (type, size, count), refused files get a clear notice; accepted files upload
  *   straight away (chip: uploading → ready; a failed upload is removed with a notice). Removing a chip
@@ -23,6 +26,11 @@ import {
   messageWithAttachments,
   type ChatAttachmentRef,
 } from '@/lib/chat-attachments';
+import {
+  chatSendKeyModeOrDefault,
+  resolveSendKeyGesture,
+  type ChatSendKeyMode,
+} from '@/lib/chat-send-key';
 import { createDraftStore, type DraftStore } from './draft-store';
 import { editQueued, enqueue, removeQueued, takeNext, type QueuedMessage } from './queue';
 
@@ -61,6 +69,8 @@ export interface ComposerState {
   attachments: ComposerAttachment[];
   queue: QueuedMessage[];
   runStatus: ComposerRunStatus;
+  /** CHAT-SEND-KEY: which key sends (see lib/chat-send-key); drives the hint under the textarea. */
+  sendKeyMode: ChatSendKeyMode;
   /** A send / steer is in flight. */
   submitting: boolean;
   dragging: boolean;
@@ -101,6 +111,8 @@ export interface ComposerControllerOptions {
   draftKey?: string;
   drafts?: DraftStore;
   runStatus?: ComposerRunStatus;
+  /** CHAT-SEND-KEY: stored mode (unknown values mean the default `enter_sends`). */
+  sendKeyMode?: unknown;
   makeId?: () => string;
 }
 
@@ -144,6 +156,7 @@ export function createComposerController(options: ComposerControllerOptions) {
     })),
     queue: [],
     runStatus: options.runStatus ?? 'idle',
+    sendKeyMode: chatSendKeyModeOrDefault(options.sendKeyMode),
     submitting: false,
     dragging: false,
     notices: [],
@@ -316,6 +329,13 @@ export function createComposerController(options: ComposerControllerOptions) {
       set({ attachments: state.attachments.filter((a) => a.id !== id) }, { persist: true });
     },
 
+    /** CHAT-SEND-KEY: the live send-key mode (the chat surface pushes preference changes here). */
+    setSendKeyMode(mode: unknown) {
+      const next = chatSendKeyModeOrDefault(mode);
+      if (state.sendKeyMode === next) return;
+      set({ sendKeyMode: next });
+    },
+
     /** Enter / the main button: send when idle, queue a follow-up while a run is open. */
     async primary(): Promise<boolean> {
       if (!runOpen()) return submitWith((t) => controls.send(t), 'send');
@@ -378,12 +398,15 @@ export function createComposerController(options: ComposerControllerOptions) {
       set({ notices: state.notices.filter((_, i) => i !== index) });
     },
 
-    /** Textarea keydown. Returns true when the key was handled. */
+    /**
+     * Textarea keydown. Returns true when the key was handled (and was therefore preventDefault-ed).
+     * The decision lives in the shared CHAT-SEND-KEY helper so every composer binds the same keys.
+     */
     handleKeyDown(e: KeyLike): boolean {
-      if (e.key !== 'Enter' || e.shiftKey) return false;
-      if (e.isComposing || e.nativeEvent?.isComposing) return false;
+      const gesture = resolveSendKeyGesture(e, { mode: state.sendKeyMode, runOpen: runOpen() });
+      if (!gesture) return false;
       e.preventDefault();
-      if ((e.ctrlKey || e.metaKey || e.altKey) && runOpen()) void controller.steer();
+      if (gesture === 'steer') void controller.steer();
       else void controller.primary();
       return true;
     },

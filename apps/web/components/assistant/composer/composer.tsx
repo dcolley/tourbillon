@@ -13,6 +13,8 @@ import { Button, buttonVariants } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
 import { CHAT_ATTACHMENT_ACCEPT, CHAT_ATTACHMENT_MAX_BYTES, CHAT_ATTACHMENT_MAX_FILES, formatBytes } from '@/lib/chat-attachments';
+import { chatSendKeyHint, DEFAULT_CHAT_SEND_KEY_MODE, type ChatSendKeyMode } from '@/lib/chat-send-key';
+import { useChatSendKeyMode } from '@/components/chat/use-chat-send-key-mode';
 import {
   createComposerController,
   type ComposerController,
@@ -39,6 +41,8 @@ export interface ComposerProps {
   /** Overrides for tests / other hosts. */
   upload?: UploadAttachment;
   drafts?: DraftStore;
+  /** CHAT-SEND-KEY: override the stored "Send message with" preference (tests / embedded hosts). */
+  sendKeyMode?: ChatSendKeyMode;
 }
 
 export function Composer(props: ComposerProps) {
@@ -57,7 +61,13 @@ function ComposerForThread({
   toolbar,
   upload,
   drafts,
+  sendKeyMode,
 }: ComposerProps) {
+  // CHAT-SEND-KEY: the browser preference (or the host's override); subscription keeps it live, so a
+  // flip re-binds this composer and re-renders the hint without a reload.
+  const [storedSendKeyMode] = useChatSendKeyMode();
+  const mode = sendKeyMode ?? storedSendKeyMode;
+
   const [controller] = React.useState(() =>
     createComposerController({
       controls,
@@ -65,6 +75,7 @@ function ComposerForThread({
       drafts: drafts ?? createDraftStore(),
       draftKey: draftKey(agentId, threadId),
       runStatus,
+      sendKeyMode: mode,
     }),
   );
 
@@ -76,6 +87,10 @@ function ComposerForThread({
   React.useEffect(() => {
     controller.setRunStatus(runStatus);
   }, [controller, runStatus]);
+
+  React.useEffect(() => {
+    controller.setSendKeyMode(mode);
+  }, [controller, mode]);
 
   // Cancel uploads still in flight when the composer goes away.
   React.useEffect(() => () => controller.cancelUploads(), [controller]);
@@ -105,6 +120,7 @@ export function initialViewState(runStatus: ComposerRunStatus = 'idle'): Compose
     attachments: [],
     queue: [],
     runStatus,
+    sendKeyMode: DEFAULT_CHAT_SEND_KEY_MODE,
     submitting: false,
     dragging: false,
     notices: [],
@@ -265,8 +281,8 @@ export function ComposerView({ state, controller, disabled, placeholder, classNa
           />
         </label>
         {toolbar ? <div data-slot="composer-toolbar">{toolbar}</div> : null}
-        <span className="flex-1 text-xs text-muted-foreground">
-          {running ? (stopping ? 'Stopping…' : 'Agent is working — Enter queues, Ctrl+Enter steers') : 'Enter to send, Shift+Enter for a new line'}
+        <span className="flex-1 text-xs text-muted-foreground" data-send-key-hint data-send-key-mode={state.sendKeyMode}>
+          {running ? (stopping ? 'Stopping…' : chatSendKeyHint(state.sendKeyMode, { running: true })) : chatSendKeyHint(state.sendKeyMode)}
         </span>
         {running ? (
           <>
