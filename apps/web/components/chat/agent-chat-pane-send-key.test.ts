@@ -269,6 +269,9 @@ describe('S296-S5 Control-Pane composer keydown (DOM level)', () => {
     const exempt = new Set([
       'components/chat/agent-chat-pane.tsx', // defines the seam
       'components/chat/agent-chat-pane-send-key.test.ts', // the only consumer of the pane seam
+      // S321-S1: the prod-freeze pin reads m.__test__ from the CHILD-process probe to assert
+      // Object.isFrozen under NODE_ENV=production; it never swaps the seam (test-only reader).
+      'components/chat/production-seam-freeze.test.ts',
       // The container seam from S302-S1 shares the `__test__` name and is pinned to its own
       // consumer by these same rules there:
       'components/assistant/agent-chat.tsx',
