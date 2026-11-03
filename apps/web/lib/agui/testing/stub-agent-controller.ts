@@ -47,6 +47,15 @@ export interface StubControllerOptions {
   controllerTools?: (args: { requestContext?: unknown }) => Record<string, unknown> | Promise<Record<string, unknown>>;
   /** Reuse another stub's storage (a rebuilt controller over the same threads). */
   storage?: unknown;
+  /**
+   * S313-S1: optional async hook awaited BEFORE each chunk is enqueued. Lets a test
+   * hold a model stream open at an exact chunk (e.g. keep a detached run live until an
+   * abort control is accepted) instead of racing the chunk pump's wall-clock. When set,
+   * the stream is pumped by a hand-rolled reader instead of simulateReadableStream; the
+   * per-chunk delay is read from `chunkDelayMs` at pump time, so a test can also zero
+   * the pacing after the hold is released.
+   */
+  chunkGate?: (info: { call: number; index: number; chunk: StubChunk }) => Promise<void> | void;
   /** OBS-1: Mastra Observability instance (e.g. with a capturing exporter), as the chat controller passes when tracing is on. */
   observability?: unknown;
 }
@@ -109,6 +118,30 @@ export async function createStubAgentController(options: StubControllerOptions) 
         ...turn,
         { type: 'finish', finishReason: hasToolCall ? 'tool-calls' : 'stop', usage },
       ];
+      const gate = options.chunkGate;
+      if (gate) {
+        // S313-S1 pump: await the gate before each chunk. pull() is only called when
+        // the consumer wants the next chunk, so a blocked gate parks the run without
+        // busy-waiting; enqueue is guarded because a cancelled/ended stream must not
+        // throw when the gate is released late.
+        let i = 0;
+        const stream = new ReadableStream<StubChunk>({
+          async pull(controller) {
+            if (i >= chunks.length) {
+              controller.close();
+              return;
+            }
+            const chunk = chunks[i];
+            i += 1;
+            await gate({ call: calls, index: i - 1, chunk });
+            const delay = options.chunkDelayMs ?? 0;
+            if (delay) await new Promise((r) => setTimeout(r, delay));
+            if (controller.desiredSize === null) return;
+            controller.enqueue(chunk);
+          },
+        });
+        return { stream, rawCall: { rawPrompt: null, rawSettings: {} } };
+      }
       return {
         stream: simulateReadableStream({ chunks, chunkDelayInMs: options.chunkDelayMs ?? 0 }),
         rawCall: { rawPrompt: null, rawSettings: {} },

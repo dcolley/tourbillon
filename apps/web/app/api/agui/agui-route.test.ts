@@ -181,6 +181,7 @@ const text = (events: Ev[]) =>
 
 let script: Parameters<typeof createStubAgentController>[0]['script'];
 let chunkDelayMs = 0;
+let chunkGate: Parameters<typeof createStubAgentController>[0]['chunkGate'];
 
 describe('AGUI-1 POST /api/agui/[agentId]', () => {
   let originalRequire: any;
@@ -243,6 +244,7 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
     tracingOn = false;
     tracingCalls.length = 0;
     chunkDelayMs = 0;
+    chunkGate = undefined;
     script = (_call, prompt) =>
       prompt.some((m) => m.role === 'tool') ? stubText('t', ['Hello ', 'there']) : stubToolCall('call-1', 'echo', { text: 'hi' });
     sessions = new Map();
@@ -250,6 +252,9 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
       script: (call, prompt) => script(call, prompt),
       get chunkDelayMs() {
         return chunkDelayMs;
+      },
+      get chunkGate() {
+        return chunkGate;
       },
       tools: { echo: (i: { text: string }) => ({ echoed: i.text }) },
     } as Parameters<typeof createStubAgentController>[0]);
@@ -472,6 +477,30 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
     it('STREAM-1: explicit abort still stops a detached run', async () => {
       script = () => stubText('t', Array.from({ length: 60 }, (_, i) => `w${i} `));
       chunkDelayMs = 20;
+      // S313-S1: deterministic closure of the explicit-abort race. The old shape
+      // raced the abort-control POST against the detached run's chunk pump
+      // (60 chunks x chunkDelayMs): under full-suite load the run could reach its
+      // natural end before the control landed, and `accepted` came back false
+      // (the waitUntil below was NOT the load-bearing wait — S313 brief, M2).
+      // The stub stream is now HELD open after the first text delta (index >= 3:
+      // [stream-start, text-start, delta-0] flow so the client sees content and
+      // calls abortRun()) until the abort control has been accepted. The run
+      // physically cannot end first, and `holdPending` pins that the control
+      // landed while the pump was still parked on the hold: drop the hold (or
+      // never block) and that assertion goes RED — the reopened race cannot
+      // pass silently on an idle machine.
+      let holdPending = false;
+      let releaseHold!: () => void;
+      const hold = new Promise<void>((r) => (releaseHold = r));
+      let heldOnce = false;
+      chunkGate = async ({ index }) => {
+        if (!heldOnce && index >= 3) {
+          heldOnce = true;
+          holdPending = true;
+          await hold;
+          holdPending = false;
+        }
+      };
       const ends: string[] = [];
       let aborted = false;
       await clientRun('agui-thread-detached-abort', {
@@ -490,7 +519,11 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
       const ctl = await readSse(
         await request('alice', input('agui-thread-detached-abort', { forwardedProps: { tourbillon: { action: 'abort' } } }, '')),
       );
+      assert.equal(holdPending, true, 'the abort control must land while the detached run is still streaming (pump parked on the hold)');
       assert.equal(ctl[1].value.accepted, true);
+      // Released: the (already-aborted) remainder drains at full speed.
+      chunkDelayMs = 0;
+      releaseHold();
       await waitUntil("the detached run's agent_end reason", () => ends.length > 0);
       assert.deepEqual(ends, ['aborted']);
       await waitIdle('agui-thread-detached-abort');
