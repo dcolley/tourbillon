@@ -22,10 +22,12 @@ let pg: { query: (sql: string, params: unknown[]) => Promise<{ rows: unknown[] }
  * Dropping `close()` from afterEach/after survives pass/fail entirely — the only
  * symptom was the leaked WASM instance keeping the process alive (this file's
  * runtime ballooned ~2.3s -> ~12.5s under load). So the convention gets a real
- * handle check: afterEach asserts the instance it closed reports `closed`, and
- * the file-level `after` asserts every instance opened during the run was
- * ALREADY closed by the per-test hook before it does its own safety-net close.
- * Delete the afterEach close and the after hook fails this file RED.
+ * handle check: afterEach asserts the instance it closed reports `closed`.
+ * S319-S1: the "every opened instance was already closed by afterEach" backstop
+ * is a REAL TEST at the bottom of this describe, not an `after()` assertion —
+ * a failing after() hook is not counted as a failure under `tsx --test` on
+ * Node 22 (the run prints `# fail 0` and exits 0 even though the assertion
+ * error is printed). Delete the afterEach close and that test fails the file.
  */
 const opened: Array<{ closed: boolean; close: () => Promise<void> }> = [];
 
@@ -71,11 +73,10 @@ describe('OBS-2 feedback store', () => {
   });
 
   after(async () => {
-    // S313-S2: the per-test hook above owns the close; this hook only backstops
-    // a crash between open and close. Seeing an OPEN instance here means the
-    // afterEach close was dropped (or never awaited) — fail, don't paper over.
-    const stillOpen = opened.filter((instance) => !instance.closed);
-    assert.equal(stillOpen.length, 0, `every PGlite instance opened by this file must already be closed by afterEach (${stillOpen.length} open)`);
+    // S313-S2/S319-S1: the per-test afterEach owns the close and asserts it; the
+    // "every instance is closed" backstop is the real test below (an `after()`
+    // assertion does not count as a failure under `tsx --test` on Node 22). This
+    // hook only backstops a crash between open and close (close without asserting).
     const instance = pg;
     pg = null;
     await instance?.close();
@@ -128,5 +129,15 @@ describe('OBS-2 feedback store', () => {
       assistantFeedback: { m1: { u1: entry, u2: up }, m2: { u1: up } },
     });
     assert.deepEqual(rows[1].metadata, { agentId: 'a1', assistantFeedback: { m1: { u1: up } } });
+  });
+
+  // S319-S1: a failing `after()` hook does NOT count as a failure under `tsx --test`
+  // on Node 22 (`# fail 0`, rc 0, only an AssertionError line in the log), so the
+  // S313-S2 backstop - every instance opened by this file must already be closed by
+  // the per-test hook - runs here as a REAL test (last, so every afterEach has run).
+  // Drop the afterEach close and this test goes RED with a counted failure.
+  it('every PGlite instance opened by this file was closed by the per-test hook', () => {
+    const stillOpen = opened.filter((instance) => !instance.closed);
+    assert.equal(stillOpen.length, 0, `every PGlite instance opened by this file must already be closed by afterEach (${stillOpen.length} open)`);
   });
 });
