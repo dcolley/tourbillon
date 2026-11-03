@@ -18,12 +18,14 @@
  * The remote/local-HTTP leg speaks the A2A JSONRPC surface that the Hermes gateway publishes
  * (agent card at `/.well-known/agent.json`, `supportedInterfaces[].protocolBinding = "JSONRPC"`,
  * `capabilities.streaming = true`; unauthenticated POST / returns JSONRPC -32050 "unauthorized"
- * — measured on the live hermes-vm gateway 2026-11-02). We send `message/send` (sync); the
- * stream leg (`message/stream`) is documented follow-up.
+ * — measured on the live hermes-vm gateway 2026-11-02). Heartbeats send `message/send` (sync).
+ * AC5 chat: the callback chat endpoint speaks the same A2A JSONRPC (`message/send` /
+ * `message/stream`) when the bind advertises `chat` (see ./harness-chat.ts).
  *
  * Never log `apiToken` or `sessionToken`.
  */
 import { z } from 'zod';
+import { harnessChatCapabilitySchema } from './harness-chat';
 
 /** adapterConfig discriminator for the external Hermes bind. */
 export const HERMES_HARNESS_KIND = 'hermes' as const;
@@ -106,6 +108,8 @@ export const hermesHarnessBindSchema = z
     callbackBaseUrl: httpOriginUrl.optional(),
     /** Replace the bundled skill-install blob served at the callback `skill` endpoint. */
     skillInstall: z.string().min(1).optional(),
+    /** AC5: chat legs this harness advertises (absent ⇒ callback chat refused). */
+    chat: harnessChatCapabilitySchema.optional(),
   })
   .strict()
   .superRefine((bind, ctx) => {
@@ -376,10 +380,24 @@ returns 403 \`tool_not_permitted\` — never retry harder; pick other work or re
 Always checkoutIssue before working a task; write decisions to issue comments (comments are
 the shared record); 409 on checkout means someone else holds the lock — choose another task.
 
-## Chat
+## Chat (only when your bind advertises it)
 
-Board chat is not exposed on this callback yet (first slice: 501 \`chat_not_implemented\`).
-For now, message other agents with the \`sendToAgent\` DM tool when the agent has it.
+If the operator set \`chat\` on your bind (\`{ "sync": true }\` and/or \`{ "stream": true }\`), you
+can chat with another Tourbillon agent over A2A JSONRPC at \`POST {callback.baseUrl}{chat}\`
+(same Bearer session token):
+
+\`\`\`json
+{ "jsonrpc": "2.0", "id": "1", "method": "message/send",
+  "params": { "message": { "role": "user", "parts": [{ "kind": "text", "text": "…" }],
+    "metadata": { "tourbillon": { "toAgentUrlKey": "cto" } } } } }
+\`\`\`
+
+- \`message/send\` needs \`chat.sync\`; \`message/stream\` needs \`chat.stream\` and answers as
+  \`text/event-stream\` (status working → agent message → final status).
+- Delivery runs your gated \`sendToAgent\` DM tool: 403 \`chat_not_permitted\` when DMs are not
+  granted (never retry harder). 409 \`chat_not_supported\` / \`chat_*_not_supported\` means the
+  bind does not advertise that leg — use \`sendToAgent\` via tools/call or issue comments.
+- Board chat stays in Tourbillon's own chat UI; reach the Board through issue comments.
 
 ## Rules
 

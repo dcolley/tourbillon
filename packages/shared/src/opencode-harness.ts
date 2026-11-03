@@ -40,6 +40,7 @@
  * Never log `apiToken` or `sessionToken`.
  */
 import { z } from 'zod';
+import { harnessChatCapabilitySchema } from './harness-chat';
 
 /** adapterConfig discriminator for the external OpenCode bind. */
 export const OPENCODE_HARNESS_KIND = 'opencode' as const;
@@ -123,6 +124,8 @@ export const opencodeHarnessBindSchema = z
     callbackBaseUrl: httpOriginUrl.optional(),
     /** Replace the bundled skill-install blob served at the callback `skill` endpoint. */
     skillInstall: z.string().min(1).optional(),
+    /** AC5: chat legs this harness advertises (absent ⇒ callback chat refused). */
+    chat: harnessChatCapabilitySchema.optional(),
   })
   .strict()
   .superRefine((bind, ctx) => {
@@ -447,10 +450,21 @@ the shared record); 409 on checkout means someone else holds the lock — choose
 When the task needs review, updateIssue to in_review with the reviewer assigned — do not
 silently park work.
 
-## Chat
+## Chat (only when your bind advertises it)
 
-Board chat is not exposed on this callback yet (501 \`chat_not_implemented\`).
-For now, message other agents with the \`sendToAgent\` DM tool when the agent has it.
+If the operator set \`chat: { "sync": true }\` on your bind, you can chat with another Tourbillon
+agent at \`POST {callback.baseUrl}{chat}\` (same Bearer session token) with a JSON-RPC body:
+
+\`\`\`json
+{ "jsonrpc": "2.0", "id": "1", "method": "message/send",
+  "params": { "message": { "role": "user", "parts": [{ "kind": "text", "text": "…" }],
+    "metadata": { "tourbillon": { "toAgentUrlKey": "cto" } } } } }
+\`\`\`
+
+Delivery runs your gated \`sendToAgent\` DM tool (403 \`chat_not_permitted\` when DMs are not
+granted). \`message/stream\` is refused unless the bind also advertises \`chat.stream\`.
+409 \`chat_not_supported\` means chat is not advertised — use \`sendToAgent\` via tools/call.
+Board chat stays in Tourbillon's own chat UI; reach the Board through issue comments.
 
 ## Rules
 

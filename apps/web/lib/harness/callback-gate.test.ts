@@ -4,7 +4,7 @@
  *  - capability-denied tool (absent from assembleAgentTools output) ⇒ 403 and execute() is
  *    NEVER invoked (mutant: delete the gate check ⇒ executed sentinel trips).
  *  - permitted tool ⇒ executes with a requestContext carrying the session token as apiKey.
- *  - chat ⇒ 501 stub (documented follow-up), skill ⇒ markdown.
+ *  - chat ⇒ refused unless the bind advertises it (AC5 matrix in callback-chat.test.ts), skill ⇒ markdown.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -207,12 +207,12 @@ test('skill endpoint: OpenCode bind skillInstall override wins', async () => {
   assert.equal(res.body, 'CUSTOM OC SKILL');
 });
 
-test('chat endpoint: authenticated 501 stub with follow-up pointer', async () => {
+test('chat endpoint: auth still first; no advertised chat ⇒ 409 chat_not_supported (no 501 stub)', async () => {
   const { deps } = makeDeps();
   const anon = await handleHarnessChat({ authorization: 'Bearer bad', deps });
   assert.equal(anon.status, 401);
   const res = await handleHarnessChat({ authorization: AUTH, deps });
-  assert.equal(res.status, 501);
-  assert.equal((res.body as { error: string }).error, 'chat_not_implemented');
-  assert.match((res.body as { followUp: string }).followUp, /#281/);
+  assert.equal(res.status, 409);
+  assert.equal((res.body as { error: string }).error, 'chat_not_supported');
+  // Full AC5 matrix (sync / stream / gate / mutants): ./callback-chat.test.ts
 });
