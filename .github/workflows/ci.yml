@@ -34,3 +34,6 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm type-check
+      # S282-S5: packages/company-computer lint gate (eslint.config.mjs in that package).
+      # Scoped to the package; apps/web lint is not yet CI-clean so it stays local.
+      - run: pnpm --filter @tourbillon/company-computer lint

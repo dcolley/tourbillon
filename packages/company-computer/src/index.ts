@@ -16,4 +16,5 @@ export * from './session-registry';
 export * from './host-client';
 export * from './lifecycle';
 export * from './settings';
-export { COMPANY_COMPUTER_TOOLS } from './tools';
+// S282-S4: the agent toolset (COMPANY_COMPUTER_TOOLS) lives in @tourbillon/mastra
+// (src/tools/company-computer-tools.ts) so this package stays a leaf (no mastra cycle).

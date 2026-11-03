@@ -18,7 +18,7 @@ toolset being attached does not bypass the gates — every call is checked serve
 | `computerScreenshot()` | Base64 PNG of your desktop — read the page, verify clicks |
 | `computerClick(x, y, button?)` | Click absolute pixel coordinates |
 | `computerTypeText(text)` | Type into the focused window |
-| `computerGetSessionInfo()` | Seat status, ports, timestamps, takeover state |
+| `computerGetSessionInfo()` | Seat status, ports, timestamps |
 | `computerCloseSession()` | Tear the seat down when GUI work is done |
 
 `computerOpenFileManager`, `computerOpenTerminal`, `computerPressKey`, `computerMouseMove`
@@ -27,10 +27,11 @@ and `computerScroll` are registered but return `not_implemented` in this slice.
 ## Discipline
 
 - Work loop: open → screenshot → act → screenshot. Never click blind twice in a row.
-- Check `computerGetSessionInfo()` before driving input: while Board holds takeover,
-  input calls return `{ paused: true }` — wait or continue non-GUI work.
+- Check `computerGetSessionInfo()` before driving input to confirm the seat is running.
+- Board watch/takeover of your seat is **Slice 2 — not available yet**. Nothing pauses
+  your input in this slice; do not wait for or expect a `paused` result.
 - NEVER type passwords, API keys, or 2FA codes. Comment on the issue and ask the Board
-  to take over for credential entry; the transcript must stay clean.
+  to handle credential entry; the transcript must stay clean.
 - Call `computerCloseSession()` when finished with GUI work to free host resources.
   Your home directory persists; the container does not.
 - Gate errors are actionable, quote them verbatim:

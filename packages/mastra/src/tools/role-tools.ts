@@ -1,6 +1,6 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
-import { COMPANY_COMPUTER_TOOLS } from '@tourbillon/company-computer/tools';
+import { COMPANY_COMPUTER_TOOLS } from './company-computer-tools';
 import { HITL_REQUEST_SPEC, hitlRequestFields, parseHitlRequestForIngest } from '@tourbillon/shared/hitl';
 import { extractToolRuntimeContext, tracedAgentFetch } from './api-client';
 import { NITTER_TOOLS } from './nitter-tools';

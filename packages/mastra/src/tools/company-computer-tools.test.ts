@@ -4,7 +4,9 @@
  */
 import { strict as assert } from 'node:assert';
 import { describe, it, before, after } from 'node:test';
-import { COMPANY_COMPUTER_TOOLS } from './tools';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { COMPANY_COMPUTER_TOOLS } from './company-computer-tools';
 
 type FakeCtx = { get: (k: string) => unknown };
 const requestContext: FakeCtx = {
@@ -135,4 +137,21 @@ describe('Slice-2 stubs answer not_implemented without touching the network', ()
       assert.deepEqual(recorded, [], 'stubs must not call the API');
     });
   }
+});
+
+// S282-S7: Slice 1 has no Board takeover, so neither the tool descriptions nor the
+// skill doc may promise a `{ paused: true }` input result or a takeover state.
+describe('S282-S7: no takeover/paused promise in Slice 1', () => {
+  it('no tool description promises paused or takeover', () => {
+    for (const [key, t] of Object.entries(COMPANY_COMPUTER_TOOLS as Record<string, { description: string }>)) {
+      assert.doesNotMatch(t.description, /paused/i, `${key} promises a paused result`);
+      assert.doesNotMatch(t.description, /taken over|holds takeover|takeover state/i, `${key} promises takeover behaviour`);
+    }
+  });
+
+  it('skill doc labels takeover as Slice 2 and promises no { paused: true }', () => {
+    const doc = readFileSync(join(__dirname, '../skills/company-computer-skills.md'), 'utf8');
+    assert.doesNotMatch(doc, /\{\s*paused:\s*true\s*\}/, 'skill doc still promises { paused: true }');
+    assert.match(doc, /takeover[^\n]*Slice 2/i, 'skill doc must label takeover as Slice 2');
+  });
 });

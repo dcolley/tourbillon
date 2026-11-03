@@ -1,6 +1,9 @@
 /**
  * `company-computer` Tier-2 toolset (Slice 1).
  *
+ * S282-S4: lives in @tourbillon/mastra (not @tourbillon/company-computer) so the
+ * workspace dep graph is one-way — company-computer is a leaf with no mastra edge.
+ *
  * Two gates (locked product rule): company `hasComputer === true` AND agent
  * `hasComputer === true`. The toolset being attached never bypasses them — the
  * /api/internal/company-computer/* routes re-check both flags server-side on every
@@ -9,10 +12,13 @@
  * Slice 1 implements openBrowser, screenshot, click, typeText, closeSession,
  * getSessionInfo end-to-end against the API. openFileManager / openTerminal /
  * pressKey / mouseMove / scroll are explicit stubs (out of scope until Slice 2+).
+ *
+ * S282-S7: Board watch/takeover (and any `{ paused: true }` input result) is Slice 2.
+ * Descriptions here must not promise it; the tools.test pin enforces that.
  */
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
-import { tracedAgentFetch } from '@tourbillon/mastra/tools-api-client';
+import { tracedAgentFetch } from './api-client';
 
 const BASE = '/api/internal/company-computer';
 
@@ -48,7 +54,7 @@ export const computerScreenshotTool = createTool({
   id: 'computerScreenshot',
   description:
     'Capture the agent\'s Company Computer desktop as a base64 PNG. Read rendered pages, verify clicks. ' +
-    'Works while Board has taken over (observe-only). Returns { imageBase64, width, height }.',
+    'Returns { imageBase64, width, height }.',
   inputSchema: z.object({}),
   execute: async (_inputData, { requestContext }) => call('screenshot', requestContext),
 });
@@ -57,7 +63,7 @@ export const computerClickTool = createTool({
   id: 'computerClick',
   description:
     'Click at absolute pixel coordinates (0,0 = top-left) on the agent\'s Company Computer desktop. ' +
-    'Verify the result with computerScreenshot. Paused with a {paused:true} result while Board holds takeover.',
+    'Verify the result with computerScreenshot.',
   inputSchema: z.object({
     x: z.number().int().min(0).describe('X pixel coordinate'),
     y: z.number().int().min(0).describe('Y pixel coordinate'),
@@ -70,7 +76,7 @@ export const computerTypeTextTool = createTool({
   id: 'computerTypeText',
   description:
     'Type text into the focused window of the agent\'s Company Computer desktop. ' +
-    'NEVER type passwords, API keys, 2FA codes or other secrets — ask the Board to take over for credential entry.',
+    'NEVER type passwords, API keys, 2FA codes or other secrets — comment on the issue and ask the Board to handle credential entry.',
   inputSchema: z.object({
     text: z.string().min(1).max(4096).describe('Text to type into the focused window'),
   }),
@@ -89,8 +95,8 @@ export const computerCloseSessionTool = createTool({
 export const computerGetSessionInfoTool = createTool({
   id: 'computerGetSessionInfo',
   description:
-    'Read the agent\'s current Company Computer seat: status, container name, VNC port, timestamps, takeover state. ' +
-    'Use to check whether the Board has taken over before driving input, and to confirm the seat is running.',
+    'Read the agent\'s current Company Computer seat: status, container name, VNC port, timestamps. ' +
+    'Use to confirm the seat is running before driving input. (Board watch/takeover is Slice 2 — not available yet.)',
   inputSchema: z.object({}),
   execute: async (_inputData, { requestContext }) => call('getSession', requestContext),
 });
