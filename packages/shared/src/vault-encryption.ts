@@ -73,7 +73,7 @@ export function decryptCredential(ciphertext: string): string | OAuthTokens {
   }
 }
 
-export function sanitizeForLogging(obj: any): any {
+export function sanitizeForLogging<T>(obj: T): T {
   if (typeof obj !== 'object' || obj === null) {
     return obj;
   }
@@ -97,7 +97,9 @@ export function sanitizeForLogging(obj: any): any {
     'searxngApiKey',
   ];
   
-  const sanitized = Array.isArray(obj) ? [...obj] : { ...obj };
+  const sanitized: Record<string, unknown> = Array.isArray(obj)
+    ? ([...obj] as unknown as Record<string, unknown>)
+    : { ...(obj as Record<string, unknown>) };
   
   for (const key in sanitized) {
     const lowerKey = key.toLowerCase();
@@ -108,5 +110,5 @@ export function sanitizeForLogging(obj: any): any {
     }
   }
   
-  return sanitized;
+  return sanitized as T;
 }

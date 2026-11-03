@@ -8,7 +8,8 @@
     "start": "bash -c 'set -a && source ../../.env && set +a && exec next start'",
     "lint": "eslint .",
     "type-check": "tsc --noEmit",
-    "test": "node scripts/run-tests.mjs"
+    "test": "node scripts/run-tests.mjs",
+    "test:harness": "tsx --test lib/harness/*.test.ts"
   },
   "dependencies": {
     "@ag-ui/core": "1.0.3",

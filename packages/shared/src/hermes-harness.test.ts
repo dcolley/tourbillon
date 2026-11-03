@@ -234,7 +234,6 @@ test('envelope: missing callbackUrl fails closed (never dispatch a homeless hear
     HermesHarnessConfigError,
   );
   assert.throws(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     () => buildHermesHeartbeatEnvelope(baseEnvelopeInput({ callbackBaseUrl: undefined as any })),
     /callback\.baseUrl/,
   );

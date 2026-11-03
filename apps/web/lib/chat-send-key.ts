@@ -130,12 +130,10 @@ export function subscribeChatSendKeyMode(listener: ChatSendKeyListener): () => v
   if (owner) {
     const refs = (storageListenerRefs.get(owner) ?? 0) + 1;
     storageListenerRefs.set(owner, refs);
-    // The `refs === 1` gate is DOCUMENTED INTENT, not behaviour the tests can distinguish:
-    // addEventListener with the identical module-level handler is deduped (by the DOM per window,
-    // and by the fake window's Set in lib/chat-send-key.test.ts), so attaching unconditionally on
-    // every subscribe would keep the whole suite green (the equivalent mutant from S300-S1). The
-    // gate makes the one-listener-per-window invariant explicit; do not "simplify" it away
-    // expecting a pin to catch the regression, because none will.
+    // The `refs === 1` gate keeps one listener per window. The DOM would dedupe the identical
+    // module-level handler anyway, so this is about intent, not behaviour, but it is pinned:
+    // the fake window in lib/chat-send-key.test.ts counts RAW addEventListener('storage') calls
+    // before its Set dedup (S305-S1), so attaching on every subscribe turns the suite red.
     if (refs === 1) owner.addEventListener('storage', onStorageEvent);
   }
   return () => {

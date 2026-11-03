@@ -6,7 +6,6 @@ import {
   flushObservability,
   getInternalApiUrl,
   buildHeartbeatMemoryKeys,
-  getResumableDurableRun,
   persistDurableRunId,
   resolveAgentGenerationOptions,
   toMastraCallOptions,
@@ -18,6 +17,8 @@ import {
   runWithHeartbeatContext,
   registerKnownSecretValues,
   resolveAgentProviderRow,
+  consumeApiErrorDetailsByRequestKey,
+  storeApiErrorDetails,
 } from '@tourbillon/mastra';
 import type { HeartbeatJobData, AgentRuntimeConfig } from '@tourbillon/shared';
 import {
@@ -36,7 +37,6 @@ import {
   TASK_SCOPED_WAKE_REASONS,
   TERMINAL_HEARTBEAT_STATUSES,
 } from '@tourbillon/shared';
-import { durableWakeOutcomeFromTripwire } from './durable-wake-outcome';
 import { buildRunWakeMessage, createDrizzleWakeContextRepo } from './wake-context';
 import type { Agent as AgentRecord } from '@tourbillon/db';
 import { randomUUID } from 'crypto';
@@ -58,7 +58,6 @@ import {
 } from '@tourbillon/shared/opencode-harness';
 import { redisPub } from './redis-pub';
 import {
-  awaitWithAbort,
   heartbeatAbortedError,
   isAbortLikeError,
   resolveHeartbeatFailureError,
@@ -1179,7 +1178,7 @@ export async function runDurableAgentWake(params: {
   // Product lock: all non-chat wakes start with empty context (no prior thread history).
   // Clear all thread types (idle, inbox, issue) before each heartbeat wake.
   // OM may still run on the current wake, but it will not load prior wake transcripts.
-  const resumable = null; // Never resume prior runs for heartbeat wakes
+  // Never resume prior runs for heartbeat wakes.
   await clearAllHeartbeatThreads(companyId, agentRecord.id, taskId);
   runTracer.info('cleared all heartbeat threads for empty-context wake');
 
@@ -1223,12 +1222,9 @@ export async function runDurableAgentWake(params: {
   const detector = new TripwireDetector(runId);
   tripwireDetectorRegistry.register(detector);
 
-  // Attach tripwire listener BEFORE stream/observe (must listen before event fires)
-  const tripwirePromise = new Promise<never>((_, reject) => {
-    detector.once('tripwire', (errorText: string) => {
-      reject(new Error(errorText));
-    });
-  });
+  // The tripwire listener lives in raceStreamWithAbort (armed before streamFn runs, via
+  // enforceHeartbeatWallClock). S316-S4: the dead outer `tripwirePromise` that sat here was never
+  // awaited, so a fired tripwire left it as an unhandled rejection.
 
   try {
     // Call production wall-clock enforcement (reads timeout.heartbeatSec ?? 300)
@@ -1287,7 +1283,6 @@ export async function runDurableAgentWake(params: {
         : undefined;
       
       if (requestKey) {
-        const { consumeApiErrorDetailsByRequestKey, storeApiErrorDetails } = require('@tourbillon/mastra') as typeof import('@tourbillon/mastra');
         
         // Look up by requestKey and re-store by runId
         const details = consumeApiErrorDetailsByRequestKey(requestKey);
@@ -1302,7 +1297,6 @@ export async function runDurableAgentWake(params: {
         }
       } else if (apiError.statusCode !== undefined || apiError.url !== undefined || apiError.responseBody !== undefined) {
         // Fallback: store directly from error object if no requestKey
-        const { storeApiErrorDetails } = require('@tourbillon/mastra') as typeof import('@tourbillon/mastra');
         
         storeApiErrorDetails(runId, {
           statusCode: typeof apiError.statusCode === 'number' ? apiError.statusCode : undefined,

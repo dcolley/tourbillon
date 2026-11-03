@@ -102,6 +102,9 @@ export async function driveSessionHeadless(
   const staleSec = progressStaleSec ?? liveness.progressStaleSec;
 
   return new Promise((resolve, reject) => {
+    // Assigned once by session.subscribe() below, but the finish() closure above it must be
+    // able to read it first (early timer / abort before subscribe), so it cannot be a const.
+    // eslint-disable-next-line prefer-const
     let unsub: (() => void) | undefined;
     let progressTimer: ReturnType<typeof setTimeout> | undefined;
     let wallClockTimer: ReturnType<typeof setTimeout> | undefined;
