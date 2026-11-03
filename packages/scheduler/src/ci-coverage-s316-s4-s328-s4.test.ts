@@ -1,6 +1,7 @@
 /**
  * S316-S4 / S322-S4 + S328-S4 pins (Soft Pack H): CI actually LINTS shared + scheduler and
- * actually RUNS the service-free shared / scheduler / apps/web harness unit tests.
+ * actually RUNS the service-free shared / scheduler / apps/web harness unit tests
+ * (plus lib/chat-send-key.test.ts — S305-S1, which sits outside lib/harness/).
  *
  * Before this pack, shared and scheduler had no eslint config (so `pnpm -r lint` skipped them
  * and hermes-adapter / opencode-adapter / wake-runner were never linted), and CI was
@@ -114,7 +115,15 @@ describe('S328-S4: CI runs the service-free shared + scheduler + harness unit te
   it('the package scripts the job calls exist and cover the whole suite', () => {
     assert.match(scripts(sharedRoot)['test:unit'] ?? '', /find src -name \\?"\*\.test\.ts\\?"/, 'shared test:unit runs every src test file');
     assert.equal(scripts(schedulerRoot)['test:unit'], 'node scripts/run-unit-tests.mjs');
-    assert.match(scripts(webRoot)['test:harness'] ?? '', /lib\/harness\/\*\.test\.ts/, 'web test:harness runs lib/harness');
+    const harnessScript = scripts(webRoot)['test:harness'] ?? '';
+    assert.match(harnessScript, /lib\/harness\/\*\.test\.ts/, 'web test:harness runs lib/harness');
+    // S305-S1 is lib/chat-send-key.test.ts, outside the harness glob. A pin that only matches
+    // lib/harness/*.test.ts stays green when CI never runs it.
+    assert.match(
+      harnessScript,
+      /(?:^|\s)lib\/chat-send-key\.test\.ts(?:\s|$)/,
+      'web test:harness must pass lib/chat-send-key.test.ts to tsx --test (S305-S1)',
+    );
   });
 
   it('no --test-force-exit in the CI unit scripts (it can drop whole files and still exit 0)', () => {

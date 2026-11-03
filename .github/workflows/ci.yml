@@ -5,7 +5,7 @@ name: CI
 # (baseline-gated, see packages/mastra/type-check.baseline). Before this workflow the
 # gate only ever ran on developer machines, so type regressions reached review.
 # S328-S4: the `unit-tests` job below runs the service-FREE subset (shared, scheduler
-# minus packages/scheduler/scripts/run-unit-tests.mjs SERVICE_BOUND, apps/web lib/harness).
+# minus packages/scheduler/scripts/run-unit-tests.mjs SERVICE_BOUND, apps/web lib/harness and lib/chat-send-key.test.ts (S305-S1)).
 # Suites that need Postgres/Redis stay a local/pre-merge concern until an infra recipe exists.
 # S316-S4 / S322-S4: shared + scheduler are linted alongside company-computer, so the
 # harness adapters (hermes-adapter, opencode-adapter, wake-runner) are no longer a blind spot.
