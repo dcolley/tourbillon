@@ -44,11 +44,26 @@
  * mock.module): seed the require-cache for the live './client' before
  * requiring the module under test, stub fetch, and set/restore the vault +
  * GitHub OAuth env around the suite.
+ *
+ * S318-S1 sweep ledger (Refs #318, from the #318 gate comment): the gate
+ * mutant-measured only the agent write-back + company refresh-failure flag.
+ * Soft pack B mutant-measured every remaining site — company_user write-back,
+ * the agent and company_user refresh-failure flags, company write-back, and a
+ * wrong-column variant on company_user — each RED'ing exactly its scope's
+ * tests here (matrix in the pack-B PR body). All 7 update sites in
+ * vault-credentials.ts are now pinned AND mutant-proven.
+ *
+ * S318-S2 (Refs #318): the self-test at the bottom probes extractWhereTarget
+ * with a known eq() so a drizzle bump that reshapes SQL.queryChunks internals
+ * fails with a clear "harness broke" message instead of masquerading as
+ * row-target regressions.
  */
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { describe, it, after, afterEach } from 'node:test';
+import { eq } from 'drizzle-orm';
 import type { OAuthTokens } from '@tourbillon/shared/vault-types';
+import { vaultSecrets } from './schema/vault-secrets';
 
 const require_ = createRequire(import.meta.url);
 
@@ -381,4 +396,23 @@ describe('S308-S2 - refreshOAuthToken returning null sets needsReauth (Refs #304
       });
     }
   }
+});
+
+// S318-S2 (Refs #318): the fake-db `.where()` unpacker above duck-types drizzle
+// 0.45 internals (SQL.queryChunks; Column chunks by name+table; Param chunks by
+// constructor name). A drizzle bump that reshapes those internals would otherwise
+// make every row-target assertion above fail as an apparent PRODUCT regression.
+// This probe isolates the harness: it must unpack a known eq() to the exact
+// { column, value } pair, or the failure message says "harness broke".
+describe('vault-credentials-308-softs — S318-S2 where-extractor self-test (Refs #318)', () => {
+  it('extractWhereTarget unpacks a known eq() to { column: "id", value }', () => {
+    assert.deepEqual(
+      extractWhereTarget(eq(vaultSecrets.id, 'probe-row-1')),
+      { column: 'id', value: 'probe-row-1' },
+      'HARNESS BROKEN: extractWhereTarget no longer unpacks drizzle eq() SQL — ' +
+        'SQL.queryChunks internals changed (drizzle bump?). Row-target pins in ' +
+        'this file are unreliable until the unpacker is fixed; do NOT read their ' +
+        'failures as row-target regressions.',
+    );
+  });
 });
