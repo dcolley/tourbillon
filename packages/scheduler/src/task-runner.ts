@@ -40,7 +40,7 @@ import {
   type ChatTaskStatus,
   type RunnableChatTaskRow,
 } from '@tourbillon/db';
-import type { HeartbeatJobData, ResolvedTaskRunnerSettings, TaskRunnerSettings } from '@tourbillon/shared';
+import type { HeartbeatJobData, ResolvedTaskRunnerSettings, TaskProgressStatus, TaskRunnerSettings } from '@tourbillon/shared';
 import {
   createTraceLogger,
   resolveHeartbeatLivenessConfig,
@@ -138,7 +138,8 @@ export interface ChatTaskProgressEvent {
   runId: string;
   /** High-level stage shown to the board: task started / finished / needs another look. */
   stage: 'started' | 'done' | 'needs_review';
-  status: 'running' | 'succeeded' | 'failed' | 'skipped';
+  /** S307-S2 (#304 softs): single source @tourbillon/shared (was a local copy of the union). */
+  status: TaskProgressStatus;
   title: string;
 }
 
