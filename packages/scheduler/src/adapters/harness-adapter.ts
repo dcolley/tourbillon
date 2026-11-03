@@ -22,7 +22,6 @@ import {
   isHarnessAdapter,
   isMastraTracingEnabled,
   isObservabilityEnabled,
-  isObservationalMemoryConfigured,
   type CompanySettings,
 } from '@tourbillon/shared';
 import { driveSessionHeadless } from '../harness-session-drive';

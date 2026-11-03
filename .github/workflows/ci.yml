@@ -4,9 +4,12 @@ name: CI
 # regressions across packages — apps/web tsc + the now-covered packages/mastra
 # (baseline-gated, see packages/mastra/type-check.baseline). Before this workflow the
 # gate only ever ran on developer machines, so type regressions reached review.
-# Scope deliberately stops at type-check: the test suites need Postgres/redis and are
-# flaky under parallel worktrees (recorded as a deferral in the soft-pack PR), so they
-# stay a local/pre-merge concern until an infra recipe exists.
+# S328-S4: the `unit-tests` job below runs the service-FREE subset (shared, scheduler
+# minus packages/scheduler/scripts/run-unit-tests.mjs SERVICE_BOUND, apps/web lib/harness and lib/chat-send-key.test.ts (S305-S1)).
+# Suites that need Postgres/Redis stay a local/pre-merge concern until an infra recipe exists.
+# S316-S4 / S322-S4: shared + scheduler are linted alongside company-computer, so the
+# harness adapters (hermes-adapter, opencode-adapter, wake-runner) are no longer a blind spot.
+# Both are pinned by packages/scheduler/src/ci-coverage-s316-s4-s328-s4.test.ts.
 
 on:
   push:
@@ -37,3 +40,28 @@ jobs:
       # S282-S5: packages/company-computer lint gate (eslint.config.mjs in that package).
       # Scoped to the package; apps/web lint is not yet CI-clean so it stays local.
       - run: pnpm --filter @tourbillon/company-computer lint
+      # S316-S4 / S322-S4: shared + scheduler lint gate (eslint.config.mjs in each package).
+      - run: pnpm --filter @tourbillon/shared lint
+      - run: pnpm --filter @tourbillon/scheduler lint
+
+  # S328-S4: unit tests that need no Postgres/Redis. DATABASE_URL/REDIS_URL point at a closed
+  # port so a suite that silently grows a service dependency fails here instead of passing.
+  unit-tests:
+    runs-on: ubuntu-latest
+    # No --test-force-exit in these scripts (it can drop files while exiting 0); an open handle
+    # surfaces here as a timeout instead.
+    timeout-minutes: 15
+    env:
+      DATABASE_URL: postgres://ci:ci@127.0.0.1:1/unused
+      REDIS_URL: redis://127.0.0.1:1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @tourbillon/shared test:unit
+      - run: pnpm --filter @tourbillon/scheduler test:unit
+      - run: pnpm --filter web test:harness

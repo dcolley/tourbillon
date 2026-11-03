@@ -2,10 +2,7 @@ import { resolveKnowledgeGraphMounts } from './knowledge-graph-config';
 import { loadMcpJsonConfig } from './mcp-config';
 import {
   MCP_BUILTIN_CATALOG,
-  MCP_SERVER_CATALOG,
   getBuiltinMcpServerForToolset,
-  getMcpBridgedToolsetIds,
-  isSpecialMcpServerId,
 } from './mcp-builtin-catalog';
 import type { McpServerDefinition } from './mcp-types';
 

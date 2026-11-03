@@ -127,6 +127,9 @@ export function widgetAnswerToolResult(answer: WidgetAnswer): string {
  * client see) describes the input; the answer is validated against it and the run receives the
  * parsed output, so a transform may change the value's type. Keep them pure and cheap.
  */
+// `any` defaults are deliberate: registries hold heterogeneous specs, and `unknown` would make
+// every concrete WidgetSpec<P, A> unassignable through its contravariant callbacks.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export interface WidgetSpec<P = any, A = any> {
   name: string;
   version: number;

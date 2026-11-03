@@ -73,7 +73,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import { and, eq, or, isNull, gte, sql } from 'drizzle-orm';
+import { and, eq, or, isNull, sql } from 'drizzle-orm';
 import { readMigrationFiles } from 'drizzle-orm/migrator';
 import { heartbeatRuns } from '@tourbillon/db';
 import * as schema from '@tourbillon/db/schema';
@@ -294,7 +294,7 @@ test('S199b: a slot-freeing tick resets the agent — the NEXT deferral is loud 
   const f = fakes({ rows: [row({ taskId: 't1', agentId: 'a1' })], log });
   f.deps.countActiveRuns = async (agentId) => slots[agentId] ?? { total: 0, task: 0 };
   const mem = new Map<string, number>();
-  let clock = 0;
+  const clock = 0;
   const opts = () => ({ maxConcurrentRuns: 2, taskCap: 1, deferLogMemory: mem, now: () => clock });
 
   await pollTaskRunner(f.deps, opts());

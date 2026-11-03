@@ -36,6 +36,13 @@ interface FakeWindow {
   fireStorage(key: string | null): void;
   /** How many `storage` handlers are currently attached (the DOM Set-like dedup). */
   storageListenerCount(): number;
+  /**
+   * S305-S1: RAW `addEventListener('storage', …)` / `removeEventListener('storage', …)` calls,
+   * counted BEFORE the Set dedup. The dedup hides an unconditional attach-per-subscribe; the raw
+   * count does not, so the `refs === 1` gate in subscribeChatSendKeyMode is pinned.
+   */
+  rawStorageAdds: number;
+  rawStorageRemoves: number;
   store: Map<string, string>;
   failNextSet?: boolean;
   failRead?: boolean;
@@ -62,16 +69,20 @@ function makeFakeWindow(initial?: Partial<Record<string, string>>): FakeWindow {
       },
     },
     addEventListener: (type, handler) => {
+      if (type === 'storage') win.rawStorageAdds += 1;
       if (!handlers.has(type)) handlers.set(type, new Set());
       handlers.get(type)!.add(handler);
     },
     removeEventListener: (type, handler) => {
+      if (type === 'storage') win.rawStorageRemoves += 1;
       handlers.get(type)?.delete(handler);
     },
     fireStorage: (key) => {
       for (const h of [...(handlers.get('storage') ?? [])]) h({ key });
     },
     storageListenerCount: () => handlers.get('storage')?.size ?? 0,
+    rawStorageAdds: 0,
+    rawStorageRemoves: 0,
     store,
   };
   return win;
@@ -276,6 +287,8 @@ describe('CHAT-SEND-KEY live subscription', () => {
       const offA = subscribeChatSendKeyMode((m) => seenA.push(m));
       const offB = subscribeChatSendKeyMode((m) => seenB.push(m));
       assert.equal(w.storageListenerCount(), 1, 'subscribers share ONE storage listener on the window');
+      // S305-S1: only the FIRST subscriber attaches (refs === 1) — not merely deduped by the window.
+      assert.equal(w.rawStorageAdds, 1, 'the second subscribe must not call addEventListener again');
 
       // A unmounts (thread switch, pane close) — and does it twice, as a sloppy caller may.
       offA();
@@ -291,12 +304,14 @@ describe('CHAT-SEND-KEY live subscription', () => {
       // The last subscriber leaving must actually detach (no leaked window listener)…
       offB();
       assert.equal(w.storageListenerCount(), 0, 'the last unsubscribe detaches the shared listener');
+      assert.equal(w.rawStorageRemoves, 1, 'only the last unsubscribe calls removeEventListener (double offA() included)');
 
       // …and a later subscriber must re-attach it.
       const seenC: string[] = [];
       const offC = subscribeChatSendKeyMode((m) => seenC.push(m));
       try {
         assert.equal(w.storageListenerCount(), 1, 'a new subscriber re-attaches the listener');
+        assert.equal(w.rawStorageAdds, 2, 're-attach is one more raw addEventListener, no more');
         w.store.set(CHAT_SEND_KEY_STORAGE_KEY, 'enter_sends');
         w.fireStorage(CHAT_SEND_KEY_STORAGE_KEY);
         assert.deepEqual(seenC, ['enter_sends']);
@@ -320,6 +335,7 @@ describe('CHAT-SEND-KEY live subscription', () => {
       const offFirst = subscribeChatSendKeyMode(shared);
       const offSecond = subscribeChatSendKeyMode(shared);
       assert.equal(w.storageListenerCount(), 1, 'both subscriptions share ONE storage listener on the window');
+      assert.equal(w.rawStorageAdds, 1, 'S305-S1: the same callback twice still attaches the window listener once');
 
       // The first subscription leaves; the second still holds the callback.
       offFirst();

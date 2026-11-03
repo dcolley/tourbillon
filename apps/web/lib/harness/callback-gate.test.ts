@@ -7,6 +7,8 @@
  *  - chat ⇒ refused unless the bind advertises it (AC5 matrix in callback-chat.test.ts), skill ⇒ markdown.
  *  - S327-S1: tools/call resolves by assembled key (`getInboxTool`) OR tool id (`getInbox`, as
  *    the skills teach); unknown / gated-out names stay 403 and NEVER execute.
+ *  - S328-S1: precedence is pinned (key tiers beat the id scan; exact id beats `Tool`-stripped
+ *    id) and two assembled tools claiming the same id ⇒ 409 ambiguous_tool, NEITHER executes.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -17,6 +19,7 @@ import {
   handleHarnessToolCall,
   handleHarnessToolList,
   findGatedTool,
+  resolveGatedTool,
   harnessBearerToken,
   type HarnessCallbackDeps,
 } from './callback-gate';
@@ -312,4 +315,64 @@ test('findGatedTool: own executable entries only; id match must be exact', () =>
   assert.equal(findGatedTool(tools, 'constructor'), undefined);
   assert.equal(findGatedTool(tools, '__proto__'), undefined);
   assert.equal(findGatedTool({}, 'getInbox'), undefined);
+});
+
+// ── S328-S1: id/key collision precedence + ambiguity ─────────────────────────────────────
+function tool(id: string, executed: string[], label: string) {
+  return { id, execute: async () => { executed.push(label); return { ok: true, label }; } };
+}
+
+test('PIN S328-S1: precedence — exact key > `${name}Tool` key > stripped key > exact id > stripped id', () => {
+  const ran: string[] = [];
+  const tools: Record<string, unknown> = {
+    // an unrelated tool whose id collides with every name form below; key tiers must win over it
+    cp_any: tool('getInbox', ran, 'id-getInbox'),
+    cp_any2: tool('getInboxTool', ran, 'id-getInboxTool'),
+    getInbox: tool('x1', ran, 'key-getInbox'),
+    getInboxTool: tool('x2', ran, 'key-getInboxTool'),
+  };
+  assert.equal(findGatedTool(tools, 'getInbox'), tools.getInbox, 'tier 1 exact key beats `${name}Tool` and id');
+  assert.equal(findGatedTool(tools, 'getInboxTool'), tools.getInboxTool, 'tier 1 exact key beats stripped key and id');
+  const t2 = { ...tools };
+  delete t2.getInbox;
+  assert.equal(findGatedTool(t2, 'getInbox'), tools.getInboxTool, 'tier 2 `${name}Tool` key beats an exact-id match');
+  const t3 = { ...tools };
+  delete t3.getInboxTool;
+  assert.equal(findGatedTool(t3, 'getInboxTool'), tools.getInbox, 'tier 3 stripped key beats an exact-id match');
+  const ids: Record<string, unknown> = { a: tool('weird', ran, 'stripped'), b: tool('weirdTool', ran, 'exact') };
+  assert.equal(findGatedTool(ids, 'weirdTool'), ids.b, 'exact id beats `Tool`-stripped id');
+  assert.deepEqual(resolveGatedTool(ids, 'weirdTool'), { kind: 'found', tool: ids.b, key: 'b' });
+  assert.deepEqual(ran, [], 'lookup never executes');
+});
+
+test('PIN S328-S1: two assembled tools with the same id ⇒ ambiguous (order-independent), findGatedTool fails closed', () => {
+  const ran: string[] = [];
+  const a = tool('search', ran, 'a');
+  const b = tool('search', ran, 'b');
+  for (const tools of [{ mcp_one_search: a, mcp_two_search: b }, { mcp_two_search: b, mcp_one_search: a }]) {
+    assert.deepEqual(resolveGatedTool(tools, 'search'), { kind: 'ambiguous', keys: ['mcp_one_search', 'mcp_two_search'] });
+    assert.deepEqual(resolveGatedTool(tools, 'searchTool'), { kind: 'ambiguous', keys: ['mcp_one_search', 'mcp_two_search'] });
+    assert.equal(findGatedTool(tools, 'search'), undefined);
+    // the assembled key is never ambiguous
+    assert.equal(findGatedTool(tools, 'mcp_two_search'), b);
+  }
+  // the SAME tool object under two keys is one tool, not a collision
+  assert.equal(resolveGatedTool({ k1: a, k2: a }, 'search').kind, 'found');
+  assert.deepEqual(ran, []);
+});
+
+test('PIN S328-S1: tools/call on an ambiguous id ⇒ 409 ambiguous_tool with candidates, NEITHER executes; key still runs', async () => {
+  const ran: string[] = [];
+  const { deps } = makeDeps();
+  deps.assembleTools = async () => ({ mcp_one_search: tool('search', ran, 'one'), mcp_two_search: tool('search', ran, 'two') });
+  const res = await handleHarnessToolCall({ authorization: AUTH, body: { tool: 'search', args: {} }, deps });
+  assert.equal(res.status, 409);
+  const body = res.body as { error: string; tool: string; candidates: string[] };
+  assert.equal(body.error, 'ambiguous_tool');
+  assert.equal(body.tool, 'search');
+  assert.deepEqual(body.candidates, ['mcp_one_search', 'mcp_two_search']);
+  assert.deepEqual(ran, [], 'ambiguous name must never execute');
+  const viaKey = await handleHarnessToolCall({ authorization: AUTH, body: { tool: 'mcp_two_search', args: {} }, deps });
+  assert.equal(viaKey.status, 200);
+  assert.deepEqual(ran, ['two']);
 });

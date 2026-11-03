@@ -147,11 +147,23 @@ async function assembleForCaller(
  *  1. exact assembled key (`getInboxTool`, or an MCP key as listed by GET tools);
  *  2. `${name}Tool` — the short id skills teach (`getInbox` → `getInboxTool`);
  *  3. `name` minus a trailing `Tool` (`getInboxTool` when assembled under `getInbox`);
- *  4. scan for a tool whose `id === name` (or its `Tool`-stripped form).
+ *  4. scan for a tool whose `id === name`, then (only if none) whose `id` is the `Tool`-stripped form.
  * Own keys only (no prototype lookups). Never consults anything outside `tools`, so a name
- * the gate did not assemble resolves to `undefined` ⇒ 403, never executed.
+ * the gate did not assemble resolves to `none` ⇒ 403, never executed.
+ *
+ * S328-S1 precedence (pinned in callback-gate.test.ts): the tiers are strict — the first tier
+ * that hits wins, so an assembled KEY always beats an id match (keys are unique by construction,
+ * so tiers 1-3 can never be ambiguous). The id scans (tier 4) are the only place two different
+ * tools can both claim a name (e.g. two MCP servers exposing the same tool id); that used to
+ * resolve to whichever the assembler happened to insert first. It is now `ambiguous` and the
+ * caller answers 409 without executing either.
  */
-export function findGatedTool(tools: Record<string, unknown>, name: string): GateableTool | undefined {
+export type GatedToolLookup =
+  | { kind: 'found'; tool: GateableTool; key: string }
+  | { kind: 'ambiguous'; keys: string[] }
+  | { kind: 'none' };
+
+export function resolveGatedTool(tools: Record<string, unknown>, name: string): GatedToolLookup {
   const executable = (v: unknown): GateableTool | undefined => {
     const t = v as GateableTool | undefined;
     return t && typeof t === 'object' && typeof t.execute === 'function' ? t : undefined;
@@ -160,14 +172,25 @@ export function findGatedTool(tools: Record<string, unknown>, name: string): Gat
   for (const key of [name, `${name}Tool`, ...(stripped ? [stripped] : [])]) {
     if (!Object.prototype.hasOwnProperty.call(tools, key)) continue;
     const t = executable(tools[key]);
-    if (t) return t;
+    if (t) return { kind: 'found', tool: t, key };
   }
-  for (const value of Object.values(tools)) {
-    const t = executable(value);
-    const id = (t as { id?: unknown } | undefined)?.id;
-    if (t && typeof id === 'string' && (id === name || id === stripped)) return t;
+  for (const wanted of [name, ...(stripped ? [stripped] : [])]) {
+    const hits: Array<[string, GateableTool]> = [];
+    for (const [key, value] of Object.entries(tools)) {
+      const t = executable(value);
+      const id = (t as { id?: unknown } | undefined)?.id;
+      if (t && typeof id === 'string' && id === wanted && !hits.some(([, h]) => h === t)) hits.push([key, t]);
+    }
+    if (hits.length === 1) return { kind: 'found', tool: hits[0][1], key: hits[0][0] };
+    if (hits.length > 1) return { kind: 'ambiguous', keys: hits.map(([k]) => k).sort() };
   }
-  return undefined;
+  return { kind: 'none' };
+}
+
+/** Executable tool for `name`, or `undefined` when absent OR ambiguous (fail closed). */
+export function findGatedTool(tools: Record<string, unknown>, name: string): GateableTool | undefined {
+  const hit = resolveGatedTool(tools, name);
+  return hit.kind === 'found' ? hit.tool : undefined;
 }
 
 /**
@@ -204,7 +227,20 @@ export async function handleHarnessToolCall(params: {
   // Resolve by assembled key OR tool id (S327-S1): skills teach `getInbox` / `sendToAgent`,
   // the assembler keys them `getInboxTool` / `sendToAgentTool`. Lookup is ONLY over the
   // assembled set, so name aliasing can never widen the gate.
-  const tool = findGatedTool(tools, toolName);
+  const lookup = resolveGatedTool(tools, toolName);
+  if (lookup.kind === 'ambiguous') {
+    // S328-S1: two assembled tools claim this id — refuse rather than run whichever came first.
+    return {
+      status: 409,
+      body: {
+        error: 'ambiguous_tool',
+        tool: toolName,
+        candidates: lookup.keys,
+        message: `Tool '${toolName}' matches more than one assembled tool (${lookup.keys.join(', ')}). Call it by its assembled key.`,
+      },
+    };
+  }
+  const tool = lookup.kind === 'found' ? lookup.tool : undefined;
   if (!tool || typeof tool.execute !== 'function') {
     return {
       status: 403,

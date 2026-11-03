@@ -8,10 +8,8 @@ import {
   resolveChatObservationalMemory,
   memoryCacheKeyForAgent,
   memoryCacheKeyForChat,
-  isAgentObservationalMemoryConfigured,
-  type ResolvedObservationalMemoryConfig,
 } from './company-settings';
-import type { CompanySettings, AgentRuntimeConfig } from './types';
+import type { CompanySettings } from './types';
 
 describe('parseCompanySettings - observationalMemory', () => {
   it('parses enabled flag correctly', () => {

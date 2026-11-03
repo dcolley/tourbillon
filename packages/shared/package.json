@@ -5,7 +5,9 @@
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "scripts": {
-    "test": "sh -c 'tsx --test $(find src -name \"*.test.ts\" | sort)'"
+    "test": "sh -c 'tsx --test $(find src -name \"*.test.ts\" | sort)'",
+    "test:unit": "sh -c 'tsx --test $(find src -name \"*.test.ts\" | sort)'",
+    "lint": "eslint . --max-warnings 0"
   },
   "exports": {
     ".": "./src/index.ts",
@@ -60,8 +62,11 @@
     "zod": "catalog:"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
     "@types/node": "catalog:",
+    "eslint": "catalog:",
     "tsx": "^4.23.1",
-    "typescript": "catalog:"
+    "typescript": "catalog:",
+    "typescript-eslint": "^8.62.0"
   }
 }

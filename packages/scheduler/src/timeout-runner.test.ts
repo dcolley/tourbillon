@@ -117,7 +117,7 @@ describe('Production enforceHeartbeatWallClock timeout enforcement', () => {
           }),
           tripwireDetector: detector,
         });
-      } catch (err) {
+      } catch {
         // Expected abort
       }
       
@@ -169,7 +169,7 @@ describe('Production enforceHeartbeatWallClock timeout enforcement', () => {
       });
       
       assert.fail('Should have aborted');
-    } catch (err) {
+    } catch {
       const durationMs = Date.now() - startTime;
       detector.clear();
       
