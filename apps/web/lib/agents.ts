@@ -31,6 +31,8 @@ import {
   type AgentRuntimeConfig,
   type AgentRuntimeType,
   nextBrowserRuntimeConfig,
+  runtimeConfigLeafOps,
+  type RuntimeConfigLeafOps,
 } from '@tourbillon/shared';
 import {
   resolveAgentMcpServerIds,
@@ -403,20 +405,24 @@ export async function updateAgentRuntimeConfig(
 
   // S297-S3: write only the keys this updater owns via one atomic jsonb statement, so a
   // concurrent save of another key (e.g. avatar) can never be dropped by this stale snapshot.
-  const set: Record<string, unknown> = {
-    // timeout is always rewritten (mirrors the previous whole-object write, which
+  // S306-S3: object-valued keys (heartbeat / timeout / model) are merged leaf-by-leaf onto the
+  // LIVE sub-object — only the leaves this call changed vs its snapshot are written — so a
+  // concurrent edit to a different leaf of the same key survives too.
+  const merge: Record<string, RuntimeConfigLeafOps> = {
+    // timeout is always materialised (mirrors the previous whole-object write, which
     // materialised `timeout: {}` on a row missing the key).
-    timeout: { ...current.timeout, ...patch.timeout },
+    timeout: runtimeConfigLeafOps(current.timeout, { ...current.timeout, ...patch.timeout }),
   };
+  const set: Record<string, unknown> = {};
   const clear: string[] = [];
-  if (patch.heartbeat) set.heartbeat = mergedHeartbeat;
-  if (patch.model !== undefined) set.model = patch.model;
+  if (patch.heartbeat) merge.heartbeat = runtimeConfigLeafOps(current.heartbeat, mergedHeartbeat);
+  if (patch.model !== undefined) merge.model = runtimeConfigLeafOps(current.model, patch.model);
   if ('mail' in patch) {
     if (patch.mail === undefined) clear.push('mail');
     else set.mail = patch.mail;
   }
 
-  const updated = await updateAgentRuntimeConfigKeys(agentId, { set, clear }, { updatedAt: new Date() });
+  const updated = await updateAgentRuntimeConfigKeys(agentId, { set, clear, merge }, { updatedAt: new Date() });
   if (!updated) throw new AgentValidationError('Agent not found.');
 
   if (patch.heartbeat) {
@@ -470,12 +476,14 @@ export async function updateAgentModelSettings(
     );
   }
 
-  // S297-S3: only the `model` key is written (cleared when the patch empties it, matching the
-  // previous whole-object write where the `undefined` member was dropped by JSON.stringify);
-  // concurrent writes to other runtimeConfig keys survive.
+  // S297-S3: only the `model` key is written; concurrent writes to other runtimeConfig keys
+  // survive. S306-S3: and only the model LEAVES this patch changed (nested jsonb merge onto the
+  // live `model`), so concurrent edits to different settings (e.g. temperature + topP) both
+  // land. The key is dropped when the live merge empties it, matching the previous
+  // whole-object write where the `undefined` member was dropped by JSON.stringify.
   const updated = await updateAgentRuntimeConfigKeys(
     agentId,
-    Object.keys(merged).length > 0 ? { set: { model: merged } } : { clear: ['model'] },
+    { merge: { model: runtimeConfigLeafOps(current.model, merged, { dropIfEmpty: true }) } },
     { updatedAt: new Date() },
   );
   if (!updated) throw new AgentValidationError('Agent not found.');
@@ -1102,12 +1110,12 @@ export async function updateAgentBudget(
     throw new AgentValidationError('Monthly token budget must be a non-negative integer.');
   }
 
-  const current = agent.runtimeConfig as AgentRuntimeConfig;
-
   // S297-S3: only the `budget` key is written, atomically (row-level columns alongside).
+  // S306-S3: nested — only the `budget.enforce` leaf (the one this form owns, always written)
+  // is merged onto the live `budget`, so a concurrent edit to another budget leaf survives.
   const updated = await updateAgentRuntimeConfigKeys(
     agentId,
-    { set: { budget: { ...current.budget, enforce: input.enforce } } },
+    { merge: { budget: { set: { enforce: input.enforce } } } },
     { budgetMonthlyTokens, updatedAt: new Date() },
   );
   if (!updated) throw new AgentValidationError('Agent not found.');
@@ -1267,17 +1275,18 @@ export async function updateAgentSecrets(
     }
   }
 
-  // S297-S3: only the `secrets` key is written (cleared when emptied, matching the previous
-  // whole-object write that dropped the `undefined` member); other runtimeConfig keys survive
-  // concurrent saves. Merging *inside* `secrets` still reads a snapshot — a concurrent write
-  // of a different secret key can be lost until secrets get their own sub-key merge.
-  const updated = await updateAgentRuntimeConfigKeys(
-    agentId,
-    Object.keys(normalizedSecrets).length > 0
+  // S297-S3: only the `secrets` key is written; other runtimeConfig keys survive concurrent
+  // saves. S306-S3: a merge (replace=false) writes only the secret leaves it changed onto the
+  // LIVE `secrets` (nested jsonb merge), so a concurrent write of a different secret key
+  // survives; the key is dropped when the live result is empty. `replace: true` keeps its
+  // whole-key semantics (the caller asked for exactly this set) — cleared when emptied,
+  // matching the previous whole-object write that dropped the `undefined` member.
+  const ops = input.replace
+    ? Object.keys(normalizedSecrets).length > 0
       ? { set: { secrets: normalizedSecrets } }
-      : { clear: ['secrets'] },
-    { updatedAt: new Date() },
-  );
+      : { clear: ['secrets'] }
+    : { merge: { secrets: runtimeConfigLeafOps(existingSecrets, normalizedSecrets, { dropIfEmpty: true }) } };
+  const updated = await updateAgentRuntimeConfigKeys(agentId, ops, { updatedAt: new Date() });
   if (!updated) throw new AgentValidationError('Agent not found.');
 
   return updated;
@@ -1301,10 +1310,11 @@ export async function deleteAgentSecrets(
     delete secrets[key.trim()];
   }
 
-  // S297-S3: single-key atomic write (see updateAgentSecrets for the intra-key caveat).
+  // S297-S3 / S306-S3: nested leaf merge — only the named secret leaves are removed from the
+  // LIVE `secrets` (a concurrently-added secret survives); the key is dropped once empty.
   const updated = await updateAgentRuntimeConfigKeys(
     agentId,
-    Object.keys(secrets).length > 0 ? { set: { secrets } } : { clear: ['secrets'] },
+    { merge: { secrets: runtimeConfigLeafOps(existingSecrets, secrets, { dropIfEmpty: true }) } },
     { updatedAt: new Date() },
   );
   if (!updated) throw new AgentValidationError('Agent not found.');

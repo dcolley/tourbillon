@@ -1,6 +1,7 @@
 /**
  * UI-2b: browser client for the assistant sidebar API (UI-2 server, #155):
  *   GET   /api/assistant/agents
+ *   GET   /api/assistant/threads?agentIds=a,b,…[&limit=]          (S306-S4: every agent's list, one request)
  *   GET   /api/assistant/agents/[agentId]/threads[?q=&limit=]
  *   POST  /api/assistant/agents/[agentId]/threads            { title? }
  *   PATCH /api/assistant/agents/[agentId]/threads/[threadId] { title?, pinned?, read? }
@@ -30,6 +31,16 @@ export interface AssistantThreadsResponse {
   threads: AssistantThread[];
   /** Thread to open when the agent is selected; null = start a new one. */
   initialThreadId: string | null;
+}
+
+/** S306-S4: GET /api/assistant/threads?agentIds=… */
+export interface AssistantThreadsBatchResponse {
+  /** One entry per distinct resolved agent, in request order. `agentKey` is the key as sent. */
+  agents: Array<AssistantThreadsResponse & { agentKey: string }>;
+  /** Keys that did not resolve in the active company (unknown, or another company's agent). */
+  missing: string[];
+  /** Per-agent failures; the other agents' lists are still returned. */
+  errors: Array<{ agentKey: string; status: number; error: string }>;
 }
 
 export type AssistantThreadPatch = { title?: string; pinned?: boolean; read?: true };
@@ -72,6 +83,13 @@ export function createAssistantSidebarApi(fetchImpl: typeof fetch = (...args) =>
 
   return {
     listAgents: () => call<AssistantAgentsResponse>('/api/assistant/agents'),
+    /** S306-S4: every listed agent's threads in ONE request (callers chunk at ASSISTANT_THREADS_BATCH_MAX_AGENTS). */
+    listThreadsBatch: (agentKeys: readonly string[], opts: { limit?: number } = {}) => {
+      const q = new URLSearchParams();
+      q.set('agentIds', agentKeys.join(','));
+      if (opts.limit) q.set('limit', String(opts.limit));
+      return call<AssistantThreadsBatchResponse>(`/api/assistant/threads?${q.toString()}`);
+    },
     listThreads: (agentKey: string, opts: { q?: string; limit?: number } = {}) => {
       const q = new URLSearchParams();
       if (opts.q) q.set('q', opts.q);

@@ -211,4 +211,150 @@ describe('S297-S3 updateAgentRuntimeConfigKeys (PGlite, real jsonb semantics)', 
     // The RETURNING row reflects the post-merge document too.
     assert.deepEqual((updated.runtimeConfig as Record<string, unknown>).avatar, AVATAR_B);
   });
+  // ── S306-S3: nested leaf merges (`merge`) ─────────────────────────────────────────────────
+  // Two writers each read the row, compute a change to a DIFFERENT leaf of the same key from
+  // their snapshot, then write. Whole-key overwrite loses the first writer's leaf; the nested
+  // merge applies only the leaves each writer changed onto the LIVE sub-object.
+  for (const key of ['model', 'secrets', 'budget', 'heartbeat'] as const) {
+    it(`S306-S3: concurrent edits to different ${key} leaves both survive (interleaved writers)`, async () => {
+      const seeds: Record<string, Record<string, unknown>> = {
+        model: { temperature: 0.3, maxOutputTokens: 2048 },
+        secrets: { EXISTING: 'e' },
+        budget: { enforce: true },
+        heartbeat: { ...HEARTBEAT },
+      };
+      const leafA: Record<string, [string, unknown]> = {
+        model: ['temperature', 0.9],
+        secrets: ['A_KEY', 'a'],
+        budget: ['enforce', false],
+        heartbeat: ['wakeOnDemand', false],
+      };
+      const leafB: Record<string, [string, unknown]> = {
+        model: ['topP', 0.5],
+        secrets: ['B_KEY', 'b'],
+        budget: ['alertAtPercent', 80],
+        heartbeat: ['maxSteps', 12],
+      };
+      const id = `n-${key}`;
+      const seed = structuredClone(seeds[key]);
+      await seedAgent(id, { [key]: seed, avatar: AVATAR });
+
+      // Both writers hold the same snapshot of the sub-object…
+      const snapshotA = structuredClone(seed);
+      const snapshotB = structuredClone(seed);
+      const nextA = { ...snapshotA, [leafA[key][0]]: leafA[key][1] };
+      const nextB = { ...snapshotB, [leafB[key][0]]: leafB[key][1] };
+      // …B commits first, then A writes from its stale snapshot.
+      await helpers.updateAgentRuntimeConfigKeys(id, { merge: { [key]: helpers.runtimeConfigLeafOps(snapshotB, nextB) } }, {}, database);
+      await helpers.updateAgentRuntimeConfigKeys(id, { merge: { [key]: helpers.runtimeConfigLeafOps(snapshotA, nextA) } }, {}, database);
+
+      const doc = await stored(id);
+      assert.deepEqual(
+        doc[key],
+        { ...seed, [leafA[key][0]]: leafA[key][1], [leafB[key][0]]: leafB[key][1] },
+        `both ${key} leaves survived`,
+      );
+      assert.deepEqual(doc.avatar, AVATAR, 'other top-level keys untouched');
+      // Control: the whole-key write A used to make would have dropped B's leaf.
+      assert.notDeepEqual(nextA, doc[key]);
+    });
+  }
+
+  it('S306-S3: leaf clear + set land in ONE UPDATE via jsonb_set, keys/values bound', async () => {
+    const { spyQueries } = await import('./test/query-spy');
+    await seedAgent('m-1', { model: { temperature: 0.3, topP: 0.4 }, avatar: AVATAR });
+    const captured = spyQueries(client);
+    const before = captured.length;
+    await helpers.updateAgentRuntimeConfigKeys(
+      'm-1',
+      { merge: { model: { set: { seed: 7 }, clear: ['topP'] } }, set: { assignedTools: ['createIssue'] } },
+      { updatedAt: new Date() },
+      database,
+    );
+    const updates = captured.slice(before).filter((q) => /^\s*update/i.test(q.sql));
+    assert.equal(updates.length, 1, 'exactly one UPDATE');
+    assert.match(updates[0].sql, /jsonb_set\(/, 'nested merge uses jsonb_set');
+    const params = updates[0].params.map((p) => (typeof p === 'string' ? p : JSON.stringify(p)));
+    for (const p of ['model', 'topP', 'seed', '7']) assert.ok(params.includes(p), `bound param ${p}`);
+    const doc = await stored('m-1');
+    assert.deepEqual(doc.model, { temperature: 0.3, seed: 7 });
+    assert.deepEqual(doc.assignedTools, ['createIssue']);
+    assert.deepEqual(doc.avatar, AVATAR);
+  });
+
+  it('S306-S3: leaf set OVERWRITES the live leaf (set wins), clears remove only named leaves', async () => {
+    await seedAgent('m-2', { secrets: { A: 'old', B: 'keep' } });
+    await helpers.updateAgentRuntimeConfigKeys('m-2', { merge: { secrets: { set: { A: 'new' } } } }, {}, database);
+    assert.deepEqual((await stored('m-2')).secrets, { A: 'new', B: 'keep' });
+    await helpers.updateAgentRuntimeConfigKeys('m-2', { merge: { secrets: { clear: ['A', 'MISSING'] } } }, {}, database);
+    assert.deepEqual((await stored('m-2')).secrets, { B: 'keep' });
+  });
+
+  it('S306-S3: dropIfEmpty removes the key only when the LIVE result is empty', async () => {
+    await seedAgent('m-3', { secrets: { A: 'x' }, avatar: AVATAR });
+    // A concurrent writer added B after our snapshot { A } — clearing A must NOT drop the key.
+    await helpers.updateAgentRuntimeConfigKeys('m-3', { merge: { secrets: { set: { B: 'y' } } } }, {}, database);
+    await helpers.updateAgentRuntimeConfigKeys(
+      'm-3',
+      { merge: { secrets: helpers.runtimeConfigLeafOps({ A: 'x' }, {}, { dropIfEmpty: true }) } },
+      {},
+      database,
+    );
+    assert.deepEqual((await stored('m-3')).secrets, { B: 'y' });
+    await helpers.updateAgentRuntimeConfigKeys('m-3', { merge: { secrets: { clear: ['B'], dropIfEmpty: true } } }, {}, database);
+    const doc = await stored('m-3');
+    assert.equal('secrets' in doc, false, 'emptied key removed');
+    assert.deepEqual(doc.avatar, AVATAR);
+    // Without dropIfEmpty an emptied / absent key is materialised as {}.
+    await helpers.updateAgentRuntimeConfigKeys('m-3', { merge: { timeout: {} } }, {}, database);
+    assert.deepEqual((await stored('m-3')).timeout, {});
+  });
+
+  it('S306-S3: a non-object live value merges as {} (null / scalar / array)', async () => {
+    await seedAgent('m-4', { budget: null, model: 5, secrets: ['x'] });
+    await helpers.updateAgentRuntimeConfigKeys(
+      'm-4',
+      { merge: { budget: { set: { enforce: true } }, model: { set: { topK: 3 } }, secrets: { set: { K: 'v' } } } },
+      {},
+      database,
+    );
+    const doc = await stored('m-4');
+    assert.deepEqual(doc.budget, { enforce: true });
+    assert.deepEqual(doc.model, { topK: 3 });
+    assert.deepEqual(doc.secrets, { K: 'v' });
+  });
+
+  it('S306-S3: merged shapes are byte-identical to the whole-object write of the same result', async () => {
+    const BASE = { heartbeat: HEARTBEAT, model: { temperature: 0.3, topP: 0.4 }, secrets: { A: 'a' } };
+    await seedAgent('m-5-ops', structuredClone(BASE));
+    await seedAgent('m-5-whole', structuredClone(BASE));
+    await helpers.updateAgentRuntimeConfigKeys(
+      'm-5-ops',
+      {
+        merge: {
+          model: { set: { temperature: 0.8 }, clear: ['topP'] },
+          secrets: { clear: ['A'], dropIfEmpty: true },
+          heartbeat: { set: { maxSteps: 9 } },
+        },
+      },
+      {},
+      database,
+    );
+    await database
+      .update(schema.agents)
+      .set({ runtimeConfig: { heartbeat: { ...HEARTBEAT, maxSteps: 9 }, model: { temperature: 0.8 } } })
+      .where(eq(schema.agents.id, 'm-5-whole'));
+    assert.equal(await storedText('m-5-ops'), await storedText('m-5-whole'));
+  });
+
+  it('S306-S3: merge guards — overlap with set/clear, undefined leaf, set+clear same leaf', async () => {
+    assert.throws(() => helpers.buildRuntimeConfigKeyMerge({ set: { model: {} }, merge: { model: {} } }), /both merged and set\/cleared/);
+    assert.throws(() => helpers.buildRuntimeConfigKeyMerge({ clear: ['model'], merge: { model: {} } }), /both merged and set\/cleared/);
+    assert.throws(() => helpers.buildRuntimeConfigKeyMerge({ merge: { model: { set: { a: undefined } } } }), /pass it in `clear` instead/);
+    assert.throws(() => helpers.buildRuntimeConfigKeyMerge({ merge: { model: { set: { a: 1 }, clear: ['a'] } } }), /both set and cleared/);
+    assert.throws(() => helpers.buildRuntimeConfigKeyMerge({ merge: { '': {} } }), /empty key/);
+    assert.throws(() => helpers.buildRuntimeConfigKeyMerge({ merge: { model: { set: { '': 1 } } } }), /empty key/);
+    // merge alone is "something to do".
+    assert.doesNotThrow(() => helpers.buildRuntimeConfigKeyMerge({ merge: { model: {} } }));
+  });
 });

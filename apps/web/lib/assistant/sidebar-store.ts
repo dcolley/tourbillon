@@ -1,12 +1,15 @@
 /**
  * UI-2b: state for the assistant sidebar (framework-free; React binds it with useSyncExternalStore).
- * Agents and their threads come from the UI-2 API (#155). Thread lists are loaded per agent, so
- * the cross-agent sections (Pinned threads, Recent threads, search results) are built from the
- * lists loaded so far.
+ * Agents and their threads come from the UI-2 API (#155). S306-S4: on load every agent's thread
+ * list arrives in ONE batch request (GET /api/assistant/threads?agentIds=…, chunked at
+ * ASSISTANT_THREADS_BATCH_MAX_AGENTS); single-agent reloads (retry, select) use the per-agent
+ * route. The cross-agent sections (Pinned threads, Recent threads, search results) are built
+ * from the lists loaded so far.
  */
 import {
   ASSISTANT_MAX_PINS_PER_AGENT,
   ASSISTANT_THREAD_LIST_LIMIT,
+  ASSISTANT_THREADS_BATCH_MAX_AGENTS,
   checkAssistantThreadTitle,
   filterThreadsByTitle,
   groupSidebarAgents,
@@ -129,7 +132,10 @@ export function selectionProblem(
 
 export interface AssistantSidebarStoreOptions {
   api: AssistantSidebarApi;
-  /** Parallel thread-list requests while loading every agent's threads. */
+  /**
+   * Parallel batch requests while loading every agent's threads (only matters past
+   * ASSISTANT_THREADS_BATCH_MAX_AGENTS agents — below that the load is one request).
+   */
   concurrency?: number;
   /**
    * Load each agent's thread list after the agents (default true). ASYNC-0 (Slice A): the assistant
@@ -145,12 +151,12 @@ export class AssistantSidebarStore {
   /** Bumped by every `load()` and by `dispose()`; a load whose token is stale stops applying results. */
   private loadToken = 0;
   /**
-   * S297-S5: one in-flight `listThreads` request per agent. `load()` fans out one request per
-   * agent and `selectAgent()` may ask for the same agent's list while that fan-out is still
-   * running; without this map each caller fires its own request (2N+1 requests for N agents on
-   * a Strict Mode remount+click). Callers waiting on the same agent share the one request and
-   * see the identical result, so the rendered lists are unchanged. Settled requests leave the
-   * map — a later `loadThreads` (e.g. retry after an error) still refetches.
+   * S297-S5: one in-flight thread-list request per agent. `load()` asks for every agent's list
+   * (S306-S4: in one batch request) and `selectAgent()` may ask for the same agent's list while
+   * that is still running; without this map each caller fires its own request. Callers waiting
+   * on the same agent share the one request (the batch, or a per-agent one) and see the
+   * identical result, so the rendered lists are unchanged. Settled requests leave the map — a
+   * later `loadThreads` (e.g. retry after an error) still refetches.
    */
   private threadsInFlight = new Map<string, Promise<AgentThreadsState | undefined>>();
   private readonly api: AssistantSidebarApi;
@@ -223,7 +229,7 @@ export class AssistantSidebarStore {
     return this.state.agents.find((a) => a.id === agentId);
   }
 
-  /** Agents of the active company, then every agent's threads (a few at a time). */
+  /** Agents of the active company, then every agent's threads (S306-S4: one batch request). */
   async load(): Promise<void> {
     this.disposed = false;
     const token = ++this.loadToken;
@@ -239,12 +245,73 @@ export class AssistantSidebarStore {
       if (live()) this.update((s) => ({ ...s, phase: 'error', loadError: errorMessage(err, 'Could not load agents') }));
       return;
     }
-    if (!this.threadLists) return;
-    const queue = [...agents];
+    if (!this.threadLists || agents.length === 0) return;
+    const queue: AssistantAgent[][] = [];
+    for (let i = 0; i < agents.length; i += ASSISTANT_THREADS_BATCH_MAX_AGENTS) {
+      queue.push(agents.slice(i, i + ASSISTANT_THREADS_BATCH_MAX_AGENTS));
+    }
     const worker = async () => {
-      for (let a = queue.shift(); a && live(); a = queue.shift()) await this.loadThreads(a.id);
+      for (let chunk = queue.shift(); chunk && live(); chunk = queue.shift()) await this.loadThreadsBatch(chunk, live);
     };
     await Promise.all(Array.from({ length: Math.min(this.concurrency, queue.length) }, worker));
+  }
+
+  /**
+   * S306-S4: one `listThreadsBatch` request for these agents. Each agent's entry in
+   * `threadsInFlight` points at this request, so a `selectAgent` / `loadThreads` racing the
+   * load shares it instead of firing its own. Agents already in flight are skipped. A failed
+   * batch marks every agent in it as failed (retry goes through the per-agent route); an agent
+   * the server filtered out (`missing`) or failed (`errors`) is marked failed on its own.
+   */
+  private async loadThreadsBatch(chunk: AssistantAgent[], live: () => boolean): Promise<void> {
+    const batch = chunk.filter((a) => !this.threadsInFlight.has(a.id));
+    if (batch.length === 0) return;
+    for (const a of batch) this.setThreads(a.id, (t) => ({ ...t, status: 'loading', error: null }));
+    // Register the shared per-agent promises BEFORE the request goes out, and drop them in the
+    // same tick the batch settles — so a caller right after `load()` always refetches.
+    let release!: () => void;
+    const done = new Promise<void>((r) => (release = r));
+    const requests = new Map<string, Promise<AgentThreadsState | undefined>>();
+    for (const a of batch) {
+      const request = done.then(() => this.state.threads[a.id]);
+      requests.set(a.id, request);
+      this.threadsInFlight.set(a.id, request);
+    }
+    const settled = this.api.listThreadsBatch(batch.map((a) => a.id)).then(
+      (res) => {
+        if (!live()) return;
+        const byKey = new Map(res.agents.map((r) => [r.agentKey, r]));
+        const failed = new Map(res.errors.map((e) => [e.agentKey, e.error]));
+        const missing = new Set(res.missing);
+        for (const a of batch) {
+          const r = byKey.get(a.id) ?? res.agents.find((x) => x.agentId === a.id);
+          if (r) {
+            this.setThreads(a.id, () => ({
+              status: 'ready',
+              threads: sortAssistantThreads(r.threads),
+              initialThreadId: r.initialThreadId,
+              error: null,
+            }));
+          } else {
+            const error = failed.get(a.id) ?? (missing.has(a.id) ? 'Agent not found' : 'Could not load threads');
+            this.setThreads(a.id, (t) => ({ ...t, status: 'error', error }));
+          }
+        }
+      },
+      (err) => {
+        if (!live()) return;
+        const error = errorMessage(err, 'Could not load threads');
+        for (const a of batch) this.setThreads(a.id, (t) => ({ ...t, status: 'error', error }));
+      },
+    );
+    try {
+      await settled;
+    } finally {
+      for (const [id, request] of requests) {
+        if (this.threadsInFlight.get(id) === request) this.threadsInFlight.delete(id);
+      }
+      release();
+    }
   }
 
   async loadThreads(agentId: string): Promise<AgentThreadsState | undefined> {

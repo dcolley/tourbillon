@@ -13,6 +13,40 @@ export const ASSISTANT_THREAD_LIST_LIMIT = 50;
 export const ASSISTANT_THREAD_TITLE_MAX = 200;
 
 /**
+ * S306-S4: most agents one `GET /api/assistant/threads?agentIds=…` request may ask for. The
+ * sidebar sends one request per this many agents (one request for any realistic company).
+ */
+export const ASSISTANT_THREADS_BATCH_MAX_AGENTS = 50;
+/** S306-S4: longest agent id / url key accepted in `agentIds` (ids are uuids, url keys short slugs). */
+export const ASSISTANT_THREADS_BATCH_MAX_KEY_LENGTH = 200;
+
+/**
+ * S306-S4: parse `agentIds` (comma-separated; the param may also repeat). Blank entries are
+ * dropped and duplicates collapse (first occurrence wins). Empty / missing → error; more than
+ * `ASSISTANT_THREADS_BATCH_MAX_AGENTS` distinct keys, or an over-long key → error.
+ */
+export function parseAssistantAgentIdsParam(
+  values: readonly string[],
+): { ok: true; agentIds: string[] } | { ok: false; error: string } {
+  const seen = new Set<string>();
+  for (const value of values) {
+    for (const raw of value.split(',')) {
+      const key = raw.trim();
+      if (!key) continue;
+      if (key.length > ASSISTANT_THREADS_BATCH_MAX_KEY_LENGTH) {
+        return { ok: false, error: `agentIds entries must be at most ${ASSISTANT_THREADS_BATCH_MAX_KEY_LENGTH} characters` };
+      }
+      seen.add(key);
+      if (seen.size > ASSISTANT_THREADS_BATCH_MAX_AGENTS) {
+        return { ok: false, error: `agentIds accepts at most ${ASSISTANT_THREADS_BATCH_MAX_AGENTS} agents` };
+      }
+    }
+  }
+  if (seen.size === 0) return { ok: false, error: 'agentIds is required' };
+  return { ok: true, agentIds: [...seen] };
+}
+
+/**
  * Thread title rule shared by the assistant API (#155) and the sidebar (UI-2b): trimmed,
  * 1–200 characters, no control characters, no bidi controls and no zero-width characters.
  * Bidi and zero-width characters are refused even at the ends (trimming would drop U+FEFF only).

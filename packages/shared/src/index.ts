@@ -32,3 +32,4 @@ export * from './knowledge-graph';
 export * from './request-origin';
 export * from './secrets-sanitizer';
 export * from './wake-context';
+export * from './runtime-config-leaf-ops';

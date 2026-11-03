@@ -16,7 +16,8 @@
  *     must stay empty).
  *  2. encryptCredential is imported from '@tourbillon/shared/vault-encryption'.
  *  3. Exactly three write-back sites assign encryptCredential(refreshed); one in
- *     each of the agent / company_user / company scope slices.
+ *     each of the agent / company_user / company scope slices. (S308-S3: now ONE
+ *     site in resolveScopedCredential(row), which every scope slice calls.)
  *  4. Behaviour: for each scope, an expired OAuth credential refreshes and the
  *     captured encryptedValue round-trips through the SHARED decryptCredential
  *     back to the refreshed tokens.
@@ -267,33 +268,28 @@ describe('vault-credentials-304-softs — encryptCredential comes from shared (R
       );
     });
 
-    it('has exactly three encryptCredential(refreshed) write-back sites', () => {
+    // S308-S3: the three per-scope copies collapsed into resolveScopedCredential(row). The #304
+    // pin is unchanged in intent — every scope's refresh write-back encrypts via the SHARED helper
+    // with no require — it now holds by construction: ONE write-back site, inside the helper, and
+    // every scope routes through it (the behaviour tests below still cover each scope end to end).
+    it('has exactly one encryptCredential(refreshed) write-back site, inside resolveScopedCredential', () => {
       const sites = SRC.match(/encryptedValue:\s*encryptCredential\(refreshed\)/g) ?? [];
-      assert.equal(sites.length, 3, 'one per scope (agent / company_user / company)');
+      assert.equal(sites.length, 1, 'S308-S3: one shared write-back for agent / company_user / company');
+      const helper = sliceBetween('async function resolveScopedCredential(', 'async function flagNeedsReauthAfterLostWriteBack(');
+      assert.match(helper, /encryptedValue:\s*encryptCredential\(refreshed\)/, 'the write-back lives in the helper');
+      assert.equal(REQUIRE_CALL.test(helper), false, 'the shared write-back must not fall back to a require');
     });
 
-    it('each scope slice writes back via encryptCredential with no require', () => {
+    it('each scope resolves its row through resolveScopedCredential (no per-scope copy of the write-back)', () => {
       const slices: Array<[string, string, string]> = [
-        ['agent', "eq(vaultSecrets.scope, 'agent')", 'Failed to decrypt agent credential'],
-        [
-          'company_user',
-          "eq(vaultSecrets.scope, 'company_user')",
-          'Failed to decrypt user credential',
-        ],
-        ['company', "eq(vaultSecrets.scope, 'company')", 'Failed to decrypt company credential'],
+        ['agent', "eq(vaultSecrets.scope, 'agent')", "resolveScopedCredential(agentCred, ctx.serverId, 'agent')"],
+        ['company_user', "eq(vaultSecrets.scope, 'company_user')", "resolveScopedCredential(userCred, ctx.serverId, 'user')"],
+        ['company', "eq(vaultSecrets.scope, 'company')", "resolveScopedCredential(companyCred, ctx.serverId, 'company')"],
       ];
       for (const [label, start, end] of slices) {
         const slice = sliceBetween(start, end);
-        assert.match(
-          slice,
-          /encryptedValue:\s*encryptCredential\(refreshed\)/,
-          `${label} scope must encrypt the refreshed tokens via the shared helper`,
-        );
-        assert.equal(
-          REQUIRE_CALL.test(slice),
-          false,
-          `${label} scope write-back must not fall back to a require`,
-        );
+        assert.doesNotMatch(slice, /encryptCredential\(/, `${label} scope must not carry its own write-back copy`);
+        assert.equal(REQUIRE_CALL.test(slice), false, `${label} scope must not fall back to a require`);
       }
     });
   });
