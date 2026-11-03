@@ -462,7 +462,10 @@ agent at \`POST {callback.baseUrl}{chat}\` (same Bearer session token) with a JS
 \`\`\`
 
 Delivery runs your gated \`sendToAgent\` DM tool (403 \`chat_not_permitted\` when DMs are not
-granted). \`message/stream\` is refused unless the bind also advertises \`chat.stream\`.
+granted). \`message/stream\` is refused unless the bind also advertises \`chat.stream\`; when
+allowed it answers \`text/event-stream\`, buffered (all events arrive together once the DM has
+been delivered). Delivery failure: \`message/send\` → HTTP 502 \`chat_delivery_failed\`;
+\`message/stream\` → HTTP 200 whose final status-update is \`failed\` — check the final state.
 409 \`chat_not_supported\` means chat is not advertised — use \`sendToAgent\` via tools/call.
 Board chat stays in Tourbillon's own chat UI; reach the Board through issue comments.
 

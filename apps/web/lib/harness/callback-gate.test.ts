@@ -5,6 +5,8 @@
  *    NEVER invoked (mutant: delete the gate check ⇒ executed sentinel trips).
  *  - permitted tool ⇒ executes with a requestContext carrying the session token as apiKey.
  *  - chat ⇒ refused unless the bind advertises it (AC5 matrix in callback-chat.test.ts), skill ⇒ markdown.
+ *  - S327-S1: tools/call resolves by assembled key (`getInboxTool`) OR tool id (`getInbox`, as
+ *    the skills teach); unknown / gated-out names stay 403 and NEVER execute.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -14,6 +16,7 @@ import {
   handleHarnessSkill,
   handleHarnessToolCall,
   handleHarnessToolList,
+  findGatedTool,
   harnessBearerToken,
   type HarnessCallbackDeps,
 } from './callback-gate';
@@ -31,6 +34,10 @@ function makeDeps(opts: {
   executed?: ExecutedCall[];
   assembleThrows?: boolean;
   adapterConfig?: Record<string, unknown>;
+  /** Assembled key per tool id (default: the id itself). Real assembler: `${id}Tool`. */
+  keyFor?: (id: string) => string;
+  /** Set false to assemble tools without an `id` property. */
+  withId?: boolean;
 } = {}) {
   const allowed = new Set(opts.allowedTools ?? ['getIdentity', 'getInbox']);
   const executed = opts.executed ?? [];
@@ -52,7 +59,8 @@ function makeDeps(opts: {
       assert.deepEqual(options.companySettings, { foo: 1 });
       const tools: Record<string, unknown> = {};
       for (const name of allowed) {
-        tools[name] = {
+        tools[(opts.keyFor ?? ((n: string) => n))(name)] = {
+          ...(opts.withId === false ? {} : { id: name }),
           description: `${name} does ${name}`,
           inputSchema:
             name === 'updateIssue'
@@ -215,4 +223,93 @@ test('chat endpoint: auth still first; no advertised chat ⇒ 409 chat_not_suppo
   assert.equal(res.status, 409);
   assert.equal((res.body as { error: string }).error, 'chat_not_supported');
   // Full AC5 matrix (sync / stream / gate / mutants): ./callback-chat.test.ts
+});
+
+// ── S327-S1: resolve by assembled key OR tool id ─────────────────────────────
+
+const ASSEMBLED = (id: string) => `${id}Tool`; // the real assembleAgentTools key shape
+
+test('PIN S327-S1: skill name (tool id) resolves against assembled `${id}Tool` keys ⇒ 200, executes', async () => {
+  for (const tool of ['getInbox', 'sendToAgent']) {
+    const { deps, executed } = makeDeps({ allowedTools: ['getInbox', 'sendToAgent'], keyFor: ASSEMBLED });
+    const res = await handleHarnessToolCall({ authorization: AUTH, body: { tool, args: {} }, deps });
+    assert.equal(res.status, 200, `${tool} must not 403 when assembled as ${tool}Tool`);
+    assert.equal(executed.length, 1);
+    assert.equal(executed[0].tool, tool);
+    assert.equal(executed[0].apiKey, 'pm_run_token_abc');
+    assert.equal((res.body as { tool: string }).tool, tool, 'response echoes the requested name');
+  }
+});
+
+test('PIN S327-S1: assembled key form (`getInboxTool`) still resolves ⇒ 200', async () => {
+  const { deps, executed } = makeDeps({ allowedTools: ['getInbox'], keyFor: ASSEMBLED });
+  const res = await handleHarnessToolCall({ authorization: AUTH, body: { tool: 'getInboxTool' }, deps });
+  assert.equal(res.status, 200);
+  assert.deepEqual(executed.map((e) => e.tool), ['getInbox']);
+});
+
+test('PIN S327-S1: `${name}Tool` key resolves even when the tool carries no id', async () => {
+  const { deps, executed } = makeDeps({ allowedTools: ['getInbox'], keyFor: ASSEMBLED, withId: false });
+  const res = await handleHarnessToolCall({ authorization: AUTH, body: { tool: 'getInbox' }, deps });
+  assert.equal(res.status, 200);
+  assert.equal(executed.length, 1);
+});
+
+test('PIN S327-S1: id scan resolves a tool keyed under an unrelated assembled key', async () => {
+  const { deps, executed } = makeDeps({ allowedTools: ['getInbox'], keyFor: (id) => `cp_${id}` });
+  const res = await handleHarnessToolCall({ authorization: AUTH, body: { tool: 'getInbox' }, deps });
+  assert.equal(res.status, 200);
+  assert.equal(executed.length, 1);
+  const viaKey = await handleHarnessToolCall({ authorization: AUTH, body: { tool: 'cp_getInbox' }, deps });
+  assert.equal(viaKey.status, 200);
+});
+
+test('PIN S327-S1: `…Tool` name resolves a tool assembled under its bare id', async () => {
+  const { deps, executed } = makeDeps({ allowedTools: ['getInbox'] }); // keyed `getInbox`
+  const res = await handleHarnessToolCall({ authorization: AUTH, body: { tool: 'getInboxTool' }, deps });
+  assert.equal(res.status, 200);
+  assert.equal(executed.length, 1);
+});
+
+test('PIN S327-S1: unknown / gated-out names (either form) ⇒ 403 tool_not_permitted, NEVER execute', async () => {
+  for (const keyFor of [ASSEMBLED, (id: string) => id]) {
+    const { deps, executed } = makeDeps({ allowedTools: ['getIdentity', 'getInbox'], keyFor });
+    for (const tool of [
+      'createGoal',
+      'createGoalTool',
+      'sendToAgent',
+      'sendToAgentTool',
+      'Tool',
+      'getinbox',
+      'getInboxTools',
+      'constructor',
+      '__proto__',
+      'toString',
+      'hasOwnProperty',
+    ]) {
+      const res = await handleHarnessToolCall({ authorization: AUTH, body: { tool, args: {} }, deps });
+      assert.equal(res.status, 403, tool);
+      assert.equal((res.body as { error: string }).error, 'tool_not_permitted', tool);
+      assert.equal((res.body as { tool: string }).tool, tool);
+    }
+    assert.equal(executed.length, 0, 'denied names must never execute');
+  }
+});
+
+test('findGatedTool: own executable entries only; id match must be exact', () => {
+  const exec = async () => ({ ok: true });
+  const tools: Record<string, unknown> = {
+    getInboxTool: { id: 'getInbox', execute: exec },
+    describedOnly: { id: 'describedOnly', description: 'no execute' },
+    cp_weird: { id: 'weird', execute: exec },
+  };
+  assert.equal(findGatedTool(tools, 'getInbox'), tools.getInboxTool);
+  assert.equal(findGatedTool(tools, 'getInboxTool'), tools.getInboxTool);
+  assert.equal(findGatedTool(tools, 'weird'), tools.cp_weird);
+  assert.equal(findGatedTool(tools, 'weirdTool'), tools.cp_weird);
+  assert.equal(findGatedTool(tools, 'describedOnly'), undefined, 'non-executable never resolves');
+  assert.equal(findGatedTool(tools, 'getInboxX'), undefined);
+  assert.equal(findGatedTool(tools, 'constructor'), undefined);
+  assert.equal(findGatedTool(tools, '__proto__'), undefined);
+  assert.equal(findGatedTool({}, 'getInbox'), undefined);
 });

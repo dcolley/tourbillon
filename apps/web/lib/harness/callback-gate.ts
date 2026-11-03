@@ -143,7 +143,36 @@ async function assembleForCaller(
 }
 
 /**
+ * Find an executable tool in the ASSEMBLED set by any of its name forms (S327-S1):
+ *  1. exact assembled key (`getInboxTool`, or an MCP key as listed by GET tools);
+ *  2. `${name}Tool` — the short id skills teach (`getInbox` → `getInboxTool`);
+ *  3. `name` minus a trailing `Tool` (`getInboxTool` when assembled under `getInbox`);
+ *  4. scan for a tool whose `id === name` (or its `Tool`-stripped form).
+ * Own keys only (no prototype lookups). Never consults anything outside `tools`, so a name
+ * the gate did not assemble resolves to `undefined` ⇒ 403, never executed.
+ */
+export function findGatedTool(tools: Record<string, unknown>, name: string): GateableTool | undefined {
+  const executable = (v: unknown): GateableTool | undefined => {
+    const t = v as GateableTool | undefined;
+    return t && typeof t === 'object' && typeof t.execute === 'function' ? t : undefined;
+  };
+  const stripped = name.endsWith('Tool') && name.length > 'Tool'.length ? name.slice(0, -'Tool'.length) : null;
+  for (const key of [name, `${name}Tool`, ...(stripped ? [stripped] : [])]) {
+    if (!Object.prototype.hasOwnProperty.call(tools, key)) continue;
+    const t = executable(tools[key]);
+    if (t) return t;
+  }
+  for (const value of Object.values(tools)) {
+    const t = executable(value);
+    const id = (t as { id?: unknown } | undefined)?.id;
+    if (t && typeof id === 'string' && (id === name || id === stripped)) return t;
+  }
+  return undefined;
+}
+
+/**
  * POST /api/harness/callback/tools/call — { tool, args }.
+ * `tool` may be the assembled key (`getInboxTool`) or the tool id skills teach (`getInbox`).
  * Capability-denied tool calls return 403 WITHOUT executing (pinned behaviour test).
  */
 export async function handleHarnessToolCall(params: {
@@ -172,7 +201,10 @@ export async function handleHarnessToolCall(params: {
   }
 
   // ── THE GATE: absent from the assembled set ⇒ refused, never executed. ──
-  const tool = tools[toolName] as GateableTool | undefined;
+  // Resolve by assembled key OR tool id (S327-S1): skills teach `getInbox` / `sendToAgent`,
+  // the assembler keys them `getInboxTool` / `sendToAgentTool`. Lookup is ONLY over the
+  // assembled set, so name aliasing can never widen the gate.
+  const tool = findGatedTool(tools, toolName);
   if (!tool || typeof tool.execute !== 'function') {
     return {
       status: 403,
@@ -303,15 +335,7 @@ export function resolveHarnessChatCapability(
 /** The DM tool from the ASSEMBLED set only (keyed `sendToAgentTool` by the control plane). */
 const DM_TOOL_ID = 'sendToAgent';
 function findGatedDmTool(tools: Record<string, unknown>): GateableTool | undefined {
-  for (const key of [`${DM_TOOL_ID}Tool`, DM_TOOL_ID]) {
-    const t = tools[key] as GateableTool | undefined;
-    if (t && typeof t.execute === 'function') return t;
-  }
-  for (const value of Object.values(tools)) {
-    const t = value as (GateableTool & { id?: unknown }) | undefined;
-    if (t && t.id === DM_TOOL_ID && typeof t.execute === 'function') return t;
-  }
-  return undefined;
+  return findGatedTool(tools, DM_TOOL_ID);
 }
 
 function deliveryFailed(result: unknown): string | null {
@@ -329,12 +353,17 @@ function deliveryFailed(result: unknown): string | null {
  *  1. session token → 401;
  *  2. bind advertises chat → else 409 `chat_not_supported`;
  *  3. A2A JSONRPC body → 400; method must be `message/send` | `message/stream`;
- *  4. requested leg advertised → else 409 `chat_sync_not_supported` / `chat_stream_not_supported`;
- *  5. peer recipient (`metadata.tourbillon.toAgentId|toAgentUrlKey`) → else 400;
- *  6. capability gate: `sendToAgent` in `assembleAgentTools` → else 403 `chat_not_permitted`
- *     (never executed);
- *  7. execute the gated DM tool with the session token as apiKey.
- * Sync ⇒ JSON-RPC result (A2A agent Message). Stream ⇒ SSE (status working → Message → final).
+ *  4. requested leg advertised → else 409 `chat_sync_not_supported` / `chat_stream_not_supported`
+ *     (wins over any later 400 — a bad text/recipient on an unadvertised leg is still 409);
+ *  5. message text (non-empty, ≤ HARNESS_CHAT_MAX_TEXT) → else 400 `invalid_request`;
+ *  6. peer recipient (`metadata.tourbillon.toAgentId|toAgentUrlKey`) → else 400
+ *     `chat_recipient_required`;
+ *  7. capability gate: `sendToAgent` in `assembleAgentTools` → else 403 `chat_not_permitted`
+ *     (never executed; only reached once every 400 has passed — assembly is not even run before);
+ *  8. execute the gated DM tool with the session token as apiKey.
+ * Sync ⇒ JSON-RPC result (A2A agent Message); delivery failure ⇒ 502 `chat_delivery_failed`.
+ * Stream ⇒ SSE (status working → Message → final), BUFFERED: all frames are emitted together
+ * after the DM completes (not incremental); delivery failure ⇒ HTTP 200 + final `failed`.
  */
 export async function handleHarnessChat(params: {
   authorization: string | null | undefined;
