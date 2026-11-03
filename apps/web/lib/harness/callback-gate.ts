@@ -9,6 +9,10 @@
  * assignedToolsets / assignedTools / mcpServerIds / company allow-list) is refused with 403
  * `tool_not_permitted` and NEVER executed.
  *
+ * Chat (AC5): `POST chat` is A2A JSONRPC (`message/send` sync / `message/stream` SSE), allowed
+ * only for the legs the bind advertises (`adapterConfig.chat`), and delivered through the
+ * agent's OWN gated DM tool (`sendToAgent` from the same assembly) — no second chat stack.
+ *
  * The skill endpoint is harness-kind aware: an OpenCode-bound agent gets the OpenCode skill
  * blob, everyone else keeps the Hermes one (first-slice default).
  *
@@ -16,12 +20,26 @@
  * unit-tested with injected deps (no DB in tests).
  */
 import { z } from 'zod';
-import { HERMES_SKILL_INSTALL_MD } from '@tourbillon/shared/hermes-harness';
+import {
+  HERMES_SKILL_INSTALL_MD,
+  hermesHarnessBindSchema,
+  isHermesHarnessBind,
+} from '@tourbillon/shared/hermes-harness';
 import {
   OPENCODE_SKILL_INSTALL_MD,
   isOpencodeHarnessBind,
   opencodeHarnessBindSchema,
 } from '@tourbillon/shared/opencode-harness';
+import {
+  HARNESS_CHAT_MAX_TEXT,
+  buildHarnessChatReply,
+  encodeHarnessChatSse,
+  harnessChatModeForMethod,
+  harnessChatRequestSchema,
+  harnessChatText,
+  type A2aStatusUpdate,
+  type HarnessChatMode,
+} from '@tourbillon/shared/harness-chat';
 
 /** Minimal shape needed to dispatch; the real db Agent row satisfies it. */
 export interface HarnessAgentRecordLike {
@@ -59,6 +77,8 @@ export interface HarnessCallbackDeps {
     companyId: string;
   }) => unknown;
   skillMarkdown?: () => string;
+  /** Id source for chat reply messageIds (crypto.randomUUID in production). */
+  newId?: () => string;
 }
 
 export interface HttpResult {
@@ -251,25 +271,234 @@ export async function handleHarnessSkill(params: {
 }
 
 /**
- * POST /api/harness/callback/chat — stub for this slice.
- * Board chat over the harness callback is a documented follow-up (PR body carries the measured
- * evidence: the Hermes gateway advertises streaming; opencode serve syncs prompts + SSE but
- * board chat is a Tourbillon-side surface, not a harness API). Auth is still enforced so the
- * surface shape is stable for harnesses.
+ * Chat legs advertised by the authenticated agent's harness bind. Fails closed: no bind, a bind
+ * that does not strictly parse, or no `chat` key ⇒ nothing advertised. Only Hermes / OpenCode
+ * binds can chat; in-product agents (no bind) never use the harness callback chat.
+ */
+export function resolveHarnessChatCapability(
+  agent: HarnessAgentRecordLike,
+): { harness: 'hermes' | 'opencode'; sync: boolean; stream: boolean } | null {
+  const adapterConfig = (agent as { adapterConfig?: unknown }).adapterConfig;
+  let harness: 'hermes' | 'opencode';
+  let chat: { sync?: boolean; stream?: boolean } | undefined;
+  if (isHermesHarnessBind(adapterConfig)) {
+    const parsed = hermesHarnessBindSchema.safeParse(adapterConfig);
+    if (!parsed.success) return null;
+    harness = 'hermes';
+    chat = parsed.data.chat;
+  } else if (isOpencodeHarnessBind(adapterConfig)) {
+    const parsed = opencodeHarnessBindSchema.safeParse(adapterConfig);
+    if (!parsed.success) return null;
+    harness = 'opencode';
+    chat = parsed.data.chat;
+  } else {
+    return null;
+  }
+  const sync = chat?.sync === true;
+  const stream = chat?.stream === true;
+  if (!sync && !stream) return null;
+  return { harness, sync, stream };
+}
+
+/** The DM tool from the ASSEMBLED set only (keyed `sendToAgentTool` by the control plane). */
+const DM_TOOL_ID = 'sendToAgent';
+function findGatedDmTool(tools: Record<string, unknown>): GateableTool | undefined {
+  for (const key of [`${DM_TOOL_ID}Tool`, DM_TOOL_ID]) {
+    const t = tools[key] as GateableTool | undefined;
+    if (t && typeof t.execute === 'function') return t;
+  }
+  for (const value of Object.values(tools)) {
+    const t = value as (GateableTool & { id?: unknown }) | undefined;
+    if (t && t.id === DM_TOOL_ID && typeof t.execute === 'function') return t;
+  }
+  return undefined;
+}
+
+function deliveryFailed(result: unknown): string | null {
+  if (result && typeof result === 'object' && 'error' in result) {
+    const r = result as { error?: unknown; message?: unknown };
+    if (r.error) return `${String(r.error)}${r.message ? `: ${String(r.message)}` : ''}`;
+  }
+  return null;
+}
+
+/**
+ * POST /api/harness/callback/chat — AC5 harness chat (S316-S3 · S322-S5).
+ *
+ * Order (each step fails closed BEFORE anything executes):
+ *  1. session token → 401;
+ *  2. bind advertises chat → else 409 `chat_not_supported`;
+ *  3. A2A JSONRPC body → 400; method must be `message/send` | `message/stream`;
+ *  4. requested leg advertised → else 409 `chat_sync_not_supported` / `chat_stream_not_supported`;
+ *  5. peer recipient (`metadata.tourbillon.toAgentId|toAgentUrlKey`) → else 400;
+ *  6. capability gate: `sendToAgent` in `assembleAgentTools` → else 403 `chat_not_permitted`
+ *     (never executed);
+ *  7. execute the gated DM tool with the session token as apiKey.
+ * Sync ⇒ JSON-RPC result (A2A agent Message). Stream ⇒ SSE (status working → Message → final).
  */
 export async function handleHarnessChat(params: {
   authorization: string | null | undefined;
+  body?: unknown;
   deps: HarnessCallbackDeps;
 }): Promise<HttpResult> {
   const authed = await authenticateAndLoad(params.authorization, params.deps);
   if (!authed.ok) return authed.result;
+  const { caller, agent, token } = authed;
+
+  const capability = resolveHarnessChatCapability(agent);
+  if (!capability) {
+    return {
+      status: 409,
+      body: {
+        error: 'chat_not_supported',
+        message:
+          "This agent's harness bind does not advertise chat (adapterConfig.chat). Use the sendToAgent DM tool via tools/call (when granted) or issue comments.",
+      },
+    };
+  }
+
+  const parsed = harnessChatRequestSchema.safeParse(params.body);
+  if (!parsed.success) {
+    return {
+      status: 400,
+      body: { error: 'invalid_request', issues: parsed.error.issues.map((i) => i.message) },
+    };
+  }
+  const request = parsed.data;
+  const mode: HarnessChatMode | null = harnessChatModeForMethod(request.method);
+  if (!mode) {
+    return {
+      status: 400,
+      body: {
+        error: 'unsupported_method',
+        method: request.method,
+        message: "Chat methods are 'message/send' (sync) and 'message/stream' (stream).",
+      },
+    };
+  }
+  if (!capability[mode]) {
+    return {
+      status: 409,
+      body: {
+        error: mode === 'stream' ? 'chat_stream_not_supported' : 'chat_sync_not_supported',
+        method: request.method,
+        message: `This harness bind does not advertise chat.${mode}; use the advertised leg (${
+          capability.sync ? 'message/send' : 'message/stream'
+        }).`,
+      },
+    };
+  }
+
+  const text = harnessChatText(request.params.message.parts);
+  if (!text) {
+    return { status: 400, body: { error: 'invalid_request', issues: ['message needs at least one non-empty text part'] } };
+  }
+  if (text.length > HARNESS_CHAT_MAX_TEXT) {
+    return { status: 400, body: { error: 'invalid_request', issues: [`message text exceeds ${HARNESS_CHAT_MAX_TEXT} chars`] } };
+  }
+  const route = request.params.message.metadata?.tourbillon;
+  if (!route?.toAgentId && !route?.toAgentUrlKey) {
+    return {
+      status: 400,
+      body: {
+        error: 'chat_recipient_required',
+        message:
+          'Set params.message.metadata.tourbillon.toAgentId or toAgentUrlKey. Board chat stays in the Tourbillon chat UI; reach the Board via issue comments.',
+      },
+    };
+  }
+
+  let tools: Record<string, unknown>;
+  try {
+    tools = await assembleForCaller(agent, caller.companyId, params.deps);
+  } catch (err) {
+    return {
+      status: 500,
+      body: { error: 'capability_gate_failed', message: err instanceof Error ? err.message : String(err) },
+    };
+  }
+
+  // ── THE GATE: chat rides the agent's own DM tool; absent ⇒ refused, never executed. ──
+  const dmTool = findGatedDmTool(tools);
+  if (!dmTool || typeof dmTool.execute !== 'function') {
+    return {
+      status: 403,
+      body: {
+        error: 'chat_not_permitted',
+        tool: DM_TOOL_ID,
+        message: 'Chat is delivered via the sendToAgent DM tool, which is not permitted for this agent (capability gate).',
+      },
+    };
+  }
+
+  let args: unknown = {
+    ...(route.toAgentId ? { toAgentId: route.toAgentId } : {}),
+    ...(route.toAgentUrlKey ? { toAgentUrlKey: route.toAgentUrlKey } : {}),
+    body: text,
+    ...(route.inReplyTo ? { inReplyTo: route.inReplyTo } : {}),
+  };
+  if (isZodLike(dmTool.inputSchema)) {
+    const inputParse = dmTool.inputSchema.safeParse(args);
+    if (!inputParse.success) {
+      return { status: 400, body: { error: 'invalid_args', tool: DM_TOOL_ID, message: 'Arguments do not match the DM tool input schema' } };
+    }
+    args = inputParse.data;
+  }
+
+  const requestContext = params.deps.buildRequestContext({
+    apiKey: token,
+    runId: caller.runId,
+    agentId: caller.agentId,
+    companyId: caller.companyId,
+  });
+  const newId = params.deps.newId ?? (() => globalThis.crypto.randomUUID());
+  const recipient = route.toAgentUrlKey ?? route.toAgentId;
+
+  let result: unknown;
+  let failure: string | null;
+  try {
+    result = await dmTool.execute(args, { requestContext });
+    failure = deliveryFailed(result);
+  } catch (err) {
+    result = undefined;
+    failure = err instanceof Error ? err.message : String(err);
+  }
+
+  const reply = buildHarnessChatReply({
+    messageId: newId(),
+    contextId: caller.runId,
+    text: failure ? `Delivery to ${recipient} failed: ${failure}` : `Delivered to ${recipient} via sendToAgent.`,
+    data: { tool: DM_TOOL_ID, ...(failure ? { error: failure } : {}), result: result ?? null },
+  });
+
+  if (mode === 'sync') {
+    if (failure) {
+      return {
+        status: 502,
+        body: { jsonrpc: '2.0', id: request.id, error: { code: -32000, message: 'chat_delivery_failed', data: reply } },
+      };
+    }
+    return { status: 200, body: { jsonrpc: '2.0', id: request.id, result: reply } };
+  }
+
+  const taskId = `chat-${reply.messageId}`;
+  const working: A2aStatusUpdate = {
+    kind: 'status-update',
+    taskId,
+    contextId: caller.runId,
+    status: { state: 'working' },
+    final: false,
+  };
+  const done: A2aStatusUpdate = {
+    kind: 'status-update',
+    taskId,
+    contextId: caller.runId,
+    status: { state: failure ? 'failed' : 'completed', message: reply },
+    final: true,
+  };
   return {
-    status: 501,
-    body: {
-      error: 'chat_not_implemented',
-      message:
-        'Board chat over the harness callback is not exposed in this slice. Use the sendToAgent DM tool (when granted) for agent-to-agent messages.',
-      followUp: '#281 later pack — see docs/backlog/harness-direct-connection.md',
-    },
+    status: 200,
+    body: encodeHarnessChatSse(request.id, [working, reply, done]),
+    contentType: 'text/event-stream; charset=utf-8',
   };
 }

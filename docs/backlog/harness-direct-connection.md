@@ -90,7 +90,7 @@ All of these live in `agents.adapterConfig` (jsonb); see "Where bind config live
 5. Chat works when the harness advertises support (sync and/or stream).
 6. OpenCode binds through the same harness-neutral seams.
 
-Status: 1-4 are shipped for Hermes with #316 (see Implemented below); 5 (chat, 501 stub today) remains open; 6 (OpenCode) shipped with the second pack (see Implemented (OpenCode slice) below).
+Status: 1-4 are shipped for Hermes with #316 (see Implemented below); 5 (chat) shipped with Soft Pack E (see Implemented (chat, AC5) below — the 501 stub is gone for binds that advertise chat); 6 (OpenCode) shipped with the second pack (see Implemented (OpenCode slice) below).
 
 ## Implemented (Hermes slice, #281 first pack)
 
@@ -108,7 +108,7 @@ Status: 1-4 are shipped for Hermes with #316 (see Implemented below); 5 (chat, 5
   Privacy default callback: loopback (`INTERNAL_API_URL` with `localhost` → `127.0.0.1`);
   remote/private reachability via explicit `callbackBaseUrl`.
 - **Callback (one surface, principal = token):** `apps/web/app/api/harness/callback/*` —
-  `GET tools`, `POST tools/call`, `GET skill`, `POST chat` (501 stub). Auth = run-scoped session
+  `GET tools`, `POST tools/call`, `GET skill`, `POST chat` (501 stub in this slice; shipped in Soft Pack E, AC5 below). Auth = run-scoped session
   token (#110); every tool call runs through `assembleAgentTools` — the same capability gate as
   in-system agents — and denied tools are refused 403 without executing.
 - **Skill install:** `HERMES_SKILL_INSTALL_MD` (shared) — shipped in the envelope and served at
@@ -137,7 +137,36 @@ Status: 1-4 are shipped for Hermes with #316 (see Implemented below); 5 (chat, 5
 - **Callback:** unchanged shared stack (`apps/web/app/api/harness/callback/*`); the `skill`
   endpoint is harness-kind aware — OpenCode runs get the OpenCode blob
   (`OPENCODE_SKILL_INSTALL_MD`, installable as `.opencode/skill/tourbillon-agent/SKILL.md` or
-  `~/.agents/skills/tourbillon-agent/SKILL.md`), Hermes runs keep theirs. Chat stays 501
-  (board chat is a Tourbillon-side surface; DMs flow via `sendToAgent`).
+  `~/.agents/skills/tourbillon-agent/SKILL.md`), Hermes runs keep theirs. Chat was 501 in this
+  pack (board chat is a Tourbillon-side surface; DMs flow via `sendToAgent`); AC5 below.
 - **Observability:** external OpenCode runs write no Mastra spans; the run row stamps
   `contextSnapshot.harness = { kind: 'opencode', mode, callbackBaseUrl }`.
+
+## Implemented (chat, AC5 — Soft Pack E · S316-S3 / S322-S5)
+
+- **Advertisement (bind):** optional `adapterConfig.chat = { sync?: boolean, stream?: boolean }`
+  on both the Hermes and OpenCode binds (strict; jsonb only — no migration). Absent / all-false /
+  malformed bind ⇒ nothing advertised ⇒ chat refused. Hermes HTTP binds can advertise both
+  (measured agent card `capabilities.streaming: true`); OpenCode advertises `sync` (stream leg
+  is only honoured when the operator sets `chat.stream`). Shared wire module:
+  `packages/shared/src/harness-chat.ts`.
+- **Wire:** `POST /api/harness/callback/chat` is A2A JSONRPC — `message/send` (sync; JSON-RPC
+  result = A2A agent `Message`) and `message/stream` (`text/event-stream`: status-update
+  `working` → `Message` → status-update `completed`/`failed` with `final: true`). Recipient =
+  `params.message.metadata.tourbillon.toAgentId | toAgentUrlKey` (+ optional `inReplyTo`).
+- **Gate order (fail closed, nothing executes before the gate):** session token (401) → bind
+  advertises chat (409 `chat_not_supported`) → JSONRPC body (400; unknown method 400
+  `unsupported_method`) → requested leg advertised (409 `chat_sync_not_supported` /
+  `chat_stream_not_supported`) → peer recipient (400 `chat_recipient_required`) →
+  `assembleAgentTools` must contain the DM tool (403 `chat_not_permitted`, never executed) →
+  execute that gated `sendToAgent` with the run session token as `apiKey`.
+- **No second chat stack:** delivery IS the agent's own DM tool (`/api/companies/:id/agent-mail`,
+  recipient woken with `agent_mail`); Board chat stays the in-product Tourbillon chat surface
+  (`/api/chat/*`), and a harness reaches the Board through issue comments / approvals.
+- **Tests:** `apps/web/lib/harness/callback-chat.test.ts` (auth fail-closed, unsupported refuse,
+  stream fail-closed, capability deny with execute-never sentinel, Hermes sync + stream,
+  OpenCode sync), `packages/shared/src/harness-chat.test.ts` (bind schema + method map + skill
+  copy). Heartbeat dispatch (Hermes/OpenCode adapters, wake-runner) is untouched.
+- **Open (proposal):** a Board ⇄ harness live chat bridge (in-product chat UI relaying to the
+  harness `message/stream`) would need a chat-scoped session token for tool callbacks — not in
+  this pack.
