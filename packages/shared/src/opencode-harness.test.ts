@@ -13,6 +13,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   OPENCODE_DEFAULT_CALLBACK_ORIGIN,
+  OPENCODE_REMOTE_API_TOKEN_MIN_LENGTH,
   OPENCODE_SKILL_INSTALL_MD,
   OpencodeHarnessConfigError,
   buildOpencodeHeartbeatEnvelope,
@@ -92,6 +93,60 @@ test('bind: remote requires harnessBaseUrl and a >=16-char apiToken', () => {
     apiToken: REMOTE_TOKEN,
   });
   assert.equal(bind.mode, 'remote');
+});
+
+// S316-S2 (Refs #316, from the #316 gate): same bind-rule PINs as the Hermes
+// suite — the coarse rejections above ('short-token' = 11, 10.0.0.5) survive
+// off-by-one / hostname-matching mutants; these bind the rules exactly at the
+// boundary (measured RED, PR body evidence).
+test('S316-S2 PIN: remote apiToken boundary is exactly OPENCODE_REMOTE_API_TOKEN_MIN_LENGTH = 16', () => {
+  assert.equal(OPENCODE_REMOTE_API_TOKEN_MIN_LENGTH, 16);
+  const base = {
+    harness: 'opencode' as const,
+    mode: 'remote' as const,
+    harnessBaseUrl: 'http://100.105.50.60:4096',
+  };
+  // exactly the minimum passes
+  assert.equal(parseOpencodeHarnessBind({ ...base, apiToken: 'k'.repeat(16) }).apiToken, 'k'.repeat(16));
+  // one below the minimum fails
+  assert.throws(() => parseOpencodeHarnessBind({ ...base, apiToken: 'k'.repeat(15) }), /apiToken/);
+  // whitespace does not smuggle a 16-char token (the rule measures trim().length)
+  assert.throws(() => parseOpencodeHarnessBind({ ...base, apiToken: `${'k'.repeat(15)} ` }), /apiToken/);
+  // the length rule is REMOTE-only: a local bind may carry a short key-gated token
+  assert.doesNotThrow(() =>
+    parseOpencodeHarnessBind({ harness: 'opencode', mode: 'local', command: 'opencode run', apiToken: 'short' }),
+  );
+});
+
+test('S316-S2 PIN: localBaseUrl loopback accepted/rejected hostname matrix', () => {
+  // accepted: the documented loopback set (127.0.0.1 / localhost / ::1 / 127.x)
+  for (const okUrl of [
+    'http://127.0.0.1:4096',
+    'http://localhost:4096',
+    'http://[::1]:4096',
+    'http://127.5.5.5:4096',
+    'http://LOCALHOST:4096',
+  ]) {
+    assert.doesNotThrow(
+      () => parseOpencodeHarnessBind({ harness: 'opencode', mode: 'local', localBaseUrl: okUrl }),
+      `must accept loopback localBaseUrl ${okUrl}`,
+    );
+  }
+  // rejected: anything that only LOOKS loopback or is plainly remote —
+  // localhost.evil.com kills loosening `h === 'localhost'` to includes/startsWith.
+  for (const badUrl of [
+    'http://10.0.0.5:4096',
+    'http://192.168.1.1:4096',
+    'http://203.0.113.9:4096',
+    'http://opencode.internal:4096',
+    'http://localhost.evil.com:4096',
+  ]) {
+    assert.throws(
+      () => parseOpencodeHarnessBind({ harness: 'opencode', mode: 'local', localBaseUrl: badUrl }),
+      OpencodeHarnessConfigError,
+      `must reject non-loopback localBaseUrl ${badUrl}`,
+    );
+  }
 });
 
 test('bind: STRICT — unknown keys are rejected (a typo must not disable the remote checks)', () => {

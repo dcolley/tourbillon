@@ -105,6 +105,60 @@ test('parse: remote bind requires harnessBaseUrl and a real apiToken', () => {
   assert.equal(ok.harnessBaseUrl, 'http://100.105.50.60:9900');
 });
 
+// S316-S2 (Refs #316, from the #316 gate): the coarse rejections above ('short',
+// 203.0.113.9) survive off-by-one / hostname-matching mutants. These PINs bind
+// the rules exactly at the boundary — measured RED against mutants that relax
+// the length by one or loosen the loopback hostname match (PR body evidence).
+test('S316-S2 PIN: remote apiToken boundary is exactly HERMES_REMOTE_API_TOKEN_MIN_LENGTH = 16', () => {
+  assert.equal(HERMES_REMOTE_API_TOKEN_MIN_LENGTH, 16);
+  const base = {
+    harness: 'hermes' as const,
+    mode: 'remote' as const,
+    harnessBaseUrl: 'http://100.105.50.60:9900',
+  };
+  // exactly the minimum passes
+  assert.equal(parseHermesHarnessBind({ ...base, apiToken: 'k'.repeat(16) }).apiToken, 'k'.repeat(16));
+  // one below the minimum fails
+  assert.throws(() => parseHermesHarnessBind({ ...base, apiToken: 'k'.repeat(15) }), /apiToken/);
+  // whitespace does not smuggle a 16-char token (the rule measures trim().length)
+  assert.throws(() => parseHermesHarnessBind({ ...base, apiToken: `${'k'.repeat(15)} ` }), /apiToken/);
+  // the length rule is REMOTE-only: a local bind may carry a short key-gated token
+  assert.doesNotThrow(() =>
+    parseHermesHarnessBind({ harness: 'hermes', mode: 'local', command: 'hermes', apiToken: 'short' }),
+  );
+});
+
+test('S316-S2 PIN: localBaseUrl loopback accepted/rejected hostname matrix', () => {
+  // accepted: the documented loopback set (127.0.0.1 / localhost / ::1 / 127.x)
+  for (const okUrl of [
+    'http://127.0.0.1:9900',
+    'http://localhost:9900',
+    'http://[::1]:9900',
+    'http://127.5.5.5:9900',
+    'http://LOCALHOST:9900',
+  ]) {
+    assert.doesNotThrow(
+      () => parseHermesHarnessBind({ harness: 'hermes', mode: 'local', localBaseUrl: okUrl }),
+      `must accept loopback localBaseUrl ${okUrl}`,
+    );
+  }
+  // rejected: anything that only LOOKS loopback or is plainly remote —
+  // localhost.evil.com kills loosening `h === 'localhost'` to includes/startsWith.
+  for (const badUrl of [
+    'http://10.0.0.5:4096',
+    'http://192.168.1.1:9900',
+    'http://203.0.113.9:9900',
+    'http://hermes.internal:9900',
+    'http://localhost.evil.com:9900',
+  ]) {
+    assert.throws(
+      () => parseHermesHarnessBind({ harness: 'hermes', mode: 'local', localBaseUrl: badUrl }),
+      HermesHarnessConfigError,
+      `must reject non-loopback localBaseUrl ${badUrl}`,
+    );
+  }
+});
+
 test('parse: strict on unknown keys, rejects credential/query/hash URLs', () => {
   assert.throws(
     () =>
