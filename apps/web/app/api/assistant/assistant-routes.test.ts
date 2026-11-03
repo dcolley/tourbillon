@@ -106,7 +106,7 @@ const session = async (resourceId: string, scope: string, createInitialThread = 
   if (!sessions.has(key)) {
     sessions.set(
       key,
-      await controller.createSession({ resourceId, id: key, ownerId: controller.id, scope, createInitialThread }),
+      await controller.createSession({ resourceId, id: key, ownerId: controller.id, createInitialThread }),
     );
   }
   return sessions.get(key);
@@ -324,10 +324,9 @@ describe('UI-2 assistant sidebar API', () => {
               return watched(
                 await controller.createSession({
                   resourceId: opts.resourceId,
-                  id: opts.threadId,
+                  id: opts.scope ? `${opts.resourceId}::${opts.scope}` : opts.resourceId,
                   ownerId: controller.id,
                   tags: opts.tags,
-                  scope: opts.scope,
                   threadId: opts.threadId,
                 }),
               );
@@ -617,8 +616,8 @@ describe('UI-2 assistant sidebar API', () => {
       assert.equal(before, 'busy');
       const deleted: string[] = [];
       const deleteSession = controller.deleteSession.bind(controller);
-      controller.deleteSession = async (o: { resourceId: string; scope?: string }) => {
-        deleted.push(o.scope ?? '');
+      controller.deleteSession = async (o: { sessionId: string }) => {
+        deleted.push(o.sessionId);
         return deleteSession(o);
       };
       sessionWrites.length = 0;
@@ -628,7 +627,7 @@ describe('UI-2 assistant sidebar API', () => {
       assert.ok(!sessionWrites.includes('switch'));
       const create = sessionCalls.find((c) => c.threadId === r.body.thread.id);
       assert.ok(create && create.scope?.startsWith(threadsLib.ASSISTANT_CREATE_SCOPE_PREFIX), JSON.stringify(sessionCalls));
-      assert.deepEqual(deleted, [create.scope]);
+      assert.deepEqual(deleted, [`${RESOURCE_A}::${create.scope}`]);
       assert.equal(r.body.thread.title, 'Second');
       assert.deepEqual((await list('alice')).body.threads.map((t: Json) => t.id), [r.body.thread.id, 'busy']);
     });
@@ -717,7 +716,7 @@ describe('UI-2 assistant sidebar API', () => {
       // continue on the new conversation.
       assert.equal(agui.thread.getId(), fresh);
       assert.equal(agui.identity.getResourceId(), RESOURCE_A);
-      assert.equal(await controller.getSessionByResource(RESOURCE_A, AGUI_SCOPE), agui);
+      assert.equal(await controller.getSession(`${RESOURCE_A}::${AGUI_SCOPE}`), agui);
       // Other agents' sessions and the assistant list session are untouched.
       assert.equal(bobAgui.thread.getId(), 'bobs');
       assert.equal(shared.thread.getId(), 'before-clear');

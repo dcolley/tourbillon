@@ -23,6 +23,9 @@ import { chatSessionIdForAgent } from '@tourbillon/shared/agent-token';
 import { ASSISTANT_THREAD_METADATA_KEYS } from '@/lib/assistant/sidebar';
 import { retireWidgetOwnersOfController } from '@/lib/agui/widget-owners';
 import { trackInFlightUserTurns } from '@/lib/chat/steer-preserving-turn';
+import { chatSessionId } from './session-id';
+
+export { chatSessionId };
 
 /** #110: re-mint chat tokens with less than this many seconds left. */
 const CHAT_TOKEN_REFRESH_SEC = 60 * 60;
@@ -276,13 +279,11 @@ export async function getChatSession(
     opts?.resourceId ??
     chatResourceId(agentRecord.companyId, chatContextFromTags(opts?.tags));
   const requestContext = createChatRequestContext(agentRecord);
-  const id = opts?.threadId ?? (opts?.scope ? `${resourceId}::${opts.scope}` : resourceId);
   const session = await controller.createSession({
     resourceId,
-    id,
+    id: chatSessionId(resourceId, opts?.scope),
     ownerId: controller.id,
     tags: opts?.tags,
-    scope: opts?.scope,
     threadId: opts?.threadId,
     requestContext: requestContext as never,
     ...(opts?.createInitialThread === false ? { createInitialThread: false } : {}),

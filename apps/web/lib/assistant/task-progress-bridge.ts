@@ -242,8 +242,16 @@ const realDeliver = createDeliver({
   // leg is what tsc validates: the record must still structurally fit Pick<Agent, 'id' |
   // 'companyId' | 'status'> — e.g. renaming `companyId` or turning `status` into a boolean
   // breaks tsc HERE. The second leg is the trivial comparable widen ChatAgentSeam -> Agent.
-  getOrCreateChatController: async (agent) =>
-    (await import('@/lib/chat')).getOrCreateChatController(agent as ChatAgentSeam as Agent),
+  getOrCreateChatController: async (agent) => {
+    const chat = await import('@/lib/chat');
+    const { chatSessionId } = await import('@/lib/chat/session-id');
+    const controller = await chat.getOrCreateChatController(agent as ChatAgentSeam as Agent);
+    // Mastra 1.81: the live session for (resourceId, scope) is getSession(chatSessionId(...)).
+    return {
+      getSessionByResource: (resourceId: string, scope: string) =>
+        controller.getSession(chatSessionId(resourceId, scope)),
+    };
+  },
   getChatSession: async (controller, agent, opts) =>
     (await import('@/lib/chat')).getChatSession(controller as never, agent as ChatAgentSeam as Agent, opts),
 });

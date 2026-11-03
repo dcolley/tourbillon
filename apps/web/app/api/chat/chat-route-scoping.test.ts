@@ -80,19 +80,18 @@ async function controllerFor(agentId: string) {
   return controllers.get(agentId);
 }
 
-/** Mirrors registry.getChatSession (session id = threadId, else resource::scope). */
+/** Mirrors registry.getChatSession (session id = resource::scope; threadId only binds the thread). */
 async function getChatSession(
   controller: any,
   _agent: unknown,
   opts: { resourceId: string; threadId?: string; tags?: Record<string, string>; scope?: string },
 ) {
-  const id = opts.threadId ?? (opts.scope ? `${opts.resourceId}::${opts.scope}` : opts.resourceId);
+  const id = opts.scope ? `${opts.resourceId}::${opts.scope}` : opts.resourceId;
   return controller.createSession({
     resourceId: opts.resourceId,
     id,
     ownerId: controller.id,
     tags: opts.tags,
-    scope: opts.scope,
     threadId: opts.threadId,
   });
 }
@@ -107,7 +106,6 @@ async function seedThread(opts: { id: string; agentId: string; resourceId: strin
     resourceId: opts.resourceId,
     id: `seed-${seedN}`,
     ownerId: c.id,
-    scope: `seed-${seedN}`,
     createInitialThread: false,
   });
   await s.thread.create({ id: opts.id, title: `title ${opts.id}` });
@@ -118,7 +116,7 @@ async function seedThread(opts: { id: string; agentId: string; resourceId: strin
 async function probe(resourceId: string) {
   const c = await controllerFor('agent-a');
   seedN += 1;
-  return c.createSession({ resourceId, id: `probe-${seedN}`, ownerId: c.id, scope: `probe-${seedN}`, createInitialThread: false });
+  return c.createSession({ resourceId, id: `probe-${seedN}`, ownerId: c.id, createInitialThread: false });
 }
 async function readThread(resourceId: string, threadId: string) {
   return (await probe(resourceId)).thread.getById({ threadId });
@@ -486,7 +484,7 @@ describe('chat route scoping', () => {
       await seedThread({ id: 'b-issue', agentId: 'agent-b', resourceId: RES_A_ISSUE });
       const q = '?sessionScope=s2';
       assert.equal((await call('POST thread', { agentId: 'bob', resourceId: RES_A }, { body: { threadId: 'b-own' }, query: q })).status, 200);
-      const session = await (await controllerFor('agent-b')).getSessionByResource(RES_A, 's2');
+      const session = await (await controllerFor('agent-b')).getSession(`${RES_A}::s2`);
       assert.equal(session.thread.getId(), 'b-own');
       const events: Json[] = [];
       const unsubscribe = session.subscribe((e: Json) => events.push(e));

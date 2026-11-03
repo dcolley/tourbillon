@@ -45,7 +45,7 @@ test('S241-S1: scheduler declares @mastra/core as a devDependency (fresh install
   const declared = depOf(schedulerPkg, 'devDependencies', '@mastra/core');
   assert.equal(
     declared,
-    '1.78.0',
+    '1.81.0',
     'packages/scheduler must declare @mastra/core in devDependencies at the monorepo-pinned version — wake-runner.test.ts imports @mastra/core/observability and a hoist-only resolution breaks on fresh installs',
   );
   // Same version the mastra package already uses — no invented major, no drift.

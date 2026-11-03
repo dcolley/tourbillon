@@ -438,16 +438,17 @@ describe('workspace.destroy stops resolver egress proxy', () => {
 
       await destroyCodeExecutionWorkspace(workspace);
 
-      if (resolved) {
-        const socksAfter = existsSync(root)
-          ? readdirSync(root).filter((n) => n.endsWith('.sock'))
-          : [];
-        assert.deepEqual(
-          socksAfter,
-          [],
-          `socks must be unlinked after destroy, still have [${socksAfter.join(', ')}]`,
-        );
-      }
+      // Mastra 1.81 throws from the LocalSandbox constructor when bwrap is
+      // missing, after the proxy has already bound. Destroy (and the resolver
+      // catch) must still unlink that socket or the suite never exits.
+      const socksAfter = existsSync(root)
+        ? readdirSync(root).filter((n) => n.endsWith('.sock'))
+        : [];
+      assert.deepEqual(
+        socksAfter,
+        [],
+        `socks must be unlinked after destroy, still have [${socksAfter.join(', ')}]`,
+      );
 
       // Idempotent second destroy
       await destroyCodeExecutionWorkspace(workspace);

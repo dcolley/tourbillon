@@ -188,7 +188,6 @@ export async function createStubAgentController(options: StubControllerOptions) 
         resourceId,
         id: scope ? `${resourceId}::${scope}` : resourceId,
         ownerId: controller.id,
-        scope,
       }),
   };
 }
