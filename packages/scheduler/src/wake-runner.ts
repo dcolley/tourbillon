@@ -49,6 +49,13 @@ import {
   parseHermesHarnessBind,
   type HermesHarnessBind,
 } from '@tourbillon/shared/hermes-harness';
+import { dispatchOpencodeHeartbeat } from './adapters/opencode-adapter';
+import {
+  deriveOpencodeCallbackBaseUrl,
+  isOpencodeHarnessBind,
+  parseOpencodeHarnessBind,
+  type OpencodeHarnessBind,
+} from '@tourbillon/shared/opencode-harness';
 import { redisPub } from './redis-pub';
 import {
   awaitWithAbort,
@@ -539,6 +546,20 @@ async function runWake(
     }
   }
 
+  // #281 second pack: external OpenCode bind (adapterConfig.harness === 'opencode'). Same
+  // loud-fail rule — a malformed OpenCode bind enters NEITHER AgentController NOR Hermes.
+  let opencodeBind: OpencodeHarnessBind | null = null;
+  let opencodeBindError: string | null = null;
+  let opencodeCallbackBaseUrl: string | null = null;
+  if (isHarnessAdapter(agentRecord.adapterType) && isOpencodeHarnessBind(agentRecord.adapterConfig)) {
+    try {
+      opencodeBind = parseOpencodeHarnessBind(agentRecord.adapterConfig);
+      opencodeCallbackBaseUrl = deriveOpencodeCallbackBaseUrl(opencodeBind.callbackBaseUrl);
+    } catch (err) {
+      opencodeBindError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
   // WC1–6: wake message built at run start. With the live context on, the header is read from the
   // DB now (fresher than the enqueue-time payload); if that read fails the run continues on the
   // T1-only message (newest-first comments) and logs wake_context_failed.
@@ -597,7 +618,15 @@ async function runWake(
               callbackBaseUrl: hermesCallbackBaseUrl,
             },
           }
-        : {}),
+        : opencodeBind
+          ? {
+              harness: {
+                kind: 'opencode',
+                mode: opencodeBind.mode,
+                callbackBaseUrl: opencodeCallbackBaseUrl,
+              },
+            }
+          : {}),
     },
     startedAt: runStartedAt,
     lastSeenAt: runStartedAt,
@@ -616,6 +645,13 @@ async function runWake(
     runTracer.error('failed: invalid Hermes harness bind', { error: hermesBindError });
     await recordHeartbeatFailure(runId, hermesBindError, companyId, agentId);
     return { runId, status: 'failed', errorText: hermesBindError };
+  }
+
+  // #281 second pack: same loud-fail rule for a half-configured OpenCode bind.
+  if (opencodeBindError) {
+    runTracer.error('failed: invalid OpenCode harness bind', { error: opencodeBindError });
+    await recordHeartbeatFailure(runId, opencodeBindError, companyId, agentId);
+    return { runId, status: 'failed', errorText: opencodeBindError };
   }
 
   if (assignedIssue && assignedIssue.assigneeAgentId !== agentId) {
@@ -713,6 +749,8 @@ async function runWake(
           // #281: an external Hermes bind takes the wake instead of the in-product
           // AgentController. The heartbeat envelope ALWAYS carries callbackUrl + session token
           // (buildHermesHeartbeatEnvelope fails closed otherwise).
+          // #281 second pack: an external OpenCode bind routes the same way; the three
+          // dispatchers are mutually exclusive on the adapterConfig discriminator.
           const harnessResult: HarnessRunResult = hermesBind
             ? await dispatchHermesHeartbeat(
                 {
@@ -732,7 +770,27 @@ async function runWake(
                   abortSignal: abortController.signal,
                 },
               )
-            : await runWithHarness(
+            : opencodeBind
+              ? await dispatchOpencodeHeartbeat(
+                  {
+                    wake,
+                    wakeMessage,
+                    runId,
+                    apiKey,
+                    goalId: issueForTask?.goalId ?? undefined,
+                    projectId: issueForTask?.projectId ?? undefined,
+                    modelId: agentRecord.modelId ?? null,
+                  },
+                  {
+                    bind: opencodeBind,
+                    callbackBaseUrl: opencodeCallbackBaseUrl ?? '',
+                    timeoutSec: effectiveHeartbeatTimeoutSec(
+                      (agentRecord.runtimeConfig as AgentRuntimeConfig | null)?.timeout?.heartbeatSec,
+                    ),
+                    abortSignal: abortController.signal,
+                  },
+                )
+              : await runWithHarness(
             agentRecord,
             {
               wake,
@@ -785,10 +843,10 @@ async function runWake(
 
           // Check for truncated generation (finishReason: length) BEFORE parking.
           // Harness also emits observability events that may show truncation.
-          // #281: an external Hermes dispatch writes no Mastra spans, so the span scan is
-          // in-product-only work — skip it for Hermes runs (usage/truncation reporting over
-          // the callback is a later pack).
-          if (!hermesBind) {
+          // #281: an external Hermes/OpenCode dispatch writes no Mastra spans, so the span scan is
+          // in-product-only work — skip it for external harness runs (usage/truncation reporting
+          // over the callback is a later pack).
+          if (!hermesBind && !opencodeBind) {
             const { detectTruncatedGeneration } = await import('@tourbillon/db');
             const truncationCheck = await detectTruncatedGeneration(runId);
             if (truncationCheck.truncated) {

@@ -1,19 +1,27 @@
 /**
- * #281 — Hermes → Tourbillon callback gate (web side).
+ * #281 — Hermes/OpenCode → Tourbillon callback gate (web side).
  *
- * One API surface, principal = token: an external Hermes harness authenticates with the
- * run-scoped session token (pm_run_…, #110) minted into its heartbeat envelope. Every tool
- * call runs the SAME capability gate as in-system agents: the allowed set is
+ * One API surface, principal = token: an external harness (Hermes or OpenCode) authenticates
+ * with the run-scoped session token (pm_run_…, #110) minted into its heartbeat envelope. Every
+ * tool call runs the SAME capability gate as in-system agents: the allowed set is
  * `assembleAgentTools(agentRecord, { allowedMcpServerIds, companySettings })` — the exact
  * assembly a durable/harness heartbeat uses. A tool outside that set (gated out by
  * assignedToolsets / assignedTools / mcpServerIds / company allow-list) is refused with 403
  * `tool_not_permitted` and NEVER executed.
+ *
+ * The skill endpoint is harness-kind aware: an OpenCode-bound agent gets the OpenCode skill
+ * blob, everyone else keeps the Hermes one (first-slice default).
  *
  * Route handlers under app/api/harness/callback/* are thin; all logic lives here and is
  * unit-tested with injected deps (no DB in tests).
  */
 import { z } from 'zod';
 import { HERMES_SKILL_INSTALL_MD } from '@tourbillon/shared/hermes-harness';
+import {
+  OPENCODE_SKILL_INSTALL_MD,
+  isOpencodeHarnessBind,
+  opencodeHarnessBindSchema,
+} from '@tourbillon/shared/opencode-harness';
 
 /** Minimal shape needed to dispatch; the real db Agent row satisfies it. */
 export interface HarnessAgentRecordLike {
@@ -215,6 +223,22 @@ export async function handleHarnessToolList(params: {
   };
 }
 
+/**
+ * Pick the skill-install blob for the authenticated agent's harness kind. An OpenCode-bound
+ * agent gets the OpenCode SKILL.md shape (bind.skillInstall override wins when the bind
+ * parses); everything else keeps the Hermes default. The skill never contains secrets, so the
+ * selection is presentation-only — auth is still enforced by the caller.
+ */
+export function selectHarnessSkillMarkdown(agent: HarnessAgentRecordLike, deps: HarnessCallbackDeps): string {
+  const adapterConfig = (agent as { adapterConfig?: unknown }).adapterConfig;
+  if (isOpencodeHarnessBind(adapterConfig)) {
+    const parsed = opencodeHarnessBindSchema.safeParse(adapterConfig);
+    const override = parsed.success ? parsed.data.skillInstall?.trim() : undefined;
+    return override || OPENCODE_SKILL_INSTALL_MD;
+  }
+  return deps.skillMarkdown?.() ?? HERMES_SKILL_INSTALL_MD;
+}
+
 /** GET /api/harness/callback/skill — the skill-install blob (auth-gated; no secrets inside). */
 export async function handleHarnessSkill(params: {
   authorization: string | null | undefined;
@@ -222,15 +246,16 @@ export async function handleHarnessSkill(params: {
 }): Promise<HttpResult> {
   const authed = await authenticateAndLoad(params.authorization, params.deps);
   if (!authed.ok) return authed.result;
-  const md = params.deps.skillMarkdown?.() ?? HERMES_SKILL_INSTALL_MD;
+  const md = selectHarnessSkillMarkdown(authed.agent, params.deps);
   return { status: 200, body: md, contentType: 'text/markdown; charset=utf-8' };
 }
 
 /**
  * POST /api/harness/callback/chat — stub for this slice.
- * The measured Hermes gateway (agent card) advertises streaming, but wiring board chat to the
- * external harness is the follow-up pack (PR body carries the evidence). DMs already flow via
- * the capability-gated sendToAgent tool in the tools surface.
+ * Board chat over the harness callback is a documented follow-up (PR body carries the measured
+ * evidence: the Hermes gateway advertises streaming; opencode serve syncs prompts + SSE but
+ * board chat is a Tourbillon-side surface, not a harness API). Auth is still enforced so the
+ * surface shape is stable for harnesses.
  */
 export async function handleHarnessChat(params: {
   authorization: string | null | undefined;
@@ -243,8 +268,8 @@ export async function handleHarnessChat(params: {
     body: {
       error: 'chat_not_implemented',
       message:
-        'Board chat over the Hermes callback is not exposed in the first slice. Use the sendToAgent DM tool (when granted) for agent-to-agent messages.',
-      followUp: '#281 next pack — see docs/backlog/harness-direct-connection.md',
+        'Board chat over the harness callback is not exposed in this slice. Use the sendToAgent DM tool (when granted) for agent-to-agent messages.',
+      followUp: '#281 later pack — see docs/backlog/harness-direct-connection.md',
     },
   };
 }
