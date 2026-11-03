@@ -128,6 +128,20 @@ describe('jobs card: badge variants (S304-S3, #304)', () => {
     );
   });
 
+  it('failed = 1 is already destructive (S307-S1 boundary: highlight is > 0, not > 1)', () => {
+    // S307-S1 (#304 softs): the pair above pins failed 0 (neutral) and 2 (destructive) but
+    // leaves the boundary unmeasured: `highlight={counts.failed > 1}` survives it (a single
+    // failure is exactly the state the board must see red). This pins the 0/1 edge.
+    const html = renderToStaticMarkup(
+      React.createElement(QueueCountBadges, { counts: { ...base, failed: 1 } }),
+    );
+    assert.match(
+      badgeSpan(html, 'failed: 1'),
+      /bg-destructive/,
+      'failed: 1 must render the destructive variant (> 0 boundary)',
+    );
+  });
+
   it('neutral counters (skipped/coalesced/cancelled + core) never render destructive', () => {
     const html = renderToStaticMarkup(
       React.createElement(QueueCountBadges, {

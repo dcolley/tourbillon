@@ -36,7 +36,7 @@ import {
 // copy of the wire type — value-checked twice, single-sourced nowhere, so the publisher and the
 // parser could drift the moment one side changed. The shared constant is now the one source of
 // truth; re-exported here so the bridge's importers keep their existing path.
-import { TASK_PROGRESS_SSE_TYPE } from '@tourbillon/shared/types';
+import { TASK_PROGRESS_SSE_TYPE, isTaskProgressStatus } from '@tourbillon/shared/types';
 export { TASK_PROGRESS_SSE_TYPE };
 
 export type TaskProgressEvent = TaskProgressEventShape;
@@ -59,7 +59,9 @@ export function parseTaskProgressMessage(raw: string): TaskProgressEvent | null 
   // S298-S1 counts/filters/maps coalesced/cancelled, but those are heartbeat_runs ROW statuses,
   // not statuses of THIS channel. The scheduler cannot emit coalesced/cancelled here: the only
   // publisher is task-runner's emitProgress (packages/scheduler/src/task-runner.ts), whose
-  // ChatTaskProgressEvent.status is exactly the four words below — `started` uses the 'running'
+  // ChatTaskProgressEvent.status is exactly the four shared words, consumed through the ONE
+  // union (S307-S2): isTaskProgressStatus / TASK_PROGRESS_STATUSES from @tourbillon/shared/types
+  // is the accept set here, no local copy. `started` uses the 'running'
   // literal and done/needs_review carry WakeResult.status ('succeeded' | 'failed' | 'skipped':
   // a coalesced wake resolves as 'skipped', a force-kill persists 'failed'), and a cancelled
   // chat task never reaches emitProgress (the claim guard returns false -> continue).
@@ -67,7 +69,7 @@ export function parseTaskProgressMessage(raw: string): TaskProgressEvent | null 
   // publisher type widens, in the same commit as the scheduler change.
   if (
     (stage !== 'started' && stage !== 'done' && stage !== 'needs_review') ||
-    (status !== 'running' && status !== 'succeeded' && status !== 'failed' && status !== 'skipped')
+    !isTaskProgressStatus(status)
   ) {
     return null;
   }
