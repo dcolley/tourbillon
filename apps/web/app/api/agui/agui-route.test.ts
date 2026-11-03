@@ -1103,6 +1103,21 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
       assert.deepEqual(controllerCalls[0].opts, { modelIdOverride: undefined });
       assert.equal(stub.modelCalls, 0);
 
+      // S319-S2 / S315-S2 determinism (Refs #319 / #315): this is the only CHAT-5 case that
+      // never starts a run — the provider gate 409s run/steer/followUp before bindThread,
+      // and abort deliberately skips the gate — so nothing ever points the route session at
+      // the thread. Its thread id therefore came ONLY from createSession() inheriting the
+      // resource-level active thread set by seedWithChoice's thread.switch(); that hand-off
+      // races Mastra's queued storage write, and under suite load the session sometimes came
+      // up on a fresh random thread, making the abort below 404 on `!onThread` (the flake).
+      // Bind the session the way a real client's is bound when it aborts (its earlier run or
+      // attach on this thread went through bindThread), so the abort's `onThread`
+      // precondition is explicit instead of timing-dependent.
+      const routeSession = sessions.get(SESSION_KEY);
+      assert.ok(routeSession, 'the 409 above created the route session (memoized under SESSION_KEY)');
+      await routeSession.thread.switch({ threadId: 'chat5-thread-2' });
+      assert.equal(routeSession.thread.getId(), 'chat5-thread-2', 'the route session is on the thread (abort precondition)');
+
       for (const action of ['steer', 'followUp']) {
         const r = await request('alice', input('chat5-thread-2', { forwardedProps: { tourbillon: { action } } }));
         assert.equal(r.status, 409, action);
