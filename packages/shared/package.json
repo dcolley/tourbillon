@@ -44,6 +44,7 @@
     "./browser-config": "./src/browser-config.ts",
     "./agent-token": "./src/agent-token.ts",
     "./hermes-harness": "./src/hermes-harness.ts",
+    "./opencode-harness": "./src/opencode-harness.ts",
     "./agent-avatar": "./src/agent-avatar.ts",
     "./widgets": "./src/widgets.ts",
     "./hitl": "./src/hitl.ts",
