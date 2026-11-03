@@ -110,7 +110,9 @@ Status: 1-4 are shipped for Hermes with #316 (see Implemented below); 5 (chat) s
 - **Callback (one surface, principal = token):** `apps/web/app/api/harness/callback/*` —
   `GET tools`, `POST tools/call`, `GET skill`, `POST chat` (501 stub in this slice; shipped in Soft Pack E, AC5 below). Auth = run-scoped session
   token (#110); every tool call runs through `assembleAgentTools` — the same capability gate as
-  in-system agents — and denied tools are refused 403 without executing.
+  in-system agents — and denied tools are refused 403 without executing. `tools/call` resolves
+  the name against the assembled set by key (`getInboxTool`) **or** tool id (`getInbox`, the
+  form the skills teach) via `findGatedTool` (S327-S1); a name not in the set stays 403.
 - **Skill install:** `HERMES_SKILL_INSTALL_MD` (shared) — shipped in the envelope and served at
   the callback `skill` endpoint.
 - **OpenCode:** deliberately not implemented; shared seams (envelope types, callback gate deps)
@@ -152,14 +154,22 @@ Status: 1-4 are shipped for Hermes with #316 (see Implemented below); 5 (chat) s
   `packages/shared/src/harness-chat.ts`.
 - **Wire:** `POST /api/harness/callback/chat` is A2A JSONRPC — `message/send` (sync; JSON-RPC
   result = A2A agent `Message`) and `message/stream` (`text/event-stream`: status-update
-  `working` → `Message` → status-update `completed`/`failed` with `final: true`). Recipient =
+  `working` → `Message` → status-update `completed`/`failed` with `final: true`). The SSE is
+  **buffered** (S327-S2): all frames are emitted together after the DM completes, not
+  incrementally. Delivery failure (S327-S4): sync → HTTP 502 JSON-RPC error
+  `chat_delivery_failed`; stream → HTTP 200 + final status-update `failed`. Recipient =
   `params.message.metadata.tourbillon.toAgentId | toAgentUrlKey` (+ optional `inReplyTo`).
 - **Gate order (fail closed, nothing executes before the gate):** session token (401) → bind
   advertises chat (409 `chat_not_supported`) → JSONRPC body (400; unknown method 400
   `unsupported_method`) → requested leg advertised (409 `chat_sync_not_supported` /
-  `chat_stream_not_supported`) → peer recipient (400 `chat_recipient_required`) →
+  `chat_stream_not_supported`) → message text (400 `invalid_request`: empty or over
+  `HARNESS_CHAT_MAX_TEXT`) → peer recipient (400 `chat_recipient_required`) →
   `assembleAgentTools` must contain the DM tool (403 `chat_not_permitted`, never executed) →
-  execute that gated `sendToAgent` with the run session token as `apiKey`.
+  execute that gated `sendToAgent` with the run session token as `apiKey`. Combined failures
+  resolve in that order (S327-S3, pinned): an unadvertised leg is 409 even when text/recipient
+  are also bad, and the 403 gate only runs once every 400 has passed. Invalid JSON is not
+  answered early by the route — it reaches the gate as an empty body, so a bad token still
+  gets 401 and only an authenticated caller gets the 400 (`lib/harness/callback-http.ts`).
 - **No second chat stack:** delivery IS the agent's own DM tool (`/api/companies/:id/agent-mail`,
   recipient woken with `agent_mail`); Board chat stays the in-product Tourbillon chat surface
   (`/api/chat/*`), and a harness reaches the Board through issue comments / approvals.

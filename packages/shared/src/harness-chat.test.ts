@@ -58,3 +58,11 @@ test('skills: 501 stub copy gone; chat documented as advertised-only + sendToAge
   }
   assert.match(HERMES_SKILL_INSTALL_MD, /message\/stream/);
 });
+
+test('skills (S327-S2/S4): stream is documented as buffered; delivery failure = sync 502 / stream HTTP 200 + final failed', () => {
+  for (const md of [HERMES_SKILL_INSTALL_MD, OPENCODE_SKILL_INSTALL_MD]) {
+    assert.match(md, /buffered/);
+    assert.match(md, /502[^\n]*chat_delivery_failed/);
+    assert.match(md, /HTTP 200 whose final status-update is `failed`/);
+  }
+});

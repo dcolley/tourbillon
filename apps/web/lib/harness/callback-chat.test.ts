@@ -9,11 +9,17 @@
  *  - capability deny: sendToAgent absent from assembleAgentTools ⇒ 403 chat_not_permitted and
  *    the DM tool NEVER executes (sentinel).
  *  - delivery runs the GATED DM tool with the run session token as apiKey (no second stack).
+ *  - S327-S3: combined-failure ordering — an unadvertised leg is 409 even with bad text /
+ *    recipient; 400s (method, text, recipient) all fire BEFORE the 403 gate (assembly never
+ *    runs); text 400 precedes recipient 400. Route glue: invalid JSON ⇒ 401 without auth,
+ *    400 only after auth; stream 200 carries the SSE headers.
+ *  - S327-S4: stream delivery failure = HTTP 200 + final `failed` (sync = 502).
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { z } from 'zod';
 import { handleHarnessChat, resolveHarnessChatCapability, type HarnessCallbackDeps } from './callback-gate';
+import { harnessChatPost } from './callback-http';
 
 interface Sent {
   key: string;
@@ -351,4 +357,118 @@ test('resolveHarnessChatCapability: advertised legs only', () => {
     sync: true,
     stream: false,
   });
+});
+
+// ── S327-S3: combined-failure ordering ────────────────────────────────────────
+
+test('PIN S327-S3: unadvertised leg ⇒ 409 even when text AND recipient are also bad (leg wins over 400s)', async () => {
+  const { deps, sent, calls } = makeDeps({
+    adapterConfig: { ...OPENCODE_HTTP, chat: { sync: true } },
+    toolKeys: ['getIdentityTool'], // DM not granted either
+  });
+  const res = await handleHarnessChat({
+    authorization: AUTH,
+    body: chatBody('message/stream', { parts: [{ kind: 'text', text: '  ' }], metadata: {} }),
+    deps,
+  });
+  assert.equal(res.status, 409);
+  assert.equal((res.body as { error: string }).error, 'chat_stream_not_supported');
+  assert.equal(calls.assemble, 0);
+  assert.equal(sent.length, 0);
+});
+
+test('PIN S327-S3: every 400 fires before the 403 gate — DM not granted, assembly never runs', async () => {
+  const cases: Array<[string, unknown, string]> = [
+    ['bad method', chatBody('tasks/get', { metadata: {} }), 'unsupported_method'],
+    ['empty text', chatBody('message/send', { parts: [{ kind: 'text', text: ' ' }] }), 'invalid_request'],
+    ['over-long text', chatBody('message/send', { parts: [{ kind: 'text', text: 'x'.repeat(8001) }] }), 'invalid_request'],
+    ['no recipient', chatBody('message/send', { metadata: {} }), 'chat_recipient_required'],
+    ['invalid JSON (undefined body)', undefined, 'invalid_request'],
+  ];
+  for (const [label, body, error] of cases) {
+    const { deps, sent, calls } = makeDeps({ toolKeys: ['getIdentityTool', 'getMessagesTool'] });
+    const res = await handleHarnessChat({ authorization: AUTH, body, deps });
+    assert.equal(res.status, 400, label);
+    assert.equal((res.body as { error: string }).error, error, label);
+    assert.equal(calls.assemble, 0, `${label}: gate must not run before the 400`);
+    assert.equal(sent.length, 0, label);
+  }
+});
+
+test('PIN S327-S3: text 400 precedes recipient 400 (empty text + no recipient ⇒ invalid_request)', async () => {
+  const { deps, sent } = makeDeps();
+  const res = await handleHarnessChat({
+    authorization: AUTH,
+    body: chatBody('message/send', { parts: [{ kind: 'text', text: '' }], metadata: {} }),
+    deps,
+  });
+  assert.equal(res.status, 400);
+  assert.equal((res.body as { error: string }).error, 'invalid_request');
+  assert.equal(sent.length, 0);
+});
+
+test('PIN S327-S3: valid request + DM not granted ⇒ 403 only after all 400 checks pass', async () => {
+  const { deps, sent, calls } = makeDeps({ toolKeys: ['getIdentityTool'] });
+  const res = await handleHarnessChat({ authorization: AUTH, body: chatBody(), deps });
+  assert.equal(res.status, 403);
+  assert.equal((res.body as { error: string }).error, 'chat_not_permitted');
+  assert.equal(calls.assemble, 1);
+  assert.equal(sent.length, 0);
+});
+
+// ── S327-S4: stream delivery failure contract ─────────────────────────────────
+
+test('PIN S327-S4: stream delivery failure (tool returned error) ⇒ HTTP 200 + final failed; sync ⇒ 502', async () => {
+  const { deps } = makeDeps({ dmResult: { error: 'HTTP 404', message: 'agent not found' } });
+  const stream = await handleHarnessChat({ authorization: AUTH, body: chatBody('message/stream'), deps });
+  assert.equal(stream.status, 200);
+  const frames = sseFrames(stream.body);
+  assert.equal(frames.length, 3);
+  assert.equal((frames[2].result.status as { state: string }).state, 'failed');
+  assert.equal(frames[2].result.final, true);
+  assert.match(JSON.stringify(frames[1].result), /Delivery to cto failed: HTTP 404: agent not found/);
+  const sync = await handleHarnessChat({ authorization: AUTH, body: chatBody('message/send'), deps });
+  assert.equal(sync.status, 502);
+});
+
+// ── S327-S3: route glue (callback-http.ts) ────────────────────────────────────
+
+function chatRequest(body: string, authorization?: string) {
+  return new Request('http://tourbillon.test/api/harness/callback/chat', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...(authorization ? { authorization } : {}) },
+    body,
+  });
+}
+
+test('PIN S327-S3 route: invalid JSON ⇒ 401 without/bad token (auth first), 400 only after auth', async () => {
+  for (const auth of [undefined, 'Bearer bad']) {
+    const { deps, calls } = makeDeps({ authenticated: auth ? false : undefined });
+    const res = await harnessChatPost(chatRequest('{not json', auth), deps);
+    assert.equal(res.status, 401, String(auth));
+    assert.equal(calls.loadAgent, 0);
+  }
+  const { deps, sent, calls } = makeDeps();
+  const res = await harnessChatPost(chatRequest('{not json', AUTH), deps);
+  assert.equal(res.status, 400);
+  assert.equal(((await res.json()) as { error: string }).error, 'invalid_request');
+  assert.equal(calls.authenticate, 1, 'auth ran before the 400');
+  assert.equal(calls.assemble, 0);
+  assert.equal(sent.length, 0);
+});
+
+test('PIN S327-S3 route: stream 200 ⇒ text/event-stream + no-cache/no-transform + X-Accel-Buffering: no', async () => {
+  const { deps } = makeDeps();
+  const res = await harnessChatPost(chatRequest(JSON.stringify(chatBody('message/stream')), AUTH), deps);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type') ?? '', /^text\/event-stream/);
+  assert.equal(res.headers.get('cache-control'), 'no-cache, no-transform');
+  assert.equal(res.headers.get('x-accel-buffering'), 'no');
+  const frames = sseFrames(await res.text());
+  assert.equal((frames[2].result.status as { state: string }).state, 'completed');
+
+  const sync = await harnessChatPost(chatRequest(JSON.stringify(chatBody('message/send')), AUTH), makeDeps().deps);
+  assert.equal(sync.status, 200);
+  assert.match(sync.headers.get('content-type') ?? '', /application\/json/);
+  assert.equal(sync.headers.get('x-accel-buffering'), null);
 });

@@ -393,7 +393,11 @@ can chat with another Tourbillon agent over A2A JSONRPC at \`POST {callback.base
 \`\`\`
 
 - \`message/send\` needs \`chat.sync\`; \`message/stream\` needs \`chat.stream\` and answers as
-  \`text/event-stream\` (status working → agent message → final status).
+  \`text/event-stream\` (status working → agent message → final status). The stream is
+  buffered: all events arrive together once the DM has been delivered (not incremental).
+- Delivery failure: \`message/send\` → HTTP 502 JSON-RPC error \`chat_delivery_failed\`;
+  \`message/stream\` → HTTP 200 whose final status-update is \`failed\` — always check the
+  final state, not just the HTTP status.
 - Delivery runs your gated \`sendToAgent\` DM tool: 403 \`chat_not_permitted\` when DMs are not
   granted (never retry harder). 409 \`chat_not_supported\` / \`chat_*_not_supported\` means the
   bind does not advertise that leg — use \`sendToAgent\` via tools/call or issue comments.
