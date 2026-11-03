@@ -35,7 +35,7 @@ export function createDryRunHostClient(options: DryRunHostClientOptions = {}): H
   const apply = env[CC_APPLY_ENV] === '1';
 
   return {
-    async ensureDirs(dirs: string[]): Promise<void> {
+    async ensureDirs(_dirs: string[]): Promise<void> {
       // Dry run: nothing is created. Production: Ops cc-ensure-company over the /opt trees
       // (CC_APPLY=1 — the trees need sudo on the host).
       if (apply && opsScriptExists(ccBinPath(CC_ENSURE_COMPANY_SCRIPT, env))) {
@@ -65,7 +65,7 @@ export function createDryRunHostClient(options: DryRunHostClientOptions = {}): H
       );
     },
 
-    async stopAndRemove(containerName: string): Promise<void> {
+    async stopAndRemove(_containerName: string): Promise<void> {
       if (allowStart && opsScriptExists(ccBinPath(CC_TEARDOWN_SEAT_SCRIPT, env))) {
         throw new HostBackendUnavailableError(
           `Ops teardown script ${CC_TEARDOWN_SEAT_SCRIPT} found but the production HostClient is not wired yet (Slice 2).`,

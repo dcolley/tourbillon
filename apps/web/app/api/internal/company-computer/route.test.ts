@@ -18,7 +18,7 @@ import {
 
 let authPayload: { kind: 'run'; runId: string; agentId: string; companyId: string } | null = null;
 let companyRow: { id: string; slug: string; hasComputer: boolean } | null = null;
-let agentRow: { id: string; urlKey: string; hasComputer: boolean } | null = null;
+let agentRow: { id: string; companyId: string; urlKey: string; hasComputer: boolean } | null = null;
 let store: InMemorySessionStore;
 let hostCalls: string[] = [];
 let hostClient: HostClient = createDryRunHostClient({ env: {} });
@@ -28,7 +28,7 @@ let route: Route;
 
 const GATES_OPEN = () => {
   companyRow = { id: 'c1', slug: 'acme', hasComputer: true };
-  agentRow = { id: 'a1', urlKey: 'ceo', hasComputer: true };
+  agentRow = { id: 'a1', companyId: 'c1', urlKey: 'ceo', hasComputer: true };
   authPayload = { kind: 'run', runId: 'r1', agentId: 'a1', companyId: 'c1' };
 };
 
@@ -160,6 +160,25 @@ describe('POST /api/internal/company-computer/[action]', () => {
       assert.equal(body.message, GATE_AGENT_NO_COMPUTER, action);
     }
     assert.deepEqual(hostCalls, []);
+  });
+
+  // ---- S282-S6: agent must belong to the run token's company (defence in depth) ----
+  it('403 agent_company_mismatch when agent.companyId !== runCtx.companyId — no host/registry work', async () => {
+    GATES_OPEN();
+    agentRow!.companyId = 'c2'; // agent from another company; both hasComputer gates open
+    for (const action of ['createSession', 'getSession', 'getSessionInfo', 'destroySession', 'screenshot', 'click', 'typeText', 'openBrowser']) {
+      const res = await call(action, { body: { x: 1, y: 1, text: 'hi', url: 'https://x.test' } });
+      assert.equal(res.status, 403, action);
+      assert.equal((await json(res)).error, 'agent_company_mismatch', action);
+    }
+    assert.deepEqual(hostCalls, [], 'no host side effects for a cross-company agent');
+    assert.equal(store.all().length, 0, 'no session rows for a cross-company agent');
+  });
+
+  it('S282-S6 control: matching companyId passes the assert (200 getSession)', async () => {
+    GATES_OPEN();
+    const res = await call('getSession');
+    assert.equal(res.status, 200);
   });
 
   // ---- dry-run host policy (zero seats until Ops contract) ----

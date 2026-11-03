@@ -12,6 +12,9 @@
  * Ops ensure contract exists and CC_ALLOW_START=1 (Derek enables). Desktop actions
  * (screenshot/click/typeText/openBrowser exec step) answer 503 ops_contract_missing.
  * Slice-2 actions (file manager, terminal, pressKey, mouseMove, scroll) answer 501.
+ *
+ * S282-S6 (defence in depth): the agent loaded by runCtx.agentId must belong to
+ * runCtx.companyId — otherwise 403 agent_company_mismatch before any gate/host work.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
@@ -91,6 +94,14 @@ export async function POST(
   if (!company) return NextResponse.json({ error: 'company_not_found' }, { status: 404 });
   const agent = await db.query.agents.findFirst({ where: eq(agents.id, runCtx.agentId) });
   if (!agent) return NextResponse.json({ error: 'agent_not_found' }, { status: 404 });
+  // S282-S6: never act for an agent outside the run token's company (defence in depth —
+  // the token issuer already binds them; a divergence means a forged/corrupt context).
+  if (agent.companyId !== runCtx.companyId) {
+    return NextResponse.json(
+      { error: 'agent_company_mismatch', message: 'Agent does not belong to this run\'s company.' },
+      { status: 403 },
+    );
+  }
 
   const ctx: ComputerContext = {
     companyId: company.id,
