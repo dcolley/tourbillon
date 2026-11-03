@@ -14,10 +14,13 @@
     "paths": {
       "@tourbillon/db": ["./packages/db/src/index.ts"],
       "@tourbillon/db/schema": ["./packages/db/src/schema/index.ts"],
-      // #216 S7b: scheduler `tsc -p` pulls query-spy.ts through this key -> +1 TS6059 rootDir
-      // error, the same pre-existing class as the 139 other @tourbillon/db sources (tip 171 total
-      // / 140 TS6059; intentional, tracked; folds into any future scheduler rootDir/project-
-      // references fix). Runtime import is gated behind the "tourbillon-test" exports condition
+      // #216 S7b: scheduler `tsc -p` pulls query-spy.ts through this key. The old
+      // "+1 TS6059 rootDir error" belonged to the ~140-error TS6059 class produced by
+      // scheduler's `rootDir: src` + these paths (workspace packages export raw .ts);
+      // S315-S1 (#315) removed rootDir from packages/scheduler/tsconfig.json,
+      // dissolving that class - the scheduler type-check gate baseline is now 27 with
+      // zero TS6059 (packages/scheduler/type-check.baseline). Runtime import is gated
+      // behind the "tourbillon-test" exports condition
       // (#216 S7a) - scheduler's test script passes --conditions=tourbillon-test (bare form;
       // the old plus-prefixed variant of that condition name was stale — #223 S26a, see
       // the S24a note below). TS resolves
