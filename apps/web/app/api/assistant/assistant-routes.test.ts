@@ -1,5 +1,6 @@
 /**
- * UI-2: assistant sidebar API — /api/assistant/agents and /api/assistant/agents/[agentId]/threads[/threadId].
+ * UI-2: assistant sidebar API — /api/assistant/agents, /api/assistant/agents/[agentId]/threads[/threadId]
+ * and (S306-S4) the batch list /api/assistant/threads?agentIds=….
  * Auth/company scope, thread list scoping, search, rename, pin, unread, new thread.
  *
  * '@/lib/chat' is mocked only at the registry boundary (agent resolution mirrors the chat routes:
@@ -12,6 +13,7 @@ import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { NextRequest } from 'next/server';
 import { chatItemsFromStoredMessages } from '../../../lib/agui/client/thread-history';
+import { ASSISTANT_THREADS_BATCH_MAX_AGENTS, ASSISTANT_THREADS_BATCH_MAX_KEY_LENGTH } from '../../../lib/assistant/sidebar';
 
 const mastraRequire = createRequire(join(__dirname, '../../../../../packages/mastra/package.json'));
 
@@ -127,6 +129,7 @@ async function seedThread(opts: {
 
 let agentsGET: (req: NextRequest) => Promise<Response>;
 let threadsGET: Handler;
+let batchGET: (req: NextRequest) => Promise<Response>;
 let threadsPOST: Handler;
 let threadPATCH: Handler;
 let threadGET: Handler;
@@ -144,6 +147,11 @@ const ctx = (params: Record<string, string>) => ({ params: Promise.resolve(param
 
 async function list(agentId: string, query = ''): Promise<{ status: number; body: Json }> {
   const res = await threadsGET(req(`/api/assistant/agents/${agentId}/threads${query}`), ctx({ agentId }));
+  return { status: res.status, body: (await res.json()) as Json };
+}
+/** S306-S4: GET /api/assistant/threads?agentIds=… (raw query string, so tests can send odd shapes). */
+async function batch(query: string): Promise<{ status: number; body: Json }> {
+  const res = await batchGET(req(`/api/assistant/threads${query}`));
   return { status: res.status, body: (await res.json()) as Json };
 }
 async function getThread(agentId: string, threadId: string): Promise<{ status: number; body: Json }> {
@@ -333,6 +341,7 @@ describe('UI-2 assistant sidebar API', () => {
     };
     ({ GET: agentsGET } = await import('./agents/route'));
     ({ GET: threadsGET, POST: threadsPOST } = (await import('./agents/[agentId]/threads/route')) as any);
+    ({ GET: batchGET } = (await import('./threads/route')) as any);
     ({ PATCH: threadPATCH, GET: threadGET } = (await import('./agents/[agentId]/threads/[threadId]/route')) as any);
     ({ GET: messagesGET } = (await import('./agents/[agentId]/threads/[threadId]/messages/route')) as any);
     ({ resetThreadCreateLimitForTests } = await import('../../../lib/assistant/create-limit'));
@@ -485,6 +494,97 @@ describe('UI-2 assistant sidebar API', () => {
       for (const body of [{}, { title: '' }, { pinned: 'yes' }, { read: false }, { title: 'x', extra: 1 }, 'not json']) {
         assert.equal((await patch('alice', 'own-old', body)).status, 400, JSON.stringify(body));
       }
+    });
+  });
+
+  describe('S306-S4 batch thread list (GET /api/assistant/threads?agentIds=…)', () => {
+    beforeEach(async () => {
+      await seedThread({ id: 'own-old', title: 'Weekly plan', agentId: 'agent-a', turn: true });
+      await seedThread({ id: 'own-new', title: 'Budget review', agentId: 'agent-a', turn: true });
+      await seedThread({ id: 'bobs', title: 'Bob plan', agentId: 'agent-b', turn: true });
+      await seedThread({ id: 'xav', title: 'Xavier plan', agentId: 'agent-x', resourceId: 'company-company-x:chat:free', turn: true });
+    });
+
+    it('one request returns each agent’s list — identical to the per-agent route — in request order', async () => {
+      const { status, body } = await batch('?agentIds=agent-b,agent-a');
+      assert.equal(status, 200);
+      assert.deepEqual(body.agents.map((a: Json) => [a.agentKey, a.agentId]), [
+        ['agent-b', 'agent-b'],
+        ['agent-a', 'agent-a'],
+      ]);
+      assert.deepEqual([body.missing, body.errors], [[], []]);
+      const single = { a: (await list('agent-a')).body, b: (await list('agent-b')).body };
+      const { agentKey: _a, ...a } = body.agents[1];
+      const { agentKey: _b, ...b } = body.agents[0];
+      assert.deepEqual(a, single.a, 'agent-a payload matches the per-agent route');
+      assert.deepEqual(b, single.b, 'agent-b payload matches the per-agent route');
+      assert.deepEqual(a.threads.map((t: Json) => t.id), ['own-new', 'own-old']);
+      assert.equal(a.initialThreadId, 'own-new');
+    });
+
+    it('UNAUTHORISED FILTER: another company’s agent (by id or url key) is filtered into `missing` — no threads, no session opened', async () => {
+      const { status, body } = await batch('?agentIds=agent-a,agent-x,xavier,nope');
+      assert.equal(status, 200);
+      assert.deepEqual(body.agents.map((a: Json) => a.agentId), ['agent-a']);
+      assert.deepEqual(body.missing, ['agent-x', 'xavier', 'nope']);
+      assert.ok(!JSON.stringify(body).includes('xav"'), 'the other company’s thread never leaks');
+      assert.ok(!JSON.stringify(body).includes('Xavier'), 'nor its title');
+      assert.deepEqual(sessionCalls.map((c) => c.agentId), ['agent-a'], 'only the in-scope agent’s session was opened');
+    });
+
+    it('only unauthorised agents → 200 with nothing listed (same “not found” as the per-agent 404)', async () => {
+      const { status, body } = await batch('?agentIds=agent-x');
+      assert.equal(status, 200);
+      assert.deepEqual([body.agents, body.missing], [[], ['agent-x']]);
+      assert.deepEqual(sessionCalls, []);
+    });
+
+    it('EMPTY agentIds → 400 (missing param, empty, blanks only); nothing opened', async () => {
+      for (const q of ['', '?agentIds=', '?agentIds=,,%20,', '?agentIds=&agentIds=']) {
+        const { status, body } = await batch(q);
+        assert.equal(status, 400, `query ${JSON.stringify(q)}`);
+        assert.equal(body.error, 'agentIds is required');
+      }
+      assert.deepEqual(sessionCalls, []);
+    });
+
+    it(`OVERSIZE agentIds → 400 (more than ${ASSISTANT_THREADS_BATCH_MAX_AGENTS} agents, or an over-long key); nothing opened`, async () => {
+      const many = Array.from({ length: ASSISTANT_THREADS_BATCH_MAX_AGENTS + 1 }, (_, i) => `k${i}`);
+      const tooMany = await batch(`?agentIds=${many.join(',')}`);
+      assert.equal(tooMany.status, 400);
+      assert.match(tooMany.body.error, /at most 50/);
+      // Split across repeated params counts the same.
+      const repeated = await batch(`?agentIds=${many.slice(0, 30).join(',')}&agentIds=${many.slice(30).join(',')}`);
+      assert.equal(repeated.status, 400);
+      const atCap = await batch(`?agentIds=${many.slice(0, ASSISTANT_THREADS_BATCH_MAX_AGENTS).join(',')}`);
+      assert.equal(atCap.status, 200, 'exactly the cap is accepted');
+      assert.equal(atCap.body.missing.length, ASSISTANT_THREADS_BATCH_MAX_AGENTS);
+      const longKey = await batch(`?agentIds=agent-a,${'x'.repeat(ASSISTANT_THREADS_BATCH_MAX_KEY_LENGTH + 1)}`);
+      assert.equal(longKey.status, 400);
+      assert.deepEqual(sessionCalls, []);
+    });
+
+    it('duplicates collapse (repeated key, or id + url key of one agent) — each agent listed once', async () => {
+      const { body } = await batch('?agentIds=agent-a,alice,agent-a&agentIds=bob');
+      assert.deepEqual(body.agents.map((a: Json) => a.agentId), ['agent-a', 'agent-b']);
+      assert.deepEqual(body.missing, []);
+    });
+
+    it('no active company → 400 and nothing opened (whole-request auth, like the per-agent route)', async () => {
+      activeCompany = null;
+      const { status } = await batch('?agentIds=agent-a');
+      assert.equal(status, 400);
+      assert.deepEqual(sessionCalls, []);
+    });
+
+    it('archived agents in the active company stay readable (as on the per-agent route)', async () => {
+      const { body } = await batch('?agentIds=zed');
+      assert.deepEqual([body.agents.map((a: Json) => a.agentId), body.missing], [['agent-z'], []]);
+    });
+
+    it('?limit= applies per agent', async () => {
+      const { body } = await batch('?agentIds=agent-a&limit=1');
+      assert.deepEqual(body.agents[0].threads.map((t: Json) => t.id), ['own-new']);
     });
   });
 

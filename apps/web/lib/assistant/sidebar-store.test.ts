@@ -1,12 +1,12 @@
 /**
  * UI-2b: assistant sidebar store against a scripted UI-2 API: loading (agents, then every agent's
- * threads), selection (latest thread or a new one), rename, pin / unpin with the cap, unread,
+ * threads — S306-S4: in ONE batch request), selection (latest thread or a new one), rename, pin / unpin with the cap, unread,
  * search across agents, and the error states.
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { AssistantApiError, type AssistantSidebarApi, type AssistantThreadPatch } from './sidebar-api';
-import { ASSISTANT_MAX_PINS_PER_AGENT, type AssistantAgent, type AssistantThread } from './sidebar';
+import { ASSISTANT_MAX_PINS_PER_AGENT, ASSISTANT_THREADS_BATCH_MAX_AGENTS, type AssistantAgent, type AssistantThread } from './sidebar';
 import {
   AssistantSidebarStore,
   pinnedCount,
@@ -51,7 +51,14 @@ interface FakeApiOpts {
   initial?: Record<string, string | null>;
   create?: (agentKey: string) => AssistantThread | Error;
   update?: (agentKey: string, threadId: string, patch: AssistantThreadPatch) => AssistantThread | Error;
+  /** S306-S4: the whole batch request fails. */
+  batch?: Error;
+  /** S306-S4: agent ids the batch reports as `missing` (filtered: other company / unknown). */
+  missing?: string[];
 }
+
+/** Every thread-list request (batch or per-agent). */
+const listCalls = (calls: string[]) => calls.filter((c) => c.startsWith('threads:') || c.startsWith('batch:'));
 
 function fakeApi(o: FakeApiOpts) {
   const calls: string[] = [];
@@ -63,6 +70,30 @@ function fakeApi(o: FakeApiOpts) {
       calls.push('agents');
       if (o.agents instanceof Error) throw o.agents;
       return { companyId: 'company-1', agents: o.agents ?? [] };
+    },
+    // S306-S4: the load path. Per-agent errors come back in `errors`, unknown agents in `missing`.
+    listThreadsBatch: async (keys) => {
+      calls.push(`batch:${keys.join(',')}`);
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 2));
+      inFlight--;
+      if (o.batch instanceof Error) throw o.batch;
+      const res: Awaited<ReturnType<AssistantSidebarApi['listThreadsBatch']>> = { agents: [], missing: [], errors: [] };
+      for (const key of keys) {
+        if (o.missing?.includes(key)) {
+          res.missing.push(key);
+          continue;
+        }
+        const t = o.threads?.[key] ?? [];
+        if (t instanceof Error) {
+          res.errors.push({ agentKey: key, status: t instanceof AssistantApiError ? t.status : 500, error: t.message });
+          continue;
+        }
+        const initial = o.initial?.[key];
+        res.agents.push({ agentKey: key, agentId: key, threads: t, initialThreadId: initial === undefined ? (t[0]?.id ?? null) : initial });
+      }
+      return res;
     },
     listThreads: async (key) => {
       calls.push(`threads:${key}`);
@@ -105,18 +136,16 @@ const c0 = () => '\u200B\u200B';
 
 describe('UI-2b assistant sidebar store', () => {
   describe('loading', () => {
-    it("loads the company's agents, then each agent's threads (bounded parallelism)", async () => {
+    it("loads the company's agents, then every agent's threads in ONE batch request (S306-S4)", async () => {
       const agents = ['a', 'b', 'c', 'd', 'e'].map((id) => agent(id));
-      const { store, calls, fake } = await loaded(
+      const { store, calls } = await loaded(
         { agents, threads: { a: [thread('a1', 'a')], c: [thread('c1', 'c'), thread('c2', 'c')] } },
         2,
       );
       const s = store.getState();
       assert.equal(s.phase, 'ready');
       assert.equal(s.companyId, 'company-1');
-      assert.equal(calls[0], 'agents');
-      assert.deepEqual(calls.slice(1).sort(), agents.map((a) => `threads:${a.urlKey}`).sort());
-      assert.ok(fake.maxInFlight <= 2, `max in flight ${fake.maxInFlight}`);
+      assert.deepEqual(calls, ['agents', 'batch:a,b,c,d,e'], 'agents, then one batch keyed by agent id');
       assert.deepEqual(s.threads.c.threads.map((t) => t.id), ['c1', 'c2']);
       assert.equal(s.threads.b.status, 'ready');
       assert.deepEqual(s.threads.b.threads, []);
@@ -174,18 +203,18 @@ describe('UI-2b assistant sidebar store', () => {
       assert.notEqual(loading, before);
       assert.equal(store.getState(), loading, 'no state change after dispose');
       assert.deepEqual(store.getState().agents, []);
-      assert.equal(fake.calls.filter((c) => c.startsWith('threads:')).length, 0, 'no thread lists requested after dispose');
+      assert.equal(listCalls(fake.calls).length, 0, 'no thread lists requested after dispose');
     });
 
-    it('disposing while thread lists load stops the remaining requests', async () => {
-      const fake = fakeApi({ agents: ['a', 'b', 'c', 'd'].map((id) => agent(id)) });
+    it('disposing while the thread-list batch loads never applies its late response', async () => {
+      const fake = fakeApi({ agents: ['a', 'b', 'c', 'd'].map((id) => agent(id)), threads: { b: [thread('b1', 'b')] } });
       const store = new AssistantSidebarStore({ api: fake.api, concurrency: 1 });
       const p = store.load();
-      await new Promise((r) => setTimeout(r, 1)); // agents loaded, first thread list in flight
+      await new Promise((r) => setTimeout(r, 1)); // agents loaded, the batch in flight
       store.dispose();
       await p;
-      assert.ok(fake.calls.filter((c) => c.startsWith('threads:')).length <= 1, fake.calls.join());
-      assert.ok(!store.getState().threads.b, 'later agents untouched');
+      assert.deepEqual(listCalls(fake.calls), ['batch:a,b,c,d'], fake.calls.join());
+      assert.notEqual(store.getState().threads.b?.status, 'ready', 'late batch result not applied');
     });
 
     it('reloading drops the previous threads (no stale lists while the new ones load)', async () => {
@@ -238,7 +267,7 @@ describe('UI-2b assistant sidebar store', () => {
       assert.deepEqual(s.threads.a.threads.map((t) => t.id), ['a1']);
       assert.equal(s.threads.b.status, 'ready');
       assert.ok(n > 0, 'the resubscribed listener is notified');
-      assert.equal(fake.calls.filter((c) => c === 'threads:a-key').length, 1, 'the abandoned load fetches no threads');
+      assert.deepEqual(listCalls(fake.calls), ['batch:a,b'], 'the abandoned load fetches no threads');
     });
 
     it('a load abandoned by dispose never applies its late response after the store is revived', async () => {
@@ -533,51 +562,72 @@ describe('UI-2b assistant sidebar store', () => {
   // listThreads request per agent. These pins measure the request count for N agents and bound
   // the fan-out: capped concurrency in `load()` + in-flight dedupe in `loadThreads` (a second
   // caller while a request is running must NOT fire its own).
-  describe('S297-S5 thread-list fan-out (request count, cap, dedupe)', () => {
-    it('N agents fan out to EXACTLY N listThreads requests, at most `concurrency` in flight', async () => {
+  describe('S306-S4 batch thread lists (one request, chunking, dedupe) — was S297-S5 fan-out', () => {
+    it('N agents → EXACTLY ONE batch request and zero per-agent requests (the sidebar is no longer N calls)', async () => {
       const ids = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'];
-      const agents = ids.map((id) => agent(id));
-      const { calls, fake } = await loaded({ agents }, 3);
-      const listReqs = calls.filter((c) => c.startsWith('threads:'));
-      assert.equal(listReqs.length, ids.length, `fan-out must be exactly one request per agent, got: ${listReqs.join()}`);
-      assert.deepEqual([...listReqs].sort(), ids.map((id) => `threads:${id}-key`).sort());
-      assert.ok(fake.maxInFlight <= 3, `cap breached: ${fake.maxInFlight} in flight`);
-      assert.equal(fake.maxInFlight, 3, 'the cap is the limit of real parallelism (not a hidden serialisation)');
+      const { store, calls } = await loaded({ agents: ids.map((id) => agent(id)), threads: { e: [thread('e1', 'e')] } }, 3);
+      assert.deepEqual(listCalls(calls), [`batch:${ids.join(',')}`], `one batch request, got: ${listCalls(calls).join(' | ')}`);
+      assert.equal(calls.filter((c) => c.startsWith('threads:')).length, 0, 'no per-agent fan-out');
+      for (const id of ids) assert.equal(store.getState().threads[id]!.status, 'ready', `agent ${id} ready`);
+      assert.deepEqual(store.getState().threads.e!.threads.map((t) => t.id), ['e1']);
+      assert.equal(store.getState().threads.e!.initialThreadId, 'e1');
     });
 
-    it('the default fan-out cap is 3 (N agents still yield exactly N requests)', async () => {
-      const ids = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
-      const { calls, fake } = await loaded({ agents: ids.map((id) => agent(id)) });
-      assert.equal(calls.filter((c) => c.startsWith('threads:')).length, ids.length);
-      assert.equal(fake.maxInFlight, 3, 'default concurrency');
+    it(`past ${ASSISTANT_THREADS_BATCH_MAX_AGENTS} agents the load chunks (ceil(N / max) requests, each ≤ max ids)`, async () => {
+      const ids = Array.from({ length: ASSISTANT_THREADS_BATCH_MAX_AGENTS * 2 + 1 }, (_, i) => `ag${i}`);
+      const { store, calls, fake } = await loaded({ agents: ids.map((id) => agent(id)) }, 2);
+      const batches = listCalls(calls);
+      assert.equal(batches.length, 3);
+      assert.ok(batches.every((b) => b.startsWith('batch:')));
+      assert.deepEqual(batches.flatMap((b) => b.slice('batch:'.length).split(',')), ids, 'every agent exactly once, in order');
+      assert.ok(batches.every((b) => b.slice('batch:'.length).split(',').length <= ASSISTANT_THREADS_BATCH_MAX_AGENTS));
+      assert.ok(fake.maxInFlight <= 2, `chunk parallelism capped: ${fake.maxInFlight}`);
+      assert.ok(ids.every((id) => store.getState().threads[id]!.status === 'ready'));
     });
 
-    it('dedupe: selecting an agent mid-fan-out shares its in-flight request (N agents stay at N requests)', async () => {
+    it('a failed batch marks every agent failed; a per-agent retry then uses the per-agent route', async () => {
+      const o: FakeApiOpts = { agents: [agent('a'), agent('b')], batch: new AssistantApiError('Internal error', 500), threads: { a: [thread('a1', 'a')] } };
+      const { store, calls } = await loaded(o);
+      assert.deepEqual(['a', 'b'].map((id) => [store.getState().threads[id]!.status, store.getState().threads[id]!.error]), [
+        ['error', 'Internal error'],
+        ['error', 'Internal error'],
+      ]);
+      await store.loadThreads('a');
+      assert.equal(store.getState().threads.a!.status, 'ready');
+      assert.deepEqual(listCalls(calls), ['batch:a,b', 'threads:a-key']);
+    });
+
+    it('an agent the server filtered out (`missing`) is marked failed on its own; the others load', async () => {
+      const { store } = await loaded({ agents: [agent('a'), agent('gone')], missing: ['gone'], threads: { a: [thread('a1', 'a')] } });
+      assert.equal(store.getState().threads.a!.status, 'ready');
+      assert.deepEqual([store.getState().threads.gone!.status, store.getState().threads.gone!.error], ['error', 'Agent not found']);
+    });
+
+    it('dedupe: selecting an agent mid-batch shares the batch (no extra per-agent request)', async () => {
       const fake = fakeApi({ agents: [agent('a'), agent('b')], threads: { a: [thread('a1', 'a')] } });
       const store = new AssistantSidebarStore({ api: fake.api, concurrency: 2 });
       const p = store.load();
-      await new Promise((r) => setTimeout(r, 1)); // both fan-out requests are in flight (2ms fake latency)
+      await new Promise((r) => setTimeout(r, 1)); // the batch is in flight (2ms fake latency)
       const href = await store.selectAgent('a');
       await p;
-      const listReqs = fake.calls.filter((c) => c.startsWith('threads:'));
-      assert.equal(listReqs.filter((c) => c === 'threads:a-key').length, 1, 'selectAgent must reuse the running fan-out request');
-      assert.equal(listReqs.length, 2, 'exactly one request per agent (agents + one selectAgent click)');
+      assert.deepEqual(listCalls(fake.calls), ['batch:a,b'], 'selectAgent must reuse the running batch request');
       assert.equal(href, '/assistant/a-key/a1', 'shared request renders the identical list');
-      assert.equal(store.getState().threads.a.status, 'ready');
+      assert.equal(store.getState().threads.a!.status, 'ready');
     });
 
     it('dedupe: concurrent loadThreads on one agent fire ONE request; a settled one refetches (retry stays fresh)', async () => {
       const fake = fakeApi({ agents: [agent('a')], threads: { a: [thread('a1', 'a')] } });
       const store = new AssistantSidebarStore({ api: fake.api });
-      await store.load(); // request 1
+      await store.load(); // the batch
       const countA = () => fake.calls.filter((c) => c === 'threads:a-key').length;
-      const [x, y] = await Promise.all([store.loadThreads('a'), store.loadThreads('a')]); // request 2, shared
-      assert.equal(countA(), 2, 'two racing callers, one request');
+      assert.equal(countA(), 0, 'load used the batch, not the per-agent route');
+      const [x, y] = await Promise.all([store.loadThreads('a'), store.loadThreads('a')]); // request 1, shared
+      assert.equal(countA(), 1, 'two racing callers, one request');
       assert.equal(x?.status, 'ready');
       assert.equal(y?.status, 'ready');
       assert.deepEqual(x!.threads.map((t) => t.id), ['a1']);
       await store.loadThreads('a'); // settled: must refetch, not replay a cached promise
-      assert.equal(countA(), 3, 'a completed request is never deduped against');
+      assert.equal(countA(), 2, 'a completed request is never deduped against');
     });
   });
 });

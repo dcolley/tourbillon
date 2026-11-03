@@ -14,12 +14,14 @@ import assert from 'node:assert/strict';
 
 type RuntimeConfig = Record<string, unknown>;
 type Row = { id: string; companyId: string; role: string; urlKey: string; runtimeConfig: RuntimeConfig; [k: string]: unknown };
-type KeyOps = { set?: Record<string, unknown>; clear?: readonly string[] };
+type LeafOps = { set?: Record<string, unknown>; clear?: readonly string[]; dropIfEmpty?: boolean };
+type KeyOps = { set?: Record<string, unknown>; clear?: readonly string[]; merge?: Record<string, LeafOps> };
 
 let row: Row;
 let setPayloads: Array<Record<string, unknown>>;
 let inserts: Array<Record<string, unknown>>;
 let onRead: (() => void | Promise<void>) | null = null;
+let opsLog: KeyOps[];
 
 const AVATAR = { shape: 'blob-2', color: '#8b5cf6' };
 const HEARTBEAT = { enabled: false, intervalSec: 0, scheduleMode: 'interval', wakeOnAssignment: true, wakeOnDemand: true };
@@ -51,6 +53,19 @@ function applyKeyOps(doc: RuntimeConfig | null, ops: KeyOps): RuntimeConfig {
   for (const [key, value] of Object.entries(ops.set ?? {})) {
     if (value === undefined) throw new Error(`ops mock: key "${key}" must be cleared, not set undefined`);
     next[key] = structuredClone(value);
+  }
+  // S306-S3: nested leaf merge onto the LIVE sub-object (what jsonb_set / `||` does in SQL).
+  for (const [key, leafOps] of Object.entries(ops.merge ?? {})) {
+    const liveSub = next[key];
+    const sub: RuntimeConfig =
+      liveSub && typeof liveSub === 'object' && !Array.isArray(liveSub) ? structuredClone(liveSub as RuntimeConfig) : {};
+    for (const leaf of leafOps.clear ?? []) delete sub[leaf];
+    for (const [leaf, value] of Object.entries(leafOps.set ?? {})) {
+      if (value === undefined) throw new Error(`ops mock: leaf "${key}.${leaf}" must be cleared, not set undefined`);
+      sub[leaf] = structuredClone(value);
+    }
+    if (leafOps.dropIfEmpty && Object.keys(sub).length === 0) delete next[key];
+    else next[key] = sub;
   }
   return next;
 }
@@ -110,6 +125,7 @@ describe('S297-S3 atomic runtimeConfig key writes', () => {
         extraSet: Record<string, unknown> = {},
       ) => {
         if (!row) return null;
+        opsLog.push(structuredClone(ops));
         const runtimeConfig = applyKeyOps(row.runtimeConfig, ops);
         const payload = { ...structuredClone(extraSet), runtimeConfig };
         setPayloads.push(payload);
@@ -153,6 +169,7 @@ describe('S297-S3 atomic runtimeConfig key writes', () => {
     row = baseRow();
     setPayloads = [];
     inserts = [];
+    opsLog = [];
     onRead = null;
   });
 
@@ -331,5 +348,114 @@ describe('S297-S3 atomic runtimeConfig key writes', () => {
     assert.deepEqual(written.assignedTools, ['createIssue']);
     assert.deepEqual(written.avatar, { shape: 'circle', color: '#10b981' }, 'concurrent avatar write survived the capabilities save');
     assert.deepEqual(doc().heartbeat, HEARTBEAT, 'heartbeat (another owner) was never rewritten');
+  });
+  // ── S306-S3: nested leaf merges ────────────────────────────────────────────────────────────
+  // Each test commits a concurrent edit to a DIFFERENT LEAF of the same key between the
+  // updater's read and its write. A whole-key overwrite (`set: { key: snapshotMerged }`) drops
+  // that leaf; the nested merge keeps it.
+
+  /** Commits `leaves` into `runtimeConfig[key]` on the live row, mid-flight. */
+  const concurrentLeafCommit = (key: string, leaves: Record<string, unknown>) => {
+    onRead = async () => {
+      const sub = (doc()[key] as RuntimeConfig | undefined) ?? {};
+      row = { ...row, runtimeConfig: { ...doc(), [key]: { ...sub, ...leaves } } };
+    };
+  };
+
+  it('S306-S3: updateAgentSecrets (merge) keeps a concurrently-added secret leaf', async () => {
+    row = { ...row, runtimeConfig: { ...doc(), secrets: { OLD: 'o' } } };
+    concurrentLeafCommit('secrets', { OTHER: 'concurrent' });
+    await lib.updateAgentSecrets('agent-1', { secrets: { API_KEY: 'abc' } });
+    onRead = null;
+    assert.deepEqual(doc().secrets, { OLD: 'o', OTHER: 'concurrent', API_KEY: 'abc' }, 'both secret writes survive');
+    assert.equal(opsLog.length, 1);
+    assert.equal(opsLog[0]!.set?.secrets, undefined, 'no whole-key secrets overwrite');
+    assert.deepEqual(opsLog[0]!.merge?.secrets?.set, { API_KEY: 'abc' }, 'only the changed leaf is written');
+  });
+
+  it('S306-S3: updateAgentSecrets (merge) emptying a value clears only that leaf; replace stays whole-key', async () => {
+    row = { ...row, runtimeConfig: { ...doc(), secrets: { A: 'x', B: 'y' } } };
+    concurrentLeafCommit('secrets', { C: 'concurrent' });
+    await lib.updateAgentSecrets('agent-1', { secrets: { A: '  ' } });
+    onRead = null;
+    assert.deepEqual(doc().secrets, { B: 'y', C: 'concurrent' });
+    assert.deepEqual(opsLog[0]!.merge?.secrets?.clear, ['A']);
+
+    // replace: true keeps its documented whole-key semantics (the caller asked for exactly this set).
+    await lib.updateAgentSecrets('agent-1', { secrets: { Z: 'z' }, replace: true });
+    assert.deepEqual(doc().secrets, { Z: 'z' });
+    assert.deepEqual(opsLog[1]!.set, { secrets: { Z: 'z' } });
+  });
+
+  it('S306-S3: deleteAgentSecrets removes only the named leaves and keeps a concurrently-added one', async () => {
+    row = { ...row, runtimeConfig: { ...doc(), secrets: { A: 'x', B: 'y' } } };
+    concurrentLeafCommit('secrets', { C: 'concurrent' });
+    await lib.deleteAgentSecrets('agent-1', ['A', 'B']);
+    onRead = null;
+    assert.deepEqual(doc().secrets, { C: 'concurrent' }, 'concurrent secret survived; key not dropped while non-empty');
+    assert.deepEqual(opsLog[0]!.merge?.secrets, { clear: ['A', 'B'], dropIfEmpty: true });
+  });
+
+  it('S306-S3: updateAgentModelSettings writes only the changed model leaf (concurrent topP survives)', async () => {
+    row = { ...row, runtimeConfig: { ...doc(), model: { temperature: 0.2, maxOutputTokens: 4096 } } };
+    concurrentLeafCommit('model', { topP: 0.9 });
+    await lib.updateAgentModelSettings('agent-1', { temperature: 0.7 } as never);
+    onRead = null;
+    assert.deepEqual(doc().model, { temperature: 0.7, maxOutputTokens: 4096, topP: 0.9 });
+    assert.deepEqual(opsLog[0]!.merge?.model, { set: { temperature: 0.7 }, dropIfEmpty: true });
+
+    // Clearing a leaf removes only that leaf; the key stays while the LIVE value is non-empty.
+    await lib.updateAgentModelSettings('agent-1', { temperature: null } as never);
+    assert.deepEqual(doc().model, { maxOutputTokens: 4096, topP: 0.9 });
+  });
+
+  it('S306-S3: updateAgentBudget merges only budget.enforce (a concurrent budget leaf survives)', async () => {
+    row = { ...row, runtimeConfig: { ...doc(), budget: { enforce: false } } };
+    concurrentLeafCommit('budget', { alertAtPercent: 80 });
+    await lib.updateAgentBudget('agent-1', { budgetMonthlyTokens: 99, enforce: true });
+    onRead = null;
+    assert.deepEqual(doc().budget, { enforce: true, alertAtPercent: 80 });
+    assert.equal(opsLog[0]!.set?.budget, undefined, 'no whole-key budget overwrite');
+  });
+
+  it('S306-S3: updateAgentRuntimeConfig({heartbeat}) merges leaves (concurrent maxSteps survives)', async () => {
+    concurrentLeafCommit('heartbeat', { maxSteps: 12 });
+    await lib.updateAgentRuntimeConfig('agent-1', { heartbeat: { wakeOnDemand: false } });
+    onRead = null;
+    const hb = doc().heartbeat as RuntimeConfig;
+    assert.equal(hb.wakeOnDemand, false, 'own leaf written');
+    assert.equal(hb.maxSteps, 12, 'concurrent heartbeat leaf survived');
+    assert.equal(hb.wakeOnAssignment, true, 'untouched leaf kept');
+    assert.equal(opsLog[0]!.set?.heartbeat, undefined, 'no whole-key heartbeat overwrite');
+    assert.deepEqual(opsLog[0]!.merge?.heartbeat?.set, { wakeOnDemand: false });
+  });
+
+  it('S306-S3: heartbeat normalisation clears dropped leaves (cron → interval drops cronExpression/timezone)', async () => {
+    row = {
+      ...row,
+      runtimeConfig: {
+        ...doc(),
+        heartbeat: { ...HEARTBEAT, enabled: true, scheduleMode: 'cron', cronExpression: '0 * * * *', timezone: 'UTC' },
+      },
+    };
+    concurrentLeafCommit('heartbeat', { maxSteps: 7 });
+    await lib.updateAgentRuntimeConfig('agent-1', {
+      heartbeat: { scheduleMode: 'interval', intervalSec: 600, enabled: true },
+    });
+    onRead = null;
+    const hb = doc().heartbeat as RuntimeConfig;
+    assert.equal(hb.scheduleMode, 'interval');
+    assert.equal(hb.intervalSec, 600);
+    assert.equal('cronExpression' in hb, false);
+    assert.equal('timezone' in hb, false);
+    assert.equal(hb.maxSteps, 7, 'concurrent leaf survived the mode switch');
+  });
+
+  it('S306-S3: updateAgentRuntimeConfig({timeout}) merges leaves (concurrent graceSec survives)', async () => {
+    concurrentLeafCommit('timeout', { graceSec: 45 });
+    await lib.updateAgentRuntimeConfig('agent-1', { timeout: { heartbeatSec: 900 } });
+    onRead = null;
+    assert.deepEqual(doc().timeout, { heartbeatSec: 900, graceSec: 45 });
+    assert.equal(opsLog[0]!.set?.timeout, undefined, 'no whole-key timeout overwrite');
   });
 });

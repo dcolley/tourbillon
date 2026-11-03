@@ -23,6 +23,9 @@ export async function resolveVaultSecret(
     eq(vaultSecrets.serverId, ctx.serverId),
   ];
 
+  // S308-S3: precedence agent → company_user → company. The first row that exists and is not
+  // flagged needsReauth decides the answer (even when that answer is null — no fall-through to
+  // a broader scope); a missing or needsReauth row falls through to the next scope.
   if (ctx.agentId) {
     const agentCred = await db.query.vaultSecrets.findFirst({
       where: and(
@@ -31,54 +34,8 @@ export async function resolveVaultSecret(
         eq(vaultSecrets.agentId, ctx.agentId)
       ),
     });
-
     if (agentCred && !agentCred.needsReauth) {
-      try {
-        const decrypted = decryptCredential(agentCred.encryptedValue);
-        if (agentCred.authType === 'oauth') {
-          const tokens = decrypted as OAuthTokens;
-          if (tokens.expiresAt && tokens.expiresAt < Date.now()) {
-            const refreshed = await refreshOAuthToken(ctx.serverId, tokens);
-            if (refreshed) {
-              try {
-                await db
-                  .update(vaultSecrets)
-                  .set({
-                    encryptedValue: encryptCredential(refreshed),
-                    needsReauth: false,
-                    updatedAt: new Date(),
-                  })
-                  .where(eq(vaultSecrets.id, agentCred.id));
-                return refreshed;
-              } catch (persistErr) {
-                // S308-S1: the refresh succeeded - only the write-back failed.
-                // Returning null (the old behaviour: this error fell into the
-                // outer "Failed to decrypt" catch) dropped the rotated tokens
-                // with no reauth signal - fatal when the provider rotates
-                // refresh tokens, since the stored copy is then already dead.
-                // Documented choice: hand the live tokens to this caller (the
-                // current wake keeps working) and flag needsReauth best-effort
-                // so the stale row is not silently retried. If the flag
-                // update also fails, the next wake's refresh attempt fails
-                // and the refresh-failure branch self-heals to needsReauth.
-                console.error('Failed to persist refreshed agent credential:', persistErr);
-                await flagNeedsReauthAfterLostWriteBack(agentCred.id, 'agent');
-                return refreshed;
-              }
-            } else {
-              await db
-                .update(vaultSecrets)
-                .set({ needsReauth: true, updatedAt: new Date() })
-                .where(eq(vaultSecrets.id, agentCred.id));
-              return null;
-            }
-          }
-        }
-        return decrypted;
-      } catch (err) {
-        console.error('Failed to decrypt agent credential:', err);
-        return null;
-      }
+      return resolveScopedCredential(agentCred, ctx.serverId, 'agent');
     }
   }
 
@@ -90,94 +47,16 @@ export async function resolveVaultSecret(
         eq(vaultSecrets.userId, ctx.userId)
       ),
     });
-
     if (userCred && !userCred.needsReauth) {
-      try {
-        const decrypted = decryptCredential(userCred.encryptedValue);
-        if (userCred.authType === 'oauth') {
-          const tokens = decrypted as OAuthTokens;
-          if (tokens.expiresAt && tokens.expiresAt < Date.now()) {
-            const refreshed = await refreshOAuthToken(ctx.serverId, tokens);
-            if (refreshed) {
-              try {
-                await db
-                  .update(vaultSecrets)
-                  .set({
-                    encryptedValue: encryptCredential(refreshed),
-                    needsReauth: false,
-                    updatedAt: new Date(),
-                  })
-                  .where(eq(vaultSecrets.id, userCred.id));
-                return refreshed;
-              } catch (persistErr) {
-                // S308-S1: see the agent-scope comment - accurate persist-failure
-                // log instead of the outer decrypt catch, and best-effort
-                // needsReauth so a rotated-but-unstored token is visible.
-                console.error('Failed to persist refreshed user credential:', persistErr);
-                await flagNeedsReauthAfterLostWriteBack(userCred.id, 'user');
-                return refreshed;
-              }
-            } else {
-              await db
-                .update(vaultSecrets)
-                .set({ needsReauth: true, updatedAt: new Date() })
-                .where(eq(vaultSecrets.id, userCred.id));
-              return null;
-            }
-          }
-        }
-        return decrypted;
-      } catch (err) {
-        console.error('Failed to decrypt user credential:', err);
-        return null;
-      }
+      return resolveScopedCredential(userCred, ctx.serverId, 'user');
     }
   }
 
   const companyCred = await db.query.vaultSecrets.findFirst({
     where: and(...conditions, eq(vaultSecrets.scope, 'company')),
   });
-
   if (companyCred && !companyCred.needsReauth) {
-    try {
-      const decrypted = decryptCredential(companyCred.encryptedValue);
-      if (companyCred.authType === 'oauth') {
-        const tokens = decrypted as OAuthTokens;
-        if (tokens.expiresAt && tokens.expiresAt < Date.now()) {
-          const refreshed = await refreshOAuthToken(ctx.serverId, tokens);
-          if (refreshed) {
-            try {
-              await db
-                .update(vaultSecrets)
-                .set({
-                  encryptedValue: encryptCredential(refreshed),
-                  needsReauth: false,
-                  updatedAt: new Date(),
-                })
-                .where(eq(vaultSecrets.id, companyCred.id));
-              return refreshed;
-            } catch (persistErr) {
-              // S308-S1: see the agent-scope comment - accurate persist-failure
-              // log instead of the outer decrypt catch, and best-effort
-              // needsReauth so a rotated-but-unstored token is visible.
-              console.error('Failed to persist refreshed company credential:', persistErr);
-              await flagNeedsReauthAfterLostWriteBack(companyCred.id, 'company');
-              return refreshed;
-            }
-          } else {
-            await db
-              .update(vaultSecrets)
-              .set({ needsReauth: true, updatedAt: new Date() })
-              .where(eq(vaultSecrets.id, companyCred.id));
-            return null;
-          }
-        }
-      }
-      return decrypted;
-    } catch (err) {
-      console.error('Failed to decrypt company credential:', err);
-      return null;
-    }
+    return resolveScopedCredential(companyCred, ctx.serverId, 'company');
   }
 
   // US-V5 Option A: Transition window dual-read fallback
@@ -190,6 +69,73 @@ export async function resolveVaultSecret(
   });
   
   return legacyCredential;
+}
+
+type VaultSecretRow = typeof vaultSecrets.$inferSelect;
+
+/**
+ * S308-S3: one scope's credential row → its value — the body the agent, company_user and
+ * company branches of `resolveVaultSecret` used to repeat verbatim. Decrypts; for an expired
+ * OAuth token refreshes and writes the rotated tokens back. Behaviour per branch (pinned by
+ * vault-credentials-304-softs / -308-softs):
+ *   - refresh OK + write-back OK → the refreshed tokens (needsReauth cleared);
+ *   - refresh OK + write-back FAILS (S308-S1) → the refreshed tokens, needsReauth flagged
+ *     best-effort;
+ *   - refresh FAILS (S308-S2) → needsReauth flagged, null;
+ *   - decrypt (or the refresh-failure flag) throws → null.
+ * `label` only names the scope in logs ('agent' | 'user' | 'company').
+ */
+async function resolveScopedCredential(
+  row: VaultSecretRow,
+  serverId: string,
+  label: 'agent' | 'user' | 'company'
+): Promise<string | OAuthTokens | null> {
+  try {
+    const decrypted = decryptCredential(row.encryptedValue);
+    if (row.authType === 'oauth') {
+      const tokens = decrypted as OAuthTokens;
+      if (tokens.expiresAt && tokens.expiresAt < Date.now()) {
+        const refreshed = await refreshOAuthToken(serverId, tokens);
+        if (refreshed) {
+          try {
+            await db
+              .update(vaultSecrets)
+              .set({
+                encryptedValue: encryptCredential(refreshed),
+                needsReauth: false,
+                updatedAt: new Date(),
+              })
+              .where(eq(vaultSecrets.id, row.id));
+            return refreshed;
+          } catch (persistErr) {
+            // S308-S1: the refresh succeeded - only the write-back failed.
+            // Returning null (the old behaviour: this error fell into the
+            // outer "Failed to decrypt" catch) dropped the rotated tokens
+            // with no reauth signal - fatal when the provider rotates
+            // refresh tokens, since the stored copy is then already dead.
+            // Documented choice: hand the live tokens to this caller (the
+            // current wake keeps working) and flag needsReauth best-effort
+            // so the stale row is not silently retried. If the flag
+            // update also fails, the next wake's refresh attempt fails
+            // and the refresh-failure branch self-heals to needsReauth.
+            console.error(`Failed to persist refreshed ${label} credential:`, persistErr);
+            await flagNeedsReauthAfterLostWriteBack(row.id, label);
+            return refreshed;
+          }
+        } else {
+          await db
+            .update(vaultSecrets)
+            .set({ needsReauth: true, updatedAt: new Date() })
+            .where(eq(vaultSecrets.id, row.id));
+          return null;
+        }
+      }
+    }
+    return decrypted;
+  } catch (err) {
+    console.error(`Failed to decrypt ${label} credential:`, err);
+    return null;
+  }
 }
 
 /**

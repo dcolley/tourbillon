@@ -21,6 +21,7 @@
     "./issue-assignee": "./src/issue-assignee.ts",
     "./model-provider": "./src/model-provider.ts",
     "./model-settings": "./src/model-settings.ts",
+    "./runtime-config-leaf-ops": "./src/runtime-config-leaf-ops.ts",
     "./context-budget": "./src/context-budget.ts",
     "./reasoning-capabilities": "./src/reasoning-capabilities.ts",
     "./company-workspace": "./src/company-workspace.ts",

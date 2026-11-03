@@ -47,6 +47,17 @@ describe('UI-2b assistant sidebar API client', () => {
     ]);
   });
 
+  it('S306-S4: listThreadsBatch is ONE GET /api/assistant/threads?agentIds=a,b[&limit=]', async () => {
+    const body = { agents: [{ agentKey: 'a1', agentId: 'a1', threads: [thread], initialThreadId: 't1' }], missing: ['x'], errors: [] };
+    const { api, calls } = fake([json(body), json({ agents: [], missing: [], errors: [] })]);
+    assert.deepEqual(await api.listThreadsBatch(['a1', 'x']), body);
+    await api.listThreadsBatch(['a 1'], { limit: 5 });
+    assert.deepEqual(calls, [
+      { url: '/api/assistant/threads?agentIds=a1%2Cx', method: 'GET', body: undefined },
+      { url: '/api/assistant/threads?agentIds=a+1&limit=5', method: 'GET', body: undefined },
+    ]);
+  });
+
   it('errors carry the API message, status and Retry-After', async () => {
     const { api } = fake([
       json({ error: 'Pin limit reached (50 threads per agent)' }, 409),

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, type FormEvent, type RefObject } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type RefObject } from 'react';
 import {
   Clock,
   PanelRight,
@@ -79,8 +79,27 @@ function agentInferenceLabel(agent: Pick<ChatAgentOption, 'providerName' | 'mode
 
 const SESSIONS_STORAGE_KEY = 'tourbillon.chat.sessionsOpen';
 
+// S321-S2: the sessions-panel flag is read as an external store (subscribe + snapshot, like
+// useChatSendKeyMode) instead of copied into state from an effect. Server render and the first
+// client paint report closed; the stored value applies from the first client render. Once this
+// tab writes, its value wins (so a toggle still sticks when localStorage throws).
+const sessionsOpenListeners = new Set<() => void>();
+let sessionsOpenThisTab: boolean | null = null;
+
+function subscribeSessionsOpen(onChange: () => void): () => void {
+  sessionsOpenListeners.add(onChange);
+  return () => {
+    sessionsOpenListeners.delete(onChange);
+  };
+}
+
+function sessionsOpenServerSnapshot(): boolean {
+  return false;
+}
+
 function readSessionsOpen(): boolean {
   if (typeof window === 'undefined') return false;
+  if (sessionsOpenThisTab !== null) return sessionsOpenThisTab;
   try {
     const stored = window.localStorage.getItem(SESSIONS_STORAGE_KEY);
     return stored === 'true';
@@ -91,11 +110,13 @@ function readSessionsOpen(): boolean {
 
 function writeSessionsOpen(open: boolean): void {
   if (typeof window === 'undefined') return;
+  sessionsOpenThisTab = open;
   try {
     window.localStorage.setItem(SESSIONS_STORAGE_KEY, String(open));
   } catch {
     // ignore
   }
+  for (const listener of sessionsOpenListeners) listener();
 }
 
 export type ChatPanePresentation = 'popover' | 'sidebar';
@@ -256,20 +277,14 @@ function ChatPaneBody({
 
   const [renameTarget, setRenameTarget] = useState<ChatThreadInfo | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ChatThreadInfo | null>(null);
-  const [sessionsOpen, setSessionsOpen] = useState(false);
+  const sessionsOpen = useSyncExternalStore(subscribeSessionsOpen, readSessionsOpen, sessionsOpenServerSnapshot);
   // CHAT-SEND-KEY: browser pref for Enter vs Ctrl/Cmd+Enter, shared with the assistant composer.
   // S301-S1: called through the module's test seam (the real hook, by default) so the DOM-level
   // keydown test can drive mode branching without touching the module cache.
   const [chatSendKeyMode] = __test__.useChatSendKeyMode();
 
-  useEffect(() => {
-    setSessionsOpen(readSessionsOpen());
-  }, []);
-
   const toggleSessions = () => {
-    const next = !sessionsOpen;
-    setSessionsOpen(next);
-    writeSessionsOpen(next);
+    writeSessionsOpen(!sessionsOpen); // notifies the store → re-render
   };
 
   const contextLabel =
@@ -737,14 +752,19 @@ function RenameChatThreadDialog({
   const [title, setTitle] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
-
-  useEffect(() => {
-    if (open && thread) {
-      setTitle(thread.title?.trim() || '');
+  // S321-S2: reset the form when the dialog opens (or its thread changes) while rendering — the
+  // "adjust state on prop change" pattern — instead of a setState-in-effect cascade. Same
+  // trigger as the old effect: [open, thread] changed and the dialog is showing a thread.
+  const showing = open ? thread : null;
+  const [shownFor, setShownFor] = useState<ChatThreadInfo | null>(null);
+  if (showing !== shownFor) {
+    setShownFor(showing);
+    if (showing) {
+      setTitle(showing.title?.trim() || '');
       setError(null);
       setPending(false);
     }
-  }, [open, thread]);
+  }
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
