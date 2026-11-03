@@ -174,13 +174,25 @@ function stoppingTextElements(view: React.ReactNode): El[] {
  * stopping. Everything else - element structure, text anywhere (above the form, inside it), and
  * attributes like the textarea placeholder - must be byte-identical, so a stopping-only hint
  * cannot survive by sitting outside the old in-form / keyword / text-child blind spots.
+ *
+ * S317-S1: the disabled normalisation is SCOPED to the three sanctioned buttons (matched by
+ * their exact label text). Stripping disabled/data-disabled GLOBALLY hid any other
+ * stopping-only disabled in the view - e.g. a disabling stopping-only textarea survived the
+ * diff and every other assistant/* test. The per-state button/textarea element pins below make
+ * the sanctioned gains/absences explicit so the scoped strip cannot go stale in either state.
  */
+const SANCTIONED_DISABLED_BUTTONS = ['Steer', 'Stop', 'Follow up'];
+
 function normalizeComposerMarkup(markup: string): string {
   return markup
     .replace(/data-status="(idle|starting|running|stopping)"/g, 'data-status="*"')
     .replace(/data-run-status(?:="[^"]*")?[^>]*>[^<]*<\/span>/g, 'data-run-status="true">§status§</span>')
-    .replace(/ data-disabled=""/g, '')
-    .replace(/ disabled=""/g, '');
+    .replace(/<button\b[^>]*>[^<]*<\/button>/g, (tag) => {
+      const label = />([^<]*)<\/button>/.exec(tag)?.[1]?.trim() ?? '';
+      return SANCTIONED_DISABLED_BUTTONS.includes(label)
+        ? tag.replace(/ data-disabled=""/g, '').replace(/ disabled=""/g, '')
+        : tag;
+    });
 }
 
 function renderView(props: ReturnType<typeof stoppingPropsFor>): string {
@@ -299,13 +311,33 @@ describe('S301-S3 assistant composer: Enter stays silent while stopping (PM deci
       // A stopping-only element, text, or attribute anywhere in the view (above the form, inside
       // it, or in an attribute) survives a keyword/form-bounded scan; a byte diff against the
       // running render with only the sanctioned status deltas normalised does not let it.
-      const running = normalizeComposerMarkup(renderView(runningPropsFor(mode)));
-      const stopping = normalizeComposerMarkup(renderView(stoppingPropsFor(mode)));
+      const runningProps = runningPropsFor(mode);
+      const stoppingProps = stoppingPropsFor(mode);
+      const runningRaw = renderView(runningProps);
+      const stoppingRaw = renderView(stoppingProps);
       assert.equal(
-        stopping,
-        running,
+        normalizeComposerMarkup(stoppingRaw),
+        normalizeComposerMarkup(runningRaw),
         'the stopping view differs from the running view only in data-status, the run-status label, and disabled buttons',
       );
+
+      // S317-S1: the disabled strip above is scoped to the sanctioned buttons, so the sanctioned
+      // gains/absences themselves get element pins (keeping the strip honest in both states):
+      // Steer / Stop / Follow up must be disabled while stopping and enabled while running.
+      for (const label of SANCTIONED_DISABLED_BUTTONS) {
+        const stoppingButton = walkEl(AgentChatView(stoppingProps)).find((e) => textChildren(e) === label);
+        const runningButton = walkEl(AgentChatView(runningProps)).find((e) => textChildren(e) === label);
+        assert.ok(stoppingButton && runningButton, `the ${label} button renders in both states`);
+        assert.ok(stoppingButton!.props.disabled, `${label} is disabled while stopping (the sanctioned delta)`);
+        assert.ok(!runningButton!.props.disabled, `${label} stays enabled while running`);
+      }
+      // The composer textarea must stay editable while stopping: it never carries disabled/
+      // data-disabled (S317-S1 - the old global strip hid exactly this mutant).
+      const taTag = /<textarea\b[^>]*>/.exec(stoppingRaw)?.[0] ?? '';
+      assert.ok(taTag, 'the composer textarea is rendered while stopping');
+      assert.doesNotMatch(taTag, /\b(?:data-)?disabled\b/, 'the stopping textarea is not disabled (typing stays possible)');
+      const taEl = composerTextarea(AgentChatView(stoppingProps));
+      assert.ok(!taEl.props.disabled, 'the stopping textarea has no disabled prop');
     });
   }
 
