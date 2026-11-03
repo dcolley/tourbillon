@@ -62,3 +62,27 @@ Capability-gated. Use sync and/or stream — whatever the harness API supports. 
 2. DRAFT PR open to main, title like `docs: #281 harness direct connection design note`, body Refs #281
 3. Comment on https://github.com/dcolley/tourbillon/issues/281 with path + draft PR link
 4. Report: SHA, PR number/URL, issue comment URL
+
+## Implemented (Hermes slice, #281 first pack)
+
+- **Bind storage:** `agents.adapterConfig` jsonb only — no migration, no new adapterType. A Hermes
+  agent keeps `adapterType = 'harness_local'` and adds `adapterConfig.harness = "hermes"` with
+  `mode: 'local' | 'remote'` (+ `command` / loopback `localBaseUrl`, or `harnessBaseUrl` +
+  `apiToken`, optional `callbackBaseUrl`, `skillInstall`). Schema + validation:
+  `packages/shared/src/hermes-harness.ts`. Configure via the row's jsonb until a settings-UI pack lands.
+- **Heartbeat:** `packages/scheduler/src/adapters/hermes-adapter.ts` (routed from
+  `wake-runner.ts`). Local CLI bind spawns `command` with the envelope on stdin +
+  `TOURBILLON_WAKE_JSON` / `TOURBILLON_CALLBACK_URL` / `TOURBILLON_SESSION_TOKEN`; HTTP bind POSTs
+  A2A JSONRPC `message/send` (measured Hermes gateway: agent card at `/.well-known/agent.json`,
+  JSONRPC binding, `capabilities.streaming: true`, unauthenticated POST → -32050). Every envelope
+  carries `callback.baseUrl` + `callback.sessionToken` (fails closed before dispatch otherwise).
+  Privacy default callback: loopback (`INTERNAL_API_URL` with `localhost` → `127.0.0.1`);
+  remote/private reachability via explicit `callbackBaseUrl`.
+- **Callback (one surface, principal = token):** `apps/web/app/api/harness/callback/*` —
+  `GET tools`, `POST tools/call`, `GET skill`, `POST chat` (501 stub). Auth = run-scoped session
+  token (#110); every tool call runs through `assembleAgentTools` — the same capability gate as
+  in-system agents — and denied tools are refused 403 without executing.
+- **Skill install:** `HERMES_SKILL_INSTALL_MD` (shared) — shipped in the envelope and served at
+  the callback `skill` endpoint.
+- **OpenCode:** deliberately not implemented; shared seams (envelope types, callback gate deps)
+  are harness-neutral so the second pack can reuse them.
