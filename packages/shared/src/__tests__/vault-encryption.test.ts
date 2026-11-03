@@ -1,8 +1,24 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+/**
+ * S313-S4 (Refs #303): ported from vitest to node:test, same pattern as the
+ * S303-S2 port of packages/db/src/__tests__/vault-resolution.test.ts. This
+ * file imported `describe/it/expect/beforeAll` from 'vitest' while the shared
+ * suite runs under `tsx --test`
+ * (packages/shared: `tsx --test $(find src -name "*.test.ts" | sort)`); the
+ * import failed with "Cannot find module 'vitest'" and the whole file counted
+ * as the suite's one baseline failure — meaning NONE of these assertions ever
+ * ran. Two consequences, both measured:
+ *   - assertions were ported 1:1 except 'should handle nested objects', whose
+ *     never-executed per-field assertions contradicted the shipped
+ *     substring-matching sanitizer (see the comment there); and
+ *   - the two env-mutating tests now restore VAULT_ENCRYPTION_KEY in finally,
+ *     so a RED assertion cannot leak the env for the tests that follow.
+ */
+import { describe, it, before } from 'node:test';
+import assert from 'node:assert/strict';
 import { encryptCredential, decryptCredential, sanitizeForLogging } from '../vault-encryption';
 import type { OAuthTokens } from '../vault-types';
 
-beforeAll(() => {
+before(() => {
   process.env.VAULT_ENCRYPTION_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 });
 
@@ -12,12 +28,12 @@ describe('vault-encryption', () => {
       const apiKey = 'sk-test-1234567890abcdef';
       const encrypted = encryptCredential(apiKey);
       
-      expect(encrypted).toBeTruthy();
-      expect(encrypted).not.toBe(apiKey);
-      expect(typeof encrypted).toBe('string');
+      assert.ok(encrypted);
+      assert.notEqual(encrypted, apiKey);
+      assert.equal(typeof encrypted, 'string');
       
       const decrypted = decryptCredential(encrypted);
-      expect(decrypted).toBe(apiKey);
+      assert.equal(decrypted, apiKey);
     });
     
     it('should encrypt and decrypt OAuth tokens', () => {
@@ -30,15 +46,15 @@ describe('vault-encryption', () => {
       
       const encrypted = encryptCredential(tokens);
       
-      expect(encrypted).toBeTruthy();
-      expect(encrypted).not.toContain('gho_test123');
+      assert.ok(encrypted);
+      assert.ok(!String(encrypted).includes('gho_test123'));
       
       const decrypted = decryptCredential(encrypted) as OAuthTokens;
-      expect(typeof decrypted).toBe('object');
-      expect(decrypted.accessToken).toBe(tokens.accessToken);
-      expect(decrypted.refreshToken).toBe(tokens.refreshToken);
-      expect(decrypted.expiresAt).toBe(tokens.expiresAt);
-      expect(decrypted.scope).toBe(tokens.scope);
+      assert.equal(typeof decrypted, 'object');
+      assert.equal(decrypted.accessToken, tokens.accessToken);
+      assert.equal(decrypted.refreshToken, tokens.refreshToken);
+      assert.equal(decrypted.expiresAt, tokens.expiresAt);
+      assert.equal(decrypted.scope, tokens.scope);
     });
     
     it('should produce different ciphertext for same input (random IV)', () => {
@@ -46,56 +62,58 @@ describe('vault-encryption', () => {
       const encrypted1 = encryptCredential(apiKey);
       const encrypted2 = encryptCredential(apiKey);
       
-      expect(encrypted1).not.toBe(encrypted2);
+      assert.notEqual(encrypted1, encrypted2);
       
-      expect(decryptCredential(encrypted1)).toBe(apiKey);
-      expect(decryptCredential(encrypted2)).toBe(apiKey);
+      assert.equal(decryptCredential(encrypted1), apiKey);
+      assert.equal(decryptCredential(encrypted2), apiKey);
     });
     
     it('should handle empty string', () => {
       const empty = '';
       const encrypted = encryptCredential(empty);
       const decrypted = decryptCredential(encrypted);
-      expect(decrypted).toBe(empty);
+      assert.equal(decrypted, empty);
     });
     
     it('should handle very long API keys', () => {
       const longKey = 'x'.repeat(1000);
       const encrypted = encryptCredential(longKey);
       const decrypted = decryptCredential(encrypted);
-      expect(decrypted).toBe(longKey);
+      assert.equal(decrypted, longKey);
     });
     
     it('should handle special characters', () => {
       const specialKey = 'sk-test_!@#$%^&*(){}[]|\\:";\'<>?,./~`';
       const encrypted = encryptCredential(specialKey);
       const decrypted = decryptCredential(encrypted);
-      expect(decrypted).toBe(specialKey);
+      assert.equal(decrypted, specialKey);
     });
     
     it('should handle unicode characters', () => {
       const unicodeKey = 'test-日本語-emoji-🔐-key';
       const encrypted = encryptCredential(unicodeKey);
       const decrypted = decryptCredential(encrypted);
-      expect(decrypted).toBe(unicodeKey);
+      assert.equal(decrypted, unicodeKey);
     });
     
     it('should throw error if VAULT_ENCRYPTION_KEY is not set', () => {
       const originalKey = process.env.VAULT_ENCRYPTION_KEY;
       delete process.env.VAULT_ENCRYPTION_KEY;
-      
-      expect(() => encryptCredential('test')).toThrow('VAULT_ENCRYPTION_KEY');
-      
-      process.env.VAULT_ENCRYPTION_KEY = originalKey;
+      try {
+        assert.throws(() => {encryptCredential('test')}, /VAULT_ENCRYPTION_KEY/);
+      } finally {
+        process.env.VAULT_ENCRYPTION_KEY = originalKey;
+      }
     });
     
     it('should throw error if VAULT_ENCRYPTION_KEY is wrong length', () => {
       const originalKey = process.env.VAULT_ENCRYPTION_KEY;
       process.env.VAULT_ENCRYPTION_KEY = 'tooshort';
-      
-      expect(() => encryptCredential('test')).toThrow('32 bytes');
-      
-      process.env.VAULT_ENCRYPTION_KEY = originalKey;
+      try {
+        assert.throws(() => {encryptCredential('test')}, /32 bytes/);
+      } finally {
+        process.env.VAULT_ENCRYPTION_KEY = originalKey;
+      }
     });
   });
   
@@ -111,11 +129,11 @@ describe('vault-encryption', () => {
       
       const sanitized = sanitizeForLogging(obj);
       
-      expect(sanitized.serverId).toBe('buffer-mcp');
-      expect(sanitized.normalField).toBe('visible');
-      expect(sanitized.value).toBe('[REDACTED]');
-      expect(sanitized.apiKey).toBe('[REDACTED]');
-      expect(sanitized.accessToken).toBe('[REDACTED]');
+      assert.equal(sanitized.serverId, 'buffer-mcp');
+      assert.equal(sanitized.normalField, 'visible');
+      assert.equal(sanitized.value, '[REDACTED]');
+      assert.equal(sanitized.apiKey, '[REDACTED]');
+      assert.equal(sanitized.accessToken, '[REDACTED]');
     });
     
     it('should handle nested objects', () => {
@@ -132,10 +150,15 @@ describe('vault-encryption', () => {
       
       const sanitized = sanitizeForLogging(obj);
       
-      expect(sanitized.publicData).toBe('visible');
-      expect(sanitized.meta.serverId).toBe('github-mcp');
-      expect(sanitized.meta.credentials.accessToken).toBe('[REDACTED]');
-      expect(sanitized.meta.credentials.refreshToken).toBe('[REDACTED]');
+      assert.equal(sanitized.publicData, 'visible');
+      assert.equal(sanitized.meta.serverId, 'github-mcp');
+      // S313-S4: this file never RAN under vitest (see header — the import failed
+      // as a file-level error), so these two per-field assertions were never
+      // exercised and contradict the shipped sanitizer: 'credential' is on the
+      // sensitive-keys list and the match is a substring match, so the whole
+      // nested `credentials` object is replaced by '[REDACTED]' before its
+      // fields are ever visited. Pin the shipped behaviour instead.
+      assert.equal(sanitized.meta.credentials, '[REDACTED]');
     });
     
     it('should handle arrays', () => {
@@ -146,10 +169,10 @@ describe('vault-encryption', () => {
       
       const sanitized = sanitizeForLogging(arr);
       
-      expect(sanitized[0].id).toBe(1);
-      expect(sanitized[0].apiKey).toBe('[REDACTED]');
-      expect(sanitized[1].id).toBe(2);
-      expect(sanitized[1].apiKey).toBe('[REDACTED]');
+      assert.equal(sanitized[0].id, 1);
+      assert.equal(sanitized[0].apiKey, '[REDACTED]');
+      assert.equal(sanitized[1].id, 2);
+      assert.equal(sanitized[1].apiKey, '[REDACTED]');
     });
     
     it('should handle case-insensitive matching', () => {
@@ -162,17 +185,17 @@ describe('vault-encryption', () => {
       
       const sanitized = sanitizeForLogging(obj);
       
-      expect(sanitized.ApiKey).toBe('[REDACTED]');
-      expect(sanitized.API_KEY).toBe('[REDACTED]');
-      expect(sanitized.access_token).toBe('[REDACTED]');
-      expect(sanitized.RefreshToken).toBe('[REDACTED]');
+      assert.equal(sanitized.ApiKey, '[REDACTED]');
+      assert.equal(sanitized.API_KEY, '[REDACTED]');
+      assert.equal(sanitized.access_token, '[REDACTED]');
+      assert.equal(sanitized.RefreshToken, '[REDACTED]');
     });
     
     it('should not modify primitives', () => {
-      expect(sanitizeForLogging('string')).toBe('string');
-      expect(sanitizeForLogging(123)).toBe(123);
-      expect(sanitizeForLogging(true)).toBe(true);
-      expect(sanitizeForLogging(null)).toBe(null);
+      assert.equal(sanitizeForLogging('string'), 'string');
+      assert.equal(sanitizeForLogging(123), 123);
+      assert.equal(sanitizeForLogging(true), true);
+      assert.equal(sanitizeForLogging(null), null);
     });
   });
 });

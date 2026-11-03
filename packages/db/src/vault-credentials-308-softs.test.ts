@@ -30,6 +30,16 @@
  *   - collapse the split catch back into the original single try → S308-S1 RED.
  *   - remove the needsReauth update from the refresh-failure branch → S308-S2 RED.
  *
+ * S314-S1 row-target pins (Refs #304, from the #314 gate): the fake db used to
+ * ignore `.where(...)`, so nothing pinned WHICH vaultSecrets row received the
+ * needsReauth flag or the token write-back — the gate's G13 mutant (helper
+ * flags `credentialId + '-x'`) survived 22/22. The harness now unpacks the
+ * real drizzle SQL handed to `.where(...)` (queryChunks: one Column chunk +
+ * one Param chunk) and every test below asserts the update attempt targets
+ * { column: 'id', value: <seeded credential id> } — covering the three
+ * write-back sites, the three refresh-failure flag sites, and the
+ * flagNeedsReauthAfterLostWriteBack helper.
+ *
  * Same harness as vault-credentials-304-softs.test.ts (the repo avoids
  * mock.module): seed the require-cache for the live './client' before
  * requiring the module under test, stub fetch, and set/restore the vault +
@@ -65,6 +75,39 @@ let failTokenWriteBack = false; // updates carrying encryptedValue reject
 let failReauthFlagUpdate = false; // needsReauth-only updates reject
 let nextCredentialRow: Record<string, unknown> | null = null;
 
+// S314-S1: the row each update attempt targets, recorded from the real drizzle
+// SQL handed to `.where(...)`. Unpacked from the SQL's queryChunks: a Column
+// chunk (has name + table) and a Param chunk (bound value). Non-throwing —
+// mismatches surface as deepEqual diffs in the tests, never as exceptions
+// inside the fake db (the production try/catches would swallow those).
+interface WhereTarget {
+  column?: string;
+  value?: unknown;
+}
+let whereTargets: WhereTarget[] = [];
+
+function extractWhereTarget(cond: unknown): WhereTarget {
+  const chunks = (cond as { queryChunks?: unknown[] } | null | undefined)?.queryChunks;
+  if (!Array.isArray(chunks)) {
+    return { column: 'expected-drizzle-sql', value: undefined };
+  }
+  const flat: Record<string, unknown>[] = [];
+  const walk = (c: unknown): void => {
+    if (c && typeof c === 'object') {
+      flat.push(c as Record<string, unknown>);
+      const nested = (c as { queryChunks?: unknown[] }).queryChunks;
+      if (Array.isArray(nested)) nested.forEach(walk);
+    }
+  };
+  chunks.forEach(walk);
+  const columns = flat.filter((c) => typeof c.name === 'string' && c.table !== undefined);
+  const params = flat.filter((c) => c.constructor?.name === 'Param' && 'value' in c);
+  return {
+    column: columns.length === 1 ? String(columns[0].name) : `expected-1-column-got-${columns.length}`,
+    value: params.length === 1 ? params[0].value : `expected-1-param-got-${params.length}`,
+  };
+}
+
 // Fake db: vault-credentials only ever calls findFirst / update().set().where().
 const fakeDb = {
   query: {
@@ -75,12 +118,18 @@ const fakeDb = {
   update: () => ({
     set: (patch: UpdatePatch) => {
       updateAttempts.push(patch);
+      whereTargets.push({});
       const rejects =
         (failTokenWriteBack && patch.encryptedValue !== undefined) ||
         (failReauthFlagUpdate && patch.encryptedValue === undefined && patch.needsReauth === true);
       return {
-        where: () =>
-          rejects ? Promise.reject(new Error('injected db failure')) : Promise.resolve(),
+        where: (cond: unknown) => {
+          const target = whereTargets[whereTargets.length - 1];
+          if (target) Object.assign(target, extractWhereTarget(cond));
+          return rejects
+            ? Promise.reject(new Error('injected db failure'))
+            : Promise.resolve();
+        },
       };
     },
   }),
@@ -125,6 +174,7 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
   console.error = originalConsoleError;
   updateAttempts = [];
+  whereTargets = [];
   failTokenWriteBack = false;
   failReauthFlagUpdate = false;
   nextCredentialRow = null;
@@ -236,6 +286,20 @@ describe('S308-S1 - write-back failure after a successful refresh (Refs #304)', 
       assert.equal(updateAttempts[1].needsReauth, true);
       assert.equal(updateAttempts[1].encryptedValue, undefined);
 
+      // S314-S1: both updates must hit the seeded row by id — G13-class
+      // mutants flag/update a different row entirely and were invisible to the
+      // old where()-ignoring harness.
+      assert.deepEqual(
+        whereTargets[0],
+        { column: 'id', value: s.credId },
+        'the token write-back must target the seeded credential row',
+      );
+      assert.deepEqual(
+        whereTargets[1],
+        { column: 'id', value: s.credId },
+        'the needsReauth flag must target the seeded credential row',
+      );
+
       // Accurate log - the old single-try catch mislabelled this as decryption.
       assert.ok(
         logged.some((m) => m.includes(`Failed to persist refreshed ${s.word} credential`)),
@@ -264,6 +328,18 @@ describe('S308-S1 - write-back failure after a successful refresh (Refs #304)', 
       const tokens = result as OAuthTokens;
       assert.equal(tokens.accessToken, `fresh-${s.label}`);
       assert.equal(updateAttempts.length, 2, 'both the write-back and the flag were attempted');
+      // S314-S1: the where() call lands before the injected rejection, so the
+      // row target is pinned even on the double-failure path.
+      assert.deepEqual(
+        whereTargets[0],
+        { column: 'id', value: s.credId },
+        'the token write-back must target the seeded credential row',
+      );
+      assert.deepEqual(
+        whereTargets[1],
+        { column: 'id', value: s.credId },
+        'the needsReauth flag must target the seeded credential row',
+      );
       assert.ok(
         logged.some((m) => m.includes(`Failed to persist refreshed ${s.word} credential`)),
         `expected an accurate persist-failure log, got: ${JSON.stringify(logged)}`,
@@ -295,6 +371,13 @@ describe('S308-S2 - refreshOAuthToken returning null sets needsReauth (Refs #304
         assert.equal(updateAttempts.length, 1, 'exactly the needsReauth flag update');
         assert.equal(updateAttempts[0].needsReauth, true);
         assert.equal(updateAttempts[0].encryptedValue, undefined);
+        // S314-S1: the refresh-failure flag must mark the seeded row, not an
+        // arbitrary one.
+        assert.deepEqual(
+          whereTargets[0],
+          { column: 'id', value: s.credId },
+          'the needsReauth flag must target the seeded credential row',
+        );
       });
     }
   }

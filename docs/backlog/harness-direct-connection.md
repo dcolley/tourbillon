@@ -1,8 +1,10 @@
 # Backlog: Harness / Direct connection (Hermes + OpenCode)
 
 **Status:** Design note / backlog proposal
-**Date:** 2026-11-02
+**Date:** 2026-11-02, revised 2026-11-03 after the first Hermes slice (#316) merged.
 **Context:** Product backlog #281. Design locked with Derek 2026-11-02. No wholesale replace of in-product agent runtimes; Company Computer seats are out of scope.
+
+**Supersedes the 2026-10-08 write-up.** #281 asks to link the 2026-10-08 request for a "Harness / Direct" agent backend type (naming, run exchange, observability, skill pack, host module vs remote call) "when it lands". That write-up never landed as a standalone document; this note **supersedes** it. The aspects it named that were not covered here are now written up below: Run exchange, Observability, Topology.
 
 ## Goal
 
@@ -14,9 +16,13 @@ Bind Tourbillon agents to external harnesses so the harness can act with the sam
 
 Do **not** split board vs agent into separate MCP servers. One MCP/API surface. Principal = token (company/board vs agent session). Agent permissions come from normal agent config. **Before every tool call (including MCP), run the same capability gate** used for in-system agents — reject if the agent is not allowed. Creating agents only if config allows.
 
+**The concrete gate** is `assembleAgentTools` (`packages/mastra/src/agent-factory.ts`), driven by the agent row's tiered config in `packages/db/src/schema/agents.ts`: `assignedToolsets` (Tier 2 boolean toolsets), `runtimeConfig.assignedTools` (Tier 2 granular tools), and `mcpServerIds` (Tier 3 MCP, intersected with the company `allowedMcpServerIds` allow-list). The shipped Hermes callback surface reuses exactly this: denied tools are refused 403 without executing (`apps/web/lib/harness/callback-gate.ts`).
+
+**Where bind config lives:** the new harness-bind fields live in **`agents.adapterConfig`** (jsonb), *not* `runtimeConfig`; this is the shipped shape from #316, chosen so no migration and no new `adapterType` enum value were needed.
+
 ## Tourbillon → harness (bind)
 
-- **Local (default):** `command` and/or local `baseUrl` (CLI or localhost API). Most harnesses are on localhost.
+- **Local (default):** `command` and/or `localBaseUrl` (CLI or loopback API). Most harnesses are on localhost; `localBaseUrl` is validated loopback-only (shipped name and validation, `packages/shared/src/hermes-harness.ts`).
 - **Remote (optional):** `harnessBaseUrl` + `apiToken` for a custom remote API.
 
 ## Harness → Tourbillon (`callbackUrl`)
@@ -34,6 +40,23 @@ Ship a skill-install file (Hermes SKILL.md / OpenCode skill / generic) that teac
 
 Capability-gated. Use sync and/or stream — whatever the harness API supports. Adapt; do not force one fixed shape.
 
+## Run exchange
+
+How a wake gets into the harness and how the outcome comes back.
+
+- **Shipped (Hermes, #316):** the scheduler routes Hermes-bound agents to `dispatchHermesHeartbeat` (`packages/scheduler/src/adapters/hermes-adapter.ts`, called from `packages/scheduler/src/wake-runner.ts` instead of the in-product `AgentController`). Local bind spawns `command` with the envelope on stdin plus `TOURBILLON_WAKE_JSON` / `TOURBILLON_CALLBACK_URL` / `TOURBILLON_SESSION_TOKEN`; HTTP bind (`localBaseUrl` or `harnessBaseUrl`) POSTs A2A JSONRPC `message/send` with Bearer `apiToken`. The envelope is built by `buildHermesHeartbeatEnvelope` (`packages/shared/src/hermes-harness.ts`) and fails closed without `callback.baseUrl` + `callback.sessionToken`. A malformed bind is a terminal run failure, never a silent in-product fallback.
+- **Open (proposal):** richer result exchange over the callback (token usage, truncation, finish reason) is a later pack; today the dispatch result (success / timeout / error) plus the harness's own gated issue/comment updates decide the outcome record. Retry / duplicate-wake semantics and the OpenCode run exchange are undecided.
+
+## Observability
+
+- **Shipped (Hermes, #316):** external Hermes runs emit no Mastra spans, so `/observability` and the issue observability tabs cover in-product runs only; the in-product span-truncation scan is skipped for Hermes runs. The `heartbeat_runs` row still records the bind (`kind: 'hermes'`, mode, `callbackBaseUrl`) and succeeded/failed.
+- **Open (proposal):** whether harness-side traces are exported into the same span store (correlated via the `runId` already carried in the envelope), and usage/truncation reporting over the callback. Until then, issue comments remain the only audit trail for harness-side work.
+
+## Topology (host module vs remote call)
+
+- **Shipped (Hermes, #316):** dispatch lives **in-process in the scheduler** (WakeRunner → `dispatchHermesHeartbeat`); there is no separate host module today. The phone-home surface lives in the web app (`apps/web/app/api/harness/callback/*`). Local bind = same-host spawn or loopback HTTP; remote bind = outbound HTTP to `harnessBaseUrl` with Bearer `apiToken`, inbound callback over LAN / Tailscale / tunnel via explicit `callbackBaseUrl`.
+- **Open (proposal):** whether the bind should move behind a host-level module/registry (shared across schedulers or reused by other products), and whether remote harnesses get a reachability-brokered callback path instead of operator-configured `callbackBaseUrl`. No decision yet; the single-scheduler in-process shape is intentional for the first slices.
+
 ## Proposed config fields
 
 - `callbackUrl` (required; stamped into each heartbeat)
@@ -41,6 +64,8 @@ Capability-gated. Use sync and/or stream — whatever the harness API supports. 
 - `skillInstall` (path or blob)
 - local: `command` | `localBaseUrl`
 - remote optional: `harnessBaseUrl`, `apiToken`
+
+All of these live in `agents.adapterConfig` (jsonb); see "Where bind config lives" above; the shipped Hermes shape is exactly this list (`mode: 'local' | 'remote'` discriminator, optional `callbackBaseUrl` override).
 
 ## First build slice
 
@@ -56,12 +81,16 @@ Capability-gated. Use sync and/or stream — whatever the harness API supports. 
 - Replacing in-product runtimes wholesale
 - Company Computer / Kasm seats
 
-## Done when
+## Done when (design acceptance)
 
-1. File exists at docs/backlog/harness-direct-connection.md on branch docs/281-harness-direct-connection
-2. DRAFT PR open to main, title like `docs: #281 harness direct connection design note`, body Refs #281
-3. Comment on https://github.com/dcolley/tourbillon/issues/281 with path + draft PR link
-4. Report: SHA, PR number/URL, issue comment URL
+1. An externally bound harness agent receives every heartbeat with `callbackUrl` + session token and can complete an assigned issue end-to-end through the single gated callback surface (issues, comments, memory, docs/workspace).
+2. Every callback tool call passes the same capability gate as in-system agents (`assembleAgentTools`); denied tools never execute.
+3. Default deployment is 100% loopback traffic; remote bind is explicit opt-in.
+4. The harness behaves as a Tourbillon agent from the skill-install file alone (heartbeat loop, tools via callbackUrl).
+5. Chat works when the harness advertises support (sync and/or stream).
+6. OpenCode binds through the same harness-neutral seams.
+
+Status: 1-4 are shipped for Hermes with #316 (see Implemented below); 5 (chat, 501 stub today) and 6 (OpenCode) remain open.
 
 ## Implemented (Hermes slice, #281 first pack)
 

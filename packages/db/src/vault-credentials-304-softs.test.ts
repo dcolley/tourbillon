@@ -20,6 +20,12 @@
  *  4. Behaviour: for each scope, an expired OAuth credential refreshes and the
  *     captured encryptedValue round-trips through the SHARED decryptCredential
  *     back to the refreshed tokens.
+ *  5. S314-S1 row-target pin: the fake db used to ignore `.where(...)`, so
+ *     nothing pinned WHICH vaultSecrets row an update touches — a mutant
+ *     targeting the wrong row id (the #314 gate's G13 class, e.g.
+ *     `credentialId + '-x'`) survived 22/22. The harness now unpacks the real
+ *     drizzle SQL handed to `.where()` and the behaviour tests assert the
+ *     update targets the seeded credential's id.
  *
  * Mutant (per the brief): revert any of the three sites to a require of the local
  * module. That REDs the no-require-call pins (whole file + the site's slice + the
@@ -65,6 +71,39 @@ interface UpdatePatch {
 const updatePatches: UpdatePatch[] = [];
 let nextCredentialRow: Record<string, unknown> | null = null;
 
+// S314-S1: the row each update attempt targets, recorded from the real drizzle
+// SQL handed to `.where(...)`. Unpacked from the SQL's queryChunks: a Column
+// chunk (has name + table) and a Param chunk (bound value). Non-throwing —
+// mismatches surface as deepEqual diffs in the tests, never as exceptions
+// inside the fake db (the production try/catches would swallow those).
+interface WhereTarget {
+  column?: string;
+  value?: unknown;
+}
+const whereTargets: WhereTarget[] = [];
+
+function extractWhereTarget(cond: unknown): WhereTarget {
+  const chunks = (cond as { queryChunks?: unknown[] } | null | undefined)?.queryChunks;
+  if (!Array.isArray(chunks)) {
+    return { column: 'expected-drizzle-sql', value: undefined };
+  }
+  const flat: Record<string, unknown>[] = [];
+  const walk = (c: unknown): void => {
+    if (c && typeof c === 'object') {
+      flat.push(c as Record<string, unknown>);
+      const nested = (c as { queryChunks?: unknown[] }).queryChunks;
+      if (Array.isArray(nested)) nested.forEach(walk);
+    }
+  };
+  chunks.forEach(walk);
+  const columns = flat.filter((c) => typeof c.name === 'string' && c.table !== undefined);
+  const params = flat.filter((c) => c.constructor?.name === 'Param' && 'value' in c);
+  return {
+    column: columns.length === 1 ? String(columns[0].name) : `expected-1-column-got-${columns.length}`,
+    value: params.length === 1 ? params[0].value : `expected-1-param-got-${params.length}`,
+  };
+}
+
 // Fake db: vault-credentials only ever calls findFirst / update().set().where().
 const fakeDb = {
   query: {
@@ -75,7 +114,14 @@ const fakeDb = {
   update: () => ({
     set: (patch: UpdatePatch) => {
       updatePatches.push(patch);
-      return { where: () => Promise.resolve() };
+      whereTargets.push({});
+      return {
+        where: (cond: unknown) => {
+          const target = whereTargets[whereTargets.length - 1];
+          if (target) Object.assign(target, extractWhereTarget(cond));
+          return Promise.resolve();
+        },
+      };
     },
   }),
 };
@@ -116,6 +162,7 @@ const originalFetch = globalThis.fetch;
 afterEach(() => {
   globalThis.fetch = originalFetch;
   updatePatches.length = 0;
+  whereTargets.length = 0;
   nextCredentialRow = null;
 });
 
@@ -146,6 +193,7 @@ function expiredOauthRow(id: string): Record<string, unknown> {
 
 async function expectRefreshedWriteBack(
   ctx: Parameters<VaultCredentialsModule['resolveVaultSecret']>[0],
+  credId: string,
   expectedAccessToken: string,
 ): Promise<void> {
   const result = await vault.resolveVaultSecret(ctx);
@@ -168,6 +216,13 @@ async function expectRefreshedWriteBack(
   // Round-trips through the SHARED decrypt -> proves the persisted value was
   // produced by the shared encryptCredential under the same VAULT_ENCRYPTION_KEY.
   assert.deepEqual(decryptCredential(patch.encryptedValue as string), tokens);
+  // S314-S1: the write-back must hit the seeded row by id — a wrong-target
+  // update would rotate the token onto a different vaultSecrets row entirely.
+  assert.deepEqual(
+    whereTargets[0],
+    { column: 'id', value: credId },
+    'the write-back must update the seeded credential row',
+  );
 }
 
 function sliceBetween(start: string, end: string): string {
@@ -234,6 +289,7 @@ describe('vault-credentials-304-softs — encryptCredential comes from shared (R
       stubTokenEndpoint('fresh-agent');
       await expectRefreshedWriteBack(
         { companyId: 'c-1', serverId: 'github-mcp', agentId: 'a-1' },
+        'cred-agent',
         'fresh-agent',
       );
     });
@@ -243,6 +299,7 @@ describe('vault-credentials-304-softs — encryptCredential comes from shared (R
       stubTokenEndpoint('fresh-user');
       await expectRefreshedWriteBack(
         { companyId: 'c-1', serverId: 'github-mcp', userId: 'u-1' },
+        'cred-user',
         'fresh-user',
       );
     });
@@ -252,6 +309,7 @@ describe('vault-credentials-304-softs — encryptCredential comes from shared (R
       stubTokenEndpoint('fresh-company');
       await expectRefreshedWriteBack(
         { companyId: 'c-1', serverId: 'github-mcp' },
+        'cred-company',
         'fresh-company',
       );
     });
