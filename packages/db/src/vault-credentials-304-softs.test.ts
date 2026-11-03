@@ -31,6 +31,19 @@
  * module. That REDs the no-require-call pins (whole file + the site's slice + the
  * count-3 canonical pin) and the behaviour test for that scope — the require
  * throws inside the try, the catch returns null, no write-back is captured.
+ *
+ * S318-S1 sweep ledger (Refs #318, from the #318 gate comment): the gate
+ * mutant-measured only the agent write-back + company refresh-failure flag. The
+ * soft-pack-B gate injected wrong-id / wrong-column mutants at EVERY remaining
+ * update site in vault-credentials.ts (company_user write-back, agent and
+ * company_user refresh-failure flags, company write-back, plus a wrong-column
+ * variant on company_user) and each RED'd exactly the scope's tests here and in
+ * vault-credentials-308-softs.test.ts (matrix in the pack-B PR body).
+ *
+ * S318-S2 (Refs #318): the shared self-test below probes extractWhereTarget with
+ * a known eq() so a drizzle bump that reshapes SQL.queryChunks internals fails
+ * with a clear "harness broke" message instead of masquerading as row-target
+ * regressions.
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -38,7 +51,9 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, after, afterEach } from 'node:test';
+import { eq } from 'drizzle-orm';
 import type { OAuthTokens } from '@tourbillon/shared/vault-types';
+import { vaultSecrets } from './schema/vault-secrets';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SRC = readFileSync(path.join(HERE, 'vault-credentials.ts'), 'utf8');
@@ -313,5 +328,24 @@ describe('vault-credentials-304-softs — encryptCredential comes from shared (R
         'fresh-company',
       );
     });
+  });
+});
+
+// S318-S2 (Refs #318): the fake-db `.where()` unpacker above duck-types drizzle
+// 0.45 internals (SQL.queryChunks; Column chunks by name+table; Param chunks by
+// constructor name). A drizzle bump that reshapes those internals would otherwise
+// make every row-target assertion below fail as an apparent PRODUCT regression.
+// This probe isolates the harness: it must unpack a known eq() to the exact
+// { column, value } pair, or the failure message says "harness broke".
+describe('vault-credentials-304-softs — S318-S2 where-extractor self-test (Refs #318)', () => {
+  it('extractWhereTarget unpacks a known eq() to { column: "id", value }', () => {
+    assert.deepEqual(
+      extractWhereTarget(eq(vaultSecrets.id, 'probe-row-1')),
+      { column: 'id', value: 'probe-row-1' },
+      'HARNESS BROKEN: extractWhereTarget no longer unpacks drizzle eq() SQL — ' +
+        'SQL.queryChunks internals changed (drizzle bump?). Row-target pins in ' +
+        'this file are unreliable until the unpacker is fixed; do NOT read their ' +
+        'failures as row-target regressions.',
+    );
   });
 });

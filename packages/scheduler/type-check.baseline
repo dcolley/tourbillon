@@ -1,0 +1,30 @@
+# packages/scheduler type-check baseline (S315-S1, Refs #315)
+#
+# Pre-existing `tsc -p packages/scheduler` error count on origin/main at pack-B
+# time (tip 7a8595b). scheduler had NO type-check script, so `pnpm -r type-check`
+# silently skipped it; this file lets the gate join WITHOUT fixing main's errors in
+# a test-hardening PR (no-scope-creep rule, same shape as packages/mastra's
+# S261-S2 baseline). Ratchet the number DOWN as errors are fixed; never ratchet it
+# UP without calling it out in review.
+#
+# Why the tsconfig lost `rootDir: src`: workspace packages export raw .ts sources
+# through the root tsconfig.base `paths`, so rootDir + cross-package imports made
+# every ../shared|db|mastra source a TS6059 ("not under rootDir") error — the
+# ~140-error class the base-tsconfig comment tracked as "any future scheduler
+# rootDir/project-references fix". With noEmit the key is pointless; removing it
+# dissolves the class and leaves the 27 real diagnostics below.
+#
+# The 27 errors (classes):
+#   ../db/src/vault-credentials.ts          6  TS18046 'data' is of type 'unknown' (fetch json())
+#   src/wake-runner.ts                      5  TS2339/TS2345/TS2769/TS7006 (AgentGenerationOptions shape)
+#   src/wake-runner.test.ts                 4  TS2339 Property 'includes' does not exist on type 'never'
+#   src/timeout-runner.test.ts              4  TS2741/TS2739 (runtime-config fixture shapes)
+#   src/park-helpers.ts                     2  TS2345 ActivityEntry[] shape
+#   src/adapters/opencode-adapter.ts        2  TS2339 'status' on { body: unknown } (non-ok Response path)
+#   ../shared/src/model-settings.ts         2  TS2304 FormDataEntryValue (lib ES2022, no DOM)
+#   ../mastra/src/tools/role-tools.ts       1  TS18046 'allAgents' is of type 'unknown'
+#   ../mastra/src/sticky-session-fetch.ts   1  TS2552 RequestInfo (lib ES2022, no DOM)
+# Cross-package pull-ins are counted because the program includes imported .ts
+# sources; if a sibling pack changes those files' diagnostics, ratchet this number
+# deliberately in that PR.
+27

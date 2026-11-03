@@ -72,6 +72,12 @@ test('PIN: missing callback origin fails closed — no transport touched', async
   );
 });
 
+// NOTE (S316-S2, Refs #316): the remote apiToken >=16 and loopback-only
+// localBaseUrl rules are enforced at BIND PARSE (wake-runner parses the
+// adapterConfig via parseHermesHarnessBind before the adapter is entered), so
+// they are pinned in packages/shared/src/hermes-harness.test.ts at the parse
+// boundary — the adapter below receives an already-validated bind.
+
 test('command bind: envelope + callback reach the spawn env and stdin', async () => {
   let seenEnv: Record<string, string> | undefined;
   const result = await dispatchHermesHeartbeat(context(), {

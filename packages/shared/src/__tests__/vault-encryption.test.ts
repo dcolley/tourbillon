@@ -12,6 +12,13 @@
  *     substring-matching sanitizer (see the comment there); and
  *   - the two env-mutating tests now restore VAULT_ENCRYPTION_KEY in finally,
  *     so a RED assertion cannot leak the env for the tests that follow.
+ *
+ * Mutant-recipe note (S319-S3, Refs #319): a mutant that re-adds a vitest import
+ * to prove the port must USE the import (e.g. call `expect(...)`) or be a
+ * side-effect import (`import 'vitest'`). A plain UNUSED `import { expect }
+ * from 'vitest'` SURVIVES — esbuild/tsx drops unused imports before module
+ * resolution, so the "Cannot find module 'vitest'" wall never fires and the
+ * suite stays green. That is how the #319 gate wrote the mutant, not a weak test.
  */
 import { describe, it, before } from 'node:test';
 import assert from 'node:assert/strict';
