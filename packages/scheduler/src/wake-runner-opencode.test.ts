@@ -10,15 +10,45 @@
  *  3. Plain harness_local (no harness key) → unchanged in-product path; OpenCode dispatch never
  *     entered.
  *  4. A Hermes-bound agent never touches the OpenCode dispatcher (cross-discriminator isolation).
+ *  5. S322-S2 (Refs #322): an external harness run NEVER calls the Mastra span scan
+ *     detectTruncatedGeneration — the `if (!hermesBind && !opencodeBind)` guard at the
+ *     harness branch of wake-runner.ts. Pinned fail-loud: the ./@tourbillon/db stub
+ *     COUNTS every detectTruncatedGeneration invocation and throws, so removing the
+ *     guard (or scanning unconditionally) turns every external-bind test RED instead
+ *     of silently riding the benign `{ truncated: false }` stub.
  * @tourbillon/db, drizzle-orm, ./redis-pub, ./park-helpers and all adapters are mocked via
  * Module.prototype.require (wake-runner.ts only), mirroring wake-runner-hermes.test.ts.
  */
-import { describe, it, before, beforeEach } from 'node:test';
+import { describe, it, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { verifyAgentTokenSignature } from '@tourbillon/shared/agent-token';
+import { createRequire } from 'node:module';
 
 const SECRET = 'test-agent-token-secret-281-oc-0123456789abcdef';
 const env = process.env as Record<string, string | undefined>;
+const dbRequire = createRequire(import.meta.url);
+const DB_ENTRY = dbRequire.resolve('@tourbillon/db');
+// ---- S322-S2: host-independent fail-loud wall on the span-scan seam ----
+// wake-runner reaches detectTruncatedGeneration via `await import('@tourbillon/db')`
+// from its ESM form. tsx resolves that through the ESM chain, BYPASSING both the
+// Module.prototype.require hook (measured: no hook hit for the dynamic form) and the
+// CJS require.cache seed — and the @tourbillon/mastra import inside wake-runner
+// pulls the REAL '@tourbillon/db' into the ESM graph too. So the wall is the module
+// itself, poisoned AT TOP LEVEL, before any import executes: assertValidDatabaseUrl
+// rejects '' (fixed message, no credentials echoed — packages/db/src/database-url.ts)
+// so EVERY later load of '@tourbillon/db' fails, on any host. A scan attempt on an
+// external-bind run can therefore NEVER silently succeed: it either hits the
+// fail-loud stub (CJS route) or the poisoned module rejection (ESM route). The
+// exports captured here are the real namespace (client.ts only builds a lazy pool;
+// no test in this file queries the real db).
+const savedDatabaseUrl = env.DATABASE_URL;
+// Capture the REAL namespace first (populates the CJS require cache under valid
+// env — client.ts only builds a lazy pool), THEN poison: later ESM loads of the
+// package re-evaluate under '' and reject, while cached CJS consumers keep real
+// exports for the Proxy fallback.
+const realDb = dbRequire('@tourbillon/db') as Record<string, unknown>;
+const realEntry = dbRequire.cache[DB_ENTRY];
+env.DATABASE_URL = '';
 
 type Row = Record<string, unknown>;
 type Cond = { op: 'eq'; c: string; val: unknown } | { op: 'and'; xs: Cond[] } | { op: 'other' };
@@ -31,6 +61,15 @@ const store: Record<string, Row[]> = {};
 let harnessCalls = 0;
 let hermesCalls = 0;
 let opencodeCalls: { context: Record<string, unknown>; options: Record<string, unknown> }[] = [];
+/**
+ * S322-S2: every detectTruncatedGeneration call the wake-runner makes through the
+ * ./@tourbillon/db stub. Must stay 0 for external harness runs — the stub THROWS
+ * (fail-loud), so a call both counts here and fails the wake with this marker in
+ * errorText. A benign `{ truncated: false }` stub would let the span-scan-skip
+ * guard (`!hermesBind && !opencodeBind`) be deleted with the suite still GREEN.
+ */
+let spanScanCalls = 0;
+const SPAN_SCAN_CALLED = 'detectTruncatedGeneration must never be called for an external harness run (S322-S2 span-scan-skip pin)';
 
 describe('#281 wake-runner OpenCode routing', () => {
   let triggerWake: typeof import('./wake-runner').triggerWake;
@@ -75,17 +114,62 @@ describe('#281 wake-runner OpenCode routing', () => {
         }),
       }),
     };
+    const stubKeys = new Set(['detectTruncatedGeneration', 'releaseStaleCheckoutLocksForRun']);
+    // (S322-S2 walls live at top level: poisoned DATABASE_URL + realDb capture.
+    // The Proxy below keeps REAL exports for any graph member that requires
+    // '@tourbillon/db' fresh via CJS; only the scan keys are stubbed.)
+    const dbStub = new Proxy(
+      {
+        db: fakeDb,
+        ...tables,
+        getLlmProviderRowById: async () => null,
+        // S322-S2 fail-loud stub: external harness runs must never reach the Mastra
+        // span scan (wake-runner.ts `if (!hermesBind && !opencodeBind)`). A call
+        // counts AND throws so the wake fails -> the test's status/succeeded pins RED.
+        detectTruncatedGeneration: async () => {
+          spanScanCalls += 1;
+          throw new Error(SPAN_SCAN_CALLED);
+        },
+        releaseStaleCheckoutLocksForRun: async () => 0,
+      } as Record<string, unknown>,
+      {
+        // LAZY real-module delegation: mastra tools and other graph members require
+        // '@tourbillon/db' too and must keep the REAL exports. Only the scan keys are
+        // stubbed; everything else falls through to the real namespace on first touch.
+        get(target, prop: string) {
+          if (prop in target || stubKeys.has(prop)) return target[prop];
+          return realDb[prop];
+        },
+        has(target, prop: string) {
+          return prop in target || stubKeys.has(prop) || prop in realDb;
+        },
+      },
+    );
+    // S322-S2: wake-runner reaches the scan via `await import('@tourbillon/db')`,
+    // which tsx compiles to a require call that BYPASSES the Module.prototype.require
+    // hook below (it only ever sees the static requires — measured: no hook hit for
+    // the dynamic form). Seed the same stub into require.cache keyed by the resolved
+    // package entry so the dynamic seam lands on the stub too (shared CJS/ESM cache;
+    // same recipe as scheduler-main.test.ts stubbing ./redis). The self-probe test
+    // at the bottom of this describe fails LOUDLY if this seam ever stops holding.
+    const dbSeed = {
+      id: DB_ENTRY,
+      filename: DB_ENTRY,
+      loaded: true,
+      exports: dbStub,
+      children: [],
+      paths: [],
+    } as unknown as NodeJS.Require['cache'][string];
+    // NOTE: plain assignment, NOT `??=` — the top-level realDb capture
+    // already filled this cache slot with the REAL namespace; `??=` would
+    // silently skip the seed and both walls would be dead (measured).
+    dbRequire.cache[DB_ENTRY] = dbSeed;
     Module.prototype.require = function (this: { filename?: string }, id: string) {
       if (!this?.filename?.endsWith('wake-runner.ts')) {
         return originalRequire.apply(this, arguments as unknown as [string]);
       }
       if (id === '@tourbillon/db') {
-        return {
-          db: fakeDb,
-          ...tables,
-          getLlmProviderRowById: async () => null,
-          detectTruncatedGeneration: async () => ({ truncated: false }),
-        };
+        return dbStub;
       }
       if (id === 'drizzle-orm') {
         return {
@@ -155,6 +239,7 @@ describe('#281 wake-runner OpenCode routing', () => {
     harnessCalls = 0;
     hermesCalls = 0;
     opencodeCalls = [];
+    spanScanCalls = 0;
     store.agents = [];
     store.companies = [{ id: 'company-o', status: 'active' }];
     store.heartbeatRuns = [];
@@ -173,6 +258,10 @@ describe('#281 wake-runner OpenCode routing', () => {
     assert.equal(harnessCalls, 0, 'in-product AgentController must not run for an OpenCode bind');
     assert.equal(hermesCalls, 0, 'an OpenCode bind must never reach the Hermes dispatcher');
     assert.equal(opencodeCalls.length, 1);
+    // S322-S2: the completed OpenCode run must not pay for the Mastra span scan —
+    // an external dispatch writes no Mastra spans. The stub throws on ANY call, so
+    // deleting the `if (!hermesBind && !opencodeBind)` skip REDs this test.
+    assert.equal(spanScanCalls, 0, 'external OpenCode run must never call detectTruncatedGeneration');
 
     const { context, options } = opencodeCalls[0];
     // EVERY heartbeat carries the minted run token + loopback callback origin.
@@ -246,5 +335,43 @@ describe('#281 wake-runner OpenCode routing', () => {
     assert.equal(hermesCalls, 1);
     assert.equal(opencodeCalls.length, 0);
     assert.equal(harnessCalls, 0);
+    // S322-S2 (same seam, Hermes discriminator): the completed Hermes run must not
+    // call the Mastra span scan either — the stub throws on any call.
+    assert.equal(spanScanCalls, 0, 'external Hermes run must never call detectTruncatedGeneration');
   });
+
+  // S322-S2 seam probe (dual-wall honesty guard): replay the EXACT dynamic import
+  // wake-runner uses. The call MUST fail — either on the require.cache stub (CJS
+  // route, if tsx ever merges the loaders) or on the poisoned DATABASE_URL (ESM
+  // route, the load-bearing wall today). A probe that SUCCEEDS means both walls
+  // fell and the spanScanCalls==0 pins above went silently vacuous -> RED here.
+  it('S322-S2 seam: the dynamic import of @tourbillon/db cannot serve a real span scan', async () => {
+    const before = spanScanCalls;
+    let wall: 'stub' | 'url-poison' | 'MISSING' = 'MISSING';
+    try {
+      // The import itself sits INSIDE the try: the poisoned-DATABASE_URL wall
+      // rejects the module load, so `import()` failing is a HIT on the wall,
+      // not a test failure.
+      const { detectTruncatedGeneration } = await import('@tourbillon/db');
+      await detectTruncatedGeneration('seam-probe-run');
+    } catch (err) {
+      const e = err as Error & { code?: string };
+      if (e.message === SPAN_SCAN_CALLED) wall = 'stub';
+      else if (e.code === 'DATABASE_URL_INVALID' || /DATABASE_URL/.test(e.message)) wall = 'url-poison';
+    }
+    assert.notEqual(wall, 'MISSING', 'scan seam must be walled (fail-loud stub or poisoned DATABASE_URL)');
+    if (wall === 'stub') {
+      assert.equal(spanScanCalls, before + 1, 'a stub-route probe call must be counted');
+    }
+  });
+});
+
+after(() => {
+  // Leave no stub or poisoned env behind for anything that runs after this file in
+  // the same process (the runner gives each file its own process, but --test
+  // isolation levels are a runner flag, not a guarantee). Restore the real
+  // namespace captured at top level rather than deleting the entry.
+  dbRequire.cache[DB_ENTRY] = realEntry;
+  if (savedDatabaseUrl === undefined) delete env.DATABASE_URL;
+  else env.DATABASE_URL = savedDatabaseUrl;
 });

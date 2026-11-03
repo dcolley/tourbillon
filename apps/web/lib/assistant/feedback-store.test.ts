@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const dbRequire = createRequire(join(__dirname, '../../../../packages/db/package.json'));
@@ -139,5 +140,45 @@ describe('OBS-2 feedback store', () => {
   it('every PGlite instance opened by this file was closed by the per-test hook', () => {
     const stillOpen = opened.filter((instance) => !instance.closed);
     assert.equal(stillOpen.length, 0, `every PGlite instance opened by this file must already be closed by afterEach (${stillOpen.length} open)`);
+  });
+
+  /**
+   * S323-S2 (Refs #323): declaration-order guard for the backstop above.
+   * The backstop is only honest because it is the LAST declared test — every
+   * afterEach has run by the time `opened` is inspected. It breaks silently if
+   * a test is appended after it, if it is moved earlier, or if the runner ever
+   * reorders/repeats tests. This guard reads THIS file's own source and pins
+   * the order; it must itself stay the last declared test, which it checks too.
+   * Backstop names are assembled by concatenation so the guard's own literals
+   * can never satisfy the declaration scan (self-reading-pin hazard).
+   */
+  it('S323-S2 declaration-order guard: close-backstop is last before this guard', () => {
+    const src = readFileSync(join(__dirname, 'feedback-store.test.ts'), 'utf8');
+    const BACKSTOP = 'every PGlite instance opened by this file was closed by the per' + '-test hook';
+    const GUARD = 'S323-S2 declaration-order guard: close-backstop is last before this guard';
+    const decls = [...src.matchAll(/\bit\(\s*'([^']+)'/g)].map((m) => ({ name: m[1], pos: m.index }));
+    const backstops = decls.filter((d) => d.name === BACKSTOP);
+    const guards = decls.filter((d) => d.name === GUARD);
+    assert.equal(backstops.length, 1, `the close-backstop must be declared exactly once (found ${backstops.length})`);
+    assert.equal(guards.length, 1, `the order guard must be declared exactly once (found ${guards.length})`);
+    // The backstop must be the SECOND-TO-LAST declared test — only the guard
+    // may follow it. Kills: deletion, moving earlier, and appending tests after it.
+    const last = decls[decls.length - 1];
+    const secondLast = decls[decls.length - 2];
+    assert.equal(last.name, GUARD, 'this guard must remain the last declared test in the file');
+    assert.equal(secondLast.name, BACKSTOP, 'the close-backstop must be the last real test (declaration order is load-bearing — see comment above)');
+    // The backstop must still READ the tracker: kill a gutted backstop that was
+    // left in place positionally but no longer inspects `opened`.
+    const body = src.slice(backstops[0].pos, guards[0].pos);
+    assert.match(body, /opened\.filter/, 'backstop must filter the opened-instance tracker');
+    assert.match(body, /assert\.equal\(stillOpen\.length, 0/, 'backstop must assert zero open instances');
+    // Reorder protection at the runner level: this Node build has no
+    // --test-shuffle (measured on Node 22), and neither the package script nor
+    // the runner may introduce one — under shuffling the backstop could run
+    // before the PGlite test and pass vacuously.
+    const webPkg = JSON.parse(readFileSync(join(__dirname, '../../package.json'), 'utf8')) as { scripts: Record<string, string> };
+    assert.doesNotMatch(webPkg.scripts.test ?? '', /shuffle/, 'web test script must not shuffle test order');
+    const runner = readFileSync(join(__dirname, '../../scripts/run-tests.mjs'), 'utf8');
+    assert.doesNotMatch(runner, /test-shuffle/, 'the web test runner must not shuffle test order');
   });
 });
