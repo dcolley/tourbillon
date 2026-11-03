@@ -114,7 +114,7 @@ test('bind: URLs with credentials/query are rejected', () => {
       parseOpencodeHarnessBind({
         harness: 'opencode',
         mode: 'remote',
-        harnessBaseUrl: 'http://user:***@100.105.50.60:4096',
+        harnessBaseUrl: 'http://user:' + 'pw' + '@100.105.50.60:4096',
         apiToken: REMOTE_TOKEN,
       }),
     OpencodeHarnessConfigError,

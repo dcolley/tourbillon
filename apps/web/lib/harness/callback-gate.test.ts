@@ -30,6 +30,7 @@ function makeDeps(opts: {
   allowedTools?: string[];
   executed?: ExecutedCall[];
   assembleThrows?: boolean;
+  adapterConfig?: Record<string, unknown>;
 } = {}) {
   const allowed = new Set(opts.allowedTools ?? ['getIdentity', 'getInbox']);
   const executed = opts.executed ?? [];
@@ -40,7 +41,7 @@ function makeDeps(opts: {
         : { agentId: 'agent-1', companyId: 'company-1', runId: 'run-1' },
     loadAgent: async (agentId, companyId) =>
       agentId === 'agent-1' && companyId === 'company-1'
-        ? { id: 'agent-1', companyId: 'company-1', role: 'engineer' }
+        ? { id: 'agent-1', companyId: 'company-1', role: 'engineer', ...(opts.adapterConfig ? { adapterConfig: opts.adapterConfig } : {}) }
         : null,
     loadCompany: async () => ({ allowedMcpServerIds: ['srv-a'], settings: { foo: 1 } }),
     assembleTools: async (_agent, options) => {
@@ -168,6 +169,42 @@ test('skill endpoint: auth-gated markdown', async () => {
   assert.equal(ok.status, 200);
   assert.equal(ok.contentType, 'text/markdown; charset=utf-8');
   assert.match(String(ok.body), /tourbillon\.heartbeat/);
+});
+
+test('skill endpoint: OpenCode-bound agent gets the OpenCode SKILL.md blob, Hermes runs keep theirs', async () => {
+  const oc = await handleHarnessSkill({
+    authorization: AUTH,
+    deps: makeDeps({
+      adapterConfig: { harness: 'opencode', mode: 'local', command: 'opencode run' },
+    }).deps,
+  });
+  assert.equal(oc.status, 200);
+  assert.match(String(oc.body), /opencode serve/); // OpenCode-specific binding taught
+  assert.doesNotMatch(String(oc.body), /A2A/); // not the Hermes text
+
+  const hermesBound = await handleHarnessSkill({
+    authorization: AUTH,
+    deps: makeDeps({ adapterConfig: { harness: 'hermes', mode: 'local', command: 'hermes run' } }).deps,
+  });
+  assert.match(String(hermesBound.body), /A2A/);
+
+  const plain = await handleHarnessSkill({ authorization: AUTH, deps: makeDeps().deps });
+  assert.match(String(plain.body), /A2A/, 'non-harness agents keep the Hermes default blob');
+});
+
+test('skill endpoint: OpenCode bind skillInstall override wins', async () => {
+  const res = await handleHarnessSkill({
+    authorization: AUTH,
+    deps: makeDeps({
+      adapterConfig: {
+        harness: 'opencode',
+        mode: 'local',
+        command: 'opencode run',
+        skillInstall: 'CUSTOM OC SKILL',
+      },
+    }).deps,
+  });
+  assert.equal(res.body, 'CUSTOM OC SKILL');
 });
 
 test('chat endpoint: authenticated 501 stub with follow-up pointer', async () => {
