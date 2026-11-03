@@ -405,6 +405,27 @@ export type SSEEventType =
  */
 export const TASK_PROGRESS_SSE_TYPE = 'chat_task_progress' satisfies SSEEventType;
 
+/**
+ * S307-S2 (#304 softs): the ONE status union for `chat_task_progress` events. It used to be
+ * declared three times: scheduler `ChatTaskProgressEvent` (task-runner.ts), mastra
+ * `TaskProgressEventShape` (concierge-signal.ts) and the web parser's inline accept set
+ * (apps/web/lib/assistant/task-progress-signals.ts). All three now consume THIS declaration
+ * (the tuple is the runtime accept set via `isTaskProgressStatus`, the derived type is the
+ * compile-time one). Exactly the four words the scheduler can publish on this channel:
+ * `started` carries 'running', done/needs_review carry WakeResult.status ('succeeded' |
+ * 'failed' | 'skipped'). coalesced/cancelled are heartbeat_runs ROW statuses and must NOT be
+ * added here without the scheduler publisher change (S304-S2, #304).
+ */
+export const TASK_PROGRESS_STATUSES = ['running', 'succeeded', 'failed', 'skipped'] as const;
+
+/** The `chat_task_progress` status union — single source (S307-S2). */
+export type TaskProgressStatus = (typeof TASK_PROGRESS_STATUSES)[number];
+
+/** Runtime accept-set check for {@link TaskProgressStatus} (the web SSE parser's single source). */
+export function isTaskProgressStatus(value: unknown): value is TaskProgressStatus {
+  return typeof value === 'string' && (TASK_PROGRESS_STATUSES as readonly string[]).includes(value);
+}
+
 export interface SSEEvent {
   type: SSEEventType;
   companyId: string;
