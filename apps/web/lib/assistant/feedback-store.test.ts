@@ -16,7 +16,18 @@ const dialect = new PgDialect();
 const executed: Array<{ sql: string; params: unknown[] }> = [];
 let nextRows: unknown[] = [];
 /** When set, statements run on this PGlite instance instead of the recorder. */
-let pg: { query: (sql: string, params: unknown[]) => Promise<{ rows: unknown[] }>; exec: (sql: string) => Promise<unknown>; close: () => Promise<void> } | null = null;
+let pg: { query: (sql: string, params: unknown[]) => Promise<{ rows: unknown[] }>; exec: (sql: string) => Promise<unknown>; close: () => Promise<void>; closed: boolean } | null = null;
+/**
+ * S313-S2: every PGlite instance this file opens, watched for a prompt close.
+ * Dropping `close()` from afterEach/after survives pass/fail entirely — the only
+ * symptom was the leaked WASM instance keeping the process alive (this file's
+ * runtime ballooned ~2.3s -> ~12.5s under load). So the convention gets a real
+ * handle check: afterEach asserts the instance it closed reports `closed`, and
+ * the file-level `after` asserts every instance opened during the run was
+ * ALREADY closed by the per-test hook before it does its own safety-net close.
+ * Delete the afterEach close and the after hook fails this file RED.
+ */
+const opened: Array<{ closed: boolean; close: () => Promise<void> }> = [];
 
 describe('OBS-2 feedback store', () => {
   let store: typeof import('./feedback-store');
@@ -56,9 +67,15 @@ describe('OBS-2 feedback store', () => {
     const instance = pg;
     pg = null;
     await instance?.close();
+    if (instance) assert.ok(instance.closed, 'PGlite instance is closed after afterEach close() resolves');
   });
 
   after(async () => {
+    // S313-S2: the per-test hook above owns the close; this hook only backstops
+    // a crash between open and close. Seeing an OPEN instance here means the
+    // afterEach close was dropped (or never awaited) — fail, don't paper over.
+    const stillOpen = opened.filter((instance) => !instance.closed);
+    assert.equal(stillOpen.length, 0, `every PGlite instance opened by this file must already be closed by afterEach (${stillOpen.length} open)`);
     const instance = pg;
     pg = null;
     await instance?.close();
@@ -88,7 +105,9 @@ describe('OBS-2 feedback store', () => {
 
   it('on Postgres: replaces one user’s entry per message, keeps other users, messages and metadata', async () => {
     const { PGlite } = dbRequire('@electric-sql/pglite');
-    pg = new PGlite();
+    const instance = new PGlite();
+    opened.push(instance);
+    pg = instance;
     await pg!.exec(`CREATE TABLE mastra_threads (id text PRIMARY KEY, "resourceId" text, title text, metadata jsonb);
       INSERT INTO mastra_threads VALUES
         ('t1', 'company-c1:chat:free', 'T', '{"agentId":"a1","assistantReadMessageId":"m0"}'),
