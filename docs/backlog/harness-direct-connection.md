@@ -90,7 +90,7 @@ All of these live in `agents.adapterConfig` (jsonb); see "Where bind config live
 5. Chat works when the harness advertises support (sync and/or stream).
 6. OpenCode binds through the same harness-neutral seams.
 
-Status: 1-4 are shipped for Hermes with #316 (see Implemented below); 5 (chat, 501 stub today) and 6 (OpenCode) remain open.
+Status: 1-4 are shipped for Hermes with #316 (see Implemented below); 5 (chat, 501 stub today) remains open; 6 (OpenCode) shipped with the second pack (see Implemented (OpenCode slice) below).
 
 ## Implemented (Hermes slice, #281 first pack)
 
@@ -115,3 +115,29 @@ Status: 1-4 are shipped for Hermes with #316 (see Implemented below); 5 (chat, 5
   the callback `skill` endpoint.
 - **OpenCode:** deliberately not implemented; shared seams (envelope types, callback gate deps)
   are harness-neutral so the second pack can reuse them.
+
+## Implemented (OpenCode slice, #281 second pack)
+
+- **Bind storage:** same jsonb-only pattern — `adapterConfig.harness = "opencode"` with the same
+  shape as the Hermes bind (`mode`, `command` / loopback `localBaseUrl`, or `harnessBaseUrl` +
+  `apiToken` ≥16 chars, optional `callbackBaseUrl`, `skillInstall`; unknown keys rejected).
+  Schema + validation: `packages/shared/src/opencode-harness.ts` (twin of the Hermes module).
+- **Heartbeat:** `packages/scheduler/src/adapters/opencode-adapter.ts` (routed from
+  `wake-runner.ts` on `harness === 'opencode'`; malformed bind fails the run loudly — never a
+  silent fallback to AgentController or Hermes). Transports: local CLI bind with the same
+  `TOURBILLON_WAKE_JSON` / `TOURBILLON_CALLBACK_URL` / `TOURBILLON_SESSION_TOKEN` env contract,
+  or HTTP against the **measured** `opencode serve` REST surface (1.18.35: `POST /session` +
+  sync `POST /session/{id}/message`; `info.finish === "stop"` is the only pass, `info.tokens`
+  feeds usage; `GET /event` SSE exists — the stream leg is a follow-up). The envelope kind
+  stays `tourbillon.heartbeat` v1; it rides session `metadata.tourbillon` AND a fenced JSON
+  block in the prompt text (OpenCode messages have no per-message metadata). Every heartbeat
+  fails closed without `callback.baseUrl` + `callback.sessionToken`. Note: `serve` gates on
+  `OPENCODE_SERVER_PASSWORD` basic auth (401 + `www-authenticate: Basic` measured); remote binds
+  should sit behind an operator-managed authenticating proxy validating the bind `apiToken`.
+- **Callback:** unchanged shared stack (`apps/web/app/api/harness/callback/*`); the `skill`
+  endpoint is harness-kind aware — OpenCode runs get the OpenCode blob
+  (`OPENCODE_SKILL_INSTALL_MD`, installable as `.opencode/skill/tourbillon-agent/SKILL.md` or
+  `~/.agents/skills/tourbillon-agent/SKILL.md`), Hermes runs keep theirs. Chat stays 501
+  (board chat is a Tourbillon-side surface; DMs flow via `sendToAgent`).
+- **Observability:** external OpenCode runs write no Mastra spans; the run row stamps
+  `contextSnapshot.harness = { kind: 'opencode', mode, callbackBaseUrl }`.
