@@ -14,6 +14,12 @@
  * mode branching, the S296-S4 empty-draft swallow, and the send / steer routing.
  * S301-S2 (Refs #301): ChatPaneBody is no longer a named export; this file reaches it through the
  * seam, and the final test pins that no app host touches the test-only surface.
+ *
+ * S309-S1/S2 (Refs #301): the seam is only real if the tests prove it is USED. The stub-menu
+ * creation assertion kills the bypass mutant (header rendering the imported ChatSendKeyMenu
+ * directly instead of the seam entry); the runtime no-export check kills the re-export mutant
+ * (`export function ChatPaneBody`) that the source-scan pin cannot see, because that pin exempts
+ * the pane file itself.
  */
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -87,6 +93,10 @@ describe('S296-S5 Control-Pane composer keydown (DOM level)', () => {
   let ChatPaneBody: (p: Record<string, unknown>) => React.ReactNode;
   let lastCapture: El[] = [];
   let restore: () => void = () => {};
+  // S309-S1: how many elements of the *stub's* type the header created — proof the pane renders
+  // the seam entry rather than the imported ChatSendKeyMenu directly. Reset per render below.
+  let StubMenu: (() => React.ReactElement) | null = null;
+  let menuStubCreations = 0;
 
   before(async () => {
     // tsx compiles JSX with the classic runtime (tsconfig jsx: preserve): agent-chat-pane.tsx
@@ -114,9 +124,11 @@ describe('S296-S5 Control-Pane composer keydown (DOM level)', () => {
     // The session hook is NOT stubbed: ChatPaneBody receives the session as a prop, and the pure
     // message helpers run for real over the (empty) message list.
     seam.useChatSendKeyMode = () => [stub.mode, () => {}];
-    seam.ChatSendKeyMenu = function ChatSendKeyMenuStub() {
-      return React.createElement(React.Fragment);
+    StubMenu = function ChatSendKeyMenuStub() {
+      menuStubCreations += 1;
+      return React.createElement('span', { 'data-stub-chat-send-key-menu': '1' });
     };
+    seam.ChatSendKeyMenu = StubMenu;
 
     ChatPaneBody = seam.ChatPaneBody as unknown as (p: Record<string, unknown>) => React.ReactNode;
   });
@@ -125,6 +137,7 @@ describe('S296-S5 Control-Pane composer keydown (DOM level)', () => {
 
   function composerTextarea(): El {
     lastCapture = [];
+    menuStubCreations = 0;
     renderToStaticMarkup(
       React.createElement(ChatPaneBody, {
         agentName: 'Test Agent',
@@ -213,6 +226,37 @@ describe('S296-S5 Control-Pane composer keydown (DOM level)', () => {
       assert.equal(press(el, { key: 'Enter', metaKey: true, nativeEvent: { isComposing: true } }), false, mode);
       assert.deepEqual([stub.sends, stub.steers], [[], []], mode);
     }
+  });
+
+  it('S309-S1: the header renders the ChatSendKeyMenu THROUGH the seam entry, not the import', () => {
+    // Mutant g4 (bypassed seam: `<ChatSendKeyMenu />` instead of `<__test__.ChatSendKeyMenu />`)
+    // survived 18/18 because nothing observed the seam entry. The real menu SSR-renders happily,
+    // so only identity proves the swap: an element whose type is the stub function can exist only
+    // if the pane read the seam at render time, and exactly one exists per pane render.
+    reset({ mode: 'enter_sends', input: '' });
+    composerTextarea();
+    assert.ok(StubMenu, 'the seam stub was installed in before()');
+    const stubEls = lastCapture.filter((e) => e.type === StubMenu);
+    assert.equal(stubEls.length, 1, 'the pane header rendered the seam ChatSendKeyMenu entry exactly once');
+    assert.ok(
+      lastCapture.some((e) => e.props?.['data-stub-chat-send-key-menu'] === '1') ||
+        /data-stub-chat-send-key-menu="1"/.test(renderToStaticMarkup(stubEls[0]!)),
+      'the stub itself renders (its marker element reaches the tree)',
+    );
+  });
+
+  it('S309-S2: ChatPaneBody is not re-exported from the pane module (runtime + source pin)', async () => {
+    // The S301-S2 source pin exempts the pane file itself, so `export function ChatPaneBody`
+    // (mutant g7, survived 18/18) slips through it. This closes the gap twice over: the runtime
+    // check catches any export form that puts the body on the module object (direct export OR
+    // `export { ChatPaneBody }`), and the regex catches source text before compilation.
+    // tsx compiles these modules to CJS, so a value export always lands as an own key.
+    const mod = await import('./agent-chat-pane'); // same module instance as before() (cached)
+    assert.ok(!('ChatPaneBody' in mod), 'ChatPaneBody must stay off the module surface — reach it via __test__');
+    assert.equal(typeof mod.__test__.ChatPaneBody, 'function', 'the seam entry is still the way in');
+    const src = readFileSync(fileURLToPath(new URL('./agent-chat-pane.tsx', import.meta.url)), 'utf8');
+    assert.doesNotMatch(src, /^\s*export\s+function\s+ChatPaneBody\b/m, 'no exported ChatPaneBody declaration');
+    assert.doesNotMatch(src, /^\s*export\s*\{[^}]*\bChatPaneBody\b[^}]*\}/m, 'no ChatPaneBody re-export list');
   });
 
   it('S301-S2: the test-only pane surface stays test-only (source pin)', () => {

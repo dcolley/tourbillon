@@ -632,6 +632,12 @@ export const __test__ = {
   useAgentChat,
   useChatSendKeyMode,
 };
+// S309-S4 (Refs #301): freeze in production builds only (positive check: Next replaces
+// process.env.NODE_ENV statically; the tsx test runner never runs with NODE_ENV=production, so
+// the seam stays swappable under tests and mutable under Fast Refresh). Same idiom as pane.
+if (process.env.NODE_ENV === 'production') {
+  Object.freeze(__test__);
+}
 
 /**
  * Chat with one agent. `agentId` is used for the API calls; `agentKey` (the agent's url key, default

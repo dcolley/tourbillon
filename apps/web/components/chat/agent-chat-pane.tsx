@@ -714,6 +714,14 @@ export const __test__ = {
   useChatSendKeyMode,
   ChatSendKeyMenu,
 };
+// S309-S4 (Refs #301): this object ships inside the client bundle — freeze it in production
+// builds so a stray render path cannot swap the stubs at runtime. The check is positive on
+// 'production': Next replaces process.env.NODE_ENV statically (dead-code-eliminated in dev), and
+// the tsx node:test runner (which mutates the seam) never runs with NODE_ENV=production, so the
+// seam stays swappable under tests and mutable under Fast Refresh re-evaluation.
+if (process.env.NODE_ENV === 'production') {
+  Object.freeze(__test__);
+}
 
 function RenameChatThreadDialog({
   open,
