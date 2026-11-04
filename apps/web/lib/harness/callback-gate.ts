@@ -169,6 +169,11 @@ export function resolveGatedTool(tools: Record<string, unknown>, name: string): 
     return t && typeof t === 'object' && typeof t.execute === 'function' ? t : undefined;
   };
   const stripped = name.endsWith('Tool') && name.length > 'Tool'.length ? name.slice(0, -'Tool'.length) : null;
+  // S331-5a (#331): the key tiers run BEFORE the id scan, so an assembled `${name}Tool` KEY
+  // returns found even when TWO different tools carry `id === name` — the short name never
+  // reaches the ambiguous branch while that key exists. This is pinned precedence, not an
+  // oversight: assembled keys are unique by construction, and the collision only matters
+  // when the caller has no key to fall back on.
   for (const key of [name, `${name}Tool`, ...(stripped ? [stripped] : [])]) {
     if (!Object.prototype.hasOwnProperty.call(tools, key)) continue;
     const t = executable(tools[key]);
@@ -191,6 +196,25 @@ export function resolveGatedTool(tools: Record<string, unknown>, name: string): 
 export function findGatedTool(tools: Record<string, unknown>, name: string): GateableTool | undefined {
   const hit = resolveGatedTool(tools, name);
   return hit.kind === 'found' ? hit.tool : undefined;
+}
+
+/**
+ * S331-2 (#331): the SINGLE ambiguous-tool refusal, shared by tools/call and chat so both
+ * surfaces answer an id collision with the SAME 409 shape (`ambiguous_tool` + candidates).
+ * Chat used to fold ambiguous into "absent" and answer 403 chat_not_permitted — same
+ * fail-closed outcome (nothing executes), wrong status/shape for a harness reconciling
+ * its tool surface.
+ */
+export function ambiguousToolResult(toolName: string, keys: string[]): HttpResult {
+  return {
+    status: 409,
+    body: {
+      error: 'ambiguous_tool',
+      tool: toolName,
+      candidates: keys,
+      message: `Tool '${toolName}' matches more than one assembled tool (${keys.join(', ')}). Call it by its assembled key.`,
+    },
+  };
 }
 
 /**
@@ -230,15 +254,7 @@ export async function handleHarnessToolCall(params: {
   const lookup = resolveGatedTool(tools, toolName);
   if (lookup.kind === 'ambiguous') {
     // S328-S1: two assembled tools claim this id — refuse rather than run whichever came first.
-    return {
-      status: 409,
-      body: {
-        error: 'ambiguous_tool',
-        tool: toolName,
-        candidates: lookup.keys,
-        message: `Tool '${toolName}' matches more than one assembled tool (${lookup.keys.join(', ')}). Call it by its assembled key.`,
-      },
-    };
+    return ambiguousToolResult(toolName, lookup.keys);
   }
   const tool = lookup.kind === 'found' ? lookup.tool : undefined;
   if (!tool || typeof tool.execute !== 'function') {
@@ -370,9 +386,6 @@ export function resolveHarnessChatCapability(
 
 /** The DM tool from the ASSEMBLED set only (keyed `sendToAgentTool` by the control plane). */
 const DM_TOOL_ID = 'sendToAgent';
-function findGatedDmTool(tools: Record<string, unknown>): GateableTool | undefined {
-  return findGatedTool(tools, DM_TOOL_ID);
-}
 
 function deliveryFailed(result: unknown): string | null {
   if (result && typeof result === 'object' && 'error' in result) {
@@ -396,6 +409,8 @@ function deliveryFailed(result: unknown): string | null {
  *     `chat_recipient_required`;
  *  7. capability gate: `sendToAgent` in `assembleAgentTools` → else 403 `chat_not_permitted`
  *     (never executed; only reached once every 400 has passed — assembly is not even run before);
+ *     two assembled tools claiming the `sendToAgent` id → same 409 `ambiguous_tool` as
+ *     tools/call (S331-2), also without executing;
  *  8. execute the gated DM tool with the session token as apiKey.
  * Sync ⇒ JSON-RPC result (A2A agent Message); delivery failure ⇒ 502 `chat_delivery_failed`.
  * Stream ⇒ SSE (status working → Message → final), BUFFERED: all frames are emitted together
@@ -484,7 +499,14 @@ export async function handleHarnessChat(params: {
   }
 
   // ── THE GATE: chat rides the agent's own DM tool; absent ⇒ refused, never executed. ──
-  const dmTool = findGatedDmTool(tools);
+  // S331-2 (#331): an id COLLISION answers the same 409 ambiguous_tool as tools/call (was
+  // 403 chat_not_permitted via findGatedTool folding ambiguous into absent). Still fail-closed:
+  // nothing executes on either refusal.
+  const dmLookup = resolveGatedTool(tools, DM_TOOL_ID);
+  if (dmLookup.kind === 'ambiguous') {
+    return ambiguousToolResult(DM_TOOL_ID, dmLookup.keys);
+  }
+  const dmTool = dmLookup.kind === 'found' ? dmLookup.tool : undefined;
   if (!dmTool || typeof dmTool.execute !== 'function') {
     return {
       status: 403,

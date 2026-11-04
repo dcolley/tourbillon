@@ -44,6 +44,12 @@ export interface HarnessRunResult {
   finishReason: 'complete' | 'suspended' | 'error' | 'timeout' | 'max_steps' | 'repeated_tool_loop';
   suspendedToolCallId?: string;
   traceId?: string;
+  /**
+   * S331-4 (#331): short operator-facing failure cause from the external Hermes/OpenCode
+   * adapters (command exit code, gateway HTTP status, JSON-RPC message). Never a token;
+   * wake-runner sanitizes + caps it before persisting to heartbeat_runs.errorText.
+   */
+  detail?: string;
 }
 
 /**

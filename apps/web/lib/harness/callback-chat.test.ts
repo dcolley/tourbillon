@@ -18,7 +18,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { z } from 'zod';
-import { handleHarnessChat, resolveHarnessChatCapability, type HarnessCallbackDeps } from './callback-gate';
+import { handleHarnessChat, handleHarnessToolCall, resolveHarnessChatCapability, type HarnessCallbackDeps } from './callback-gate';
 import { harnessChatPost } from './callback-http';
 
 interface Sent {
@@ -471,4 +471,44 @@ test('PIN S327-S3 route: stream 200 ⇒ text/event-stream + no-cache/no-transfor
   assert.equal(sync.status, 200);
   assert.match(sync.headers.get('content-type') ?? '', /application\/json/);
   assert.equal(sync.headers.get('x-accel-buffering'), null);
+});
+
+// ── S331-2 (#331): ambiguous DM id — chat answers the SAME 409 as tools/call ──────────────
+test('PIN S331-2: two gated tools collide on sendToAgent ⇒ chat and tools/call both answer the SAME 409 ambiguous_tool, DM NEVER executes', async () => {
+  const ran: string[] = [];
+  const colliding = (label: string) => ({
+    id: 'sendToAgent',
+    execute: async () => {
+      ran.push(label);
+      return { ok: true, label };
+    },
+  });
+  const { deps, sent } = makeDeps();
+  deps.assembleTools = async () => ({
+    mcp_one_dm: colliding('one'),
+    mcp_two_dm: colliding('two'),
+  });
+
+  const chat = await handleHarnessChat({ authorization: AUTH, body: chatBody(), deps });
+  // Pre-S331-2 this was 403 chat_not_permitted (findGatedTool folded ambiguous into absent).
+  assert.equal(chat.status, 409, 'ambiguous DM id must be 409 on the chat path, not 403');
+  const call = await handleHarnessToolCall({ authorization: AUTH, body: { tool: 'sendToAgent', args: {} }, deps });
+  assert.equal(call.status, 409);
+
+  const chatOut = chat.body as Record<string, unknown>;
+  const callOut = call.body as Record<string, unknown>;
+  assert.equal(chatOut.error, 'ambiguous_tool');
+  assert.equal(chatOut.tool, 'sendToAgent');
+  assert.deepEqual(chatOut.candidates, ['mcp_one_dm', 'mcp_two_dm']);
+  // SAME status AND body shape on both paths (same tool name ⇒ identical bodies).
+  assert.deepEqual(Object.keys(chatOut).sort(), Object.keys(callOut).sort());
+  assert.deepEqual(chatOut, callOut);
+  assert.deepEqual(ran, [], 'neither colliding DM tool executes on either path');
+  assert.deepEqual(sent, [], 'makeDeps DM never ran');
+
+  // Fail-closed parity stays: an absent tool is STILL 403 chat_not_permitted (not 409).
+  const { deps: absentDeps } = makeDeps({ toolKeys: ['getIdentityTool'] });
+  const absent = await handleHarnessChat({ authorization: AUTH, body: chatBody(), deps: absentDeps });
+  assert.equal(absent.status, 403);
+  assert.equal((absent.body as { error: string }).error, 'chat_not_permitted');
 });
