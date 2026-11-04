@@ -134,7 +134,14 @@ export async function defaultSpawnCommand(
       if (stderr.length < cap) stderr += chunk.toString('utf8').slice(0, cap - stderr.length);
     });
     // The envelope also rides stdin for harnesses that read stdin instead of env.
-    child.stdin?.write(env[HERMES_WAKE_ENV.wakeJson]);
+    // NIT-2 (#335 review) hardening, two parts, both proven by hermes-adapter-spawn-env.test.ts:
+    //  - wakeJson is always set by the adapters' env builder, but an un-guarded
+    //    write(undefined) throws inside the executor and rejects the dispatch; '' keeps it total.
+    //  - The stdin envelope is BEST-EFFORT: a CLI that never reads stdin (or exits fast, e.g.
+    //    `true`) closes the pipe and the write EPIPEs — an unhandled stream error would reject
+    //    an otherwise-successful dispatch. The env vars still carry the full envelope.
+    child.stdin?.on('error', () => {});
+    child.stdin?.write(env[HERMES_WAKE_ENV.wakeJson] ?? '');
     child.stdin?.end();
     const kill = () => child.kill('SIGKILL');
     if (signal.aborted) kill();

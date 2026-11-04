@@ -175,3 +175,14 @@ test('S331-3 SOURCE PINS: defaultSpawnCommand wires harnessChildEnv; neither ada
   assert.match(hermesSrc, /spawnCommand\s*\?\?\s*defaultSpawnCommand/);
   assert.match(opencodeSrc, /spawnCommand\s*\?\?\s*defaultSpawnCommand/);
 });
+
+test('NIT-2: defaultSpawnCommand with TOURBILLON_WAKE_JSON ABSENT resolves instead of rejecting (stdin write guarded)', async () => {
+  // The adapters always set wakeJson, but write(undefined) would throw inside the executor
+  // and reject the whole dispatch on any caller that forgets it. Guarded with ?? ''.
+  const res: HermesSpawnResult = await defaultSpawnCommand(
+    'true',
+    { [HERMES_WAKE_ENV.callbackUrl]: 'http://127.0.0.1:9/cb', [HERMES_WAKE_ENV.sessionToken]: 'pm_run_guard_probe' },
+    new AbortController().signal,
+  );
+  assert.equal(res.exitCode, 0, 'child ran with stdin envelope absent-but-empty');
+});
