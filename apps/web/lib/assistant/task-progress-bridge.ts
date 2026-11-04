@@ -22,6 +22,8 @@
  */
 import IORedis from 'ioredis';
 import { aguiSessionScope } from '@/lib/agui/run-input';
+// Leaf module (no deps) — static import so the S332-S2 pin exercises the REAL keying helper.
+import { chatSessionId } from '@/lib/chat/session-id';
 import type { Agent } from '@tourbillon/db';
 import type { QueueSignalSession, TaskProgressSignalPayload } from '@tourbillon/mastra/concierge-signal';
 import {
@@ -235,6 +237,39 @@ export function createDeliver(deps: DeliverDeps) {
  */
 export type ChatAgentSeam = Pick<Agent, 'id' | 'companyId' | 'status'>;
 
+/** The chat-module slice the deliver adapter consumes (S332-S2 seam shape). */
+export type RealDeliverChatModule = {
+  getOrCreateChatController(
+    agent: Agent,
+  ): Promise<{ getSession(sessionId: string): Promise<DeliverSession | null | undefined> }>;
+};
+
+/**
+ * S332-S2: the (resourceId, scope) -> live-session adapter used by `realDeliver`, extracted
+ * and exported so a test can PIN it. Before this, the adapter lived only inside the
+ * `realDeliver` closure while the bridge test injected a fake `getSessionByResource` at the
+ * `DeliverDeps` seam — so reverting the Mastra 1.81 fix here (`getSession(resourceId)`,
+ * scope dropped) kept the whole suite GREEN while the bridge silently delivered to the wrong
+ * (or no) session. `task-progress-bridge-332-softs.test.ts` calls THIS function.
+ *
+ * Test seam (same convention as agent-factory's model-factory option): `loadChat` defaults
+ * to the real `@/lib/chat` import; tests inject a fake module. `chatSessionId` stays a
+ * STATIC import on purpose — the pin must exercise the real keying helper, not something a
+ * mock could replace.
+ */
+export async function realDeliverGetOrCreateChatController(
+  agent: TaskProgressAgentRecord,
+  loadChat: () => Promise<RealDeliverChatModule> = () => import('@/lib/chat'),
+): Promise<DeliverChatController> {
+  const chat = await loadChat();
+  const controller = await chat.getOrCreateChatController(agent as ChatAgentSeam as Agent);
+  // Mastra 1.81: the live session for (resourceId, scope) is getSession(chatSessionId(...)).
+  return {
+    getSessionByResource: (resourceId: string, scope: string) =>
+      controller.getSession(chatSessionId(resourceId, scope)),
+  };
+}
+
 const realDeliver = createDeliver({
   resourceId: async (agent) => (await import('@/lib/chat')).chatResourceId(agent.companyId),
   // S18 + S19b: two CHECKED assertion steps through the named `ChatAgentSeam` — never through
@@ -242,16 +277,7 @@ const realDeliver = createDeliver({
   // leg is what tsc validates: the record must still structurally fit Pick<Agent, 'id' |
   // 'companyId' | 'status'> — e.g. renaming `companyId` or turning `status` into a boolean
   // breaks tsc HERE. The second leg is the trivial comparable widen ChatAgentSeam -> Agent.
-  getOrCreateChatController: async (agent) => {
-    const chat = await import('@/lib/chat');
-    const { chatSessionId } = await import('@/lib/chat/session-id');
-    const controller = await chat.getOrCreateChatController(agent as ChatAgentSeam as Agent);
-    // Mastra 1.81: the live session for (resourceId, scope) is getSession(chatSessionId(...)).
-    return {
-      getSessionByResource: (resourceId: string, scope: string) =>
-        controller.getSession(chatSessionId(resourceId, scope)),
-    };
-  },
+  getOrCreateChatController: realDeliverGetOrCreateChatController,
   getChatSession: async (controller, agent, opts) =>
     (await import('@/lib/chat')).getChatSession(controller as never, agent as ChatAgentSeam as Agent, opts),
 });

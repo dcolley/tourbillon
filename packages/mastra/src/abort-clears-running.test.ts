@@ -87,44 +87,55 @@ describe('Session.abort() clears running state (Mastra 1.63)', () => {
       );
       
       // Now abort (as the route does). isRunning stays true until agent_end.
+      //
+      // S332-S3: the mock stream is deliberately LEFT OPEN here. The previous shape
+      // closed `streamController` immediately after abort(), so deleting the
+      // `session.abort()` call below stayed GREEN — close() ended the run naturally
+      // and both agent_end and isRunning=false still arrived. Now agent_end must be
+      // produced by abort() itself against a still-open stream: with abort removed,
+      // the deadline lapses and the assertions below fail BEFORE any cleanup runs.
+      // Cleanup happens in the finally — after the assertions — so a red run still
+      // releases the stream and cannot hang the suite.
       let agentEnded = false;
       const unsubscribe = session.subscribe((event) => {
         if (event.type === 'agent_end') agentEnded = true;
       });
       session.abort();
-      
-      // Clean up stream
-      try {
-        streamController?.close();
-      } catch {
-        // Abort may already have closed the mock body.
-      }
-      await messagePromise.catch(() => {}); // Swallow abort error
 
-      const deadline = Date.now() + 2_000;
-      while (!agentEnded && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 10));
+      try {
+        const deadline = Date.now() + 2_000;
+        while (!agentEnded && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+
+        // KEY ASSERTION: abort() must clear isRunning to false via agent_end.
+        // This FAILS if the run never finalizes and running stays stuck true.
+        assert.equal(agentEnded, true, 'abort() must emit agent_end (HOLD 2 requirement)');
+        const displayStateAfterAbort = session.displayState.get();
+        assert.equal(
+          displayStateAfterAbort.isRunning,
+          false,
+          'abort() must clear isRunning to false (HOLD 2 requirement)'
+        );
+
+        // Also verify displayState.set() doesn't exist (read-only in 1.63+)
+        assert.equal(
+          'set' in session.displayState,
+          false,
+          'displayState.set should not exist in Mastra 1.63+ (read-only)'
+        );
+      } finally {
+        unsubscribe();
+        // Release the still-open mock stream so messagePromise settles and the
+        // suite can exit, whichever way the assertions above went.
+        try {
+          streamController?.close();
+        } catch {
+          // Abort may already have closed the mock body.
+        }
+        await messagePromise.catch(() => {}); // Swallow abort error
       }
-      unsubscribe();
-      
-      const displayStateAfterAbort = session.displayState.get();
-      
-      // KEY ASSERTION: abort() must clear isRunning to false via agent_end.
-      // This FAILS if the run never finalizes and running stays stuck true.
-      assert.equal(agentEnded, true, 'abort() must emit agent_end (HOLD 2 requirement)');
-      assert.equal(
-        displayStateAfterAbort.isRunning,
-        false,
-        'abort() must clear isRunning to false (HOLD 2 requirement)'
-      );
-      
-      // Also verify displayState.set() doesn't exist (read-only in 1.63+)
-      assert.equal(
-        'set' in session.displayState,
-        false,
-        'displayState.set should not exist in Mastra 1.63+ (read-only)'
-      );
-      
+
     } finally {
       globalThis.fetch = originalFetch;
     }
