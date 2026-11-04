@@ -2,7 +2,7 @@
  * #247 softs S247-S1 — behavioural resolution pin for the scheduler `@mastra/core` devDep.
  *
  * S241-S1 (task-runner-241-softs.test.ts) pinned the DECLARATION: packages/scheduler/
- * package.json lists `@mastra/core` 1.78.0 in devDependencies. That guard is text-level —
+ * package.json lists `@mastra/core` 1.81.0 in devDependencies. That guard is text-level —
  * it REDs when the manifest is edited, but not when the installed tree stops satisfying
  * it (link evicted, version drifted away from what is actually in node_modules). The real
  * failure mode behind #241 was runtime: `import '@mastra/core/observability'` in
@@ -255,7 +255,7 @@ test('S247-S1: the declared @mastra/core devDep is materialised in packages/sche
   );
   const real = realpathSync(SCHEDULER_MASTRA_CORE);
   // S250-S2: pin the DECLARED version, not "any version". Read the scheduler devDep from
-  // package.json (currently 1.78.0) — never hardcode a stale major here. A bare
+  // package.json (currently 1.81.0) — never hardcode a stale major here. A bare
   // `/@mastra\+core@/` accepted a fake store entry (9.9.9 passed this test pre-fix; only
   // the sibling test noticed), so the store directory AND the installed package.json
   // version must both equal the declared devDep.
@@ -478,7 +478,7 @@ test('S251-S1: childResolve is wired through the single childEnv-built spawn sit
 });
 
 test('S251-S2: declared-version comparison stays meaningful when the devDep spec carries a range prefix', () => {
-  // The manifest declares '@mastra/core' exactly ('1.78.0', pinned by S241-S1) and the
+  // The manifest declares '@mastra/core' exactly ('1.81.0', pinned by S241-S1) and the
   // materialisation test compares with assert.equal — correct for an exact pin. But a raw
   // compare against the DECLARED STRING fails misleadingly the moment the devDep becomes
   // a range: "the store entry must be the DECLARED version ^1.78.0" can never be true,

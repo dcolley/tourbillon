@@ -18,6 +18,7 @@
 import { parseCompanySettings, type AgentRuntimeConfig } from '@tourbillon/shared';
 import { getActiveCompany } from '@/lib/company';
 import { listCachedChatControllersForAgent, type TourbillonChatSession } from '@/lib/chat';
+import { chatSessionId } from '@/lib/chat/session-id';
 import { aguiSessionScope } from '@/lib/agui/run-input';
 import {
   claimActiveAssistantThread,
@@ -75,7 +76,7 @@ export async function retargetAgentChatSessions(agent: AgentLike, threadId: stri
   let moved = 0;
   for (const controller of await listCachedChatControllersForAgent(agent.id)) {
     try {
-      const session = await controller.getSessionByResource(resourceId, scope);
+      const session = await controller.getSession(chatSessionId(resourceId, scope));
       if (!session || session.thread.getId() === threadId) continue;
       // An open run, or one parked on a card / approval, stays on its thread until it ends.
       if (session.getCurrentRunId()) continue;

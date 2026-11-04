@@ -6,10 +6,15 @@ import { createOpenAI } from '@ai-sdk/openai';
 
 /**
  * HOLD 2: Prove session.abort() clears displayState.isRunning (Mastra 1.63+)
- * 
+ *
  * #24 required Stop to clear a false working state when abort() left isRunning true.
  * This test FAILS if abort() doesn't clear isRunning.
- * 
+ *
+ * Mastra 1.81 no longer flips isRunning inside abort() itself. abort() requests
+ * the run stop; displayState.isRunning becomes false on the following agent_end,
+ * once the model stream finalizes. sendMessage() can resolve on the abort
+ * request before that event, so the assertion waits for agent_end.
+ *
  * Uses REAL Mastra Session with streaming mock that sets isRunning: true.
  */
 describe('Session.abort() clears running state (Mastra 1.63)', () => {
@@ -81,17 +86,32 @@ describe('Session.abort() clears running state (Mastra 1.63)', () => {
         'isRunning must be true during active sendMessage stream'
       );
       
-      // Now abort (as the route does)
+      // Now abort (as the route does). isRunning stays true until agent_end.
+      let agentEnded = false;
+      const unsubscribe = session.subscribe((event) => {
+        if (event.type === 'agent_end') agentEnded = true;
+      });
       session.abort();
       
       // Clean up stream
-      streamController?.close();
+      try {
+        streamController?.close();
+      } catch {
+        // Abort may already have closed the mock body.
+      }
       await messagePromise.catch(() => {}); // Swallow abort error
+
+      const deadline = Date.now() + 2_000;
+      while (!agentEnded && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      unsubscribe();
       
       const displayStateAfterAbort = session.displayState.get();
       
-      // KEY ASSERTION: abort() must clear isRunning to false
-      // This FAILS if abort() doesn't clear running state
+      // KEY ASSERTION: abort() must clear isRunning to false via agent_end.
+      // This FAILS if the run never finalizes and running stays stuck true.
+      assert.equal(agentEnded, true, 'abort() must emit agent_end (HOLD 2 requirement)');
       assert.equal(
         displayStateAfterAbort.isRunning,
         false,
@@ -116,8 +136,7 @@ describe('Session.abort() clears running state (Mastra 1.63)', () => {
     // 
     // In Mastra 1.63+:
     // - displayState.set() is removed (read-only via .get())
-    // - session.abort() does the force-clear internally
-    // - abort() emits agent_end event with isRunning: false
+    // - session.abort() requests the stop; agent_end clears isRunning
     // - No manual state manipulation needed or possible
     
     const testProvider = createOpenAI({

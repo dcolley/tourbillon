@@ -104,10 +104,9 @@ describe('AGUI-1b client ↔ POST /api/agui/[agentId]', () => {
             if (o.threadId) {
               return stub.controller.createSession({
                 resourceId: o.resourceId,
-                id: o.threadId,
+                id: o.scope ? `${o.resourceId}::${o.scope}` : o.resourceId,
                 ownerId: stub.controller.id,
                 tags: o.tags,
-                scope: o.scope,
                 threadId: o.threadId,
               });
             }
@@ -120,7 +119,6 @@ describe('AGUI-1b client ↔ POST /api/agui/[agentId]', () => {
                       resourceId: o.resourceId,
                       id: key,
                       ownerId: stub.controller.id,
-                      scope: o.scope,
                       createInitialThread: false,
                     })
                   : await stub.createSession(o.resourceId, o.scope),

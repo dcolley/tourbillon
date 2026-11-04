@@ -233,13 +233,26 @@ export function buildCodeExecutionWorkspace(): Workspace {
             }
           : { allowNetwork: osNetworkShare };
 
-      const sandbox = new LocalSandbox({
-        workingDirectory: cwd,
-        isolation,
-        timeout: resolveSandboxTimeoutMs(runtimeConfig),
-        nativeSandbox,
-        env: Object.keys(sandboxEnv).length > 0 ? sandboxEnv : undefined,
-      });
+      // Mastra 1.81 throws IsolationUnavailableError from the LocalSandbox
+      // constructor when the requested backend (bwrap/seatbelt) is not installed.
+      // The egress proxy is already listening by then; nothing else stops it if
+      // construction throws, so the unix socket keeps the process alive.
+      let sandbox: LocalSandbox;
+      try {
+        sandbox = new LocalSandbox({
+          workingDirectory: cwd,
+          isolation,
+          timeout: resolveSandboxTimeoutMs(runtimeConfig),
+          nativeSandbox,
+          env: Object.keys(sandboxEnv).length > 0 ? sandboxEnv : undefined,
+        });
+      } catch (err) {
+        if (proxy) {
+          await proxy.stop();
+          proxy = undefined;
+        }
+        throw err;
+      }
 
       const originalDestroy = sandbox.destroy.bind(sandbox);
       const destroyCacheKey = companyId

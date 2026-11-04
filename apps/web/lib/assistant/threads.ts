@@ -5,6 +5,7 @@ import {
   getOrCreateChatController,
   type TourbillonChatSession,
 } from '@/lib/chat';
+import { chatSessionId } from '@/lib/chat/session-id';
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { chatErrorResponse } from '@/lib/chat/route-helpers';
@@ -252,7 +253,7 @@ export async function createAssistantThread(
       await creator.thread.setSettingOn({ threadId, key, value });
     }
   } finally {
-    await controller.deleteSession({ resourceId, scope }).catch(() => false);
+    await controller.deleteSession({ sessionId: chatSessionId(resourceId, scope) }).catch(() => false);
   }
   return toAssistantThread(session, await requireAssistantThread(session, agent, threadId), false);
 }

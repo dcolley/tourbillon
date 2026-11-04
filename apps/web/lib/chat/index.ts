@@ -2,6 +2,7 @@ export {
   resolveChatAgent,
   getOrCreateChatController,
   getChatSession,
+  chatSessionId,
   createChatRequestContext,
   getOrCreateChatApiKey,
   chatResourceId,

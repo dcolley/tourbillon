@@ -194,7 +194,6 @@ describe('OBS-2 assistant feedback API', () => {
               resourceId: opts.resourceId,
               id: `${opts.resourceId}::${opts.scope}`,
               ownerId: controller.id,
-              scope: opts.scope,
               createInitialThread: false,
             }),
         };
