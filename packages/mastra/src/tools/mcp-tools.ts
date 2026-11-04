@@ -195,6 +195,13 @@ export { resolveAgentMcpServerIds, agentNeedsMcpTools };
 export interface BuildMCPToolsOptions {
   allowedMcpServerIds?: string[];
   companySettings?: CompanySettings | null;
+  /** Test seam (S331-5b): replace the MCP client factory. Production default is unchanged. */
+  deps?: {
+    getMCPClientImpl?: (
+      serverId: string,
+      options: GetMcpClientOptions,
+    ) => Promise<{ listTools: () => Promise<Record<string, unknown>> } | null>;
+  };
 }
 
 export async function buildMCPTools(
@@ -230,7 +237,7 @@ export async function buildMCPTools(
       }
     }
 
-    const client = await getMCPClient(serverId, {
+    const client = await (options.deps?.getMCPClientImpl ?? getMCPClient)(serverId, {
       companyId: agentRecord.companyId,
       urlKey: agentRecord.urlKey,
       apiKey,
@@ -240,6 +247,12 @@ export async function buildMCPTools(
     try {
       const clientTools = await client.listTools();
       const filtered = filterMcpTools(clientTools, def, runtimeConfig);
+      // S331-5b (#331): LAST-WRITER-WINS merge. Keys are the raw listTools() names, NOT
+      // server-namespaced — a name exposed by two allowed servers is Object.assign'd in
+      // server-iteration order, so the LAST server silently owns the key. The loser never
+      // reaches resolveGatedTool (only one tool exists under that key), so the 409
+      // ambiguous_tool refusal there only ever fires while BOTH tools stay under DISTINCT
+      // keys — cross-server duplicate names never surface as ambiguity, they vanish.
       Object.assign(tools, filtered);
     } catch (err) {
       console.warn(`[mcp-tools] Failed to load tools from ${serverId}:`, err);

@@ -53,6 +53,8 @@ let hermesCalls: { context: Record<string, unknown>; options: Record<string, unk
  * the wake fail instead of riding a benign `{ truncated: false }` stub.
  */
 let spanScanCalls = 0;
+/** S331-4: per-test override of the fake Hermes dispatch result (default: 'complete'). */
+let hermesResultOverride: Record<string, unknown> | undefined;
 const SPAN_SCAN_CALLED = 'detectTruncatedGeneration must never be called for an external harness run (S322-S2 span-scan-skip pin)';
 
 describe('#281 wake-runner Hermes routing', () => {
@@ -187,7 +189,13 @@ describe('#281 wake-runner Hermes routing', () => {
         return {
           dispatchHermesHeartbeat: async (context: Record<string, unknown>, options: Record<string, unknown>) => {
             hermesCalls.push({ context, options });
-            return { threadId: 'hermes-run', transport: 'command', inputTokens: 0, outputTokens: 0, finishReason: 'complete' };
+            return (hermesResultOverride ?? {
+              threadId: 'hermes-run',
+              transport: 'command',
+              inputTokens: 0,
+              outputTokens: 0,
+              finishReason: 'complete',
+            }) as never;
           },
         };
       }
@@ -215,6 +223,7 @@ describe('#281 wake-runner Hermes routing', () => {
     harnessCalls = 0;
     hermesCalls = [];
     spanScanCalls = 0;
+    hermesResultOverride = undefined;
     store.agents = [];
     store.companies = [{ id: 'company-h', status: 'active' }];
     store.heartbeatRuns = [];
@@ -292,7 +301,77 @@ describe('#281 wake-runner Hermes routing', () => {
     const snapshot = run?.contextSnapshot as { harness?: unknown };
     assert.equal(snapshot.harness, undefined, 'no hermes stamp on in-product runs');
   });
+
+  // ── S331-4 (#331): adapter `detail` must reach heartbeat_runs.errorText (sanitized, capped) ──
+  const runHermesFailure = async (detail: string | undefined) => {
+    store.agents = [baseAgent({ harness: 'hermes', mode: 'local', command: 'hermes run' })];
+    hermesResultOverride = {
+      threadId: 'hermes-run',
+      transport: 'command',
+      inputTokens: 0,
+      outputTokens: 0,
+      finishReason: 'error',
+      ...(detail === undefined ? {} : { detail }),
+    };
+    const result = await triggerWake({
+      agentId: 'agent-h',
+      companyId: 'company-h',
+      invocationSource: 'on_demand',
+      wakeReason: 'on_demand',
+    } as never);
+    assert.equal(result.status, 'failed');
+    const run = store.heartbeatRuns.find((r) => r.id === result.runId);
+    assert.ok(run, 'run row exists');
+    return { result, run: run! };
+  };
+
+  it('S331-4: error + detail ⇒ exit code surfaces in returned AND persisted errorText; secret value redacted', async () => {
+    const { result, run } = await runHermesFailure(
+      'command exit 7: {"stderr":"gateway crashed in runTask","token":"pm_leak_canary_4fd8"}',
+    );
+    for (const [where, text] of [['returned', result.errorText ?? ''], ['persisted', String(run.errorText)]] as Array<[string, string]>) {
+      assert.match(text, /Harness run failed/, `${where}: base sentence kept`);
+      assert.match(text, /command exit 7/, `${where}: exit-code detail surfaced`);
+      assert.match(text, /gateway crashed in runTask/, `${where}: detail essence surfaced`);
+      assert.doesNotMatch(text, /pm_leak_canary_4fd8/, `${where}: secret value leaked into errorText`);
+      assert.match(text, /\[REDACTED\]/, `${where}: sanitizer marker present`);
+    }
+    assert.equal(result.errorText, String(run.errorText), 'returned status and persisted row agree');
+  });
+
+  it('S331-4: error WITHOUT detail keeps the static string (no colon noise)', async () => {
+    const { result, run } = await runHermesFailure(undefined);
+    assert.equal(result.errorText, 'Harness run failed');
+    assert.equal(String(run.errorText), 'Harness run failed');
+  });
+
+  it('S331-4: timeout + detail appends to the stale-heartbeat text instead of replacing it', async () => {
+    store.agents = [baseAgent({ harness: 'hermes', mode: 'local', command: 'hermes run' })];
+    hermesResultOverride = {
+      threadId: 'hermes-run', transport: 'command', inputTokens: 0, outputTokens: 0,
+      finishReason: 'timeout', detail: 'command wall-clock exceeded',
+    };
+    const result = await triggerWake({
+      agentId: 'agent-h', companyId: 'company-h',
+      invocationSource: 'on_demand', wakeReason: 'on_demand',
+    } as never);
+    assert.equal(result.status, 'failed');
+    const run = store.heartbeatRuns.find((r) => r.id === result.runId);
+    const text = String(run?.errorText ?? '');
+    assert.match(text, /Heartbeat worker stopped responding/, 'stale boilerplate stays as prefix');
+    assert.match(text, /command wall-clock exceeded/, 'adapter timeout detail surfaced');
+    assert.equal(result.errorText, text, 'returned status and persisted row agree');
+  });
+
+  it('S331-4: oversized detail is capped to the existing errorText limit', async () => {
+    const { run } = await runHermesFailure('command exit 1: ' + 'y'.repeat(5000));
+    assert.ok(String(run.errorText).length <= 2000, `errorText length ${String(run.errorText).length} exceeds cap`);
+    assert.match(String(run.errorText), /^Harness run failed: command exit 1/);
+  });
+
+
 });
+
 
 after(() => {
   // Leave no stub or poisoned env behind (mirror of the OpenCode file). Restore

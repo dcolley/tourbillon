@@ -57,6 +57,7 @@ import {
   type OpencodeHarnessBind,
 } from '@tourbillon/shared/opencode-harness';
 import { redisPub } from './redis-pub';
+import { harnessErrorTextWithDetail } from './harness-error-text';
 import {
   heartbeatAbortedError,
   isAbortLikeError,
@@ -823,7 +824,9 @@ async function runWake(
             let errorText: string;
             switch (harnessResult.finishReason) {
               case 'timeout':
-                errorText = heartbeatStaleErrorText(staleSec);
+                // S331-4: append the adapter's REDACTED detail (wall-clock / abort cause) so the
+                // stored row is not just the stale-heartbeat boilerplate.
+                errorText = harnessErrorTextWithDetail(heartbeatStaleErrorText(staleSec), harnessResult.detail);
                 break;
               case 'max_steps':
                 errorText = 'Heartbeat exceeded maxSteps limit';
@@ -832,7 +835,9 @@ async function runWake(
                 errorText = 'Repeated tool loop detected';
                 break;
               default:
-                errorText = 'Harness run failed';
+                // S331-4: exit code / HTTP status / JSON-RPC message live on `detail` — surface
+                // them (sanitized, capped) instead of dropping them from the returned status.
+                errorText = harnessErrorTextWithDetail('Harness run failed', harnessResult.detail);
                 break;
             }
             // Record failure without parking (leave issue in_progress with checkout lock)
@@ -1089,9 +1094,10 @@ async function recordHarnessResult(
 
   if (result.finishReason === 'timeout') {
     const { staleSec } = resolveHeartbeatLivenessConfig();
+    // S331-4: keep the stale boilerplate as the prefix but surface the adapter detail too.
     await recordHeartbeatFailure(
       runId,
-      heartbeatStaleErrorText(staleSec),
+      harnessErrorTextWithDetail(heartbeatStaleErrorText(staleSec), result.detail),
       companyId,
       agentRecord.id,
     );
@@ -1099,7 +1105,14 @@ async function recordHarnessResult(
   }
 
   if (result.finishReason === 'error') {
-    await recordHeartbeatFailure(runId, 'Harness run failed', companyId, agentRecord.id);
+    // S331-4: the adapters report the real cause (exit code / HTTP status / JSON-RPC message)
+    // on `detail` — persist it (sanitized + capped), not just the static sentence.
+    await recordHeartbeatFailure(
+      runId,
+      harnessErrorTextWithDetail('Harness run failed', result.detail),
+      companyId,
+      agentRecord.id,
+    );
     return;
   }
 

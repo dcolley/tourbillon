@@ -376,3 +376,22 @@ test('PIN S328-S1: tools/call on an ambiguous id ⇒ 409 ambiguous_tool with can
   assert.equal(viaKey.status, 200);
   assert.deepEqual(ran, ['two']);
 });
+
+test('PIN S331-5a: assembled `${name}Tool` KEY outranks an id COLLISION — no 409 while the key exists', () => {
+  const ran: string[] = [];
+  const a = tool('sendToAgent', ran, 'a');
+  const b = tool('sendToAgent', ran, 'b');
+  // Two DIFFERENT tools with id 'sendToAgent' would be ambiguous — except the assembled
+  // `${name}Tool` key resolves in tier 2, BEFORE the id scan ever runs (pinned precedence).
+  const withKey: Record<string, unknown> = { mcp_one: a, mcp_two: b, sendToAgentTool: a };
+  const hit = resolveGatedTool(withKey, 'sendToAgent');
+  assert.equal(hit.kind, 'found', 'assembled key must resolve, never ambiguous');
+  assert.deepEqual(hit, { kind: 'found', tool: a, key: 'sendToAgentTool' });
+  assert.equal(findGatedTool(withKey, 'sendToAgent'), a);
+  // Discriminator: remove the key and the very same pair IS ambiguous.
+  assert.deepEqual(
+    resolveGatedTool({ mcp_one: a, mcp_two: b }, 'sendToAgent'),
+    { kind: 'ambiguous', keys: ['mcp_one', 'mcp_two'] },
+  );
+  assert.deepEqual(ran, [], 'resolution never executes');
+});

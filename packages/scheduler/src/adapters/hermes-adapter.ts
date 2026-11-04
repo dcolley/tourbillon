@@ -93,6 +93,25 @@ function envForEnvelope(envelope: HermesHeartbeatEnvelope): Record<string, strin
   };
 }
 
+/**
+ * S331-3 (#331): MINIMAL spawn environment for harness children. The worker carries
+ * DATABASE_URL, BETTER_AUTH_SECRET, TOURBILLON_AGENT_TOKEN_SECRET and friends — an operator's
+ * `command` bind is third-party CLI glue and must never inherit them. The child gets exactly:
+ *  - PATH (so the shell can resolve the operator's command; sane fallback when absent)
+ *  - HOME  (CLIs look up ~/.config, ~/.hermes etc.; omitted when unset)
+ *  - every var the adapter passes explicitly (the three TOURBILLON_* wake vars —
+ *    wake JSON, callback URL, session token — spread LAST so they always win).
+ * Object.assign (not a literal spread) keeps this assignable under apps/web's tsc too, where
+ * Next's globals declare NODE_ENV required on ProcessEnv (TS2322 on spread-literal merges).
+ */
+export function harnessChildEnv(env: Record<string, string>): Record<string, string> {
+  const minimal: Record<string, string> = {
+    PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
+  };
+  if (process.env.HOME) minimal.HOME = process.env.HOME;
+  return Object.assign({}, minimal, env);
+}
+
 /** Default command transport: shell spawn, envelope on env + stdin, hard-stop on signal. */
 export async function defaultSpawnCommand(
   command: string,
@@ -102,7 +121,7 @@ export async function defaultSpawnCommand(
   return await new Promise((resolve, reject) => {
     const child: ChildProcess = spawn(command, {
       shell: true,
-      env: { ...process.env, ...env },
+      env: harnessChildEnv(env),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let stdout = '';
