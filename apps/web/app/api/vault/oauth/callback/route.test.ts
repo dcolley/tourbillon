@@ -18,8 +18,11 @@ describe('#106 vault OAuth callback redirects', () => {
       if (id === '@tourbillon/db') return { db: { query: { vaultSecrets: { findFirst: async () => null } } } };
       if (id === '@tourbillon/db/schema') return { vaultSecrets: {} };
       if (id === '@tourbillon/shared/vault-encryption') return { encryptCredential: () => 'enc' };
-      if (id === '@/lib/company' || id.endsWith('/lib/company')) {
-        return { getActiveCompany: async () => ({ id: 'company-a' }) };
+      if (id === '@/lib/board-route-auth' || id.endsWith('/lib/board-route-auth')) {
+        return { requireBoardCompany: async () => ({ ok: true, value: { id: 'company-a' } }) };
+      }
+      if (id === '@/lib/vault-oauth-nonce-store' || id.endsWith('/lib/vault-oauth-nonce-store')) {
+        return { consumeOAuthNonce: async () => true };
       }
       return originalRequire.apply(this, arguments as unknown as [string]);
     };

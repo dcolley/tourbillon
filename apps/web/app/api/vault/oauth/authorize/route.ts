@@ -4,12 +4,15 @@ import { db, agents } from '@tourbillon/db';
 import { and, eq } from 'drizzle-orm';
 import { requireBoardCompany } from '@/lib/board-route-auth';
 import {
+  OAUTH_NONCE_COOKIE,
   OAUTH_NOT_CONFIGURED_ERROR,
+  buildOAuthState,
   isOAuthStateSecretConfigured,
   logOAuthStateSecretMissing,
+  oauthNonceCookieOptions,
   settingsRedirect,
-  signOAuthState,
 } from '@/lib/vault-oauth-state';
+import { recordOAuthNonce } from '@/lib/vault-oauth-nonce-store';
 
 const authorizeSchema = z.object({
   serverId: z.string().min(1),
@@ -41,6 +44,21 @@ export async function GET(req: NextRequest) {
     
     const validated = authorizeSchema.parse(params);
 
+    // #112: board sessions carry no user identity yet (#107), so a userId here can't be checked
+    // against the board company. Refuse user-scoped grants rather than trust it.
+    if (validated.scope === 'company_user' || validated.userId) {
+      return NextResponse.json(
+        { error: 'User-scoped OAuth grants are not supported: the board session has no user identity' },
+        { status: 400 },
+      );
+    }
+    if ((validated.scope === 'agent') !== Boolean(validated.agentId)) {
+      return NextResponse.json(
+        { error: 'agentId is required for agent-scoped grants and not allowed otherwise' },
+        { status: 400 },
+      );
+    }
+
     // Agent-scoped grants must target an agent in the board's company (other company → 404).
     if (validated.agentId) {
       const agent = await db.query.agents.findFirst({
@@ -62,21 +80,20 @@ export async function GET(req: NextRequest) {
       const baseUrl = process.env.BETTER_AUTH_URL || 'http://localhost:3002';
       const redirectUri = `${baseUrl}/api/vault/oauth/callback`;
       
-      const statePayload = JSON.stringify({
+      // #112 items 3–4: state bound to a browser nonce (httpOnly cookie), this board company,
+      // the agent and a 10-minute expiry; the nonce is recorded server-side for single use.
+      const built = buildOAuthState({
         serverId: validated.serverId,
         scope: validated.scope,
-        userId: validated.userId,
         agentId: validated.agentId,
+        companyId: auth.value.id,
       });
-      const signature = signOAuthState(statePayload);
-      if (!signature) {
+      if (!built) {
         logOAuthStateSecretMissing('start');
         return settingsRedirect(`/settings?oauth_error=${OAUTH_NOT_CONFIGURED_ERROR}`);
       }
-      const state = Buffer.from(JSON.stringify({
-        payload: statePayload,
-        signature,
-      })).toString('base64');
+      await recordOAuthNonce(built.nonce, built.expiresAt);
+      const { state } = built;
       
       const githubAuthUrl = new URL('https://github.com/login/oauth/authorize');
       githubAuthUrl.searchParams.set('client_id', clientId);
@@ -84,7 +101,9 @@ export async function GET(req: NextRequest) {
       githubAuthUrl.searchParams.set('scope', 'repo,user');
       githubAuthUrl.searchParams.set('state', state);
       
-      return NextResponse.redirect(githubAuthUrl.toString());
+      const res = NextResponse.redirect(githubAuthUrl.toString());
+      res.cookies.set(OAUTH_NONCE_COOKIE, built.nonce, oauthNonceCookieOptions(req.headers));
+      return res;
     }
     
     return NextResponse.json(
