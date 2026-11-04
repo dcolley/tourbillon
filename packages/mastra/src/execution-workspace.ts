@@ -20,7 +20,7 @@ import { createConnection } from 'node:net';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash, randomBytes } from 'node:crypto';
-import { EgressProxy } from './egress-proxy';
+import { EgressProxy, type EgressProxyOptions } from './egress-proxy';
 import {
   assertCanEnforceEgressAllowList,
   buildEgressFilterEnv,
@@ -139,7 +139,36 @@ export function newEgressRunId(): string {
   return randomBytes(16).toString('hex');
 }
 
-export function buildCodeExecutionWorkspace(): Workspace {
+/**
+ * S332-S4 test seams for the resolver. The LocalSandbox-throw path (Mastra 1.81 throws
+ * `IsolationUnavailableError` from the constructor AFTER the egress proxy has bound, and the
+ * resolver catch must stop it) was only reachable on x86_64 CI: on arm64/Spark1
+ * `assertCanEnforceEgressAllowList` refuses BEFORE the proxy binds, so the destroy test was
+ * vacuous there and gate mutant W1 (drop `proxy.stop()` in the catch) stayed natively GREEN.
+ * These seams make that exact interleaving deterministic on any host: stub the enforce
+ * pre-check, bind a fake proxy, throw from the sandbox constructor, then pin that the catch
+ * stopped the proxy. Defaults are the production classes/functions; production call sites
+ * (`agent-factory.ts`, `controller-config.ts`) build without seams.
+ */
+export interface CodeExecutionProxyHandle {
+  start(listen: { socketPath: string } | { tcp: true }): Promise<number>;
+  stop(): Promise<void>;
+  getSocketPath(): string | undefined;
+}
+
+export interface CodeExecutionWorkspaceSeams {
+  /** Default: Mastra `LocalSandbox` (may throw IsolationUnavailableError from its ctor). */
+  LocalSandboxCtor?: new (options: ConstructorParameters<typeof LocalSandbox>[0]) => LocalSandbox;
+  /** Default: `EgressProxy`. */
+  EgressProxyCtor?: new (options: EgressProxyOptions) => CodeExecutionProxyHandle;
+  /** Default: `assertCanEnforceEgressAllowList`. */
+  assertCanEnforceEgress?: (isolation: SandboxIsolation, egressAllowList: string[] | undefined) => void;
+}
+
+export function buildCodeExecutionWorkspace(seams: CodeExecutionWorkspaceSeams = {}): Workspace {
+  const LocalSandboxCtor = seams.LocalSandboxCtor ?? LocalSandbox;
+  const EgressProxyCtor = seams.EgressProxyCtor ?? EgressProxy;
+  const assertCanEnforceEgress = seams.assertCanEnforceEgress ?? assertCanEnforceEgressAllowList;
   const workspace = new Workspace({
     id: 'tourbillon-code-execution',
     name: 'Code execution',
@@ -154,14 +183,14 @@ export function buildCodeExecutionWorkspace(): Workspace {
       const isolation = resolveSandboxIsolation(runtimeConfig) as IsolationBackend;
       const egressAllowList = resolveSandboxEgressAllowList(runtimeConfig);
 
-      assertCanEnforceEgressAllowList(isolation, egressAllowList);
+      assertCanEnforceEgress(isolation, egressAllowList);
 
       const allowNetwork = resolveSandboxAllowNetwork(runtimeConfig);
       const egressPlan = planCodeExecutionEgress(isolation, runtimeConfig);
       const agentSecrets = extractAgentSecrets(requestContext);
 
       let sandboxEnv: NodeJS.ProcessEnv = { ...agentSecrets } as NodeJS.ProcessEnv;
-      let proxy: EgressProxy | undefined;
+      let proxy: CodeExecutionProxyHandle | undefined;
       let extraRoBinds: string[] = [];
       let extraRwBinds: string[] = [];
 
@@ -173,7 +202,7 @@ export function buildCodeExecutionWorkspace(): Workspace {
           publicInternet ? [PUBLIC_INTERNET_EGRESS_SENTINEL] : allowList,
           { runId },
         );
-        proxy = new EgressProxy({
+        proxy = new EgressProxyCtor({
           allowList,
           companyId,
           taskId,
@@ -239,7 +268,7 @@ export function buildCodeExecutionWorkspace(): Workspace {
       // construction throws, so the unix socket keeps the process alive.
       let sandbox: LocalSandbox;
       try {
-        sandbox = new LocalSandbox({
+        sandbox = new LocalSandboxCtor({
           workingDirectory: cwd,
           isolation,
           timeout: resolveSandboxTimeoutMs(runtimeConfig),
@@ -327,7 +356,7 @@ export function buildCodeExecutionWorkspace(): Workspace {
 /** Per-workspace registry of live resolver-returned sandboxes (see below). */
 interface LiveSandboxEntry {
   sandbox: LocalSandbox;
-  proxy?: EgressProxy;
+  proxy?: CodeExecutionProxyHandle;
 }
 
 interface WorkspaceTeardownState {
