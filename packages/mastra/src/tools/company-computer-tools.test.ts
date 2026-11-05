@@ -145,13 +145,22 @@ describe('S282-S7: no takeover/paused promise in Slice 1', () => {
   it('no tool description promises paused or takeover', () => {
     for (const [key, t] of Object.entries(COMPANY_COMPUTER_TOOLS as Record<string, { description: string }>)) {
       assert.doesNotMatch(t.description, /paused/i, `${key} promises a paused result`);
-      assert.doesNotMatch(t.description, /taken over|holds takeover|takeover state/i, `${key} promises takeover behaviour`);
+      // S326-S2 (#326 review soft): the old regex listed only 'taken over|holds takeover|
+      // takeover state', so the M6 near-miss wording "ask the Board to take over for
+      // credential entry" escaped. /take n?\s?over/i catches take over, takeover and
+      // taken over in one pattern; 'paused' is covered by the line above.
+      assert.doesNotMatch(t.description, /take n?\s?over/i, `${key} promises takeover behaviour`);
     }
   });
 
   it('skill doc labels takeover as Slice 2 and promises no { paused: true }', () => {
     const doc = readFileSync(join(__dirname, '../skills/company-computer-skills.md'), 'utf8');
     assert.doesNotMatch(doc, /\{\s*paused:\s*true\s*\}/, 'skill doc still promises { paused: true }');
+    // S326-S3 (#326 review soft): only the braced { paused: true } form was banned, so the
+    // M7 near-miss "while Board holds takeover input calls return paused" escaped. Ban the
+    // prose forms too — takeover is Slice 2; the doc may only LABEL it as such.
+    assert.doesNotMatch(doc, /holds takeover/i, 'skill doc describes a Board-held takeover (Slice 2 behaviour)');
+    assert.doesNotMatch(doc, /returns? paused/i, 'skill doc promises a plain-language paused return (Slice 2 behaviour)');
     assert.match(doc, /takeover[^\n]*Slice 2/i, 'skill doc must label takeover as Slice 2');
   });
 });

@@ -335,6 +335,28 @@ test('S24a pin: scheduler test script keeps the working belt --conditions=tourbi
   );
 });
 
+// S325-S4 (#325 review soft, Soft Pack I): the full scheduler `pnpm test` script needs
+// --test-force-exit — the suite leaves open handles (ioredis clients, PGlite), so deleting the
+// flag turns `pnpm test` into an infinite hang AFTER everything has printed pass, i.e. a
+// mutation with no RED anywhere (the local gate would just stop finishing). Pin the token
+// next to the S24a script pin above. Deliberate contrast: the CI unit-tests job is the OPPOSITE
+// contract — run-unit-tests.mjs must NOT have force-exit (it can drop whole files while
+// exiting 0), pinned in ci-coverage-s316-s4-s328-s4.test.ts.
+test('S325-S4 pin: scheduler test script keeps --test-force-exit (its removal hangs with no RED)', () => {
+  const pkg = JSON.parse(
+    readFileSync(path.join(__dirname, '../package.json'), 'utf8'),
+  ) as { scripts: Record<string, string> };
+  assert.match(
+    pkg.scripts.test ?? '',
+    /--test-force-exit(?=\s|$)/,
+    'the full scheduler suite needs --test-force-exit or pnpm test hangs on open handles after printing GREEN',
+  );
+  // And the CI unit runner must stay on the opposite side of that contract.
+  const unitScript = readFileSync(path.join(__dirname, '../scripts/run-unit-tests.mjs'), 'utf8');
+  const spawnArgs = /spawnSync\([\s\S]*?\);/.exec(unitScript)?.[0] ?? '';
+  assert.doesNotMatch(spawnArgs, /--test-force-exit/, 'the CI unit subset must stay force-exit-free (S328-S4)');
+});
+
 // S272-S3 (#272 ACCEPT soft-pack, info): the S266-S3 per-test timeouts had NO existence pin
 // — S256-S3's timeout option on the 199-softs slow pins likewise only lived in the option
 // literals themselves, so deleting one would silently return that pin to the opaque
