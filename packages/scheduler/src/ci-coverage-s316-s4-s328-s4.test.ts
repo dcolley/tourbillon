@@ -10,6 +10,11 @@
  *
  * Source pins (readFileSync) plus ESLint's in-process config resolver — no pnpm/eslint spawn,
  * so they behave identically on CI and dev hosts. This file is itself in the CI unit subset.
+ *
+ * S330-S1 (Soft Pack I): the web `test:harness` check used to be a text regex on package.json,
+ * which stayed GREEN while CI actually ran a shrunken suite (`&& echo`-dropped file, injected
+ * `--test-name-pattern`). It now pins the exact runner command plus the runner's explicit file
+ * list (imported from apps/web/scripts/run-harness-tests.mjs) and the lib/harness drift guard.
  */
 import { strict as assert } from 'node:assert';
 import { existsSync, readFileSync } from 'node:fs';
@@ -115,25 +120,66 @@ describe('S328-S4: CI runs the service-free shared + scheduler + harness unit te
   it('the package scripts the job calls exist and cover the whole suite', () => {
     assert.match(scripts(sharedRoot)['test:unit'] ?? '', /find src -name \\?"\*\.test\.ts\\?"/, 'shared test:unit runs every src test file');
     assert.equal(scripts(schedulerRoot)['test:unit'], 'node scripts/run-unit-tests.mjs');
-    const harnessScript = scripts(webRoot)['test:harness'] ?? '';
-    assert.match(harnessScript, /lib\/harness\/\*\.test\.ts/, 'web test:harness runs lib/harness');
-    // S305-S1 is lib/chat-send-key.test.ts, outside the harness glob. A pin that only matches
-    // lib/harness/*.test.ts stays green when CI never runs it.
-    assert.match(
-      harnessScript,
-      /(?:^|\s)lib\/chat-send-key\.test\.ts(?:\s|$)/,
-      'web test:harness must pass lib/chat-send-key.test.ts to tsx --test (S305-S1)',
+    // S330-S1: the web harness script is pinned EXACTLY, not by text regex. Before this, the
+    // pin matched substrings of the one-liner, so `… && echo lib/chat-send-key.test.ts` (file
+    // never run, 48 of 72 tests) and `--test-name-pattern=PIN` (~29 tests) both stayed GREEN.
+    // The suite now lives in an explicit file list inside apps/web/scripts/run-harness-tests.mjs;
+    // any text change to the CI command goes red here, and any file-list change goes red below.
+    assert.equal(
+      scripts(webRoot)['test:harness'],
+      'node scripts/run-harness-tests.mjs',
+      'web test:harness must be exactly the pinned runner invocation (S330-S1)',
     );
   });
 
-  it('no --test-force-exit in the CI unit scripts (it can drop whole files and still exit 0)', () => {
+  it('web test:harness runs an explicit, pinned file list — not a text-regex on package.json (S330-S1)', async () => {
+    const webRunner = (await import(
+      pathToFileURL(join(webRoot, 'scripts', 'run-harness-tests.mjs')).href
+    )) as {
+      HARNESS_TEST_FILES: string[];
+      listHarnessDirTestFiles: () => string[];
+      listHarnessTestFiles: () => string[];
+    };
+    // The exact suite. Dropping a file here (or in the runner) is RED — including
+    // lib/chat-send-key.test.ts, which sits outside lib/harness/ (S305-S1) and was the file
+    // the old text pin let CI skip.
+    assert.deepEqual(
+      [...webRunner.HARNESS_TEST_FILES].sort(),
+      [
+        'lib/chat-send-key.test.ts',
+        'lib/harness/callback-chat.test.ts',
+        'lib/harness/callback-gate.test.ts',
+      ],
+      'web harness suite is exactly these files — add/remove deliberately, in both places',
+    );
+    for (const f of webRunner.HARNESS_TEST_FILES) {
+      assert.ok(existsSync(join(webRoot, f)), `${f} no longer exists — update the harness pin`);
+    }
+    // Drift guard: every *.test.ts on disk under lib/harness/ is in the explicit list, so a
+    // new harness file can never escape the CI run by omission (the runner throws too).
+    const dirFiles = webRunner.listHarnessDirTestFiles();
+    const listed = new Set(webRunner.HARNESS_TEST_FILES);
+    for (const f of dirFiles) {
+      assert.ok(listed.has(f), `a lib/harness test file is on disk but not in HARNESS_TEST_FILES: ${f}`);
+    }
+    assert.ok(dirFiles.length >= 2, `only ${dirFiles.length} harness test files on disk — folder moved?`);
+    assert.deepEqual(webRunner.listHarnessTestFiles().sort(), [...webRunner.HARNESS_TEST_FILES].sort());
+  });
+
+  it('no --test-force-exit / --test-name-pattern in the CI unit scripts (they shrink the run and still exit 0)', () => {
+    const webRunnerSrc = readFileSync(join(webRoot, 'scripts', 'run-harness-tests.mjs'), 'utf8');
     for (const [where, cmd] of [
       ['shared test:unit', scripts(sharedRoot)['test:unit'] ?? ''],
       ['web test:harness', scripts(webRoot)['test:harness'] ?? ''],
       ['scheduler run-unit-tests.mjs spawn args', /spawnSync\([\s\S]*?\);/.exec(readFileSync(join(schedulerRoot, 'scripts', 'run-unit-tests.mjs'), 'utf8'))?.[0] ?? ''],
+      ['web run-harness-tests.mjs spawn args', /spawnSync\([\s\S]*?\}\);/.exec(webRunnerSrc)?.[0] ?? ''],
     ]) {
       assert.ok(cmd.length > 0, `${where}: not found`);
       assert.doesNotMatch(cmd, /--test-force-exit/, `${where} must not pass --test-force-exit`);
+      // S330-S1: a hardcoded name pattern silently runs a subset (the H3 escape: pin GREEN,
+      // ~29 of 72 tests). Local filtering stays available via forwarded CLI args in ci.yml's
+      // pinned-bare command only.
+      assert.doesNotMatch(cmd, /--test-name-pattern/, `${where} must not hardcode --test-name-pattern`);
     }
     assert.match(jobBlock(readFileSync(ciPath, 'utf8'), 'unit-tests') ?? '', /^\s+timeout-minutes:\s*\d+/m, 'the unit job carries a timeout instead');
   });

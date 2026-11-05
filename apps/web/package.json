@@ -9,7 +9,7 @@
     "lint": "eslint .",
     "type-check": "tsc --noEmit",
     "test": "node scripts/run-tests.mjs",
-    "test:harness": "tsx --test lib/harness/*.test.ts lib/chat-send-key.test.ts"
+    "test:harness": "node scripts/run-harness-tests.mjs"
   },
   "dependencies": {
     "@ag-ui/core": "1.0.3",
