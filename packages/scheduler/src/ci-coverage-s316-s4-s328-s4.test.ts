@@ -210,3 +210,30 @@ describe('S328-S4: CI runs the service-free shared + scheduler + harness unit te
     assert.ok(!unit.includes('src/timeout-runner.test.ts'));
   });
 });
+
+describe('S326-S1: company-computer stays a leaf package (no @tourbillon/* workspace deps)', () => {
+  // #326 review: re-adding cc→mastra while @tourbillon/mastra→cc exists forms a workspace
+  // CYCLE, and CI only caught it via ERR_PNPM_OUTDATED_LOCKFILE — a regenerated lockfile would
+  // sail through with just pnpm's `WARN cyclic workspace dependencies`. The S282-S4 fix moved
+  // the shared toolset into @tourbillon/mastra and removed BOTH declared edges, so
+  // company-computer is now a leaf: it imports nothing from the workspace. Pinning that (the
+  // fix the #326 review asked for) makes any cc-side cycle edge RED on the package.json edit
+  // itself, lockfile state or no. One side missing is enough to break the ring — this is the
+  // side cc controls. (cc's own test suite is NOT in the CI unit-tests job, so the pin lives
+  // here, where CI runs.)
+  const ccRoot = join(repoRoot, 'packages', 'company-computer');
+  it('package.json declares no @tourbillon/* dependencies (leaf — breaks any cc-side cycle)', () => {
+    const pkg = JSON.parse(readFileSync(join(ccRoot, 'package.json'), 'utf8')) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+    for (const field of ['dependencies', 'devDependencies'] as const) {
+      const offenders = Object.keys(pkg[field] ?? {}).filter((name) => name.startsWith('@tourbillon/'));
+      assert.deepEqual(
+        offenders,
+        [],
+        `company-computer must stay a leaf: ${field} pulled in ${offenders.join(', ')} — re-closing the S326 cycle with @tourbillon/mastra`,
+      );
+    }
+  });
+});

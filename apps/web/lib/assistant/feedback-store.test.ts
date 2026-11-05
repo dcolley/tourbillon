@@ -156,7 +156,16 @@ describe('OBS-2 feedback store', () => {
     const src = readFileSync(join(__dirname, 'feedback-store.test.ts'), 'utf8');
     const BACKSTOP = 'every PGlite instance opened by this file was closed by the per' + '-test hook';
     const GUARD = 'S323-S2 declaration-order guard: close-backstop is last before this guard';
-    const decls = [...src.matchAll(/\bit\(\s*'([^']+)'/g)].map((m) => ({ name: m[1], pos: m.index }));
+    // S325-S2 (#325 review soft): the old scan matched only the single-quoted declaration
+    // form, so an appended declaration in double quotes, backticks, or with a skip/only/todo
+    // modifier stayed invisible and silently made the backstop not-last. The scan now covers
+    // all three quote styles and the modifier forms. Self-reading-pin hazard: NOTHING in this
+    // file may contain a literal declaration token (the two chars of the runner function name
+    // followed by an open paren then any quote) outside real declarations — including comments
+    // and this one. The pattern's own source never self-matches (after the optional modifier
+    // the next char is a regex metachar, never whitespace-then-quote); keep both rules.
+    const decls = [...src.matchAll(/\bit(?:\.(?:skip|only|todo))?\(\s*(['"`])((?:\\.|(?!\1)[^\\])*)\1/g)]
+      .map((m) => ({ name: m[2], pos: m.index }));
     const backstops = decls.filter((d) => d.name === BACKSTOP);
     const guards = decls.filter((d) => d.name === GUARD);
     assert.equal(backstops.length, 1, `the close-backstop must be declared exactly once (found ${backstops.length})`);
@@ -176,9 +185,16 @@ describe('OBS-2 feedback store', () => {
     // --test-shuffle (measured on Node 22), and neither the package script nor
     // the runner may introduce one — under shuffling the backstop could run
     // before the PGlite test and pass vacuously.
+    // S325-S1 (#325 review soft): shuffle was only one of the reordering knobs. Node 24
+    // ships --test-randomize and --test-random-seed (measured on 24.22.1), which the old
+    // /shuffle/ regex missed entirely — a shuffled CI run stayed GREEN. Ban the whole token
+    // family. Honest caveat: the web runner forwards extra CLI args to tsx, so an operator
+    // CAN still shuffle locally via `pnpm test -- --test-randomize` — that is a deliberate
+    // local action; the pin's job is that the committed script, the runner, and ci.yml never
+    // do it by default.
     const webPkg = JSON.parse(readFileSync(join(__dirname, '../../package.json'), 'utf8')) as { scripts: Record<string, string> };
-    assert.doesNotMatch(webPkg.scripts.test ?? '', /shuffle/, 'web test script must not shuffle test order');
+    assert.doesNotMatch(webPkg.scripts.test ?? '', /shuffle|randomi[sz]e|random[-_]seed|randomSeed/, 'web test script must not shuffle/randomize test order');
     const runner = readFileSync(join(__dirname, '../../scripts/run-tests.mjs'), 'utf8');
-    assert.doesNotMatch(runner, /test-shuffle/, 'the web test runner must not shuffle test order');
+    assert.doesNotMatch(runner, /test-shuffle|test-randomize|random-seed|randomSeed/, 'the web test runner must not shuffle/randomize test order');
   });
 });
