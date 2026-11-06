@@ -12,6 +12,10 @@ const logger = createTraceLogger('scheduler', {});
 
 void runSchedulerMain(async () => {
   assertValidDatabaseUrl(process.env.DATABASE_URL);
-  const { main } = await import('./scheduler-main');
+  const { main, installSchedulerProcessGuards } = await import('./scheduler-main');
+  // #338: installed at the ENTRY, not inside main() — main() is called per-boot in production
+  // exactly once, while unit tests call it repeatedly and must keep Node's default rejection
+  // semantics for their own assertions.
+  installSchedulerProcessGuards(logger);
   await main(logger);
 }, logger);

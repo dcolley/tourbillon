@@ -125,7 +125,14 @@ describe('reconcileStaleChatTaskRuns (S2: crashed/stale Run Task rows)', () => {
       assert.equal(row!.completedAt, null);
       assert.equal(row!.runnerLastRunId, 'run-dead', 'audit link is kept, not cleared');
       assert.equal(row!.runnerAttempts, 1, 'attempts are NOT refunded — the re-queue is the budget');
-      assert.match(row!.notes!, /^Notify: Ops\n\[runner\] Run Task lost/, 'note appended to the existing notes');
+      // #340/#338: the notes line is a `failure:` line (never an ask) and names the PRECISE
+      // lost-run reason read off the linked heartbeat_runs row — here: terminal `failed`.
+      assert.match(
+        row!.notes!,
+        /^Notify: Ops\nfailure: \[runner\] Run Task lost — run row terminal \(status failed/,
+        'failure-prefixed note appended to the existing notes, with the precise reason',
+      );
+      assert.ok(!row!.notes!.includes('ask:'), 'a runner re-queue never reads as a user ask');
       // The re-queued row is claimable again (the poller's retry path is live).
       const reclaimed = await claimChatTaskRun(db, { taskId: task.id, runId: 'run-retry' });
       assert.equal(reclaimed?.runnerAttempts, 2);
@@ -150,6 +157,15 @@ describe('reconcileStaleChatTaskRuns (S2: crashed/stale Run Task rows)', () => {
       const [row] = await listChatTasks(A1, { includeClosed: true }, db);
       assert.equal(row!.status, 'waiting_on_user');
       assert.match(row!.notes!, /attempt budget exhausted/);
+      // #340 honesty: an honest park says FAILURE, not "the human owes you something".
+      assert.match(row!.notes!, /failure: \[runner\]/, 'park notes carry the failure prefix');
+      assert.match(row!.notes!, /not a user-input ask/, 'and state that plainly');
+      assert.match(
+        row!.notes!,
+        /run row terminal \(status failed/,
+        '#338: the precise reason comes from the linked run row (here: failed)',
+      );
+      assert.ok(!row!.notes!.includes('ask:'), 'a runner park never carries an ask');
     } finally {
       await client.close();
     }
@@ -456,6 +472,28 @@ describe('reconcileStaleChatTaskRuns budget follows company settings (S-soft, PR
         maxAttempts: 1,
       });
       assert.deepEqual({ requeued: forced.requeued, parked: forced.parked }, { requeued: 0, parked: 1 });
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+describe('reconcileStaleChatTaskRuns #338 reasons (cont.)', () => {
+  it('#338: a claim whose run row never landed parks with the MISSING-run reason', async () => {
+    const { client, db } = await freshDb();
+    try {
+      const task = await addChatTask(A1, { title: 'Never woken' }, db);
+      await claimedCrash(client, db, task.id, 'run-never-inserted');
+      // NO seedRun — the crash-between-claim-and-insert shape: the linked heartbeat_runs row
+      // does not exist at all.
+      const result = await reconcileStaleChatTaskRuns(db, { staleCutoff: sweepCutoff(), maxAttempts: 1 });
+      assert.deepEqual({ requeued: result.requeued, parked: result.parked }, { requeued: 0, parked: 1 });
+      const [row] = await listChatTasks(A1, { includeClosed: true }, db);
+      assert.match(
+        row!.notes!,
+        /failure: \[runner\] Run Task lost — run row missing \(the claimed Run Task wake never landed\)/,
+        'the note names the missing run row instead of guessing "worker died"',
+      );
     } finally {
       await client.close();
     }

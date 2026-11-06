@@ -264,6 +264,38 @@ export interface TaskRunPollSummary {
 export const DEFER_LOG_WINDOW_MS = 10 * 60_000;
 
 /**
+ * #338 defensive settle guard. When the harness (`AgentController`) dies before its drive
+ * promise settles — neither resolve nor reject — the in-memory wake hangs with the chat_tasks
+ * row stuck `in_progress` until the stale sweeps notice, and the row is then lost-parked with
+ * the vague "worker died or run row missing" note. The poller therefore races every wake
+ * against a hard settle deadline: expiry yields a precise FAILED WakeResult so the normal
+ * settle/retry path runs instead of a silent hang.
+ *
+ * The deadline must sit ABOVE the maximum harness wall-clock
+ * (`effectiveHeartbeatTimeoutSec` caps an agent's timeout at 23h) or a legitimately long run
+ * gets cut off — hence default 23h + 15 min grace. Operators can tighten it with
+ * TASK_RUNNER_WAKE_SETTLE_GUARD_SEC (garbage/≤0 falls back to the default). Exported pure for
+ * tests; the race timer is unref'd so it never holds the event loop.
+ */
+export const WAKE_SETTLE_GUARD_DEFAULT_SEC = 23 * 3600 + 900;
+
+export function resolveWakeSettleGuardSec(
+  raw: string | undefined = process.env.TASK_RUNNER_WAKE_SETTLE_GUARD_SEC,
+): number {
+  const parsed = Number(raw ?? WAKE_SETTLE_GUARD_DEFAULT_SEC);
+  if (!Number.isFinite(parsed) || parsed <= 0) return WAKE_SETTLE_GUARD_DEFAULT_SEC;
+  return Math.trunc(parsed);
+}
+
+/** The #338 guard's failure text (exported so the pin asserts the operator-facing wording). */
+export function wakeSettleGuardErrorText(guardSec: number): string {
+  return (
+    `Run Task wake did not settle within ${guardSec}s (harness settle guard — the ` +
+    'controller promise died before settling); treating as failed'
+  );
+}
+
+/**
  * S1: dig the taskRunner block out of the companies.settings jsonb and resolve it with the
  * shared defaults/clamps. `enabled=false` skips enqueue for the whole company; the other
  * resolved fields (maxConcurrentTasks, maxAttemptsPerTask) drive the per-agent gating below.
@@ -295,6 +327,12 @@ export async function pollTaskRunner(
     deferLogWindowMs?: number;
     /** S199b: clock injection for tests (defaults to Date.now). */
     now?: () => number;
+    /**
+     * #338: @internal TEST seam overriding the wake settle guard deadline (seconds). Absent →
+     * resolveWakeSettleGuardSec() (env TASK_RUNNER_WAKE_SETTLE_GUARD_SEC, else 23h + 15m grace
+     * above the max harness wall-clock). Tests pass a tiny value to pin the guard behaviour.
+     */
+    wakeSettleGuardSec?: number;
   } = {},
 ): Promise<TaskRunPollSummary> {
   const maxConcurrent = opts.maxConcurrentRuns ?? DEFAULT_MAX_CONCURRENT_RUNS;
@@ -474,18 +512,45 @@ export async function pollTaskRunner(
         attempts: task.attempts + 1,
       });
       const done = (async () => {
-        let result: WakeResult;
-        try {
-          result = await deps.startWake(job);
-        } catch (err) {
-          result = {
-            runId,
-            status: 'failed',
-            errorText: err instanceof Error ? err.message : String(err),
-          };
-        }
+        // #338: race the wake against the settle guard — a harness whose promise dies before
+        // settling (no resolve, no reject) must produce a PRECISE failure, not a silent hang
+        // that the stale sweeps later lose-park. The wake's own errors map to a failed result
+        // exactly as before; the guard timer is unref'd so it cannot hold the event loop.
+        const guardSec = opts.wakeSettleGuardSec ?? resolveWakeSettleGuardSec();
+        const wake: Promise<WakeResult> = (async () => {
+          try {
+            return await deps.startWake(job);
+          } catch (err) {
+            return {
+              runId,
+              status: 'failed' as const,
+              errorText: err instanceof Error ? err.message : String(err),
+            };
+          }
+        })();
+        let guardTimer: ReturnType<typeof setTimeout> | undefined;
+        const guard = new Promise<'guard'>((resolve) => {
+          guardTimer = setTimeout(() => resolve('guard'), guardSec * 1000);
+          guardTimer.unref?.();
+        });
+        const outcome = await Promise.race([wake, guard]);
+        if (guardTimer) clearTimeout(guardTimer);
+        const result: WakeResult =
+          outcome === 'guard'
+            ? { runId, status: 'failed', errorText: wakeSettleGuardErrorText(guardSec) }
+            : outcome;
         const settle = taskRunSettleStatus(result, task.attempts + 1, maxAttempts);
-        await deps.settle(task.taskId, settle, result.errorText);
+        // #340 honesty: a terminal park is a runner FAILURE — the notes line carries the
+        // `failure:` prefix so the concierge/UI never presents it as "the task needs your
+        // input" (the ask line is the ONLY way a genuine user wait enters). Retry re-queues
+        // keep the plain errorText (they are not parks at all).
+        const settleNote =
+          settle === 'waiting_on_user'
+            ? `failure: [runner] Run Task parked as a runner FAILURE (wake ${result.status}${
+                result.errorText ? `: ${result.errorText.slice(0, 300)}` : ''
+              }) — not a user-input ask.`
+            : result.errorText;
+        await deps.settle(task.taskId, settle, settleNote);
         // TASK-AUDIT (#258): settle audit — done / error (retry re-queue) / parked, with the
         // run link and failure text when the run carried one.
         await logRunnerActivity(deps, {

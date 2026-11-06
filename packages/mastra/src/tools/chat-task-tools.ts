@@ -25,12 +25,20 @@ import {
   getCompanySettingsSnapshot,
   listChatTasks,
   prioritizeChatTask,
+  resumeChatTask,
   setChatTaskPaused,
   setChatTaskStatus,
   updateChatTask,
   recordChatTaskActivity,
   chatTaskProductStatus,
   CHAT_TASK_STATUSES,
+  CHAT_TASK_ASK_PREFIX,
+  CHAT_TASK_FAILURE_PREFIX,
+  CHAT_TASK_RECENT_COMPLETED_DEFAULT_MIN,
+  composeChatTaskNoteLine,
+  extractChatTaskNoteLine,
+  hasChatTaskUserFacingSignal,
+  setChatTaskNoteLine,
   isOpenChatTaskStatus,
   type ChatTask,
   type ChatTaskScope,
@@ -98,11 +106,18 @@ function statusCounts(tasks: ChatTask[]): string {
 }
 
 function row(task: ChatTask) {
+  const ask = extractChatTaskNoteLine(task.notes, CHAT_TASK_ASK_PREFIX);
+  const failure = extractChatTaskNoteLine(task.notes, CHAT_TASK_FAILURE_PREFIX);
   return {
     id: task.id,
     status: task.status,
     title: task.title,
     ...(task.notes ? { notes: task.notes } : {}),
+    // #340: the structured signals the concierge needs verbatim — `ask` = what the human must
+    // supply; `failure` = an honest runner-failure park (present it as a FAILURE, never as a
+    // question to the human).
+    ...(ask ? { ask } : {}),
+    ...(failure ? { failure } : {}),
     ...(task.requestedByDisplayName ? { requestedBy: task.requestedByDisplayName } : {}),
   };
 }
@@ -111,6 +126,23 @@ const notFound = (id: string) => ({
   error: 'task_not_found',
   message: `No chat task "${id}" in your list. Call listMyTasks to see it.`,
 });
+
+/**
+ * #340 (PM product ask): `waiting_on_user` without a stated ask is a LYING status — the
+ * observed case parked "Run Task lost (worker died…)" on the human with nothing to answer.
+ * Any agent-driven move INTO waiting_on_user must carry the concrete ask; a runner FAILURE
+ * park is the runner's own `failure:` note path and must never be faked as a user wait.
+ */
+function missingAsk(): { error: string; message: string } {
+  return {
+    error: 'missing_ask',
+    message:
+      'waiting_on_user must state what the human needs to supply — pass ask: "the concrete input / ' +
+      'decision / action you need" (or put an "ask: …" line in notes). If this is actually a ' +
+      'lost/failed Run Task, do NOT mark it waiting_on_user: report the failure (the runner ' +
+      'already stamps a "failure:" note) and let the human decide whether to resume it.',
+  };
+}
 
 /**
  * TASK-AUDIT (#258): lifecycle audit row for a human/agent-driven chat-task change (the runner
@@ -160,23 +192,50 @@ async function logToolActivity(
 export const listMyTasksTool = createTool({
   id: 'listMyTasks',
   description:
-    'List YOUR private chat task list — the to-dos you promised in this chat (pending / in_progress / ' +
-    'waiting_on_user by default; pass includeClosed for done + cancelled too). ' +
+    'List YOUR private chat task list — the to-dos you promised in this chat. DEFAULT (#337): ' +
+    'incomplete tasks (pending / in_progress / waiting_on_user) PLUS tasks COMPLETED in the last ' +
+    `${CHAT_TASK_RECENT_COMPLETED_DEFAULT_MIN} minutes — the "what is on / what just finished" shape for chat. ` +
+    'Pass recentCompletedMinutes to widen/narrow that tail (0 = incomplete only) or includeClosed ' +
+    'for the FULL done + cancelled history. ' +
     'This is NOT company issues or assignments — for assigned company ISSUES use getInbox instead. ' +
     'Call this FIRST whenever the human asks what is left, what you are working on, your status, ' +
     'what you promised, or whether something got done — then answer in plain language from the result. ' +
+    'A waiting_on_user row carries an `ask` field: tell the human exactly that. A row with a ' +
+    '`failure` field is a runner FAILURE park — say so; do not invent a question for it. ' +
     'Never invent items: if the list is empty, answer in plain text instead; do not call showTaskList for it ' +
     '(the card needs at least one task).',
   inputSchema: z.object({
-    includeClosed: z.boolean().optional().describe('Also return done and cancelled tasks (default false).'),
+    includeClosed: z.boolean().optional().describe('Also return the FULL done and cancelled history (default false).'),
+    recentCompletedMinutes: z
+      .number()
+      .int()
+      .min(0)
+      .max(7 * 24 * 60)
+      .optional()
+      .describe(
+        `With includeClosed unset: include done tasks completed within this many minutes ` +
+          `(default ${CHAT_TASK_RECENT_COMPLETED_DEFAULT_MIN}; 0 = incomplete only).`,
+      ),
   }),
   execute: async (inputData, { requestContext }) => {
     const scope = chatTaskScope(requestContext);
     if (!scope) return missingScope();
-    const tasks = await listChatTasks(scope, { includeClosed: inputData.includeClosed }, toolDb());
+    const tasks = await listChatTasks(
+      scope,
+      {
+        includeClosed: inputData.includeClosed,
+        ...(inputData.recentCompletedMinutes !== undefined
+          ? { recentCompletedMinutes: inputData.recentCompletedMinutes }
+          : {}),
+      },
+      toolDb(),
+    );
     const open = tasks.filter((t) => isOpenChatTaskStatus(t.status));
     return {
-      summary: tasks.length === 0 ? 'No open tasks.' : statusCounts(tasks),
+      summary:
+        tasks.length === 0
+          ? 'No open tasks.'
+          : `${statusCounts(tasks)}${open.length === tasks.length ? '' : ' (includes tasks completed in the recent window)'}`,
       count: tasks.length,
       open: open.length,
       tasks: tasks.map(row),
@@ -192,6 +251,14 @@ const addMyTaskInputSchema = z.object({
     .describe('One or more task titles, e.g. ["Draft the runbook", "Check the restore backup"].'),
   notes: z.string().max(2000).optional().describe('Optional context/next step, or a "notify:" list of interested parties.'),
   status: statusSchema.optional().describe('Initial status (default pending).'),
+  ask: z
+    .string()
+    .max(500)
+    .optional()
+    .describe(
+      'Required with status=waiting_on_user: the concrete input / decision / action you need ' +
+        'from the human (stored as an "ask:" line on the notes).',
+    ),
 });
 
 /** #242 live-chat copy: queue non-simple work for Run Task, then STOP — no in-turn grind. */
@@ -324,13 +391,21 @@ async function runAddMyTask(
       message: `Your task list is capped at ${CHAT_TASK_LIST_CAP} open tasks (${open} open now). Finish or cancel some first.`,
     };
   }
+  // #340: an item ADDED as waiting_on_user must already state the ask (same rule as updateMyTask).
+  let notes = inputData.notes ?? null;
+  if (inputData.ask?.trim()) {
+    notes = setChatTaskNoteLine(notes, composeChatTaskNoteLine(CHAT_TASK_ASK_PREFIX, inputData.ask));
+  }
+  if (inputData.status === 'waiting_on_user' && !hasChatTaskUserFacingSignal(notes)) {
+    return missingAsk();
+  }
   const added: ChatTask[] = [];
   for (const title of titles) {
     const task = await addChatTask(
       scope,
       {
         title,
-        notes: inputData.notes,
+        notes,
         status: inputData.status,
         sourceThreadId: scope.threadId ?? null,
         requestedBy: requestingUser(requestContext),
@@ -389,12 +464,24 @@ export const updateMyTaskTool = createTool({
   description:
     'Update one of YOUR chat tasks by id — your private chat task list, NOT company issues: rename it, ' +
     'replace its notes, move its status (pending / in_progress / waiting_on_user / done / cancelled), ' +
-    'reorder it, or change who requested it (when the human corrects who a to-do belongs to).',
+    'reorder it, or change who requested it (when the human corrects who a to-do belongs to). ' +
+    'Moving INTO waiting_on_user REQUIRES ask: "what you need from the human" (#340 — a user wait ' +
+    'without a stated ask is rejected). Moving waiting_on_user → pending RESUMES it: the Run Task ' +
+    'attempt budget resets and taskRunner re-claims it — use it after the human answers the ask ' +
+    '(put their answer into notes so the next run sees it).',
   inputSchema: z.object({
     id: z.string().min(1).describe('Chat task id (from listMyTasks).'),
     title: z.string().min(1).max(CHAT_TASK_TITLE_MAX).optional(),
-    notes: z.string().max(2000).optional().describe('Replaces the notes text ("" clears it).'),
+    notes: z.string().max(2000).optional().describe('Replaces the notes text ("") clears it.'),
     status: statusSchema.optional(),
+    ask: z
+      .string()
+      .max(500)
+      .optional()
+      .describe(
+        'Required when status=waiting_on_user: the concrete input / decision / action the human ' +
+          'must supply (stored as an "ask:" line on the notes, replacing any previous ask).',
+      ),
     position: z.number().int().min(0).optional().describe('Ordering within your list (lower = earlier).'),
     requestedBy: z
       .object({
@@ -410,20 +497,42 @@ export const updateMyTaskTool = createTool({
     // S263-S4 (#263 softs): read the PRIOR status when a status move is requested — the audit
     // row carries "from → to" like the runner rows (previousStatus/previousProductStatus), and a
     // move to the status the task already holds is not a move at all (no row, per "audit only
-    // real status moves").
+    // real status moves"). The prior row also feeds the #340 ask gate and the resume reset below.
     // S269-S4 (#269 softs, known): this read and the write below are SEPARATE statements — a
     // concurrent move can record a stale `from` or skip the row. Best-effort audit only; task
     // state is unaffected (the scoped UPDATE still settles from the live row). Same shape in
     // completeMyTask / cancelMyTask.
-    const previous = inputData.status !== undefined
+    const previous = inputData.status !== undefined || inputData.ask !== undefined
       ? await getChatTask(scope, { id: inputData.id }, toolDb())
       : null;
+    // #340: a REAL move into waiting_on_user must state the ask — either the fresh `ask` param
+    // or an "ask:" line the caller's notes already carry. A row whose only signal is a runner
+    // `failure:` line has NO ask, so hand-moving such a park onto the human is rejected by the
+    // same gate: the ask gate is the only way in. Already-waiting rows are exempt (not a move).
+    if (inputData.status === 'waiting_on_user' && previous && previous.status !== 'waiting_on_user') {
+      const candidateNotes = inputData.notes !== undefined ? inputData.notes : previous.notes;
+      const freshAsk = Boolean(inputData.ask?.trim());
+      const hasAskLine = extractChatTaskNoteLine(candidateNotes, CHAT_TASK_ASK_PREFIX) !== null;
+      if (!freshAsk && !hasAskLine) return missingAsk();
+    }
+    let notes = inputData.notes;
+    if (inputData.ask?.trim()) {
+      const base = notes !== undefined ? notes : previous?.notes ?? null;
+      notes = setChatTaskNoteLine(base, composeChatTaskNoteLine(CHAT_TASK_ASK_PREFIX, inputData.ask));
+    }
+    // #340 go-between resume: waiting_on_user → pending re-queues for Run Task with a FRESH
+    // attempt budget (the exhausted budget was spent on the failed/lost runs — the human's
+    // reply is new input, so the task is claimable again). CAS-guarded; a concurrent move just
+    // no-ops and the UPDATE below settles the fields from the live row.
+    if (inputData.status === 'pending' && previous?.status === 'waiting_on_user') {
+      await resumeChatTask(scope, { id: inputData.id }, toolDb());
+    }
     const updated = await updateChatTask(
       scope,
       {
         id: inputData.id,
         ...(inputData.title !== undefined ? { title: inputData.title } : {}),
-        ...(inputData.notes !== undefined ? { notes: inputData.notes } : {}),
+        ...(notes !== undefined ? { notes } : {}),
         ...(inputData.status !== undefined ? { status: inputData.status } : {}),
         ...(inputData.position !== undefined ? { position: inputData.position } : {}),
         ...(inputData.requestedBy !== undefined ? { requestedBy: inputData.requestedBy } : {}),

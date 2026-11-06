@@ -16,7 +16,7 @@
  * Same shape as company-llm-provider-queries: `database` is injectable (the app pool by default,
  * an in-memory PGlite database in tests).
  */
-import { and, asc, eq, inArray, isNotNull, lt, sql } from 'drizzle-orm';
+import { and, asc, eq, gte, inArray, isNotNull, lt, or, sql } from 'drizzle-orm';
 import type { PgDatabase, PgQueryResultHKT } from 'drizzle-orm/pg-core';
 import { db } from './client';
 import type * as schema from './schema/index';
@@ -42,9 +42,18 @@ export interface ChatTaskRequester {
 }
 
 export interface ListChatTasksOptions {
-  /** Include `done` + `cancelled` (default: open items only). */
+  /** Include ALL `done` + `cancelled` history (full back-catalogue dump). */
   includeClosed?: boolean;
+  /**
+   * #337: with `includeClosed` unset, closed items are hidden EXCEPT `done` rows whose
+   * `completedAt` falls inside this window (minutes). Default 15; 0 disables the recent-done
+   * tail (open-only). Cancelled rows carry no `completedAt`, so they never enter the window.
+   */
+  recentCompletedMinutes?: number;
 }
+
+/** #337 product default: `listMyTasks` shows open items + tasks completed in the last 15 minutes. */
+export const CHAT_TASK_RECENT_COMPLETED_DEFAULT_MIN = 15;
 
 export interface AddChatTaskInput {
   title: string;
@@ -80,17 +89,37 @@ export function isOpenChatTaskStatus(status: ChatTaskStatus): boolean {
 }
 
 /**
- * The agent's task list. Open items by default (`includeClosed` also returns done/cancelled),
- * ordered by `position` then creation time.
+ * The agent's task list. Default (#337): open items PLUS `done` rows completed inside the
+ * recent window (default 15 min) — the chat shape Derek asked for: "what is on / what just
+ * finished", never a history dump. `includeClosed` returns the full done+cancelled back-
+ * catalogue unchanged; `recentCompletedMinutes: 0` drops the recent tail (open-only).
+ * Ordered by `position` then creation time.
  */
 export async function listChatTasks(
   scope: ChatTaskScope,
   options: ListChatTasksOptions = {},
   database: ChatTaskDb = defaultDb,
 ): Promise<ChatTask[]> {
-  const where = options.includeClosed
-    ? and(...scopeWhere(scope))
-    : and(...scopeWhere(scope), inArray(chatTasks.status, OPEN_STATUSES));
+  let where;
+  if (options.includeClosed) {
+    where = and(...scopeWhere(scope));
+  } else {
+    const openClause = inArray(chatTasks.status, OPEN_STATUSES);
+    const recentMin = options.recentCompletedMinutes ?? CHAT_TASK_RECENT_COMPLETED_DEFAULT_MIN;
+    where =
+      recentMin > 0
+        ? and(
+            ...scopeWhere(scope),
+            or(
+              openClause,
+              and(
+                eq(chatTasks.status, 'done'),
+                gte(chatTasks.completedAt, new Date(Date.now() - recentMin * 60_000)),
+              ),
+            ),
+          )
+        : and(...scopeWhere(scope), openClause);
+  }
   return database
     .select()
     .from(chatTasks)
@@ -199,6 +228,92 @@ export async function setChatTaskStatus(
       completedAt: input.status === 'done' ? now : null,
     })
     .where(and(eq(chatTasks.id, input.id), ...scopeWhere(scope)))
+    .returning();
+  return row ?? null;
+}
+
+// ─── #340: structured `ask:` / `failure:` lines in `notes` ──────────────────
+// `waiting_on_user` must STATE what the human needs to do (PM product ask, #340): a transition
+// into user-wait carries a single `ask:` line in `notes` (stable prefix, no migration — the UI
+// and the concierge parse this). A runner-lost / budget-exhausted park is the OPPOSITE signal:
+// a `failure:` line that says plainly it is a runner FAILURE, never a user ask. One line per
+// prefix (the newest wins); everything else in `notes` is free text.
+
+export const CHAT_TASK_ASK_PREFIX = 'ask:';
+export const CHAT_TASK_FAILURE_PREFIX = 'failure:';
+
+/** One structured notes line: `<prefix> <single-line text>`. */
+export function composeChatTaskNoteLine(prefix: string, text: string): string {
+  return `${prefix} ${text.trim().replace(/\s+/g, ' ')}`;
+}
+
+/** The NEWEST line carrying `prefix` (case-insensitive prefix match), or null. */
+export function extractChatTaskNoteLine(
+  notes: string | null | undefined,
+  prefix: string,
+): string | null {
+  if (!notes) return null;
+  const needle = prefix.trimEnd().toLowerCase();
+  for (let i = notes.split('\n').length - 1; i >= 0; i -= 1) {
+    const line = notes.split('\n')[i]!.trim();
+    if (line.toLowerCase().startsWith(`${needle} `)) return line.slice(needle.length + 1).trim();
+  }
+  return null;
+}
+
+/** Replace the line for `prefix` (or append it); other notes lines are untouched. */
+export function setChatTaskNoteLine(
+  notes: string | null | undefined,
+  line: string,
+): string {
+  const prefix = line.slice(0, line.indexOf(' ')).toLowerCase();
+  const kept = (notes ?? '')
+    .split('\n')
+    .filter((l) => !l.trim().toLowerCase().startsWith(`${prefix} `))
+    .filter((l) => l.trim() !== '');
+  kept.push(line);
+  return kept.join('\n');
+}
+
+/** True when the notes carry a user-facing ask OR an honest runner-failure marker. */
+export function hasChatTaskUserFacingSignal(notes: string | null | undefined): boolean {
+  return (
+    extractChatTaskNoteLine(notes, CHAT_TASK_ASK_PREFIX) !== null ||
+    extractChatTaskNoteLine(notes, CHAT_TASK_FAILURE_PREFIX) !== null
+  );
+}
+
+/**
+ * #340 go-between resume: human answered (or the failure cause was fixed) — move a
+ * `waiting_on_user` row back to `pending` and RESET the Run Task attempt budget. The exhausted
+ * budget was spent on the lost/failed runs; the human's reply is new input, so the task earns
+ * fresh attempts (without this, a parked task set back to `pending` by hand would never be
+ * listed by `listRunnableChatTasks` again — the attempts filter would drop it forever).
+ * CAS on waiting_on_user (mirrors finishChatTaskRun's in_progress guard); optional note.
+ */
+export async function resumeChatTask(
+  scope: ChatTaskScope,
+  input: { id: string; note?: string | null },
+  database: ChatTaskDb = defaultDb,
+): Promise<ChatTask | null> {
+  const [existing] = await database
+    .select()
+    .from(chatTasks)
+    .where(and(eq(chatTasks.id, input.id), ...scopeWhere(scope)))
+    .limit(1);
+  if (!existing || existing.status !== 'waiting_on_user') return null;
+  const note = input.note?.trim();
+  const notes = note ? [existing.notes, note].filter(Boolean).join('\n') : existing.notes;
+  const [row] = await database
+    .update(chatTasks)
+    .set({ status: 'pending', notes, runnerAttempts: 0, completedAt: null, updatedAt: new Date() })
+    .where(
+      and(
+        eq(chatTasks.id, input.id),
+        ...scopeWhere(scope),
+        eq(chatTasks.status, 'waiting_on_user'),
+      ),
+    )
     .returning();
   return row ?? null;
 }
@@ -544,11 +659,38 @@ export interface StaleChatTaskRunRow {
   attempts: number;
   runnerLastRunId: string;
   /**
+   * #338/#340: the linked heartbeat_runs row's status at read time — null when the row is
+   * MISSING (crash between claim and insert) — and its errorText when one exists. The settle
+   * notes quote the PRECISE lost-run reason instead of the old blanket "worker died or run
+   * row missing" guess.
+   */
+  lastRunStatus: string | null;
+  lastRunErrorText: string | null;
+  /**
    * Raw companies.settings jsonb (null when the company row is missing). The reconciler reads
    * `settings.taskRunner.maxAttemptsPerTask` through `resolveMaxAttempts` (S-soft), so a park
    * decision uses the SAME budget the poller claimed with — never a fixed 2.
    */
   companySettings: unknown;
+}
+
+/**
+ * #338: the honest one-liner for WHY a Run Task run is dead, from the linked heartbeat_runs
+ * row the reconciler just read — missing row, stalled worker (live status, stale liveness), or
+ * terminal status with the run's own errorText. Feeds the `failure:` notes lines so a parked
+ * task states its real cause (#340: no more blanket "worker died or run row missing").
+ */
+export function describeLostChatTaskRun(
+  row: Pick<StaleChatTaskRunRow, 'lastRunStatus' | 'lastRunErrorText'>,
+): string {
+  if (row.lastRunStatus === null || row.lastRunStatus === undefined) {
+    return 'run row missing (the claimed Run Task wake never landed)';
+  }
+  if (row.lastRunStatus === 'queued' || row.lastRunStatus === 'running') {
+    return `run worker stalled (run row still ${row.lastRunStatus}, no worker heartbeat past the liveness window)`;
+  }
+  const err = row.lastRunErrorText ? `; run error: ${row.lastRunErrorText.slice(0, 300)}` : '';
+  return `run row terminal (status ${row.lastRunStatus}${err})`;
 }
 
 /**
@@ -585,12 +727,17 @@ export async function listStaleChatTaskRuns(
       title: chatTasks.title,
       attempts: chatTasks.runnerAttempts,
       runnerLastRunId: chatTasks.runnerLastRunId,
+      // #338: the dead run's own row (LEFT — the MISSING-row case is exactly `null` here) so
+      // the settle note can name the precise cause instead of guessing "worker died".
+      lastRunStatus: heartbeatRuns.status,
+      lastRunErrorText: heartbeatRuns.errorText,
       companySettings: companies.settings,
     })
     .from(chatTasks)
     // LEFT join: a chat row whose company row vanished must still be reconciled (settings
     // read as null → default budget), never stranded in_progress by an inner-join miss.
     .leftJoin(companies, eq(companies.id, chatTasks.companyId))
+    .leftJoin(heartbeatRuns, eq(heartbeatRuns.id, chatTasks.runnerLastRunId))
     .where(
       and(
         eq(chatTasks.status, 'in_progress'),
@@ -654,12 +801,17 @@ export async function reconcileStaleChatTaskRuns(
   for (const row of stale) {
     const maxAttempts = opts.maxAttempts ?? opts.resolveMaxAttempts?.(row.companySettings) ?? 2;
     const requeue = row.attempts < maxAttempts;
+    // #340 honesty: these parks/re-queues are runner FAILURES, never user asks. The notes line
+    // carries the `failure:` prefix (the concierge/UI must not present it as "needs your input")
+    // plus the PRECISE lost-run reason (#338), while keeping the historic "attempt budget
+    // exhausted" / "re-queued" phrasing the pins assert.
+    const reason = describeLostChatTaskRun(row);
     const settled = await finishChatTaskRun(database, {
       taskId: row.taskId,
       status: requeue ? 'pending' : 'waiting_on_user',
       note: requeue
-        ? '[runner] Run Task lost (worker died or run row missing); re-queued for a fresh attempt.'
-        : '[runner] Run Task lost (worker died or run row missing); attempt budget exhausted — parked.',
+        ? `failure: [runner] Run Task lost — ${reason}; re-queued for a fresh attempt.`
+        : `failure: [runner] Run Task lost — ${reason}; attempt budget exhausted — parked as a runner FAILURE, not a user-input ask.`,
     });
     if (settled) {
       if (requeue) result.requeued += 1;
@@ -682,7 +834,7 @@ export async function reconcileStaleChatTaskRuns(
             previousStatus: 'in_progress',
             previousProductStatus: 'running',
             attempts: row.attempts,
-            note: 'Run Task lost (worker died or run row missing).',
+            note: `Run Task lost — ${reason}.`,
           },
         }, {
           database,
