@@ -1096,3 +1096,26 @@ describe('#339 false-restart guard', () => {
     assert.match(updateMyTaskTool.description ?? '', /LIES about a running run/);
   });
 });
+
+
+// ─── #342: listMyTasks is the TASK answer, read-only, never the ISSUES answer ─
+// The concierge answered "what issues are open" from this list and "mutated" while
+// asked to list (Derek, TEST f260ea2). The description must keep the task/questions
+// boundary AND the read-only rule — the prompt glossary and these tool-copy pins are
+// the two halves; this pins the tool half.
+
+describe('#342 listMyTasks — task questions only, list never mutates', () => {
+  const d = listMyTasksTool.description ?? '';
+
+  it('answers TASK questions only — issues questions go to the issue tools', () => {
+    assert.match(d, /Answers TASK questions \("what is on the task list"\) only/);
+    assert.match(d, /"what issues are open \/ on the board"/);
+    assert.match(d, /use getInbox \/ search, never this list \(#342\)/);
+  });
+
+  it('a list request is read-only — never answer it by mutating', () => {
+    assert.match(d, /A "list" request is READ-ONLY/);
+    assert.match(d, /never call updateMyTask \/ addMyTask \/ completeMyTask \/ cancelMyTask to answer a list request/);
+  });
+});
+

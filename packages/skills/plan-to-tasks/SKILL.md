@@ -1,6 +1,17 @@
-# SKILL: Plan to Tasks
+# SKILL: Plan to Issues (plan-to-tasks)
 
-This skill describes how to decompose a goal or project into a structured task tree, then create those tasks in the control plane.
+This skill decomposes a goal or project into a tree of company board **issues** and creates them in the control plane (`createIssue` / `createSubtask`). The "tasks" in this skill's name are board ISSUES — issue identifiers, projects, goals, assignees — NOT your private chat **task list** (`addMyTask` / `listMyTasks`), which is your personal Run Task queue, not the board (#342).
+
+---
+
+## §0 — Tasks vs issues (one place, #342)
+
+| Word | What it is | Where it lives | Tools |
+|---|---|---|---|
+| **Task** | the agent's private chat to-do list (personal work items run by taskRunner as Run Tasks) | chat only, never on the board | `addMyTask` / `listMyTasks` / `updateMyTask` |
+| **Issue** | company board work item for agents (identifier, project, goal, assignee) | Control Plane board | `createIssue` / `createSubtask` / `updateIssue` / `getInbox` |
+
+Everything below operates on ISSUES. Never satisfy this skill by adding chat tasks, and never track chat to-dos by creating issues.
 
 ---
 
@@ -9,7 +20,7 @@ This skill describes how to decompose a goal or project into a structured task t
 Apply this skill when:
 - You receive a new goal or initiative and need to create actionable work
 - A project has no child issues and needs to be broken down
-- A large task needs parallel sub-tasks delegated to specialist agents
+- A large issue needs parallel sub-issues delegated to specialist agents
 
 ---
 
@@ -32,7 +43,7 @@ Goal (strategic objective, 4–12 week horizon)
 4. **Create issues top-down** — first-layer issues under a goal: call `createIssue` with `goalId` (parentId optional). Sub-issues: call `createSubtask` with `parentId` and `goalId`. `goalId` must be the goal’s UUID from `getGoalDetail` / `listGoals`, or the parent issue’s linked goal (`getHeartbeatContext.goal.id`) — never the issue id
 5. **Assign roles** — enable the **Agent roster** toolset (or call `listAgents`) to match agent roles to issue types. Omitting `assigneeAgentId` defers assignment to CEO triage — the issue lands in `backlog`, not `todo`. Only CEO or a human promotes backlog items to `todo`
 6. **Set dependencies** — use `blockedByIssueIds` to encode sequencing. Visualise the DAG before creating issues to avoid cycles
-7. **Update parent status** — after subtasks are created, set parent to `in_review` or `in_progress` as appropriate
+7. **Update parent status** — after sub-issues are created, set parent to `in_review` or `in_progress` as appropriate
 
 ---
 

@@ -5,8 +5,8 @@ import { extractToolRuntimeContext, tracedAgentFetch } from './api-client';
 const createIssueTool = createTool({
   id: 'createIssue',
   description:
-    'Create a top-level issue linked to a goal. Use for first-layer tasks under a goal. ' +
-    'For sub-issues under an existing task, use createSubtask instead. ' +
+    'Create a top-level issue linked to a goal. Use for first-layer issues under a goal. ' +
+    'For sub-issues under an existing issue, use createSubtask instead. ' +
     'goalId must be an existing goals.id UUID from listGoals / getGoalDetail; never invent or reuse an issue/agent id. ' +
     'Assign with assigneeAgentId (from listAgents) for agent work, or assigneeUserId from getIdentity.board ' +
     'for human/board work. Set exactly one; omit both only to defer to CEO (creates backlog).',
@@ -76,7 +76,7 @@ const getGoalDetailTool = createTool({
   id: 'getGoalDetail',
   description:
     'Get full goal context: description, linked issues, stats, and needsAttention. ' +
-    'Call before decomposing a goal into tasks.',
+    'Call before decomposing a goal into issues.',
   inputSchema: z.object({
     goalId: z.string().describe('Goal UUID'),
   }),

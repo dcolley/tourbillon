@@ -1,6 +1,8 @@
 # SKILL: Control Plane Operations
 
-This skill governs how you interact with the Tourbillon control plane. Follow every rule here precisely. Deviations cause duplicate work, budget overruns, and task conflicts.
+This skill governs how you interact with the Tourbillon control plane. Follow every rule here precisely. Deviations cause duplicate work, budget overruns, and issue conflicts.
+
+**Words (#342):** "issue" = a company board work item (identifier like TOUR-123, project, goal, assignee) — the object of every rule below. The agent's private chat **task list** (`listMyTasks` / `addMyTask` / `updateMyTask`, run by taskRunner as Run Tasks) is a DIFFERENT system that never appears on the board; do not call issues "tasks".
 
 ---
 
@@ -17,12 +19,12 @@ You wake, you work, you exit. Every heartbeat follows these 9 steps exactly:
      - Then EXIT — do not fetch more work
    - Prefer the boolean `budgetExhausted` from `getIdentity` over recomputing from raw token fields
 3. **Fetch inbox** — Call `getInbox`. Review all `in_progress`, `in_review`, `todo`, and `blocked` items
-4. **Select task** — Priority: critical/high unblocked workable (in_progress or todo) > medium/low in_progress > in_review > medium/low todo > blocked. Pre-empt lower-priority in_progress for critical/high unblocked todos.
-5. **Checkout** — Call `checkoutIssue`. If 409 → pick next task. If no tasks:
+4. **Select issue** — Priority: critical/high unblocked workable (in_progress or todo) > medium/low in_progress > in_review > medium/low todo > blocked. Pre-empt lower-priority in_progress for critical/high unblocked todos.
+5. **Checkout** — Call `checkoutIssue`. If 409 → pick the next inbox issue. If the inbox has no issue:
    - **CEO only:** run the Goal Review Fallback (§1a), then EXIT
    - **All other roles:** EXIT cleanly
 6. **Understand context** — Call `getHeartbeatContext` for the checked-out issue. Then call `getComments` (omit `after` on cold start; see §1b). If the work needs a methodology skill other than this control-plane skill, call `getSkill(slug)` first (see catalog / `listSkills`)
-7. **Do work** — Act on the task. Use all available tools. Create subtasks to delegate. Update status and add a comment at every material checkpoint
+7. **Do work** — Act on the issue. Use all available tools. Create sub-issues (`createSubtask`) to delegate. Update status and add a comment at every material checkpoint
 8. **Hand off or complete** — Set status to `done`, `in_review`, or `blocked`. For `in_review`, follow §2a (assign reviewer via `assigneeAgentId`). Always include a comment explaining what is complete, what remains, and who acts next
 9. **EXIT** — The scheduler re-wakes you as needed. Do not poll or loop
 
@@ -35,7 +37,7 @@ When your inbox is empty and your role is `ceo`:
 3. **Triage unassigned issues** — for each issue with `assigneeAgentId: null` and status `backlog` or `todo`:
    - Call `listAgents` to pick the right role
    - Call `updateIssue` with `assigneeAgentId`, `status: 'todo'`, and a comment explaining the assignment
-4. Call `getSkill('plan-to-tasks')` if needed, then apply **SKILL: Plan to Tasks** — identify gaps, create issues via `createIssue` (set `goalId`, assign via `listAgents`, use `blockedByIssueIds` for sequencing)
+4. Call `getSkill('plan-to-tasks')` if needed, then apply **SKILL: Plan to Issues (plan-to-tasks)** — identify gaps, create issues via `createIssue` (set `goalId`, assign via `listAgents`, use `blockedByIssueIds` for sequencing)
 5. Add a comment on each created issue summarizing the plan and next owner
 6. Do not create more than 15 issues per goal per heartbeat — break into phases if needed
 7. EXIT — assignment wakes will handle downstream agents
@@ -62,14 +64,14 @@ When you pick one up:
 |---|---|---|
 | **Control plane (source of truth)** | `getInbox`, `getHeartbeatContext`, `getComments`, `updateIssue` | Every heartbeat — steps 3–8 |
 | **Methodology skills (on demand)** | `listSkills`, `getSkill` | When you need a playbook beyond this control-plane skill — e.g. plan-to-tasks, company frameworks. Call `getSkill(slug)` before following those procedures |
-| **Mastra memory (private accelerator)** | Automatic — your turns persist per issue thread | Across heartbeats on the same task |
+| **Mastra memory (private accelerator)** | Automatic — your turns persist per issue thread | Across heartbeats on the same issue |
 | **Company workspace** | `listWorkspaceFiles`, `readWorkspaceFile`, `writeWorkspaceFile` | On demand during work — shared reference docs, not task history |
 | **Execution sandbox** | `mastra_workspace_execute_command`, sandbox file tools | When `code-execution` toolset enabled — per-issue scratch code; see SKILL: Code Execution |
 | **Web search** | MCP web search tools | External information only |
 
 Only **control-plane** is fully inlined in your system prompt. Other skills appear as a short catalog — load full text with `getSkill` when you need them (saves context for tool results).
 
-**Task history lives in issue comments**, not in memory or RAG. Always write material decisions to comments so other agents can read them.
+**Issue history lives in issue comments**, not in memory or RAG. Always write material decisions to comments so other agents can read them.
 
 At step 6: `getHeartbeatContext` returns `latestCommentId` (newest activity snapshot) and `commentCount`. Use these for orientation only. It also returns `goal` (`{ id, title, … }` or `null`). When `goal` is present, reuse `goal.id` as `goalId` on every `createSubtask` for this issue.
 
@@ -91,7 +93,7 @@ At step 6: `getHeartbeatContext` returns `latestCommentId` (newest activity snap
 | `blocked` | Cannot proceed, depends on another issue | You, after checkout |
 | `cancelled` | No longer needed | Human / CEO agent |
 
-**Never** set status to `done` without a summary comment. **Never** mark a task `in_progress` without checking it out first.
+**Never** set status to `done` without a summary comment. **Never** mark an issue `in_progress` without checking it out first.
 
 ### §2a — `in_review` handoff rules
 
@@ -99,7 +101,7 @@ When setting `status: 'in_review'`, you **must** call `updateIssue` with `assign
 
 **Reviewer selection order:**
 
-1. Agent who **requested/delegated** the task (parent issue assignee, or issue creator from history)
+1. Agent who **requested/delegated** the issue (parent issue assignee, or issue creator from history)
 2. Your `reportsToId` from `getIdentity` if no clear requester
 3. `listAgents` only when the org chart is ambiguous
 
@@ -113,25 +115,25 @@ When setting `status: 'in_review'`, you **must** call `updateIssue` with `assign
 
 ## §3 — Checkout Lock Rules
 
-- **Always checkout before any state mutation** on a task
-- A `409 Conflict` means another agent or run owns the lock — do NOT retry, pick a different task
+- **Always checkout before any state mutation** on an issue
+- A `409 Conflict` means another agent or run owns the lock — do NOT retry, pick a different inbox issue
 - The checkout lock is per-run. Restarting your heartbeat acquires a new lock
 - If you start work and discover blockers, set `blocked` + comment + EXIT. Do not hold the lock open
 
 ---
 
-## §4 — Delegation and Subtasks
+## §4 — Delegation and Sub-issues
 
-- Break large tasks into subtasks via `createSubtask`
-- Every subtask **must** have `parentId` and `goalId` — no orphan issues
+- Break large issues into sub-issues via `createSubtask`
+- Every sub-issue **must** have `parentId` and `goalId` — no orphan issues
 - **`goalId` must be an existing `goals.id` UUID** — never invent a slug, and never reuse the parent issue id, agent id, or any other non-goal id
 - **Source `goalId` (in order):** `getHeartbeatContext.goal.id` → inbox item `goalId` → `listGoals` / `getGoalDetail` when deliberately attaching to an existing goal
 - **If `getHeartbeatContext.goal` is `null`:** do **not** invent a `goalId` and do **not** call `createSubtask` with a fake id. Comment the blocker, then assign Board (`assigneeUserId` from `getIdentity.board`) or defer to CEO to link a goal before delegating. You may still do the work yourself on the parent without creating subtasks
 - Set `assigneeAgentId` (from `listAgents`) to route work to an agent — omitting both assignees creates a `backlog` issue for CEO triage
 - Set `assigneeUserId` to `getIdentity.board.assigneeUserId` to assign **human/Board work** (never invent a user id; Board is not in `listAgents`)
 - Never set both `assigneeAgentId` and `assigneeUserId` on the same call
-- Set `blockedByIssueIds` to encode dependencies between subtasks
-- Your task stays `in_progress` while child tasks are running; set to `in_review` when all children reach `done`
+- Set `blockedByIssueIds` to encode dependencies between sub-issues
+- Your issue stays `in_progress` while child issues are running; set to `in_review` when all children reach `done`
 
 ### §4a — Board vs approval vs agent review
 
@@ -193,8 +195,8 @@ Budget pausing applies **only when `budgetEnforced` is `true`** on `getIdentity`
 
 When enforcement is on:
 
-- **`budgetWarning` true (~80%+)**: Enter critical-only mode — only pick `critical` priority tasks
-- **`budgetExhausted` true (100%)**: Follow step 2 — block an active checked-out task if any, then EXIT
+- **`budgetWarning` true (~80%+)**: Enter critical-only mode — only pick `critical` priority issues
+- **`budgetExhausted` true (100%)**: Follow step 2 — block an active checked-out issue if any, then EXIT
 - Prefer `budgetEnforced`, `budgetExhausted`, and `budgetWarning` from `getIdentity` over raw arithmetic
 - Token cost tracking is automatic — you do not need to count tokens manually
 - Local LM Studio models have zero dollar cost; token budget without enforcement is soft governance only
@@ -219,7 +221,7 @@ When enforcement is on:
 ### When to Search
 
 1. **Before `createSubtask` or `createIssue`**:
-   - Search for similar work: `search({ q: "<task description keywords>", types: ["issue"] })`
+   - Search for similar work: `search({ q: "<issue description keywords>", types: ["issue"] })`
    - If match found with `status: done` → review that solution and link in comment
    - If match found with `status: in_progress` → coordinate with assignee instead of duplicating
    - If match found with `status: blocked` → check if you can unblock rather than create new
@@ -230,7 +232,7 @@ When enforcement is on:
 
 3. **During planning or goal decomposition**:
    - Find related closed issues to reuse approach
-   - Discover company documentation relevant to the task
+   - Discover company documentation relevant to the issue
 
 ### Search Result Shape
 
@@ -416,8 +418,8 @@ When filing, prefer specific types (`hire_agent`) over generic (`request_board_a
 ## §7 — Critical Constraints
 
 - **Never modify files in this skills directory** — they are read-only
-- **Never create circular task dependencies** — check existing blockers before setting new ones
-- **Never assign tasks to yourself** via `createSubtask` — you are already doing the parent
+- **Never create circular issue dependencies** — check existing blockers before setting new ones
+- **Never assign issues to yourself** via `createSubtask` — you are already doing the parent
 - **Never set `goalId` to the parent issue id, your agent id, or a made-up string** — only a real goal UUID from heartbeat context / inbox / `listGoals`
 - **Never impersonate another agent** — your `agentId` is fixed per heartbeat run
 - **Always prefer delegation** for work outside your role. A CEO delegates; does not code.
@@ -427,5 +429,5 @@ When filing, prefer specific types (`hire_agent`) over generic (`request_board_a
 ## §8 — Company Workspace
 
 - Read workspace files **after checkout**, during step 7 only — not at orient
-- Never store task decisions only in workspace — always echo material findings in issue comments
+- Never store issue decisions only in workspace — always echo material findings in issue comments
 - When completing work that produced a reusable artifact (spec, checklist), write to `resources/` or `projects/` and link the path in your completion comment

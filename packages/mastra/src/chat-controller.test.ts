@@ -295,3 +295,84 @@ describe('#339 concierge honesty instructions', () => {
     assert.match(CHAT_MODE_INSTRUCTIONS, /only taskRunner's claim sets `in_progress`/);
   });
 });
+
+
+// ─── #342 (TASKS VS ISSUES): one glossary, never crossed ─────────────────────
+// The concierge was answering "what is on the task list" with board issues and
+// "what issues are open" with chat tasks (Derek, 6 Nov). CHAT_MODE_INSTRUCTIONS must
+// define BOTH terms in one place, route each phrasing to the right tool family, keep
+// "list" requests read-only, and keep the go-between rule (#340) visible. These pins
+// fail if the glossary is silently deleted or softened.
+
+describe('#342 concierge tasks-vs-issues glossary', () => {
+  it('defines Tasks = private chat list run by taskRunner, with the task tools and statuses', () => {
+    assert.match(CHAT_MODE_INSTRUCTIONS, /### Tasks vs issues — one glossary, never crossed \(#342\)/);
+    assert.match(CHAT_MODE_INSTRUCTIONS, /\*\*Tasks\*\* = YOUR private chat task list/);
+    assert.match(CHAT_MODE_INSTRUCTIONS, /executed in the background by taskRunner as \*\*Run Tasks\*\*/);
+    assert.match(CHAT_MODE_INSTRUCTIONS, /`addMyTask` \/ `listMyTasks` \/ `updateMyTask`/);
+    // Statuses from CHAT_TASK_STATUSES (+ the parked product word on waiting_on_user).
+    assert.match(CHAT_MODE_INSTRUCTIONS, /`pending` \(queued\)/);
+    assert.match(CHAT_MODE_INSTRUCTIONS, /`in_progress` \(taskRunner is actually running it — only its claim sets this\)/);
+    assert.match(CHAT_MODE_INSTRUCTIONS, /`waiting_on_user` \(parked/);
+    assert.match(CHAT_MODE_INSTRUCTIONS, /`done`, `cancelled`/);
+  });
+
+  it('defines Issues = company board work items with identifiers, projects, goals, assignees', () => {
+    assert.match(CHAT_MODE_INSTRUCTIONS, /\*\*Issues\*\* = company board work items for agents/);
+    assert.match(CHAT_MODE_INSTRUCTIONS, /issue identifiers/);
+    assert.match(CHAT_MODE_INSTRUCTIONS, /projects, goals and assignees/);
+    assert.match(CHAT_MODE_INSTRUCTIONS, /They live on the Control Plane board; they are NOT your chat to-dos\./);
+  });
+
+  it('routes the two phrasings apart — task list never lists issues, open issues never lists tasks', () => {
+    assert.match(
+      CHAT_MODE_INSTRUCTIONS,
+      /"what is on the task list".*→ `listMyTasks` ONLY — never list issues for it/,
+    );
+    assert.match(
+      CHAT_MODE_INSTRUCTIONS,
+      /"what issues are open".*→ the issue tools \(`getInbox`, `search`\) — never list chat tasks for it/,
+    );
+    assert.match(CHAT_MODE_INSTRUCTIONS, /you never answer one with the other/);
+  });
+
+  it('keeps list requests read-only and failure reporting on the go-between path (#340)', () => {
+    assert.match(CHAT_MODE_INSTRUCTIONS, /A "list" request is READ-ONLY/);
+    assert.match(
+      CHAT_MODE_INSTRUCTIONS,
+      /Never mutate anything \(`updateMyTask` \/ `addMyTask` \/ `completeMyTask` \/ `cancelMyTask`\) as the answer to a list request/,
+    );
+    assert.match(CHAT_MODE_INSTRUCTIONS, /be the go-between \(#340\)/);
+    assert.match(CHAT_MODE_INSTRUCTIONS, /Do \*\*not\*\* invent a recovery plan/);
+    assert.match(CHAT_MODE_INSTRUCTIONS, /"create a new minimal task…"/);
+  });
+
+  it('names only tools that exist — no stale backticked tool references (audit pin)', () => {
+    // Every camelCase backticked token in the prompt must be a tool that exists (or the
+    // taskRunner concept). A stale reference like the old `searchIssues` (there is no such
+    // tool — the company search tool is `search`) turns this RED until it is fixed or the
+    // name is genuinely added to the tool surface.
+    const EXISTING = new Set([
+      'listMyTasks', 'addMyTask', 'updateMyTask', 'completeMyTask', 'cancelMyTask',
+      'pauseMyTask', 'prioritizeMyTask',
+      'getInbox', 'getHeartbeatContext', 'getComments', 'updateIssue', 'createIssue',
+      'createSubtask', 'getMessages', 'getSkill', 'listTools', 'getToolDetails',
+      'taskRunner',
+    ]);
+    const names = new Set<string>();
+    const re = /`([a-z][a-z0-9]*(?:[A-Z][a-zA-Z0-9]*)+)`/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(CHAT_MODE_INSTRUCTIONS)) !== null) names.add(m[1]!);
+    assert.ok(names.size >= 10, 'audit pin must actually see the tool references');
+    for (const name of names) {
+      assert.ok(EXISTING.has(name), `CHAT_MODE_INSTRUCTIONS references unknown tool \`${name}\``);
+    }
+    // The known-stale name must stay gone.
+    assert.doesNotMatch(CHAT_MODE_INSTRUCTIONS, /searchIssues/);
+    // And the routing tools must be present by name (deleting them re-points the agent
+    // at nothing — this makes silent deletion RED, not just an unknown-name RED).
+    for (const expected of ['listMyTasks', 'addMyTask', 'updateMyTask', 'getInbox', 'search']) {
+      assert.ok(CHAT_MODE_INSTRUCTIONS.includes(expected), `prompt lost the tool name ${expected}`);
+    }
+  });
+});
