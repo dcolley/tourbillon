@@ -286,3 +286,12 @@ describe('CHAT_MODE_INSTRUCTIONS — chat-task handoff wording (#242, S243-S1/S4
     assert.doesNotMatch(CHAT_MODE_INSTRUCTIONS, /using Wake \/ Run heartbeat/);
   });
 });
+
+
+describe('#339 concierge honesty instructions', () => {
+  it('pins the answer-every-message + no-fake-restart copy', () => {
+    assert.match(CHAT_MODE_INSTRUCTIONS, /Each queued user message gets its OWN answer/);
+    assert.match(CHAT_MODE_INSTRUCTIONS, /never tell the human a task is "running again"/);
+    assert.match(CHAT_MODE_INSTRUCTIONS, /only taskRunner's claim sets `in_progress`/);
+  });
+});

@@ -1059,3 +1059,40 @@ describe('#340 ask contract on the chat-task tools', () => {
     }
   });
 });
+
+
+// ─── #339(b): parked → in_progress is never a fake "running again" ───────────
+
+describe('#339 false-restart guard', () => {
+  it('a parked task flipped straight to in_progress is re-queued as pending, truthfully', async () => {
+    const { client, db } = await seededToolDb();
+    try {
+      setToolDbForTests(db);
+      const task = await addChatTask(SCOPE, { title: 'Ship the report' }, db);
+      await client.exec(
+        `update chat_tasks set status = 'waiting_on_user', runner_attempts = 2, notes = 'failure: [runner] Run Task lost — worker died' where id = '${task.id}'`,
+      );
+      const res = (await updateMyTaskTool.execute!(
+        { id: task.id, status: 'in_progress' },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.equal(res.ok, true);
+      assert.match(res.message!, /RE-QUEUED as pending/, 'the tool tells the truth: re-queued, not running');
+      assert.match(res.message!, /NOT running/);
+      const stored = await listChatTasks(SCOPE, { includeClosed: true }, db);
+      assert.equal(
+        stored.find((t) => t.id === task.id)!.status,
+        'pending',
+        'never a lying in_progress without a re-dispatch',
+      );
+    } finally {
+      setToolDbForTests(null);
+      await client.close();
+    }
+  });
+
+  it('the tool description pins the no-fake-restart contract', () => {
+    assert.match(updateMyTaskTool.description ?? '', /in_progress yourself/);
+    assert.match(updateMyTaskTool.description ?? '', /LIES about a running run/);
+  });
+});

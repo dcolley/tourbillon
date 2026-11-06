@@ -227,6 +227,24 @@ test('progress: needs_review + skipped → needs a decision', () => {
   assert.match(payload.contents, /needs a decision/);
 });
 
+test('#339: waiting_on_user → relay the stated ask, route to a real resume', () => {
+  const payload = taskProgressSignalPayload(
+    progress({ stage: 'waiting_on_user', status: 'succeeded', detail: 'Pick vendor A or B' }),
+  );
+  assert.match(payload.contents, /is waiting on the human: Pick vendor A or B/);
+  assert.match(payload.contents, /resume the task \(status pending\)/);
+  const bare = taskProgressSignalPayload(progress({ stage: 'waiting_on_user', status: 'succeeded' }));
+  assert.match(bare.contents, /is waiting on the human\./, 'no detail → no invented ask');
+});
+
+test('#339: failed → report the failure, never dress it as a user ask', () => {
+  const payload = taskProgressSignalPayload(
+    progress({ stage: 'failed', status: 'failed', detail: 'run row missing' }),
+  );
+  assert.match(payload.contents, /FAILED: run row missing/);
+  assert.match(payload.contents, /do NOT present it as waiting on their input/);
+});
+
 test('progress: the full queue path — every transition lands as one typed signal each', async () => {
   const session = new FakeSession();
   const events = [

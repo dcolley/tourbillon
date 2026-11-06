@@ -1,4 +1,11 @@
-import { db as defaultDb, heartbeatRuns, reconcileStaleChatTaskRuns, type ChatTaskDb, type ChatTaskReconcileResult } from '@tourbillon/db';
+import {
+  db as defaultDb,
+  heartbeatRuns,
+  reconcileStaleChatTaskRuns,
+  type ChatTaskDb,
+  type ChatTaskReconcileResult,
+  type StaleChatTaskRunRow,
+} from '@tourbillon/db';
 import { and, eq, isNull, lt, or } from 'drizzle-orm';
 import { resolveTaskRunnerSettingsForCompany } from './task-runner';
 
@@ -48,9 +55,12 @@ export async function sweepOrphanedRunsOnStartup(
 export async function reconcileChatTaskRunsOnStartup(
   bootTime: Date,
   database: ChatTaskDb = defaultDb as unknown as ChatTaskDb,
+  /** #339: per-settled-row sink (scheduler-main wires the concierge wake for parks). */
+  opts: { onSettled?: (row: StaleChatTaskRunRow, kind: 'requeued' | 'parked', note: string) => void } = {},
 ): Promise<ChatTaskReconcileResult> {
   return reconcileStaleChatTaskRuns(database, {
     staleCutoff: bootTime,
+    ...(opts.onSettled ? { onSettled: opts.onSettled } : {}),
     // S-soft: same company-resolved budget as the interval sweep (settings.taskRunner.
     // maxAttemptsPerTask, clamped) — budget 1 parks instead of re-queueing past the limit.
     resolveMaxAttempts: (settings) => resolveTaskRunnerSettingsForCompany(settings).maxAttemptsPerTask,

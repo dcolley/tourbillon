@@ -58,6 +58,30 @@ test('parse: valid chat_task_progress payload round-trips', () => {
   assert.deepEqual(parseTaskProgressMessage(raw), event());
 });
 
+test('#339 parse: the new stages round-trip and the optional detail rides through', () => {
+  const ask = parseTaskProgressMessage(
+    JSON.stringify({
+      type: 'chat_task_progress',
+      ...event(),
+      stage: 'waiting_on_user',
+      status: 'succeeded',
+      detail: 'Pick vendor A or B',
+    }),
+  )!;
+  assert.equal(ask.stage, 'waiting_on_user');
+  assert.equal(ask.detail, 'Pick vendor A or B');
+  const failed = parseTaskProgressMessage(
+    JSON.stringify({ type: 'chat_task_progress', ...event(), stage: 'failed', status: 'failed', detail: 'boom' }),
+  )!;
+  assert.equal(failed.stage, 'failed');
+  assert.equal(failed.detail, 'boom');
+  assert.equal(
+    parseTaskProgressMessage(JSON.stringify({ type: 'chat_task_progress', ...event(), stage: 'blocked' })),
+    null,
+    'blocked is not a published stage (it maps onto waiting_on_user)',
+  );
+});
+
 test('parse: non-JSON, other types, bad stage/status and missing fields return null', () => {
   assert.equal(parseTaskProgressMessage('not json'), null);
   assert.equal(parseTaskProgressMessage(JSON.stringify({ type: 'issue_updated', ...event() })), null);
@@ -135,6 +159,9 @@ test('handle: status→contents — done, failed (another look), skipped (decisi
     [{ stage: 'done', status: 'succeeded' }, /^Background task done:/],
     [{ stage: 'needs_review', status: 'failed' }, /needs another look/],
     [{ stage: 'needs_review', status: 'skipped' }, /needs a decision/],
+    // #339: the fan-out words — relay the STATED ask; report the failure as a failure.
+    [{ stage: 'waiting_on_user', status: 'succeeded', detail: 'Pick vendor A or B' }, /is waiting on the human: Pick vendor A or B/],
+    [{ stage: 'failed', status: 'failed', detail: 'worker died' }, /FAILED: worker died/],
   ];
   for (const [over, pattern] of cases) {
     const h = harness();

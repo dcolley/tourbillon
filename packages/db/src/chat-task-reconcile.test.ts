@@ -499,3 +499,60 @@ describe('reconcileStaleChatTaskRuns #338 reasons (cont.)', () => {
     }
   });
 });
+
+describe('reconcileStaleChatTaskRuns #339 onSettled sink', () => {
+  it('notifies per settled row with kind + the failure note', async () => {
+    const { client, db } = await freshDb();
+    try {
+      const lost = await addChatTask(A1, { title: 'Lost run' }, db);
+      await claimedCrash(client, db, lost.id, 'run-339-park');
+      const seen: Array<{ id: string; kind: string; note: string }> = [];
+      const result = await reconcileStaleChatTaskRuns(db, {
+        staleCutoff: sweepCutoff(),
+        maxAttempts: 1,
+        onSettled: (row, kind, note) => seen.push({ id: row.taskId, kind, note }),
+      });
+      assert.equal(result.parked, 1);
+      assert.deepEqual(seen.map((s) => [s.id, s.kind]), [[lost.id, 'parked']]);
+      assert.match(seen[0]!.note, /failure: \[runner\] Run Task lost/, 'the sink carries the row note');
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('reports re-queues too (the caller decides what wakes the concierge)', async () => {
+    const { client, db } = await freshDb();
+    try {
+      const retry = await addChatTask(A1, { title: 'Will retry' }, db);
+      await claimedCrash(client, db, retry.id, 'run-339-retry');
+      const seen: Array<[string, string]> = [];
+      await reconcileStaleChatTaskRuns(db, {
+        staleCutoff: sweepCutoff(),
+        maxAttempts: 2,
+        onSettled: (row, kind) => seen.push([row.taskId, kind]),
+      });
+      assert.deepEqual(seen, [[retry.id, 'requeued']]);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('a throwing sink never breaks the sweep (notification is best-effort by contract)', async () => {
+    const { client, db } = await freshDb();
+    try {
+      const lost = await addChatTask(A1, { title: 'Sink down case' }, db);
+      await claimedCrash(client, db, lost.id, 'run-339-throw');
+      const result = await reconcileStaleChatTaskRuns(db, {
+        staleCutoff: sweepCutoff(),
+        maxAttempts: 1,
+        onSettled: () => {
+          throw new Error('sink down');
+        },
+      });
+      assert.equal(result.parked, 1, 'the settle landed despite the exploding sink');
+    } finally {
+      await client.close();
+    }
+  });
+});
+

@@ -426,6 +426,31 @@ export function isTaskProgressStatus(value: unknown): value is TaskProgressStatu
   return typeof value === 'string' && (TASK_PROGRESS_STATUSES as readonly string[]).includes(value);
 }
 
+/**
+ * #339: the ONE stage union for `chat_task_progress` events — same single-source discipline as
+ * TASK_PROGRESS_STATUSES (S307-S2). `started` / `done` / `needs_review` are the original three;
+ * #339 adds `waiting_on_user` (a genuine ask park — the concierge must relay the ask to the
+ * human) and `failed` (a runner-failure park per #340 — report the failure, NEVER as a user
+ * ask). "blocked" from the issue maps onto `waiting_on_user` (chat_tasks has no blocked status).
+ * Publisher (scheduler), signal payload (mastra) and the web parser all consume THIS declaration;
+ * widen only publisher + parser together, in the same commit.
+ */
+export const TASK_PROGRESS_STAGES = [
+  'started',
+  'done',
+  'needs_review',
+  'waiting_on_user',
+  'failed',
+] as const;
+
+/** The `chat_task_progress` stage union — single source (#339). */
+export type TaskProgressStage = (typeof TASK_PROGRESS_STAGES)[number];
+
+/** Runtime accept-set check for {@link TaskProgressStage} (the web SSE parser's single source). */
+export function isTaskProgressStage(value: unknown): value is TaskProgressStage {
+  return typeof value === 'string' && (TASK_PROGRESS_STAGES as readonly string[]).includes(value);
+}
+
 export interface SSEEvent {
   type: SSEEventType;
   companyId: string;

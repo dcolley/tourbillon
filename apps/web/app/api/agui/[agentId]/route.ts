@@ -171,6 +171,28 @@ function isUnknownDismissal(
 
 const WIDGET_RUN_ERROR = 'The widget answer could not be processed. Please try again.';
 
+/**
+ * #339(a): bounded best-effort wait until the session's core run is idle. The claim's
+ * queued turn drains at `agent_end` + setTimeout(0), which is BEFORE the run has fully
+ * settled (persistence included) — sending straight away raced the just-finished turn's
+ * persistence, letting the model re-answer the PREVIOUS user message. `run.isRunning()`
+ * stays armed through the settle, so waiting on it delivers at the same point the core
+ * follow-up queue drains behind — while letting the route still pass tracingOptions
+ * (which core `followUp()` drops). Falls through after `timeoutMs` (historic behaviour)
+ * rather than wedging the SSE run.
+ */
+export async function waitForSessionRunIdle(
+  session: { run: { isRunning(): boolean } },
+  opts: { timeoutMs?: number; pollMs?: number } = {},
+): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? 15_000;
+  const pollMs = opts.pollMs ?? 20;
+  const deadline = Date.now() + timeoutMs;
+  while (session.run.isRunning() && Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, pollMs));
+  }
+}
+
 function controlResponse(threadId: string, runId: string, action: string, value: Record<string, unknown>) {
   const events: BaseEvent[] = [
     { type: EventType.CUSTOM, name: AGUI_CUSTOM.control, value: { action, ...value } } as BaseEvent,
@@ -443,16 +465,29 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
           console.error('[agui] steer failed', err),
         );
       } else if (active) {
-        // Started by the open AG-UI stream once the current turn completes; dropped if it closes first.
-        const queued = active.queueTurn(() =>
-          runWithHeartbeatContext(heartbeat, () =>
+        // Started by the open AG-UI stream once the current turn completes; dropped if it closes
+        // first. #339(a) turn-mix fix: the queued turn goes through the SESSION's own follow-up
+        // queue (the AgentController holds it FIFO and sends it once the active run has fully
+        // settled) instead of a raw sendMessage fired from a setTimeout(0) after agent_end —
+        // that raced the persistence of the just-finished turn, so the model could re-answer the
+        // PREVIOUS user message while the queued one got swallowed. Claim bookkeeping stays (the
+        // queued count + follow_up_dropped contract are unchanged); tracing rides the run.
+        const queued = active.queueTurn(async () => {
+          // Wait for the core run to fully settle — the same idle gate the core follow-up
+          // queue drains behind — then send DIRECTLY with the open run's tracingOptions:
+          // core's followUp() dispatch builds its stream options WITHOUT them, so the
+          // queued turn would start its own trace (the OBS-1 pin says a follow-up queued
+          // on an open run JOINS that run's trace). Still dispatched strictly after the
+          // previous turn persisted, so each queued message gets its own answer (#339a).
+          await waitForSessionRunIdle(session);
+          return runWithHeartbeatContext(heartbeat, () =>
             session.sendMessage({
               content,
               requestContext: requestContext as never,
               ...(tracingOptions ? { tracingOptions } : {}),
             }),
-          ),
-        );
+          );
+        });
         return controlResponse(input.threadId, input.runId, action, { accepted: true, queued });
       } else {
         void session.followUp({ content, requestContext: requestContext as never });

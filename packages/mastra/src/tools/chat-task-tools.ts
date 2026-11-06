@@ -468,7 +468,10 @@ export const updateMyTaskTool = createTool({
     'Moving INTO waiting_on_user REQUIRES ask: "what you need from the human" (#340 — a user wait ' +
     'without a stated ask is rejected). Moving waiting_on_user → pending RESUMES it: the Run Task ' +
     'attempt budget resets and taskRunner re-claims it — use it after the human answers the ask ' +
-    '(put their answer into notes so the next run sees it).',
+    '(put their answer into notes so the next run sees it). Do NOT set a parked task to ' +
+    'in_progress yourself: in_progress belongs to the Run Task claim, and a bare flip only ' +
+    'LIES about a running run (#339). To restart a parked task use status pending (a real ' +
+    're-queue); a parked -> in_progress flip is converted into that re-queue for you.',
   inputSchema: z.object({
     id: z.string().min(1).describe('Chat task id (from listMyTasks).'),
     title: z.string().min(1).max(CHAT_TASK_TITLE_MAX).optional(),
@@ -526,6 +529,29 @@ export const updateMyTaskTool = createTool({
     // no-ops and the UPDATE below settles the fields from the live row.
     if (inputData.status === 'pending' && previous?.status === 'waiting_on_user') {
       await resumeChatTask(scope, { id: inputData.id }, toolDb());
+    }
+    // #339(b) false-restart guard: a parked task flipped straight to in_progress is a LYING
+    // status — in_progress belongs to the Run Task claim and a bare flip never re-dispatches a
+    // run, yet the concierge was reporting "running again". Coerce the flip into the REAL
+    // thing: resume (waiting_on_user -> pending, fresh attempt budget) so taskRunner actually
+    // claims it, and answer truthfully instead of confirming a run that does not exist.
+    if (inputData.status === 'in_progress' && previous?.status === 'waiting_on_user') {
+      const resumed = await resumeChatTask(scope, { id: inputData.id }, toolDb());
+      if (resumed) {
+        await logToolActivity(scope, resumed, 'chat_task.updated', requestContext, {
+          changes: { status: { from: previous.status, to: resumed.status } },
+          previousStatus: previous.status,
+          previousProductStatus: chatTaskProductStatus(previous.status),
+        });
+        return {
+          ok: true,
+          message:
+            `Task ${resumed.id} was parked, so the bare in_progress flip was refused: it was ` +
+            'RE-QUEUED as pending instead — taskRunner will start a fresh run. Say it is ' +
+            're-queued, NOT running.',
+          task: row(resumed),
+        };
+      }
     }
     const updated = await updateChatTask(
       scope,
