@@ -198,6 +198,10 @@ export const listMyTasksTool = createTool({
     'Pass recentCompletedMinutes to widen/narrow that tail (0 = incomplete only) or includeClosed ' +
     'for the FULL done + cancelled history. ' +
     'This is NOT company issues or assignments — for assigned company ISSUES use getInbox instead. ' +
+    'Answers TASK questions ("what is on the task list") only — "what issues are open / on the board" ' +
+    'is an ISSUES question: use getInbox / search, never this list (#342). ' +
+    'A "list" request is READ-ONLY: report this result and stop — never call updateMyTask / addMyTask / ' +
+    'completeMyTask / cancelMyTask to answer a list request. ' +
     'Call this FIRST whenever the human asks what is left, what you are working on, your status, ' +
     'what you promised, or whether something got done — then answer in plain language from the result. ' +
     'A waiting_on_user row carries an `ask` field: tell the human exactly that. A row with a ' +

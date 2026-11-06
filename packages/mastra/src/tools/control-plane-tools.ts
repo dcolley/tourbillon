@@ -92,8 +92,10 @@ export const getIdentityTool = createTool({
 export const getInboxTool = createTool({
   id: 'getInbox',
   description:
-    'Get your compact assignment list. Returns todo, in_progress, in_review, ' +
-    'and blocked tasks assigned to you. Use this to pick work at the start of a heartbeat.',
+    'Get your compact assignment list of company board ISSUES: todo, in_progress, in_review, ' +
+    'and blocked issues assigned to you. Use this to pick work at the start of a heartbeat. ' +
+    'These are board issues (identifiers, projects, goals, assignees) — NOT your private chat ' +
+    'task list; for "what is on the task list" use listMyTasks instead (#342).',
   inputSchema: z.object({}),
   execute: async (_inputData, { requestContext }) => {
     const res = await tracedAgentFetch('getInbox', requestContext, '/api/agents/me/inbox-lite');
@@ -105,8 +107,9 @@ export const getInboxTool = createTool({
 export const checkoutIssueTool = createTool({
   id: 'checkoutIssue',
   description:
-    'Atomically checkout a task before doing any work on it (including resuming in_progress work). ' +
-    'On 409 conflict, pick the next inbox task — never retry the same issue in one heartbeat.',
+    'Atomically checkout an ISSUE (a company board issue) before doing any work on it ' +
+    '(including resuming in_progress work). ' +
+    'On 409 conflict, pick the next inbox issue — never retry the same issue in one heartbeat.',
   inputSchema: z.object({
     issueId: z.string().describe('The issue UUID to checkout'),
   }),
@@ -127,7 +130,7 @@ export const checkoutIssueTool = createTool({
           conflict: true,
           conflictReason: 'lock',
           message:
-            'Another heartbeat run holds the checkout lock on this task. Pick a different inbox task.',
+            'Another heartbeat run holds the checkout lock on this issue. Pick a different inbox issue.',
         };
       }
       return {
@@ -135,7 +138,7 @@ export const checkoutIssueTool = createTool({
         conflictReason: body.code ?? 'checkout_conflict',
         message:
           body.error ??
-          'Cannot checkout this task right now. Pick a different inbox task.',
+          'Cannot checkout this issue right now. Pick a different inbox issue.',
       };
     }
     if (!res.ok) return { error: `HTTP ${res.status}`, message: await res.text() };
@@ -146,7 +149,7 @@ export const checkoutIssueTool = createTool({
 export const getHeartbeatContextTool = createTool({
   id: 'getHeartbeatContext',
   description:
-    'Get compact context for a task: state, ancestors, goal info, latestCommentId, and commentCount. ' +
+    'Get compact context for an ISSUE: state, ancestors, goal info, latestCommentId, and commentCount. ' +
     'Always call this before reading the full comment thread.',
   inputSchema: z.object({ issueId: z.string() }),
   execute: async (inputData, { requestContext }) => {
@@ -160,7 +163,7 @@ export const getHeartbeatContextTool = createTool({
 export const getCommentsTool = createTool({
   id: 'getComments',
   description:
-    'Get comments on a task. Omit after on cold start (assignment/reassignment). ' +
+    'Get comments on an ISSUE. Omit after on cold start (assignment/reassignment). ' +
     'For incremental updates within a run, pass latestId from a prior getComments response.',
   inputSchema: z.object({
     issueId: z.string(),
@@ -321,7 +324,7 @@ export const createSubtaskTool = createTool({
   id: 'createSubtask',
   description:
     'Create a child issue to delegate work to another agent or the Board. ' +
-    'Always set parentId and goalId — no orphan tasks allowed. ' +
+    'Always set parentId and goalId — no orphan issues allowed. ' +
     'goalId must come from getHeartbeatContext.goal.id or listGoals; never the issue id. ' +
     'Assign with assigneeAgentId (listAgents) or assigneeUserId (getIdentity.board.assigneeUserId); ' +
     'omit both only to defer assignment to CEO (creates backlog).',
