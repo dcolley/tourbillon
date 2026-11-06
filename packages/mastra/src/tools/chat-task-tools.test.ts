@@ -711,7 +711,7 @@ describe('TASK-AUDIT (#258): tool-owned transitions write lifecycle audit rows',
       )) as ToolResult;
       assert.equal(done.ok, true);
       const updated = (await updateMyTaskTool.execute!(
-        { id: task.id, status: 'waiting_on_user' },
+        { id: task.id, status: 'waiting_on_user', ask: 'Approve the draft or request changes' },
         { requestContext: scopeContext } as never,
       )) as ToolResult;
       assert.equal(updated.ok, true);
@@ -755,7 +755,7 @@ describe('TASK-AUDIT (#258): tool-owned transitions write lifecycle audit rows',
       setToolDbForTests(db);
       const fromQueued = await addChatTask(SCOPE, { title: 'Pin the queued word' }, db);
       const queuedMove = (await updateMyTaskTool.execute!(
-        { id: fromQueued.id, status: 'waiting_on_user' },
+        { id: fromQueued.id, status: 'waiting_on_user', ask: 'Pick vendor A or vendor B' },
         { requestContext: scopeContext } as never,
       )) as ToolResult;
       assert.equal(queuedMove.ok, true);
@@ -902,6 +902,157 @@ describe('TASK-AUDIT (#258): tool-owned transitions write lifecycle audit rows',
       )) as ToolResult;
       assert.equal(cancelAgain.ok, true);
       assert.equal((await activityRows(client)).length, 2, 'cancelled → cancelled stays row-silent');
+    } finally {
+      setToolDbForTests(null);
+      await client.close();
+    }
+  });
+});
+
+// ─── #340: ask-required waiting_on_user + go-between resume (tool layer) ────
+describe('#340 ask contract on the chat-task tools', () => {
+  it('updateMyTask INTO waiting_on_user without an ask is rejected and writes nothing', async () => {
+    const { client, db } = await seededToolDb();
+    try {
+      setToolDbForTests(db);
+      const task = await addChatTask(SCOPE, { title: 'Research vendors', notes: 'Notify: Ops' }, db);
+      const res = (await updateMyTaskTool.execute!(
+        { id: task.id, status: 'waiting_on_user' },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.equal(res.error, 'missing_ask', 'a lying status is refused at the tool boundary');
+      const stored = await listChatTasks(SCOPE, { includeClosed: true }, db);
+      assert.equal(stored[0]!.status, 'pending', 'the rejected move wrote nothing');
+      assert.equal(stored[0]!.notes, 'Notify: Ops', 'notes untouched');
+      assert.equal((await activityRows(client)).length, 0, 'no audit row for a rejected move');
+    } finally {
+      setToolDbForTests(null);
+      await client.close();
+    }
+  });
+
+  it('the ask lands as an `ask:` notes line AND a structured field on the row', async () => {
+    const { client, db } = await seededToolDb();
+    try {
+      setToolDbForTests(db);
+      const task = await addChatTask(SCOPE, { title: 'Research vendors' }, db);
+      const res = (await updateMyTaskTool.execute!(
+        { id: task.id, status: 'waiting_on_user', ask: 'Pick  vendor  A or B' },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.equal(res.ok, true);
+      assert.equal(res.task.ask, 'Pick vendor A or B', 'single-line ask parsed for the concierge');
+      assert.match(res.task.notes, /ask: Pick vendor A or B/);
+      // An ask in notes WITHOUT the param also satisfies the gate (stable prefix contract).
+      const viaNotes = await addChatTask(SCOPE, { title: 'Notes-ask' }, db);
+      const viaNotesRes = (await updateMyTaskTool.execute!(
+        { id: viaNotes.id, status: 'waiting_on_user', notes: 'ask: Confirm the budget' },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.equal(viaNotesRes.ok, true);
+      assert.equal(viaNotesRes.task.ask, 'Confirm the budget');
+      // A runner-failure-parked row (failure: line, no ask) cannot be hand-moved without one.
+      const parked = await addChatTask(SCOPE, { title: 'Lost run' }, db);
+      await client.exec(
+        `update chat_tasks set status = 'waiting_on_user', notes = 'failure: [runner] Run Task lost — run row missing' where id = '${parked.id}'`,
+      );
+      const listed = (await listMyTasksTool.execute!(
+        {},
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      const parkedRow = listed.tasks.find((t: ToolResult) => t.id === parked.id)!;
+      assert.equal(parkedRow.ask, undefined, 'a park has no ask to present');
+      assert.match(parkedRow.failure, /run row missing/, 'and the row exposes the failure verbatim');
+    } finally {
+      setToolDbForTests(null);
+      await client.close();
+    }
+  });
+
+  it('addMyTask with initial status waiting_on_user needs the ask too', async () => {
+    const { client, db } = await seededToolDb();
+    try {
+      setToolDbForTests(db);
+      const bad = (await addMyTaskTool.execute!(
+        { titles: ['Blocked thing'], status: 'waiting_on_user' },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.equal(bad.error, 'missing_ask');
+      assert.equal((await listChatTasks(SCOPE, { includeClosed: true }, db)).length, 0, 'nothing stored');
+      const good = (await addMyTaskTool.execute!(
+        { titles: ['Blocked thing'], status: 'waiting_on_user', ask: 'Which environment?' },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.equal(good.ok, true);
+      assert.equal(good.tasks[0].ask, 'Which environment?');
+    } finally {
+      setToolDbForTests(null);
+      await client.close();
+    }
+  });
+
+  it('go-between resume: waiting_on_user → pending resets the attempt budget (re-claimable)', async () => {
+    const { client, db } = await seededToolDb();
+    try {
+      setToolDbForTests(db);
+      const task = await addChatTask(SCOPE, { title: 'Parked research', notes: 'ask: Which vendor?' }, db);
+      await client.exec(
+        `update chat_tasks set status = 'waiting_on_user', runner_attempts = 2 where id = '${task.id}'`,
+      );
+      const res = (await updateMyTaskTool.execute!(
+        { id: task.id, status: 'pending', notes: 'human answered: vendor A' },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.equal(res.ok, true);
+      assert.equal(res.task.status, 'pending');
+      const { rows: rawRows } = await client.query<{ attempts: number; status: string }>(
+        `select runner_attempts as attempts, status from chat_tasks where id = '${task.id}'`,
+      );
+      const raw = rawRows[0]!;
+      assert.equal(raw.attempts, 0, '#340: the exhausted budget was spent on the lost runs — resume is a fresh start');
+      assert.equal(raw.status, 'pending');
+    } finally {
+      setToolDbForTests(null);
+      await client.close();
+    }
+  });
+
+  it('#337 listMyTasks default: open + last-15-min done; knobs honour, includeClosed stays full history', async () => {
+    const { client, db } = await seededToolDb();
+    try {
+      setToolDbForTests(db);
+      const open = await addChatTask(SCOPE, { title: 'Still open' }, db);
+      const fresh = await addChatTask(SCOPE, { title: 'Just done', status: 'done' }, db);
+      const stale = await addChatTask(SCOPE, { title: 'Old done', status: 'done' }, db);
+      await client.exec(
+        `update chat_tasks set completed_at = now() - interval '45 minutes' where id = '${stale.id}'`,
+      );
+      const def = (await listMyTasksTool.execute!(
+        {},
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.deepEqual(
+        def.tasks.map((t: ToolResult) => t.id).sort(),
+        [open.id, fresh.id].sort(),
+        'default = incomplete + recently completed (no history dump)',
+      );
+      assert.match(def.summary, /recent window/, 'the summary tells the model the tail is time-boxed');
+      const only = (await listMyTasksTool.execute!(
+        { recentCompletedMinutes: 0 },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.deepEqual(only.tasks.map((t: ToolResult) => t.id), [open.id]);
+      const wide = (await listMyTasksTool.execute!(
+        { recentCompletedMinutes: 120 },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.equal(wide.count, 3);
+      const full = (await listMyTasksTool.execute!(
+        { includeClosed: true },
+        { requestContext: scopeContext } as never,
+      )) as ToolResult;
+      assert.equal(full.count, 3, 'includeClosed keeps returning everything');
+      void fresh; void stale;
     } finally {
       setToolDbForTests(null);
       await client.close();

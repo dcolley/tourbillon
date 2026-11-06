@@ -18,15 +18,23 @@ import {
   addChatTask,
   claimChatTaskRun,
   countOpenChatTasks,
+  describeLostChatTaskRun,
+  extractChatTaskNoteLine,
+  composeChatTaskNoteLine,
   finishChatTaskRun,
   getChatTask,
+  hasChatTaskUserFacingSignal,
   listChatTasks,
   listPendingChatTaskCompanySettings,
   listRunnableChatTasks,
   prioritizeChatTask,
+  resumeChatTask,
+  setChatTaskNoteLine,
   setChatTaskPaused,
   setChatTaskStatus,
   updateChatTask,
+  CHAT_TASK_ASK_PREFIX,
+  CHAT_TASK_FAILURE_PREFIX,
 } from './chat-task-queries';
 import { spyQueries } from './test/query-spy';
 
@@ -110,9 +118,17 @@ describe('chat-task query layer', () => {
       const cancelled = await setChatTaskStatus(A1, { id: first.id, status: 'cancelled', note: 'No longer needed.' }, db);
       assert.equal(cancelled?.status, 'cancelled');
 
-      const open = await listChatTasks(A1, {}, db);
+      // #337: the DEFAULT list is open + recently-completed (15 min window), so `Done thing`
+      // (completedAt = now) rides along; recentCompletedMinutes: 0 is the open-only view.
+      const open = await listChatTasks(A1, { recentCompletedMinutes: 0 }, db);
+      const chatShape = await listChatTasks(A1, {}, db);
       const everything = await listChatTasks(A1, { includeClosed: true }, db);
       assert.equal(open.length, 1); // only the waiting_on_user backup stays open
+      assert.deepEqual(
+        chatShape.map((t) => t.title),
+        ['Check the restore backup', 'Done thing'],
+        '#337 default: open items + the done row completed inside the recent window',
+      );
       assert.equal(everything.length, 3); // runbook cancelled + backup waiting + Done thing done
       assert.equal(await countOpenChatTasks(A1, db), 1);
 
@@ -867,5 +883,111 @@ describe('chat-task company read + fallback bound (S2/S3, PR #208 ACCEPT softs)'
     } finally {
       await client.close();
     }
+  });
+});
+
+// ─── #340: ask / failure notes lines + resume ───────────────────────────────
+describe('#340 chat-task ask/failure notes convention + resume', () => {
+  it('compose/extract/set round-trip the ask line; other notes survive', () => {
+    const line = composeChatTaskNoteLine(CHAT_TASK_ASK_PREFIX, 'Approve   the   plan\nor pick a vendor');
+    assert.equal(line, 'ask: Approve the plan or pick a vendor', 'flattened to ONE line');
+    let notes = setChatTaskNoteLine('notify: Bob\ncontext stays', line);
+    assert.equal(extractChatTaskNoteLine(notes, CHAT_TASK_ASK_PREFIX), 'Approve the plan or pick a vendor');
+    assert.match(notes, /notify: Bob/);
+    assert.match(notes, /context stays/);
+    // Newest ask wins — exactly one ask line after a replace.
+    notes = setChatTaskNoteLine(notes, composeChatTaskNoteLine(CHAT_TASK_ASK_PREFIX, 'Pick vendor A or B'));
+    assert.equal(notes.split('\n').filter((l) => l.startsWith('ask:')).length, 1);
+    assert.equal(extractChatTaskNoteLine(notes, CHAT_TASK_ASK_PREFIX), 'Pick vendor A or B');
+    // A `failure:` line alone is NOT a user-facing ask.
+    const parked = setChatTaskNoteLine(null, composeChatTaskNoteLine(CHAT_TASK_FAILURE_PREFIX, 'run row missing'));
+    assert.equal(extractChatTaskNoteLine(parked, CHAT_TASK_ASK_PREFIX), null);
+    assert.equal(extractChatTaskNoteLine(parked, CHAT_TASK_FAILURE_PREFIX), 'run row missing');
+    assert.equal(hasChatTaskUserFacingSignal(parked), true, 'an honest failure marker is user-facing');
+    assert.equal(hasChatTaskUserFacingSignal('free text only'), false);
+    assert.equal(hasChatTaskUserFacingSignal(null), false);
+  });
+
+  it('#337 window: recent done rides along, old done and cancelled drop out; widen/zero honour', async () => {
+    const { client, db } = await freshDb();
+    try {
+      const openTask = await addChatTask(A1, { title: 'Still open' }, db);
+      const fresh = await addChatTask(A1, { title: 'Just finished', status: 'done' }, db);
+      const stale = await addChatTask(A1, { title: 'Finished an hour ago', status: 'done' }, db);
+      await client.exec(
+        `update chat_tasks set completed_at = now() - interval '60 minutes' where id = '${stale.id}'`,
+      );
+      const dropped = await addChatTask(A1, { title: 'Cancelled one', status: 'cancelled' }, db);
+
+      const def = await listChatTasks(A1, {}, db);
+      assert.deepEqual(
+        def.map((t) => t.id),
+        [openTask.id, fresh.id],
+        'default = open + done inside the 15-min window (cancelled never enters)',
+      );
+      assert.ok(!def.some((t) => t.id === stale.id), 'an hour-old done row is NOT noise for chat');
+      assert.ok(!def.some((t) => t.id === dropped.id), 'cancelled stays hidden');
+
+      const widened = await listChatTasks(A1, { recentCompletedMinutes: 120 }, db);
+      assert.ok(widened.some((t) => t.id === stale.id), 'a wider window brings the old done row back');
+      const only = await listChatTasks(A1, { recentCompletedMinutes: 0 }, db);
+      assert.deepEqual(only.map((t) => t.id), [openTask.id], '0 = incomplete only');
+      const full = await listChatTasks(A1, { includeClosed: true }, db);
+      assert.equal(full.length, 4, 'includeClosed keeps returning the FULL history');
+      void fresh;
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('resumeChatTask: waiting_on_user → pending RESETS the attempt budget; CAS + scope held', async () => {
+    const { client, db } = await freshDb();
+    try {
+      const parked = await addChatTask(A1, {
+        title: 'Parked research',
+        status: 'waiting_on_user',
+        notes: 'failure: [runner] Run Task lost — run row missing; attempt budget exhausted.',
+      }, db);
+      await client.exec(`update chat_tasks set runner_attempts = 2 where id = '${parked.id}'`);
+
+      const resumed = await resumeChatTask(A1, { id: parked.id, note: 'user answered: use vendor A' }, db);
+      assert.ok(resumed);
+      assert.equal(resumed!.status, 'pending');
+      assert.equal(resumed!.runnerAttempts, 0, 'human input earns a FRESH attempt budget');
+      assert.match(resumed!.notes!, /user answered: use vendor A/);
+      assert.match(resumed!.notes!, /failure: \[runner\]/, 'the failure history line survives');
+      // The exhausted-budget row is claimable again (the attempts filter would otherwise
+      // drop it from the runnable listing forever).
+      const run = await listRunnableChatTasks(db, { maxAttempts: 2 });
+      assert.ok(run.some((r) => r.taskId === parked.id), 'resumed task is back in the Run Task queue');
+
+      // CAS: only waiting_on_user rows resume; pending/done rows are untouched nulls.
+      assert.equal(await resumeChatTask(A1, { id: parked.id }, db), null, 'already pending → null');
+      const done = await addChatTask(A1, { title: 'Done', status: 'done' }, db);
+      assert.equal(await resumeChatTask(A1, { id: done.id }, db), null);
+      // Scope: a foreign agent/company cannot resume the row.
+      const other = await addChatTask(A1, { title: 'Foreign parked', status: 'waiting_on_user' }, db);
+      assert.equal(await resumeChatTask(A2, { id: other.id }, db), null);
+      assert.equal((await getChatTask(A1, { id: other.id }, db))?.status, 'waiting_on_user');
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('#338 describeLostChatTaskRun names the precise cause', () => {
+    assert.equal(
+      describeLostChatTaskRun({ lastRunStatus: null, lastRunErrorText: null }),
+      'run row missing (the claimed Run Task wake never landed)',
+    );
+    assert.equal(
+      describeLostChatTaskRun({ lastRunStatus: 'running', lastRunErrorText: null }),
+      'run worker stalled (run row still running, no worker heartbeat past the liveness window)',
+    );
+    assert.equal(
+      describeLostChatTaskRun({ lastRunStatus: 'failed', lastRunErrorText: 'boom' }),
+      'run row terminal (status failed; run error: boom)',
+    );
+    const long = describeLostChatTaskRun({ lastRunStatus: 'failed', lastRunErrorText: 'x'.repeat(400) });
+    assert.ok(long.includes('run error: ' + 'x'.repeat(300)), 'errorText capped at 300 chars');
   });
 });

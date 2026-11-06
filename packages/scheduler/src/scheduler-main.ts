@@ -40,6 +40,42 @@ const productionBootDeps: SchedulerBootDeps = {
   startTaskRunnerPolling,
 };
 
+/**
+ * #338 ("AgentController dies before its promise settles", worker-died half): an unhandled
+ * rejection escaping the harness internals kills the whole scheduler on Node's default policy
+ * — every in-flight heartbeat and Run Task then dies with it and the stale sweeps lose-park
+ * them behind the vague "worker died" note. Make that death LOUD and cheap to diagnose:
+ *
+ * - `unhandledRejection`: log at error and STAY alive. The scheduler is tick-based; one stray
+ *   promise rejection (Mastra/AgentController internals are upstream-owned) must not cancel
+ *   every other agent's heartbeat/Run Task work. The settle guard in task-runner.ts bounds
+ *   any wake whose controller died.
+ * - `uncaughtException`: log at error, then exit(1) — same crash semantics as the Node default
+ *   (systemd restarts), but the cause now reaches the scheduler log instead of only stderr.
+ *
+ * Exported for tests (emit the events against a fake logger); returns a disposer removing the
+ * listeners. main() installs it before any subsystem boots.
+ */
+export function installSchedulerProcessGuards(logger: Logger): () => void {
+  const describe = (reason: unknown): Record<string, unknown> => ({
+    error: reason instanceof Error ? reason.message : String(reason),
+    ...(reason instanceof Error && reason.stack ? { stack: reason.stack } : {}),
+  });
+  const onRejection = (reason: unknown): void => {
+    logger.error('unhandled rejection kept alive (#338 process guard)', describe(reason));
+  };
+  const onException = (reason: unknown): void => {
+    logger.error('uncaught exception; exiting for supervisor restart (#338 process guard)', describe(reason));
+    process.exit(1);
+  };
+  process.on('unhandledRejection', onRejection);
+  process.on('uncaughtException', onException);
+  return () => {
+    process.off('unhandledRejection', onRejection);
+    process.off('uncaughtException', onException);
+  };
+}
+
 export async function main(logger: Logger, boot: SchedulerBootDeps = productionBootDeps): Promise<void> {
   const bootTime = new Date();
   // Postgres may still be starting (e.g. "the database system is not yet accepting connections").

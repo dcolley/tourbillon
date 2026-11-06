@@ -108,6 +108,10 @@ export function staleRow(over: Partial<StaleChatTaskRunRow> = {}): StaleChatTask
     title: 'Crashed run',
     attempts: 1,
     runnerLastRunId: 'run-dead',
+    // #338: default to the MISSING-run shape (the classic crash-between-claim-and-wake);
+    // tests override with the real heartbeat_runs status/errorText when pinning a reason.
+    lastRunStatus: null,
+    lastRunErrorText: null,
     companySettings: null,
     ...over,
   };
