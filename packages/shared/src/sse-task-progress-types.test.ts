@@ -13,9 +13,12 @@ import {
   TASK_PROGRESS_SSE_TYPE,
   TASK_PROGRESS_STATUSES,
   isTaskProgressStatus,
+  TASK_PROGRESS_STAGES,
+  isTaskProgressStage,
   type SSEEvent,
   type SSEEventType,
   type TaskProgressStatus,
+  type TaskProgressStage,
 } from './types';
 
 // Type level (compile gate): the pinned constant must be a member of the enum...
@@ -78,5 +81,34 @@ test('S307-S2: TASK_PROGRESS_STATUSES is exactly the four publishable words; gua
   // coalesced/cancelled stay heartbeat_runs ROW statuses (S304-S2 asymmetry), and so does junk.
   for (const not of ['coalesced', 'cancelled', 'pending', '', 'Running', 1, null, undefined]) {
     assert.equal(isTaskProgressStatus(not), false, `${String(not)} must be rejected`);
+  }
+});
+
+// ─── #339: the ONE chat_task_progress stage union ────────────────────────────
+
+// Type level (compile gate): exhaustive map over the stage union — dropping a word from
+// TASK_PROGRESS_STAGES goes RED here on the excess key, adding one goes RED on the missing key.
+const stageCoverage: Record<TaskProgressStage, true> = {
+  started: true,
+  done: true,
+  needs_review: true,
+  waiting_on_user: true,
+  failed: true,
+};
+void stageCoverage;
+
+test('#339: TASK_PROGRESS_STAGES is exactly the five publishable stages; guard agrees with the tuple', () => {
+  // Hard-coded (NOT derived) so shrinking/growing the SHARED union goes RED here. #339 added
+  // waiting_on_user (relay the stated ask) + failed (runner-failure park, #340 honesty);
+  // "blocked" from the issue maps onto waiting_on_user (chat_tasks has no blocked status).
+  assert.deepEqual(
+    [...TASK_PROGRESS_STAGES].sort(),
+    ['done', 'failed', 'needs_review', 'started', 'waiting_on_user'],
+  );
+  for (const stage of TASK_PROGRESS_STAGES) {
+    assert.equal(isTaskProgressStage(stage), true, `${stage} must be accepted`);
+  }
+  for (const not of ['blocked', 'cancelled', 'parked', '', 'Started', 1, null, undefined]) {
+    assert.equal(isTaskProgressStage(not), false, `${String(not)} must be rejected`);
   }
 });

@@ -792,6 +792,13 @@ export async function reconcileStaleChatTaskRuns(
      * scheduler logs while the settle itself still goes through (best-effort, never throws).
      */
     onAuditError?: (err: unknown, row: StaleChatTaskRunRow) => void;
+    /**
+     * #339: called once per settled row AFTER the settle landed, with the same note the row
+     * carries. The db layer stays dependency-free (no redis import): the scheduler sweeper
+     * passes a sink that fans the park out to the concierge. A throwing sink is swallowed by
+     * contract — the reconcile must never break on its notification path.
+     */
+    onSettled?: (row: StaleChatTaskRunRow, kind: 'requeued' | 'parked', note: string) => void;
     now?: Date;
     limit?: number;
   },
@@ -806,12 +813,13 @@ export async function reconcileStaleChatTaskRuns(
     // plus the PRECISE lost-run reason (#338), while keeping the historic "attempt budget
     // exhausted" / "re-queued" phrasing the pins assert.
     const reason = describeLostChatTaskRun(row);
+    const settleNote = requeue
+      ? `failure: [runner] Run Task lost — ${reason}; re-queued for a fresh attempt.`
+      : `failure: [runner] Run Task lost — ${reason}; attempt budget exhausted — parked as a runner FAILURE, not a user-input ask.`;
     const settled = await finishChatTaskRun(database, {
       taskId: row.taskId,
       status: requeue ? 'pending' : 'waiting_on_user',
-      note: requeue
-        ? `failure: [runner] Run Task lost — ${reason}; re-queued for a fresh attempt.`
-        : `failure: [runner] Run Task lost — ${reason}; attempt budget exhausted — parked as a runner FAILURE, not a user-input ask.`,
+      note: settleNote,
     });
     if (settled) {
       if (requeue) result.requeued += 1;
@@ -842,6 +850,15 @@ export async function reconcileStaleChatTaskRuns(
           // (still best-effort: recordChatTaskActivity swallows when no sink is given).
           ...(opts.onAuditError ? { onError: (err: unknown) => opts.onAuditError!(err, row) } : {}),
         });
+      }
+      // #339: notify the caller's sink (concierge wake for parks). Best-effort by contract:
+      // a throwing sink must never abort the sweep.
+      if (opts.onSettled) {
+        try {
+          opts.onSettled(row, requeue ? 'requeued' : 'parked', settleNote);
+        } catch {
+          /* never breaks the sweep */
+        }
       }
     }
   }

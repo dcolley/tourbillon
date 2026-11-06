@@ -22,6 +22,9 @@ import {
   startTaskRunnerPolling,
   sweepStaleChatTaskRuns,
   taskRunSettleStatus,
+  taskRunSettleProgressEvent,
+  createStaleRunProgressSink,
+  type ChatTaskProgressEvent,
   type TaskRunPollSummary,
   type TaskRunSlotState,
   type TaskRunnerDeps,
@@ -674,3 +677,79 @@ test('S3 (#202 softs): the company-settings read feeds the listing — no pendin
   const q = new PgDialect().sqlToQuery(wheres[1]!);
   assert.doesNotMatch(q.sql.toLowerCase(), /\bcase\b/, 'no companies → plain bounded listing (nothing to map)');
 });
+
+// ─── #339: progress fan-out mapping (taskRunSettleProgressEvent + sweep sink) ─
+
+test('#339: settle map — done, retry re-queue, and the historic fallback', async () => {
+  const base = { companyId: 'c1', agentId: 'a1', chatTaskId: 't1', runId: 'r1', title: 'Ship it' };
+  const done = await taskRunSettleProgressEvent({ ...base, settle: 'done', wakeStatus: 'succeeded' });
+  assert.deepEqual(done, { ...base, stage: 'done', status: 'succeeded' });
+  const retry = await taskRunSettleProgressEvent({
+    ...base,
+    settle: 'pending',
+    wakeStatus: 'failed',
+    errorText: 'boom',
+  });
+  assert.equal(retry.stage, 'needs_review');
+  assert.equal(retry.detail, 'boom');
+  // No readTaskState wired (fakes/tests): the historic settle→stage mapping stands.
+  const legacy = await taskRunSettleProgressEvent({ ...base, settle: 'waiting_on_user', wakeStatus: 'failed' });
+  assert.equal(legacy.stage, 'needs_review');
+});
+
+test('#339: the STORED row decides ask-park vs failure-park (never a lying "done")', async () => {
+  const base = { companyId: 'c1', agentId: 'a1', chatTaskId: 't1', runId: 'r1', title: 'Ship it' };
+  // The agent parked the row with an ask mid-run: the settle CAS skipped it, so a naive
+  // emit would have claimed "done". The stored row says the truth.
+  const ask = await taskRunSettleProgressEvent({
+    ...base,
+    settle: 'done',
+    wakeStatus: 'succeeded',
+    readTaskState: async () => ({ status: 'waiting_on_user', notes: 'ask: Pick vendor A or B' }),
+  });
+  assert.equal(ask.stage, 'waiting_on_user');
+  assert.equal(ask.detail, 'Pick vendor A or B', 'the stated ask rides to the concierge');
+  const park = await taskRunSettleProgressEvent({
+    ...base,
+    settle: 'waiting_on_user',
+    wakeStatus: 'failed',
+    errorText: 'worker died',
+    readTaskState: async () => ({ status: 'waiting_on_user', notes: 'failure: [runner] lost' }),
+  });
+  assert.equal(park.stage, 'failed', '#340 honesty: a failure park is a FAILURE, not a user wait');
+  assert.match(park.detail!, /lost/);
+  const broken = await taskRunSettleProgressEvent({
+    ...base,
+    settle: 'done',
+    wakeStatus: 'succeeded',
+    readTaskState: async () => {
+      throw new Error('db down');
+    },
+  });
+  assert.equal(broken.stage, 'done', 'a failed best-effort read falls back, never throws');
+});
+
+test('#339: sweep sink wakes the concierge for parks only', () => {
+  const events: ChatTaskProgressEvent[] = [];
+  const sink = createStaleRunProgressSink((e) => events.push(e));
+  const row = {
+    taskId: 't1',
+    companyId: 'c1',
+    agentId: 'a1',
+    title: 'Ship it',
+    attempts: 2,
+    runnerLastRunId: 'run-9',
+    lastRunStatus: 'running',
+    lastRunErrorText: null,
+    companySettings: null,
+  };
+  sink(row, 'requeued', 'failure: re-queued');
+  assert.equal(events.length, 0, 'routine re-queues stay silent');
+  sink(row, 'parked', 'failure: [runner] lost — parked');
+  assert.equal(events.length, 1);
+  assert.equal(events[0]!.stage, 'failed');
+  assert.equal(events[0]!.status, 'failed');
+  assert.equal(events[0]!.runId, 'run-9');
+  assert.match(events[0]!.detail!, /parked/);
+});
+

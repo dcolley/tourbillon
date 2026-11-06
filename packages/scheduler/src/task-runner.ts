@@ -39,8 +39,19 @@ import {
   type ChatTaskReconcileResult,
   type ChatTaskStatus,
   type RunnableChatTaskRow,
+  type StaleChatTaskRunRow,
+  getChatTask,
+  extractChatTaskNoteLine,
+  CHAT_TASK_ASK_PREFIX,
+  CHAT_TASK_FAILURE_PREFIX,
 } from '@tourbillon/db';
-import type { HeartbeatJobData, ResolvedTaskRunnerSettings, TaskProgressStatus, TaskRunnerSettings } from '@tourbillon/shared';
+import type {
+  HeartbeatJobData,
+  ResolvedTaskRunnerSettings,
+  TaskProgressStage,
+  TaskProgressStatus,
+  TaskRunnerSettings,
+} from '@tourbillon/shared';
 import {
   createTraceLogger,
   resolveHeartbeatLivenessConfig,
@@ -121,6 +132,17 @@ export interface TaskRunnerDeps {
   /** High-level progress event for the parent chat (SSE chip), never a tool transcript. */
   emitProgress?(event: ChatTaskProgressEvent): void;
   /**
+   * #339: best-effort read of the STORED chat_tasks row after the run, so the progress event
+   * tells the truth about ask-parks (the settle CAS skips rows the agent parked mid-run — the
+   * event must not claim "done" for a task that is waiting on the human). Absent → the
+   * historic settle→stage mapping.
+   */
+  readTaskState?: (
+    companyId: string,
+    agentId: string,
+    taskId: string,
+  ) => Promise<{ status: string; notes: string | null } | null>;
+  /**
    * S199a: warn/error are optional so existing info-only loggers still satisfy the interface,
    * but the poll-failure path PREFERS them (greppable by level) and only falls back to info.
    */
@@ -136,11 +158,122 @@ export interface ChatTaskProgressEvent {
   agentId: string;
   chatTaskId: string;
   runId: string;
-  /** High-level stage shown to the board: task started / finished / needs another look. */
-  stage: 'started' | 'done' | 'needs_review';
+  /** High-level stage shown to the board. #339: shared single-source union (waiting_on_user +
+   * failed added WITH the web parser + signal payload, same commit — S304-S2 discipline). */
+  stage: TaskProgressStage;
   /** S307-S2 (#304 softs): single source @tourbillon/shared (was a local copy of the union). */
   status: TaskProgressStatus;
+  /** #339: precise ask/failure text carried to the concierge (truncated by the publisher). */
+  detail?: string;
   title: string;
+}
+
+/**
+ * #339: map a settled Run Task run to the ONE progress event the concierge gets. Prefers the
+ * STORED row state (when the caller wired readTaskState) so the stage says what the task
+ * actually IS: `waiting_on_user` + an `ask:` line = genuine user wait (relay the ask),
+ * `waiting_on_user` + a `failure:` line = runner-failure park (report the failure, #340
+ * honesty), `done` = complete, `pending` = retry re-queue (needs another look). With no read
+ * available (tests, or the row vanished), falls back to the historic settle mapping.
+ */
+export async function taskRunSettleProgressEvent(opts: {
+  companyId: string;
+  agentId: string;
+  chatTaskId: string;
+  runId: string;
+  title: string;
+  settle: 'pending' | 'waiting_on_user' | 'done';
+  wakeStatus: TaskProgressStatus;
+  errorText?: string | null;
+  readTaskState?: (
+    companyId: string,
+    agentId: string,
+    taskId: string,
+  ) => Promise<{ status: string; notes: string | null } | null>;
+}): Promise<ChatTaskProgressEvent> {
+  const base = {
+    companyId: opts.companyId,
+    agentId: opts.agentId,
+    chatTaskId: opts.chatTaskId,
+    runId: opts.runId,
+    title: opts.title,
+  };
+  let stored: { status: string; notes: string | null } | null = null;
+  if (opts.readTaskState) {
+    try {
+      stored = await opts.readTaskState(opts.companyId, opts.agentId, opts.chatTaskId);
+    } catch {
+      stored = null; // the progress fan-out must never fail on a best-effort read
+    }
+  }
+  if (stored?.status === 'waiting_on_user') {
+    const ask = extractChatTaskNoteLine(stored.notes, CHAT_TASK_ASK_PREFIX);
+    if (ask) return { ...base, stage: 'waiting_on_user', status: opts.wakeStatus, detail: ask.slice(0, 300) };
+    const failure = extractChatTaskNoteLine(stored.notes, CHAT_TASK_FAILURE_PREFIX);
+    return {
+      ...base,
+      stage: 'failed',
+      status: 'failed',
+      detail: (failure ?? opts.errorText ?? 'Run Task parked by the runner').slice(0, 300),
+    };
+  }
+  if (stored?.status === 'done') return { ...base, stage: 'done', status: opts.wakeStatus };
+  if (stored?.status === 'pending') {
+    return {
+      ...base,
+      stage: 'needs_review',
+      status: opts.wakeStatus,
+      ...(opts.errorText ? { detail: opts.errorText.slice(0, 300) } : {}),
+    };
+  }
+  // No read (or an unexpected row state): the historic settle mapping.
+  return {
+    ...base,
+    stage: opts.settle === 'done' ? 'done' : 'needs_review',
+    status: opts.wakeStatus,
+    ...(opts.settle !== 'done' && opts.errorText ? { detail: opts.errorText.slice(0, 300) } : {}),
+  };
+}
+
+/** #339: the SSE publisher for task-progress events (shared by the poller default + sweeps). */
+export function createTaskProgressPublisher(): (event: ChatTaskProgressEvent) => void {
+  return (event) => {
+    // Minimal parent-chat bridge: one SSE event per stage. No tool transcript, no replies.
+    // S4 (#196): the type is the shared pinned constant, so the enum, the publisher and the
+    // web parser can no longer drift apart (the old `task_run_update`/`chat_task_progress` gap).
+    void import('./redis-pub')
+      .then(({ redisPub }) =>
+        redisPub.publish(
+          `sse:${event.companyId}`,
+          JSON.stringify({ type: TASK_PROGRESS_SSE_TYPE, ...event }),
+        ),
+      )
+      .catch(() => undefined);
+  };
+}
+
+/**
+ * #339: stale-sweep onSettled sink → concierge wake. A lost-run PARK is a concierge-visible
+ * FAILURE (the human hears about it without polling); routine re-queues stay silent — the
+ * runner's own retry path already emits needs_review for failures it sees, and a sweep
+ * re-queue is the same event class re-attempting, not news.
+ */
+export function createStaleRunProgressSink(
+  publish: (event: ChatTaskProgressEvent) => void,
+): (row: StaleChatTaskRunRow, kind: 'requeued' | 'parked', note: string) => void {
+  return (row, kind, note) => {
+    if (kind !== 'parked') return;
+    publish({
+      companyId: row.companyId,
+      agentId: row.agentId,
+      chatTaskId: row.taskId,
+      runId: row.runnerLastRunId || 'lost-run',
+      stage: 'failed',
+      status: 'failed',
+      title: row.title,
+      detail: note.slice(0, 300),
+    });
+  };
 }
 
 /**
@@ -566,15 +699,22 @@ export async function pollTaskRunner(
           attempts: task.attempts + 1,
           note: settle === 'done' ? null : result.errorText ?? null,
         });
-        deps.emitProgress?.({
-          companyId: task.companyId,
-          agentId,
-          chatTaskId: task.taskId,
-          runId,
-          stage: settle === 'done' ? 'done' : 'needs_review',
-          status: result.status,
-          title: task.title,
-        });
+        // #339 fan-out: derive the stage from the STORED row where readable — a Run Task the
+        // agent parked mid-run with an ask is NOT done, and a failure park is never dressed as
+        // a user ask (#340 honesty continues here: the concierge hears the truth without polling).
+        deps.emitProgress?.(
+          await taskRunSettleProgressEvent({
+            companyId: task.companyId,
+            agentId,
+            chatTaskId: task.taskId,
+            runId,
+            title: task.title,
+            settle,
+            wakeStatus: result.status,
+            errorText: result.errorText,
+            readTaskState: deps.readTaskState,
+          }),
+        );
       })();
       summary.started.push({ agentId, taskId: task.taskId, runId, done });
     }
@@ -697,21 +837,13 @@ export function createDefaultTaskRunnerDeps(
     // poll failure (e.g. the countActiveRuns Date crash) was silent. Default to the scheduler
     // trace logger so failures surface in scheduler logs.
     log,
-    emitProgress:
-      options.emitProgress ??
-      ((event) => {
-        // Minimal parent-chat bridge: one SSE event per stage. No tool transcript, no replies.
-        // S4 (#196): the type is the shared pinned constant, so the enum, the publisher and the
-        // web parser can no longer drift apart (the old `task_run_update`/`chat_task_progress` gap).
-        void import('./redis-pub')
-          .then(({ redisPub }) =>
-            redisPub.publish(
-              `sse:${event.companyId}`,
-              JSON.stringify({ type: TASK_PROGRESS_SSE_TYPE, ...event }),
-            ),
-          )
-          .catch(() => undefined);
-      }),
+    emitProgress: options.emitProgress ?? createTaskProgressPublisher(),
+    // #339: read the STORED row after the run so the fan-out tells the truth about ask-parks
+    // (the settle CAS skipped them) instead of claiming "done".
+    readTaskState: async (companyId, agentId, taskId) => {
+      const row = await getChatTask({ companyId, agentId }, { id: taskId }, database);
+      return row ? { status: row.status, notes: row.notes } : null;
+    },
   };
 }
 
@@ -804,7 +936,15 @@ export async function sweepStaleChatTaskRuns(
    * insert was silently swallowed on the sweep path (only the poller's own rows logged). Defaults
    * to the scheduler trace logger — same 'task-run activity log failed' line as the runner path.
    */
-  opts: { log?: TaskRunnerDeps['log'] } = {},
+  opts: {
+    log?: TaskRunnerDeps['log'];
+    /**
+     * #339: notified per settled row — the boot/interval sweep wires createStaleRunProgressSink
+     * so a lost-run PARK wakes the concierge as a failure. Never breaks the sweep (the db layer
+     * swallows sink throws by contract).
+     */
+    onSettled?: (row: StaleChatTaskRunRow, kind: 'requeued' | 'parked', note: string) => void;
+  } = {},
 ): Promise<ChatTaskReconcileResult> {
   const { staleSec } = resolveHeartbeatLivenessConfig();
   const cutoff = new Date(Date.now() - staleSec * 1000);
@@ -823,6 +963,8 @@ export async function sweepStaleChatTaskRuns(
     // maxAttemptsPerTask, clamped) — the same number the claim used. Budget 1 parks, never
     // re-queues in a loop; a fixed 2 here would re-queue past the company's limit forever.
     resolveMaxAttempts: (settings) => resolveTaskRunnerSettingsForCompany(settings).maxAttemptsPerTask,
+    // #339: parks found by the sweep must reach the concierge (wired by the callers).
+    ...(opts.onSettled ? { onSettled: opts.onSettled } : {}),
   });
 }
 

@@ -7,6 +7,7 @@ import { startTaskRunnerPolling } from './task-runner';
 import { describeDatabaseTarget, probeDatabase } from '@tourbillon/db';
 import { DEFAULT_DB_ATTEMPT_TIMEOUT_MS, waitForDb, type Logger } from './startup';
 import { sweepOrphanedRunsOnStartup, reconcileChatTaskRunsOnStartup } from './startup-sweep';
+import { createStaleRunProgressSink, createTaskProgressPublisher } from './task-runner';
 
 /**
  * S1 (#202 ACCEPT softs): the boot side-effects are injectable so the startup path — above all
@@ -32,7 +33,12 @@ const productionBootDeps: SchedulerBootDeps = {
   waitForDb,
   probeDatabase,
   sweepOrphanedRunsOnStartup,
-  reconcileChatTaskRunsOnStartup,
+  // #339: parks the boot reconcile finds are concierge-visible failures (same publisher as
+  // the poller's own progress emits).
+  reconcileChatTaskRunsOnStartup: (bootTime: Date) =>
+    reconcileChatTaskRunsOnStartup(bootTime, undefined, {
+      onSettled: createStaleRunProgressSink(createTaskProgressPublisher()),
+    }),
   sweepStaleEgressSockets,
   startWakeServer,
   startStaleSweepInterval,

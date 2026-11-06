@@ -16,7 +16,7 @@
 
 // S307-S2 (#304 softs): type-only subpath import (no runtime barrel side effects) - the
 // shared union keeps publisher (scheduler) and parser (web) on one status contract.
-import type { TaskProgressStatus } from '@tourbillon/shared/types';
+import type { TaskProgressStage, TaskProgressStatus } from '@tourbillon/shared/types';
 
 /** Tag name the free-chat concierge sees on Run Task progress signals. */
 export const TASK_PROGRESS_TAG_NAME = 'task-progress';
@@ -137,8 +137,12 @@ export interface TaskProgressEventShape {
   agentId: string;
   chatTaskId: string;
   runId: string;
-  stage: 'started' | 'done' | 'needs_review';
+  /** #339: shared single-source stage union (waiting_on_user + failed landed with the
+   * scheduler publisher + web parser in the same commit). */
+  stage: TaskProgressStage;
   status: TaskProgressStatus;
+  /** #339: the precise ask/failure text when the scheduler carries one. */
+  detail?: string;
   title: string;
 }
 
@@ -171,6 +175,18 @@ export function taskProgressSignalPayload(event: TaskProgressEventShape): TaskPr
         event.status === 'skipped'
           ? `Background task "${title}" is blocked and needs a decision from the human.`
           : `Background task "${title}" did not finish and needs another look.`;
+      break;
+    case 'waiting_on_user':
+      // #339: the go-between wake — relay the STATED ask (#340 contract), never invent one.
+      contents = `Background task "${title}" is waiting on the human${
+        event.detail ? `: ${event.detail}` : ''
+      }. Ask them for exactly that, and resume the task (status pending) when they answer.`;
+      break;
+    case 'failed':
+      // #340 honesty: a runner failure is a FAILURE, not a question for the human.
+      contents = `Background task "${title}" FAILED${
+        event.detail ? `: ${event.detail}` : ''
+      }. Tell the human it failed and offer a retry (resume re-queues it) — do NOT present it as waiting on their input.`;
       break;
     default:
       contents = `Background task update for "${title}".`;

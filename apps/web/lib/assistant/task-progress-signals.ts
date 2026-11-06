@@ -36,7 +36,7 @@ import {
 // copy of the wire type — value-checked twice, single-sourced nowhere, so the publisher and the
 // parser could drift the moment one side changed. The shared constant is now the one source of
 // truth; re-exported here so the bridge's importers keep their existing path.
-import { TASK_PROGRESS_SSE_TYPE, isTaskProgressStatus } from '@tourbillon/shared/types';
+import { TASK_PROGRESS_SSE_TYPE, isTaskProgressStage, isTaskProgressStatus } from '@tourbillon/shared/types';
 export { TASK_PROGRESS_SSE_TYPE };
 
 export type TaskProgressEvent = TaskProgressEventShape;
@@ -67,10 +67,11 @@ export function parseTaskProgressMessage(raw: string): TaskProgressEvent | null 
   // chat task never reaches emitProgress (the claim guard returns false -> continue).
   // Pinned by task-progress-signals.test.ts (behaviour + this comment); widen only if the
   // publisher type widens, in the same commit as the scheduler change.
-  if (
-    (stage !== 'started' && stage !== 'done' && stage !== 'needs_review') ||
-    !isTaskProgressStatus(status)
-  ) {
+  // #339: the stage accept set is now the shared TASK_PROGRESS_STAGES tuple — `waiting_on_user`
+  // (relay the stated ask) and `failed` (report the failure) landed WITH the scheduler publisher
+  // and the concierge-signal payload in the same commit.
+  // #339: stages come from the shared accept set (was a local three-word copy).
+  if (!isTaskProgressStage(stage) || !isTaskProgressStatus(status)) {
     return null;
   }
   const companyId = str(e.companyId);
@@ -79,7 +80,17 @@ export function parseTaskProgressMessage(raw: string): TaskProgressEvent | null 
   const runId = str(e.runId);
   const title = str(e.title);
   if (!companyId || !agentId || !chatTaskId || !runId || !title) return null;
-  return { companyId, agentId, chatTaskId, runId, stage, status, title };
+  const detail = str(e.detail);
+  return {
+    companyId,
+    agentId,
+    chatTaskId,
+    runId,
+    stage,
+    status,
+    title,
+    ...(detail ? { detail } : {}),
+  };
 }
 
 /**
