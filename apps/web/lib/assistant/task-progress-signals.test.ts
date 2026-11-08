@@ -16,6 +16,7 @@ import {
   type TaskProgressAgentRecord,
   type TaskProgressBridgeDeps,
   type TaskProgressEvent,
+  type TaskProgressOriginResolution,
 } from './task-progress-signals';
 import {
   TASK_PROGRESS_SSE_TYPE as SHARED_TASK_PROGRESS_SSE_TYPE,
@@ -103,7 +104,10 @@ interface Harness {
 
 function harness(opts: {
   agent?: TaskProgressAgentRecord | null;
-  threadId?: string | null;
+  /** TN-ORIGIN (H2): the scoped origin resolution the fake db returns for the event task. */
+  origin?: TaskProgressOriginResolution;
+  /** When set, the origin lookup THROWS (DB error must surface, C3). */
+  originError?: Error;
   deliverOk?: boolean;
   /** Shared across harnesses to emulate several replicas seeing one event (S2). */
   claimStore?: Set<string>;
@@ -120,7 +124,10 @@ function harness(opts: {
         'agent' in opts
           ? (opts.agent ?? null)
           : { id: 'agent-1', companyId: 'company-1', status: 'active', companyStatus: 'active' },
-      getActiveThreadId: async () => ('threadId' in opts ? (opts.threadId ?? null) : 'thread-42'),
+      getTaskOrigin: async () => {
+        if (opts.originError) throw opts.originError;
+        return opts.origin ?? { threadId: 'thread-42' };
+      },
       deliver: async (agent, threadId, payload) => {
         delivered.push({ agentId: agent.id, threadId, payload });
         return opts.deliverOk !== false;
@@ -184,9 +191,26 @@ test('handle: agent from another company is skipped', async () => {
   assert.equal(h.delivered.length, 0);
 });
 
-test('handle: agent with no pinned chat thread is skipped (nothing to wake)', async () => {
-  const h = harness({ threadId: null });
-  assert.equal(await handleTaskProgressEvent(h.deps, event()), 'skipped:no-thread');
+test('handle: missing task skips with the recorded reason and zero queue work (H2, no pin fallback)', async () => {
+  const h = harness({ origin: { skip: 'task-not-found' } });
+  assert.equal(await handleTaskProgressEvent(h.deps, event()), 'skipped:task-not-found');
+  assert.equal(h.delivered.length, 0);
+  // claim IS consumed for the event identity on a skip (recorded; no retry promise)
+  assert.equal(h.claimed.length, 1);
+  assert.ok(h.warnings.some((w) => w.msg.includes('skipped (task-not-found)') && w.data?.claimConsumed === true));
+});
+
+test('handle: present task with null/empty source_thread_id skips missing-origin (H2)', async () => {
+  const h = harness({ origin: { skip: 'missing-origin' } });
+  assert.equal(await handleTaskProgressEvent(h.deps, event()), 'skipped:missing-origin');
+  assert.equal(h.delivered.length, 0);
+  assert.ok(h.warnings.some((w) => w.msg.includes('skipped (missing-origin)')));
+});
+
+test('handle: origin lookup ERROR propagates (surfaced, never a silent skip — C3)', async () => {
+  const boom = new Error('db exploded');
+  const h = harness({ originError: boom });
+  await assert.rejects(() => handleTaskProgressEvent(h.deps, event()), /db exploded/);
   assert.equal(h.delivered.length, 0);
 });
 
@@ -277,7 +301,7 @@ test('deliver: handleTaskProgressEvent end-to-end onto the fake chat session', a
   const session = new FakeChatSession();
   const deps: TaskProgressBridgeDeps<TaskProgressAgentRecord> = {
     getAgent: async () => ({ id: 'agent-1', companyId: 'company-1', status: 'active', companyStatus: 'active' }),
-    getActiveThreadId: async () => 'thread-42',
+    getTaskOrigin: async () => ({ threadId: 'thread-42' }),
     deliver: async (_agent, _thread, payload) => {
       await queueTaskProgressSignal(session, payload);
       return true;

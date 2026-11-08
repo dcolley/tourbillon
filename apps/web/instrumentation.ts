@@ -6,7 +6,13 @@ export async function register() {
   const { logLegacyControlChatStartupWarnings } = await import('./lib/feature-flags');
   logLegacyControlChatStartupWarnings();
   // CONCIERGE-QUEUE-SIGNAL: TASK-RUNNER progress → typed task-progress signals on the
-  // agent's pinned free-chat thread (queueSignal; idempotent per process).
+  // task's ORIGINATING free-chat thread (queueSignal; idempotent per process). The handle
+  // exposes the owned psubscribe ACK (`ready`) and an idempotent `stop` for lifecycle tests;
+  // production owns the bridge for the process lifetime — a failed subscribe is surfaced,
+  // never fatal to boot.
   const { startTaskProgressSignalBridge } = await import('./lib/assistant/task-progress-bridge');
-  startTaskProgressSignalBridge();
+  const bridge = startTaskProgressSignalBridge();
+  bridge.ready.catch((err) => {
+    console.warn('[concierge-signal] bridge subscribe failed', err);
+  });
 }
