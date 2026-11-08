@@ -1,20 +1,40 @@
-import type { NextRequest } from 'next/server';
-import { db } from '@tourbillon/db';
+import type { NextRequest, NextResponse } from 'next/server';
+import { db, agents } from '@tourbillon/db';
 import { vaultSecrets } from '@tourbillon/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { encryptCredential } from '@tourbillon/shared/vault-encryption';
-import { getActiveCompany } from '@/lib/company';
+import { requireBoardCompany } from '@/lib/board-route-auth';
 import type { OAuthTokens } from '@tourbillon/db/schema';
 import {
+  OAUTH_NONCE_COOKIE,
   OAUTH_NOT_CONFIGURED_ERROR,
+  clearOAuthNonceCookie,
   isOAuthStateSecretConfigured,
   logOAuthStateSecretMissing,
+  readOAuthState,
   settingsRedirect,
-  verifyOAuthState,
 } from '@/lib/vault-oauth-state';
+import { consumeOAuthNonce } from '@/lib/vault-oauth-nonce-store';
 
-
+/**
+ * GET /api/vault/oauth/callback
+ *
+ * #112 items 3–4: before any token exchange the state must
+ *   1. carry a valid signature (constant time) and an unexpired `exp`;
+ *   2. match the httpOnly nonce cookie set by authorize (constant time);
+ *   3. come back under a board session for the SAME company it was issued for;
+ *   4. name an agent (agent scope) that belongs to that company; user-scoped grants are refused
+ *      (board sessions carry no user identity yet, #107);
+ *   5. redeem its nonce server-side exactly once (replay → state_already_used).
+ * Any failure redirects to /settings?oauth_error=<code> (or the board guard's 401/403) with no
+ * token exchange. The nonce cookie is cleared on every outcome.
+ */
 export async function GET(req: NextRequest) {
+  const res = await handleCallback(req);
+  return clearOAuthNonceCookie(res, req.headers);
+}
+
+async function handleCallback(req: NextRequest): Promise<NextResponse> {
   // #112: fail closed. Without a real BETTER_AUTH_SECRET no state can be trusted.
   if (!isOAuthStateSecretConfigured()) {
     logOAuthStateSecretMissing('finish');
@@ -35,20 +55,39 @@ export async function GET(req: NextRequest) {
       return settingsRedirect('/settings?oauth_error=missing_parameters');
     }
     
-    let stateData: { payload: string; signature: string };
-    try {
-      stateData = JSON.parse(Buffer.from(state, 'base64').toString('utf8'));
-    } catch {
+    const checked = readOAuthState(state, req.cookies.get(OAUTH_NONCE_COOKIE)?.value);
+    if (!checked.ok) {
+      return settingsRedirect(`/settings?oauth_error=${checked.error}`);
+    }
+    const { serverId, scope, agentId, companyId, nonce } = checked.value;
+
+    // Board only, and the same company that started the flow.
+    const auth = await requireBoardCompany(req);
+    if (!auth.ok) return auth.response;
+    const company = auth.value;
+    if (companyId !== company.id) {
+      return settingsRedirect('/settings?oauth_error=company_mismatch');
+    }
+
+    if (scope === 'company_user') {
+      return settingsRedirect('/settings?oauth_error=user_scope_unsupported');
+    }
+    if ((scope === 'agent') !== Boolean(agentId)) {
       return settingsRedirect('/settings?oauth_error=invalid_state');
     }
-    
-    if (!verifyOAuthState(stateData.payload, stateData.signature)) {
-      return settingsRedirect('/settings?oauth_error=invalid_state_signature');
+    if (agentId) {
+      const agent = await db.query.agents.findFirst({
+        where: and(eq(agents.id, agentId), eq(agents.companyId, company.id)),
+      });
+      if (!agent) {
+        return settingsRedirect('/settings?oauth_error=agent_not_in_company');
+      }
     }
-    
-    const { serverId, scope, userId, agentId } = JSON.parse(stateData.payload);
-    
-    const company = await getActiveCompany();
+
+    // Single use: atomically redeem the nonce recorded at authorize.
+    if (!(await consumeOAuthNonce(nonce))) {
+      return settingsRedirect('/settings?oauth_error=state_already_used');
+    }
     
     if (serverId === 'github-mcp') {
       const clientId = process.env.GITHUB_OAUTH_CLIENT_ID;
@@ -102,10 +141,6 @@ export async function GET(req: NextRequest) {
         eq(vaultSecrets.scope, scope),
       ];
       
-      if (scope === 'company_user' && userId) {
-        conditions.push(eq(vaultSecrets.userId, userId));
-      }
-      
       if (scope === 'agent' && agentId) {
         conditions.push(eq(vaultSecrets.agentId, agentId));
       }
@@ -129,7 +164,6 @@ export async function GET(req: NextRequest) {
           companyId: company.id,
           serverId,
           scope,
-          userId,
           agentId,
           authType: 'oauth',
           encryptedValue,
