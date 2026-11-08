@@ -71,6 +71,7 @@ export const redisTerminalLog: Array<{ channel: string; payload: unknown; at: st
 export const claimOutcomeLog: Array<{ key?: string; outcome: boolean; detail?: string; at: string }> = [];
 let redisObserver: Redis | null = null;
 let accountingClaim: { quit: () => Promise<void> } | null = null;
+let ackMutantSubscriber: Redis | null = null;
 
 export async function startRedisObserver(): Promise<void> {
   if (redisObserver) return;
@@ -194,10 +195,18 @@ export async function assertBoundaryPrerequisites(): Promise<void> {
 }
 
 export async function tnTeardown(): Promise<void> {
+  // Isolated control children never reach TN-TEARDOWN, so the live bridge
+  // subscriber would otherwise keep Redis open (same class of leak as redis.ts
+  // `connection`: an owned client whose owner did not quit).
+  await bridgeReset();
   await stopRedisObserver();
   if (accountingClaim) {
     try { await accountingClaim.quit(); } catch { /* ignore */ }
     accountingClaim = null;
+  }
+  if (ackMutantSubscriber) {
+    try { await ackMutantSubscriber.quit(); } catch { try { ackMutantSubscriber.disconnect(); } catch { /* ignore */ } }
+    ackMutantSubscriber = null;
   }
   persistVerdicts();
   if (admin) {
@@ -897,6 +906,12 @@ export async function bridgeStart(opts: Record<string, unknown> = {}): Promise<v
       const controller = await chat.getOrCreateChatController(record as never);
       const session = await chat.getChatSession(controller, record as never, { threadId: undefined });
       session.thread.switch({ threadId });
+      // Persist the hijacked live/pin thread so pin-unchanged oracles fail.
+      await db.execute(sql`
+        insert into assistant_active_threads (company_id, agent_id, thread_id, updated_at)
+        values (${agent.companyId}, ${agent.id}, ${threadId}, now())
+        on conflict (company_id, agent_id) do update set thread_id = excluded.thread_id, updated_at = now()
+      `);
       const { queueTaskProgressSignal } = await import('./task-progress-signals');
       await queueTaskProgressSignal(session as never, payload as never);
       return true;
@@ -936,6 +951,7 @@ export async function bridgeStart(opts: Record<string, unknown> = {}): Promise<v
   if (control === 'C-ACK') {
     extra.createSubscriber = () => {
       const r = new Redis(process.env.REDIS_URL as string, { maxRetriesPerRequest: 1 });
+      ackMutantSubscriber = r;
       r.psubscribe = (async () => undefined) as typeof r.psubscribe;
       return r;
     };
