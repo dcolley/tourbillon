@@ -37,7 +37,13 @@ for (let i = 0; i < lines.length; i++) {
   if (!m) continue;
   const isSuite = /type: 'suite'/.test(lines.slice(i + 1, i + 5).join('\n'));
   if (isSuite) continue;
-  if (m[1] === 'ok') leafOk.add(m[2]); else notOk.push(m[2]);
+  // Test soft: a SKIP/TODO leaf or a duplicated name is never counted as a pass.
+  const directive = /\s#\s*(SKIP|TODO)\b/i.exec(m[2]);
+  if (directive) { notOk.push(`${m[2]} (${directive[1]})`); continue; }
+  if (m[1] === 'ok') {
+    if (leafOk.has(m[2])) notOk.push(`${m[2]} (duplicate)`);
+    leafOk.add(m[2]);
+  } else notOk.push(m[2]);
 }
 const expected = new Set(manifest.tests);
 const missing = [...expected].filter((t) => !leafOk.has(t));

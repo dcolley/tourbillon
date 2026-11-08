@@ -154,9 +154,11 @@ describe('#114 real PG', () => {
 
   after(async () => {
     Module.prototype.require = originalRequire;
-    env.TOURBILLON_AGENT_TOKEN_SECRET = savedEnv.a;
-    env.BETTER_AUTH_SECRET = savedEnv.b;
-    env.TOURBILLON_BOARD_SECRET = savedEnv.c;
+    // Test soft: restore absent keys by deleting them, not by assigning undefined.
+    for (const [k, v] of [['TOURBILLON_AGENT_TOKEN_SECRET', savedEnv.a], ['BETTER_AUTH_SECRET', savedEnv.b], ['TOURBILLON_BOARD_SECRET', savedEnv.c]] as const) {
+      if (v === undefined) delete env[k];
+      else env[k] = v;
+    }
     const client = (globalThis as { postgresClient?: { end: () => Promise<void> } }).postgresClient;
     await client?.end();
   });
