@@ -10,7 +10,7 @@
  * ordering: idle → wakes the thread now; active → delivered after the current run). When it
  * is not, delivery runs through an origin-bound distinct session created by the SAME real
  * controller: the active pin is never read or written and no session's thread is switched
- * (TN-ORIGIN / H3, demonstrated feasible on Spark1 2026-11-08).
+ * (TN-ORIGIN / H3).
  *
  * Heartbeats and the existing SSE chip path are untouched: this is an extra consumer of the
  * event the scheduler already publishes (no parallel notification bus — product lock).
@@ -254,7 +254,7 @@ export interface DeliverDeps {
  * Deterministic session-id scope for the ORIGIN-BOUND delivery session of one free-chat
  * agent. The user's live session stays at `chatSessionId(resourceId, scope)` untouched; the
  * notice is queued through a DISTINCT real session `${scope}::origin:${threadId}` created by
- * the SAME controller (H3 feasibility, demonstrated on Spark1 2026-11-08: Mastra 1.81 keys
+ * the SAME controller (H3 feasibility: Mastra 1.81 keys
  * the run queue by (resourceId, threadId), so an idle origin wakes immediately and a busy
  * origin queues behind its OWN run, while an unrelated busy thread is simply a different
  * key — no pin mutation, no thread switching, no drop-because-someone-is-busy).
