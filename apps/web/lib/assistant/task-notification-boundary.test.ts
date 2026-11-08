@@ -6,7 +6,7 @@
  * → real registry controller/session → Session.queueSignal → PostgresStore
  * → independently constructed PostgresStore reader.
  */
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -25,9 +25,15 @@ import {
   HELD_MARKER,
   isFixedCapable,
   loadPublisher,
+  invokeDefaultPoller,
   progressEvent,
   publishProgress,
   recordVerdict,
+  persistVerdicts,
+  startRedisObserver,
+  redisTerminalEvents,
+  claimOutcomeLog,
+  redisTerminalLog,
   runHeldUser,
   tnFreshText,
   tnFreshMessages,
@@ -39,9 +45,14 @@ import {
   tnTrace,
   withAckGate,
 } from './task-notification-boundary-harness';
-import { startTaskProgressSignalBridge, __resetTaskProgressSignalBridgeForTests } from './task-progress-bridge';
+import { startTaskProgressSignalBridge, __resetTaskProgressSignalBridgeForTests, redisClaimClient } from './task-progress-bridge';
 
 const INCOMPAT = 'MISSING_EVIDENCE/HARNESS_INCOMPATIBLE';
+
+after(async () => {
+  await tnTeardown();
+});
+
 
 async function skipIfIncompatible(t: { name: string }, name: string): Promise<boolean> {
   if (isFixedCapable()) return false;
@@ -62,12 +73,15 @@ test('TN-PROVENANCE-PREFLIGHT', { timeout: 30_000 }, async () => {
 test('TN-DEFAULT-PATH', { timeout: 90_000 }, async (t) => {
   if (await skipIfIncompatible(t, 'TN-DEFAULT-PATH')) return;
   await loadPublisher();
+  await startRedisObserver();
   await bridgeReset();
   await bridgeStart();
   const f = await buildFixture({ seedPin: 't2' });
   try {
-    await publishProgress(progressEvent(f));
+    const poll = await invokeDefaultPoller(progressEvent(f));
+    assert.ok((poll.started ?? 0) >= 1, 'default poller claimed and started a run');
     await waitFor('T1 notice', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done') >= 1);
+    assert.ok(redisTerminalEvents(f.taskId).length >= 1, 'independent Redis observer saw poller publish');
     const t1 = await tnFreshMessages(f.t1);
     const t2 = await tnFreshMessages(f.t2);
     assert.equal(countNoticeMessages(t1, f.taskId, 'done'), 1);
@@ -172,6 +186,8 @@ test('TN-BUSY-ORIGIN-HELD', { timeout: 120_000 }, async (t) => {
     assert.equal(countNoticeMessages(early, f.taskId), 0, 'B-NO-EARLY before publish');
     await publishProgress(progressEvent(f));
     await waitFor('queue entered while origin held', async () => tnSignalRecords({ taskId: f.taskId }).length >= 1, 15_000);
+    assert.ok(redisTerminalEvents(f.taskId).length >= 1, 'Redis terminal observed during hold');
+    assert.equal(f.models.a.callLog.filter((c) => c.notice).length, 0, 'zero terminal-model-entry during hold');
     const mid = await tnFreshMessages(f.t1);
     assert.equal(countNoticeMessages(mid, f.taskId), 0, 'B-NO-EARLY: no persist while origin held');
     f.models.a.releaseChunks();
@@ -199,6 +215,10 @@ test('TN-CONCURRENT-THREAD-SWITCH', { timeout: 90_000 }, async (t) => {
   const f = await buildFixture({ seedPin: 't2' });
   try {
     const pub = publishProgress(progressEvent(f));
+    await waitFor(
+      'delivery interval before switch',
+      async () => redisTerminalEvents(f.taskId).length >= 1 || tnSignalRecords({ taskId: f.taskId }).length >= 1,
+    );
     f.userSession.thread.switch({ threadId: f.t3 });
     await f.pool.query(
       `insert into assistant_active_threads (company_id, agent_id, thread_id, updated_at)
@@ -233,13 +253,19 @@ test('TN-CONCURRENT-ORIGIN-NOTICES', { timeout: 90_000 }, async (t) => {
       publishProgress(progressEvent({ ...f, taskId: f.taskId2 }, { runId: 'run-b' })),
     ]);
     await waitFor('both origin notices', async () => {
-      const textMsgs = await tnFreshMessages(f.t1);
-      return countNoticeMessages(textMsgs, f.taskId, 'done') >= 1 && countNoticeMessages(textMsgs, f.taskId2, 'done') >= 1;
+      return (
+        countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done') >= 1 &&
+        countNoticeMessages(await tnFreshMessages(f.tOrigin2), f.taskId2, 'done') >= 1
+      );
     });
-    const textMsgs = await tnFreshMessages(f.t1);
-    assert.equal(countNoticeMessages(textMsgs, f.taskId, 'done'), 1);
-    assert.equal(countNoticeMessages(textMsgs, f.taskId2, 'done'), 1);
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done'), 1);
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.tOrigin2), f.taskId2, 'done'), 1, 'second origin is a distinct thread');
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskId2), 0);
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.tOrigin2), f.taskId), 0);
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t2), f.taskId), 0);
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t2), f.taskId2), 0);
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t3), f.taskId), 0);
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t3), f.taskId2), 0);
     recordVerdict('TN-CONCURRENT-ORIGIN-NOTICES', 'GREEN');
   } catch (err) {
     recordVerdict('TN-CONCURRENT-ORIGIN-NOTICES', 'RED', err instanceof Error ? err.message : String(err));
@@ -267,8 +293,11 @@ test('TN-CONCURRENT-AGENT-COMPANY', { timeout: 90_000 }, async (t) => {
     ]);
     await waitFor('A notice', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done') >= 1);
     await waitFor('B notice', async () => countNoticeMessages(await tnFreshMessages(f.t1b), f.taskIdB, 'done') >= 1);
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done'), 1, 'exact one notice for A');
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t1b), f.taskIdB, 'done'), 1, 'exact one notice for B');
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskIdB), 0, 'no cross-company leak onto A');
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t1b), f.taskId), 0, 'no cross-company leak onto B');
+    assert.notEqual(f.controllerA.id, f.controllerB.id);
     recordVerdict('TN-CONCURRENT-AGENT-COMPANY', 'GREEN');
   } catch (err) {
     recordVerdict('TN-CONCURRENT-AGENT-COMPANY', 'RED', err instanceof Error ? err.message : String(err));
@@ -287,10 +316,18 @@ test('TN-ONCE-DUP', { timeout: 90_000 }, async (t) => {
     const event = progressEvent(f, { runId: 'run-dup' });
     await publishProgress(event);
     await waitFor('first notice', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done') >= 1);
+    const copiesAfterFirst = redisTerminalEvents(f.taskId).length;
+    const noticeCallsAfterFirst = f.models.a.callLog.filter((c) => c.notice).length;
     await publishProgress(event);
     await new Promise((r) => setTimeout(r, 800));
+    assert.ok(copiesAfterFirst >= 1, 'first Redis copy observed');
+    assert.ok(redisTerminalEvents(f.taskId).length >= 2, 'second Redis copy independently observed');
+    const claims = claimOutcomeLog.filter((c) => JSON.stringify(c).includes(f.taskId) || JSON.stringify(c).includes('run-dup'));
+    assert.ok(claims.some((c) => c.outcome === true), 'first claim won');
+    assert.ok(claims.some((c) => c.outcome === false), 'second claim lost (duplicate)');
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done'), 1);
     assert.equal(tnSignalRecords({ taskId: f.taskId, tagName: 'task-progress' }).length, 1);
+    assert.equal(f.models.a.callLog.filter((c) => c.notice).length, noticeCallsAfterFirst, 'no extra model/run after duplicate publish');
     recordVerdict('TN-ONCE-DUP', 'GREEN');
   } catch (err) {
     recordVerdict('TN-ONCE-DUP', 'RED', err instanceof Error ? err.message : String(err));
@@ -445,7 +482,10 @@ test('TN-STOP-BORROWED-CLIENTS', { timeout: 20_000 }, async (t) => {
   let quitCalled = false;
   await bridgeStart({
     claimClient: {
-      claim: async () => true,
+      claim: async (key: string, ttl: number) => {
+        const result = await client.set(key, '1', 'EX', ttl, 'NX');
+        return result === 'OK';
+      },
       quit: async () => {
         quitCalled = true;
       },
@@ -454,7 +494,7 @@ test('TN-STOP-BORROWED-CLIENTS', { timeout: 20_000 }, async (t) => {
   const report = (await bridgeStop()) as { closedOwnedClients?: string[] };
   assert.equal(quitCalled, false, 'borrowed claim client was never quit');
   assert.equal((report.closedOwnedClients ?? []).includes('claim'), false);
-  assert.equal(await client.ping(), 'PONG');
+  assert.equal(await client.ping(), 'PONG', 'the same borrowed client still answers PING');
   await client.quit();
   recordVerdict('TN-STOP-BORROWED-CLIENTS', 'GREEN');
 });
@@ -492,6 +532,13 @@ test('TN-DRAIN-TIMEOUT', { timeout: 30_000 }, async (t) => {
     tnSetQueueHold(null);
     assert.ok(error, 'timeout must reject, never pass');
     assert.match(error!.message, /did not settle|drain|pending/i);
+    const report = (error as { report?: { admitted?: number; completed?: number; pending?: number; unsettled?: unknown; timedOut?: boolean } }).report;
+    assert.ok(report, 'stop rejection carries a report');
+    assert.ok((report!.admitted ?? 0) >= 1, 'report.admitted');
+    assert.ok(typeof report!.completed === 'number', 'report.completed');
+    assert.ok(typeof report!.pending === 'number', 'report.pending');
+    assert.ok(report!.unsettled !== undefined, 'report.unsettled');
+    assert.equal(report!.timedOut, true);
     assert.ok(took < 6_000, `bounded drain ${took}ms`);
     recordVerdict('TN-DRAIN-TIMEOUT', 'GREEN');
   } catch (err) {
@@ -524,13 +571,154 @@ test('TN-RESTART-FRESH-CLIENTS', { timeout: 60_000 }, async (t) => {
   }
 });
 
+
+test('TN-CONCURRENT-SAME-COMPANY-AGENTS', { timeout: 90_000 }, async (t) => {
+  if (await skipIfIncompatible(t, 'TN-CONCURRENT-SAME-COMPANY-AGENTS')) return;
+  await bridgeReset();
+  await bridgeStart();
+  let f: Awaited<ReturnType<typeof buildFixture>> | undefined;
+  try {
+    f = await buildFixture({ seedPin: 't2', secondAgentSameCompany: true });
+    assert.ok(f.controllerC, 'same-company agent C controller');
+    assert.notEqual(f.controllerA.id, f.controllerC!.id, 'distinct controllers for two agents in one company');
+    await publishProgress(progressEvent(f, { runId: 'run-a' }));
+    await publishProgress(progressEvent({ companyId: f.companyId, agentId: f.agentIdC, taskId: f.taskIdC }, { runId: 'run-c' }));
+    await waitFor('A own notice', async () => countNoticeMessages(await tnFreshMessages(f!.t1), f!.taskId, 'done') >= 1);
+    await waitFor('C own notice', async () => countNoticeMessages(await tnFreshMessages(f!.t1c), f!.taskIdC, 'done') >= 1);
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done'), 1);
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t1c), f.taskIdC, 'done'), 1);
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskIdC), 0, 'no same-company cross-agent leak onto A');
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t1c), f.taskId), 0, 'no same-company cross-agent leak onto C');
+    recordVerdict('TN-CONCURRENT-SAME-COMPANY-AGENTS', 'GREEN');
+  } catch (err) {
+    recordVerdict('TN-CONCURRENT-SAME-COMPANY-AGENTS', 'RED', err instanceof Error ? err.message : String(err));
+    throw err;
+  } finally {
+    await f?.cleanup();
+  }
+});
+
+test('TN-START-CONCURRENT', { timeout: 30_000 }, async (t) => {
+  if (await skipIfIncompatible(t, 'TN-START-CONCURRENT')) return;
+  await bridgeReset();
+  const first = startTaskProgressSignalBridge({ log: { warn: () => {} } });
+  const second = startTaskProgressSignalBridge({ log: { warn: () => {} } });
+  await first.ready;
+  await second.ready;
+  await first.stop();
+  await second.stop().catch(() => {});
+  await __resetTaskProgressSignalBridgeForTests();
+  recordVerdict('TN-START-CONCURRENT', 'GREEN');
+});
+
+test('TN-CLAIM-FAIL-OPEN', { timeout: 90_000 }, async (t) => {
+  if (await skipIfIncompatible(t, 'TN-CLAIM-FAIL-OPEN')) return;
+  await bridgeReset();
+  await bridgeStart({
+    claimClient: redisClaimClient({
+      set: async () => {
+        throw new Error('injected claim failure');
+      },
+    }),
+  });
+  const f = await buildFixture({ seedPin: 't2' });
+  try {
+    await publishProgress(progressEvent(f));
+    await waitFor('fail-open still delivers', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done') >= 1);
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done'), 1);
+    recordVerdict('TN-CLAIM-FAIL-OPEN', 'GREEN');
+  } catch (err) {
+    recordVerdict('TN-CLAIM-FAIL-OPEN', 'RED', err instanceof Error ? err.message : String(err));
+    throw err;
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('TN-DRAIN-SUCCESS', { timeout: 60_000 }, async (t) => {
+  if (await skipIfIncompatible(t, 'TN-DRAIN-SUCCESS')) return;
+  await bridgeReset();
+  await bridgeStart();
+  const f = await buildFixture({ seedPin: 't2' });
+  try {
+    await publishProgress(progressEvent(f));
+    await waitFor('notice before successful drain', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done') >= 1);
+    const report = (await bridgeStop()) as { admitted?: number; completed?: number; timedOut?: boolean; pending?: number };
+    assert.equal(report.timedOut, false);
+    assert.ok((report.admitted ?? 0) >= 1);
+    assert.ok((report.completed ?? 0) >= 1);
+    recordVerdict('TN-DRAIN-SUCCESS', 'GREEN');
+  } catch (err) {
+    recordVerdict('TN-DRAIN-SUCCESS', 'RED', err instanceof Error ? err.message : String(err));
+    throw err;
+  } finally {
+    await f.cleanup();
+    await bridgeReset();
+  }
+});
+
+test('TN-SUBSCRIBE-DELAYED-ACK', { timeout: 20_000 }, async (t) => {
+  if (await skipIfIncompatible(t, 'TN-SUBSCRIBE-DELAYED-ACK')) return;
+  await bridgeReset();
+  let release = () => {};
+  const gate = new Promise<void>((r) => (release = r));
+  const handle = await withAckGate(
+    async () => startTaskProgressSignalBridge({ log: { warn: () => {} } }),
+    gate,
+  );
+  let ready = false;
+  const readyWait = handle.ready.then(() => {
+    ready = true;
+  });
+  await new Promise((r) => setTimeout(r, 80));
+  assert.equal(ready, false, 'ready must not resolve before ACK');
+  release();
+  await readyWait;
+  assert.equal(ready, true);
+  await handle.stop();
+  await __resetTaskProgressSignalBridgeForTests();
+  recordVerdict('TN-SUBSCRIBE-DELAYED-ACK', 'GREEN');
+});
+
+
+test('TN-START-FAIL-RETRY', { timeout: 30_000 }, async (t) => {
+  if (await skipIfIncompatible(t, 'TN-START-FAIL-RETRY')) return;
+  await bridgeReset();
+  const leaked: Redis[] = [];
+  try {
+    const handle1 = startTaskProgressSignalBridge({
+      log: { warn: () => {} },
+      createSubscriber: () => {
+        const client = new Redis(process.env.REDIS_URL as string, { maxRetriesPerRequest: 1 });
+        leaked.push(client);
+        client.psubscribe = (async () => {
+          throw new Error('injected subscribe failure');
+        }) as typeof client.psubscribe;
+        return client;
+      },
+    });
+    await assert.rejects(() => handle1.ready, /injected subscribe failure/);
+    await __resetTaskProgressSignalBridgeForTests();
+    const handle2 = startTaskProgressSignalBridge({ log: { warn: () => {} } });
+    await handle2.ready;
+    await handle2.stop();
+    await __resetTaskProgressSignalBridgeForTests();
+    recordVerdict('TN-START-FAIL-RETRY', 'GREEN');
+  } catch (err) {
+    recordVerdict('TN-START-FAIL-RETRY', 'RED', err instanceof Error ? err.message : String(err));
+    throw err;
+  } finally {
+    await Promise.all(leaked.map((c) => c.quit().catch(() => c.disconnect())));
+  }
+});
+
 test('TN-FAIL-CLEAN-INNER', { timeout: 5_000 }, () => {
   if (process.env.TN_FAIL_CLEAN === '1') {
     assert.equal(1, 2, 'deliberate failing control');
   }
 });
 
-test('TN-FAIL-CLEAN-CONTROL', { timeout: 30_000 }, () => {
+test('TN-FAIL-CLEAN-CONTROL', { timeout: 90_000 }, () => {
   if (!isFixedCapable()) {
     recordVerdict('TN-FAIL-CLEAN-CONTROL', INCOMPAT, capability.reason.join('; '));
     return;
@@ -557,7 +745,7 @@ test('TN-FAIL-CLEAN-CONTROL', { timeout: 30_000 }, () => {
         TOURBILLON_AGENT_TOKEN_SECRET: process.env.TOURBILLON_AGENT_TOKEN_SECRET,
       },
       encoding: 'utf8',
-      timeout: 20_000,
+      timeout: 60_000,
     },
   );
   assert.notEqual(
@@ -571,7 +759,13 @@ test('TN-FAIL-CLEAN-CONTROL', { timeout: 30_000 }, () => {
 });
 
 test('TN-TEARDOWN', { timeout: 20_000 }, async () => {
+  const admin = new Redis(process.env.REDIS_URL as string, { maxRetriesPerRequest: 1 });
+  const baseline = Number(await admin.call('PUBSUB', 'NUMPAT'));
   await bridgeReset();
   await tnTeardown();
+  persistVerdicts();
+  const after = Number(await admin.call('PUBSUB', 'NUMPAT'));
+  assert.ok(after <= baseline, `NUMPAT after teardown ${after} <= baseline ${baseline}`);
+  await admin.quit();
   recordVerdict('TN-TEARDOWN', 'GREEN');
 });

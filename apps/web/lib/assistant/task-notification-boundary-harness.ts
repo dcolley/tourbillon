@@ -11,6 +11,7 @@
  *
  * Requires TN_DISPOSABLE=1 and disposable Postgres/Redis. This module does not migrate.
  */
+import { writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -50,8 +51,57 @@ export function isFixedCapable(): boolean {
 
 export const cellVerdicts: Array<{ name: string; verdict: string; detail?: string }> = [];
 
+export function persistVerdicts(): void {
+  const dest = process.env.TN_EVIDENCE_DIR
+    ? `${process.env.TN_EVIDENCE_DIR}/verdicts.json`
+    : `${process.cwd()}/.tn-verdicts.json`;
+  try {
+    writeFileSync(dest, JSON.stringify(cellVerdicts, null, 2));
+  } catch {
+    /* evidence directory may be absent on isolated child runs */
+  }
+}
+
 export function recordVerdict(name: string, verdict: string, detail?: string): void {
   cellVerdicts.push({ name, verdict, detail });
+  persistVerdicts();
+}
+
+export const redisTerminalLog: Array<{ channel: string; payload: unknown; at: string }> = [];
+export const claimOutcomeLog: Array<{ key?: string; outcome: boolean; detail?: string; at: string }> = [];
+let redisObserver: Redis | null = null;
+let accountingClaim: { quit: () => Promise<void> } | null = null;
+
+export async function startRedisObserver(): Promise<void> {
+  if (redisObserver) return;
+  redisObserver = new Redis(process.env.REDIS_URL as string, { maxRetriesPerRequest: null });
+  redisObserver.on('pmessage', (_pattern: string, channel: string, message: string) => {
+    try {
+      const payload = JSON.parse(message) as { type?: string; [k: string]: unknown };
+      if (payload && (payload.type === 'chat_task_progress' || payload.stage)) {
+        redisTerminalLog.push({ channel, payload, at: new Date().toISOString() });
+      }
+    } catch {
+      redisTerminalLog.push({ channel, payload: message, at: new Date().toISOString() });
+    }
+  });
+  await redisObserver.psubscribe('sse:*');
+}
+
+export async function stopRedisObserver(): Promise<void> {
+  if (!redisObserver) return;
+  try {
+    await redisObserver.punsubscribe('sse:*');
+    await redisObserver.quit();
+  } catch {
+    redisObserver.disconnect();
+  }
+  redisObserver = null;
+}
+
+export function redisTerminalEvents(taskId?: string): Array<{ channel: string; payload: unknown; at: string }> {
+  if (!taskId) return [...redisTerminalLog];
+  return redisTerminalLog.filter((row) => JSON.stringify(row.payload).includes(taskId));
 }
 
 type MastraChat = typeof import('@tourbillon/mastra/chat');
@@ -144,6 +194,12 @@ export async function assertBoundaryPrerequisites(): Promise<void> {
 }
 
 export async function tnTeardown(): Promise<void> {
+  await stopRedisObserver();
+  if (accountingClaim) {
+    try { await accountingClaim.quit(); } catch { /* ignore */ }
+    accountingClaim = null;
+  }
+  persistVerdicts();
   if (admin) {
     await admin.quit().catch(() => {});
     admin = null;
@@ -295,6 +351,9 @@ let readerStore: { getStore: (n: 'memory') => Promise<{ listMessages: (a: unknow
 async function openReader() {
   if (readerStore) return readerStore;
   const store = new PostgresStore({ id: 'tn-reader-shared', connectionString: process.env.DATABASE_URL });
+  if (process.env.TN_CONTROL === 'C-PERSIST') {
+    throw new Error('ADAPTER LIMITATION (C-PERSIST): non-Postgres store');
+  }
   if (store.constructor?.name !== 'PostgresStore') throw new Error('ADAPTER LIMITATION (C-PERSIST): non-Postgres store');
   await store.init?.();
   readerStore = store;
@@ -365,6 +424,9 @@ export function tnTrace(step: string, extra?: Record<string, unknown>): void {
 
 
 export async function waitFor(label: string, pred: () => Promise<boolean>, timeoutMs = 20_000): Promise<void> {
+  if (process.env.TN_CONTROL && process.env.TN_CONTROL_WAIT_MS) {
+    timeoutMs = Number(process.env.TN_CONTROL_WAIT_MS) || timeoutMs;
+  }
   tnTrace(`waitFor:start ${label}`, { timeoutMs });
   const start = Date.now();
   let polls = 0;
@@ -430,9 +492,85 @@ export async function loadPublisher(): Promise<Publisher> {
 
 export async function publishProgress(event: Record<string, unknown>): Promise<void> {
   tnTrace('publishProgress:start', { chatTaskId: event.chatTaskId, stage: event.stage });
+  const control = process.env.TN_CONTROL;
+  if (control === 'C-PUB') {
+    tnTrace('publishProgress:C-PUB swallowed');
+    return;
+  }
   const emit = await loadPublisher();
+  if (control === 'C-DRESS-ASK' && (event.stage === 'failed' || event.status === 'failed')) {
+    emit({ ...event, stage: 'waiting_on_user', status: 'waiting_on_user' });
+    tnTrace('publishProgress:C-DRESS-ASK dressed');
+    return;
+  }
   emit(event);
+  if (control === 'C-FALSE-RUN') {
+    emit({ ...event, runId: 'tn-false-run', stage: event.stage ?? 'done' });
+    tnTrace('publishProgress:C-FALSE-RUN extra');
+  }
   tnTrace('publishProgress:emitted');
+}
+
+export async function invokeDefaultPoller(event: Record<string, unknown>): Promise<{ runId?: string; polled: number; started: number }> {
+  const href = new URL('../../../../packages/scheduler/src/task-runner.ts', import.meta.url).href;
+  const importer = new Function('specifier', 'return import(specifier)') as (s: string) => Promise<Record<string, unknown>>;
+  const mod = await importer(href);
+  if (typeof mod.pollTaskRunner !== 'function' || typeof mod.createDefaultTaskRunnerDeps !== 'function') {
+    throw new Error('TN plumbing: pollTaskRunner / createDefaultTaskRunnerDeps missing');
+  }
+  const defaults = (mod.createDefaultTaskRunnerDeps as (o?: Record<string, unknown>) => Record<string, unknown>)({
+    log: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
+  });
+  if (typeof defaults.emitProgress !== 'function') {
+    throw new Error('TN plumbing: default poller deps missing emitProgress');
+  }
+  const control = process.env.TN_CONTROL;
+  const emitProgress =
+    control === 'C-PUB' ? () => {} : (defaults.emitProgress as (e: Record<string, unknown>) => void);
+  const companyId = String(event.companyId ?? '');
+  const agentId = String(event.agentId ?? '');
+  const taskId = String(event.chatTaskId ?? event.taskId ?? '');
+  const title = String(event.title ?? 'TN bounded prompt');
+  const deps = {
+    ...defaults,
+    emitProgress,
+    listRunnable: async () => [
+      {
+        taskId,
+        companyId,
+        agentId,
+        title,
+        notes: null,
+        position: 0,
+        attempts: 0,
+        paused: false,
+        sourceThreadId: null,
+        agentName: 'tn-agent',
+        agentUrlKey: 'tn-agent',
+        agentStatus: 'active',
+        companyStatus: 'active',
+        companySettings: { taskRunner: { enabled: true, maxConcurrentTasks: 4, maxAttemptsPerTask: 5 } },
+      },
+    ],
+    countActiveRuns: async () => ({ total: 0, task: 0 }),
+    claim: async (claimedTaskId: string, runId: string) => {
+      claimOutcomeLog.push({ key: claimedTaskId, outcome: true, detail: `poller:${runId}`, at: new Date().toISOString() });
+      return true;
+    },
+    startWake: async (job: { runId?: string }) => ({ runId: job.runId ?? 'tn-poller-run', status: 'succeeded' }),
+    settle: async () => undefined,
+    logActivity: async () => undefined,
+    readTaskState: async () => ({ status: 'done', notes: null }),
+  };
+  const summary = (await (mod.pollTaskRunner as (d: unknown, o?: unknown) => Promise<{
+    polled: number;
+    started: Array<{ runId: string; done: Promise<unknown> }>;
+  }>)(deps, { wakeSettleGuardSec: 8, taskCap: 2, maxConcurrentRuns: 4 })) as {
+    polled: number;
+    started: Array<{ runId: string; done: Promise<unknown> }>;
+  };
+  await Promise.all((summary.started ?? []).map((s) => s.done));
+  return { runId: summary.started[0]?.runId, polled: summary.polled, started: summary.started.length };
 }
 
 export interface TnFixture {
@@ -445,18 +583,24 @@ export interface TnFixture {
   t2: string;
   t3: string;
   t9: string;
+  tOrigin2: string;
   t1b: string;
+  t1c: string;
+  agentIdC: string;
+  taskIdC: string;
+  controllerC: TnFixture['controllerA'] | null;
   bystanderCompanyId: string;
   bystanderAgentId: string;
   taskId: string;
   taskId2: string;
   taskIdB: string;
-  models: { a: ReturnType<typeof makeModel>; b: ReturnType<typeof makeModel>; bystander: ReturnType<typeof makeModel> };
+  models: { a: ReturnType<typeof makeModel>; b: ReturnType<typeof makeModel>; bystander: ReturnType<typeof makeModel>; c: ReturnType<typeof makeModel> };
   pinBefore: string | null;
   controllerA: { id: string };
   controllerB: { id: string };
   recordA: unknown;
   recordB: unknown;
+  recordC: unknown;
   userSession: { thread: { getId(): string | null; switch(opts: { threadId: string }): unknown }; getCurrentRunId(): string | null | undefined; sendMessage(input: unknown): Promise<unknown> };
   pool: { query: (sqlText: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }>; end: () => Promise<void> };
   readPin(): Promise<string | null>;
@@ -473,6 +617,7 @@ export async function buildFixture(opts: {
   missingTask?: boolean;
   nullOrigin?: boolean;
   secondOriginNotice?: boolean;
+  secondAgentSameCompany?: boolean;
   secondCompany?: boolean;
   extraTaskOnB?: boolean;
 } = {}): Promise<TnFixture> {
@@ -489,6 +634,9 @@ export async function buildFixture(opts: {
   const t3 = rid('tn-t3');
   const t9 = rid('tn-t9');
   const t1b = rid('tn-t1b');
+  const tOrigin2 = rid('tn-tO2');
+  const t1c = rid('tn-t1c');
+  const agentIdC = rid('tn-agc');
   const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 4 });
 
   const insertCompany = async (id: string) => {
@@ -518,11 +666,24 @@ export async function buildFixture(opts: {
       providerId,
     },
   ]);
+  if (opts.secondAgentSameCompany) {
+    await db.insert(agents).values({
+      id: agentIdC,
+      companyId,
+      name: 'tn-c',
+      role: 'cto',
+      title: 'tn-c',
+      urlKey: agentIdC,
+      status: 'active',
+      providerId,
+    } as never);
+  }
 
   const models = {
     a: makeModel(opts.holdUser === true),
     b: makeModel(false),
     bystander: makeModel(false),
+    c: makeModel(false),
   };
   const unregisters = [
     mastraChat.registerChatModelOverride({ companyId, agentId }, { resolveModel: () => models.a.mock as never }),
@@ -531,6 +692,14 @@ export async function buildFixture(opts: {
       { companyId: bystanderCompanyId, agentId: bystanderAgentId },
       { resolveModel: () => models.bystander.mock as never },
     ),
+    ...(opts.secondAgentSameCompany
+      ? [
+          mastraChat.registerChatModelOverride(
+            { companyId, agentId: agentIdC },
+            { resolveModel: () => models.c.mock as never },
+          ),
+        ]
+      : []),
   ];
 
   const rows = await db.select().from(agents);
@@ -541,7 +710,7 @@ export async function buildFixture(opts: {
   if (controllerA.id !== mastraChat.buildChatControllerId(agentId)) {
     throw new Error(`TN plumbing: controller identity is not the production formula (${controllerA.id})`);
   }
-  if (process.env.TN_CONTROL === 'C-SHARED-IDENTITY') {
+  if (process.env.TN_CONTROL === 'C-SHARED-IDENTITY' || process.env.TN_CONTROL === 'C-SHARED-CTRL') {
     (controllerB as { id: string }).id = controllerA.id;
   }
 
@@ -550,6 +719,16 @@ export async function buildFixture(opts: {
   await chatMod.getChatSession(controllerA, recordA as never, { threadId: t1, scope: `tn-seed:${t1}` });
   await chatMod.getChatSession(controllerA, recordA as never, { threadId: t3, scope: `tn-seed:${t3}` });
   await chatMod.getChatSession(controllerA, recordA as never, { threadId: t9, scope: `tn-seed:${t9}` });
+  await chatMod.getChatSession(controllerA, recordA as never, { threadId: tOrigin2, scope: `tn-seed:${tOrigin2}` });
+  let controllerC: typeof controllerA | null = null;
+  let recordC: typeof recordA | null = null;
+  if (opts.secondAgentSameCompany) {
+    const rowsC = await db.select().from(agents);
+    recordC = rowsC.find((r) => r.id === agentIdC)!;
+    controllerC = await chatMod.getOrCreateChatController(recordC as never);
+    await chatMod.getChatSession(controllerC, recordC as never, { threadId: t1c, scope: `tn-seed:${t1c}` });
+  }
+
   if (!protoPatched) {
     const proto = Object.getPrototypeOf(userSession);
     const original = proto.queueSignal;
@@ -589,10 +768,14 @@ export async function buildFixture(opts: {
   let taskIdB = '';
   if (!opts.missingTask) {
     taskId = await insertTask(companyId, agentId, opts.nullOrigin ? null : t1, 'TN bounded prompt');
-    if (opts.secondOriginNotice) taskId2 = await insertTask(companyId, agentId, t1, 'TN bounded prompt 2');
+    if (opts.secondOriginNotice) taskId2 = await insertTask(companyId, agentId, tOrigin2, 'TN bounded prompt 2');
   }
   if (opts.secondCompany || opts.extraTaskOnB) {
     taskIdB = await insertTask(companyIdB, agentIdB, t1b, 'TN bounded prompt B');
+  }
+  let taskIdC = '';
+  if (opts.secondAgentSameCompany) {
+    taskIdC = await insertTask(companyId, agentIdC, t1c, 'TN bounded prompt C');
   }
 
   const readPin = async (): Promise<string | null> => {
@@ -622,7 +805,13 @@ export async function buildFixture(opts: {
     t2,
     t3,
     t9,
+    tOrigin2,
     t1b,
+    t1c,
+    agentIdC,
+    taskIdC,
+    controllerC,
+    recordC,
     bystanderCompanyId,
     bystanderAgentId,
     taskId,
@@ -647,7 +836,7 @@ export async function buildFixture(opts: {
       }
       await pool.query('delete from chat_tasks where company_id = any($1)', [[companyId, companyIdB, bystanderCompanyId]]).catch(() => {});
       await pool.query('delete from assistant_active_threads where company_id = any($1)', [[companyId, companyIdB, bystanderCompanyId]]).catch(() => {});
-      await pool.query('delete from agents where id = any($1)', [[agentId, agentIdB, bystanderAgentId]]).catch(() => {});
+      await pool.query('delete from agents where id = any($1)', [[agentId, agentIdB, bystanderAgentId, agentIdC]]).catch(() => {});
       await pool.query('delete from companies where id = any($1)', [[companyId, companyIdB, bystanderCompanyId]]).catch(() => {});
       await pool.query('delete from llm_providers where id = $1', [providerId]).catch(() => {});
       await pool.end().catch(() => {});
@@ -676,6 +865,8 @@ export async function bridgeStart(opts: Record<string, unknown> = {}): Promise<v
   if (!bridgeMod) throw new Error('TN plumbing: bridge module missing');
   if (bridgeHandle) return;
   bridgeLog.length = 0;
+  redisTerminalLog.length = 0;
+  claimOutcomeLog.length = 0;
   const control = process.env.TN_CONTROL;
   const extra: Record<string, unknown> = { ...opts };
   extra.log = {
@@ -711,7 +902,66 @@ export async function bridgeStart(opts: Record<string, unknown> = {}): Promise<v
       return true;
     };
   }
+  if (control === 'C-PIN-FOLLOW' && !extra.getTaskOrigin) {
+    extra.getTaskOrigin = async (event: { companyId: string; agentId: string }) => {
+      const res = await fixturePinLookup(event.companyId, event.agentId);
+      if (res) return { threadId: res };
+      return { skip: 'missing-origin' };
+    };
+  }
+  if (control === 'C-THREAD' || control === 'C-WRONG-THREAD-DEFAULT') {
+    extra.getTaskOrigin = async (event: { companyId: string; agentId: string }) => {
+      const res = await fixturePinLookup(event.companyId, event.agentId);
+      if (res) return { threadId: res };
+      return { skip: 'missing-origin' };
+    };
+  }
+  if (control === 'C-BUSY-OTHER-DROP') {
+    extra.deliver = async () => false;
+  }
+  if (control === 'C-WAKE' || control === 'C-SETTLE') {
+    extra.deliver = async () => true; // pretend delivered; nothing queued
+  }
+  if (control === 'C-BRIDGE') {
+    return;
+  }
+  if (control === 'C-DEDUPE') {
+    extra.claimClient = {
+      claim: async (key: string) => {
+        claimOutcomeLog.push({ key, outcome: true, detail: 'C-DEDUPE-always-first', at: new Date().toISOString() });
+        return true;
+      },
+    };
+  }
+  if (control === 'C-ACK') {
+    extra.createSubscriber = () => {
+      const r = new Redis(process.env.REDIS_URL as string, { maxRetriesPerRequest: 1 });
+      r.psubscribe = (async () => undefined) as typeof r.psubscribe;
+      return r;
+    };
+  }
+  await startRedisObserver();
+  if (!extra.claimClient && control !== 'C-DEDUPE') {
+    if (accountingClaim) {
+      try { await accountingClaim.quit(); } catch { /* previous borrowed wrapper */ }
+      accountingClaim = null;
+    }
+    const { createOwnedRedisClaimClient } = bridgeMod;
+    const owned = createOwnedRedisClaimClient();
+    extra.claimClient = {
+      claim: async (key: string, ttl: number) => {
+        const outcome = await owned.claim(key, ttl);
+        claimOutcomeLog.push({ key, outcome, at: new Date().toISOString() });
+        return outcome;
+      },
+      quit: () => owned.quit(),
+    };
+    // Injected, so stop() will treat it as borrowed unless we quit in teardown.
+    extra._ownedClaimForAccounting = owned;
+    accountingClaim = owned;
+  }
   const handle = bridgeMod.startTaskProgressSignalBridge(extra as never);
+
   bridgeHandle = handle;
   await handle.ready;
 }
