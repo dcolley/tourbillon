@@ -110,6 +110,12 @@ export interface TaskProgressAgentRecord {
   status: string;
   /** companies.status — same rule; a paused/archived tenant must not be woken (S4, #196-B1 class). */
   companyStatus: string;
+  /**
+   * agents.runtime_config (NOT NULL, DB default {}). Origin-bound getChatSession /
+   * createChatController read runtimeConfig.mail; dropping this field makes
+   * `runtimeConfig.mail` throw and silently fails notice delivery (H3).
+   */
+  runtimeConfig?: unknown;
 }
 
 export interface TaskProgressBridgeDeps<A extends TaskProgressAgentRecord> {

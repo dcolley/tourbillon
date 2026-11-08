@@ -425,7 +425,7 @@ test('getAgent (db-backed, S10): joins the company row and maps companyStatus th
   // companyStatus is the JOINED company row's status. Flip the mapper to
   // `companyStatus: 'active'` and this fails even though the pure core still skips later —
   // the bridge must see the real tenant state, not a stubbed one.
-  assert.deepEqual(rec, { id: 'agent-1', companyId: 'company-9', status: 'active', companyStatus: 'paused' });
+  assert.deepEqual(rec, { id: 'agent-1', companyId: 'company-9', status: 'active', companyStatus: 'paused', runtimeConfig: {} });
   // The company is looked up BY THE AGENT'S companyId (real join), not the requested id.
   assert.equal(db.agentLookups.length, 1, 'one agent lookup');
   assert.equal(db.companyLookups.length, 1, 'one company lookup (the join)');
@@ -451,6 +451,20 @@ test('getAgent (db-backed, S10): missing company row → null (no tenant to deli
   assert.equal(db.companyLookups.length, 1, 'the company was looked up before deciding');
 });
 
+test('getAgent (db-backed): passes through agents.runtime_config for H3 origin-bound delivery', async () => {
+  // Production agents.runtime_config is NOT NULL with a DB default (see packages/db
+  // schema/agents.ts). getAgent used to return only id/companyId/status/companyStatus,
+  // so origin-bound getChatSession / skill-loader saw runtimeConfig === undefined and
+  // threw `Cannot read properties of undefined (reading 'mail')`.
+  const runtimeConfig = { mail: { enabled: false }, heartbeat: { enabled: false } };
+  const db = fakeDb({
+    agent: { id: 'agent-1', companyId: 'company-1', status: 'active', runtimeConfig },
+    company: { status: 'active' },
+  });
+  const rec = await getAgent('agent-1', { db, orm: fakeOrm().orm, tables: fakeTables() });
+  assert.deepEqual(rec?.runtimeConfig, runtimeConfig);
+});
+
 test('getAgent (db-backed, S14): a PAUSED agent maps status through row.status — NOT hard-coded active', async () => {
   // The mapper's `status: row.status` was uncovered: hard-coding `status: 'active'` kept every
   // prior test green (the pure core had its own inactive skip, so the wrong record never
@@ -461,7 +475,7 @@ test('getAgent (db-backed, S14): a PAUSED agent maps status through row.status �
   });
   const orm = fakeOrm();
   const rec = await getAgent('agent-1', { db, orm: orm.orm, tables: fakeTables() });
-  assert.deepEqual(rec, { id: 'agent-1', companyId: 'company-1', status: 'paused', companyStatus: 'active' });
+  assert.deepEqual(rec, { id: 'agent-1', companyId: 'company-1', status: 'paused', companyStatus: 'active', runtimeConfig: {} });
   // End-to-end through the bridge: the paused agent is skipped before deliver, so the wrong
   // mapping can't hide behind the pure core's skip either way.
   let delivered = 0;
@@ -591,7 +605,7 @@ test('getAgent (default path, S15/B1): queries the module `db` EXPORT — not th
     { column: { table: 'agents', column: 'id', origin: 'module-export' }, value: 'agent-1' },
     { column: { table: 'companies', column: 'id', origin: 'module-export' }, value: 'company-9' },
   ]);
-  assert.deepEqual(rec, { id: 'agent-1', companyId: 'company-9', status: 'active', companyStatus: 'paused' });
+  assert.deepEqual(rec, { id: 'agent-1', companyId: 'company-9', status: 'active', companyStatus: 'paused', runtimeConfig: {} });
 });
 
 test('getAgent (default path, S15/B1): the db passed to lookups is === the module db export, never the namespace', async () => {

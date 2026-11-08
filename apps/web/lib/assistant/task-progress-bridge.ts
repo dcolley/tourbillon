@@ -191,6 +191,10 @@ export async function getAgent(
     companyId: row.companyId,
     status: row.status,
     companyStatus: company.status,
+    // Pass through the NOT NULL runtime_config column. Stripping it makes the
+    // origin-bound H3 session path throw on `runtimeConfig.mail` in skill-loader
+    // / agent-factory when a controller is assembled from this record.
+    runtimeConfig: row.runtimeConfig ?? {},
   };
 }
 

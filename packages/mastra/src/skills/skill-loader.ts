@@ -187,7 +187,7 @@ export async function loadSkillsForAgent(
 
   // Auto-attach agent-dm skill when DMs are enabled (default: true)
   const runtimeConfig = agentRecord.runtimeConfig as AgentRuntimeConfig;
-  const mailEnabled = runtimeConfig.mail?.enabled ?? true;
+  const mailEnabled = runtimeConfig?.mail?.enabled ?? true;
   if (mailEnabled && !seen.has(AGENT_DM_SKILL_SLUG)) {
     const dmSkill = await readSkillFile(AGENT_DM_SKILL_SLUG, agentRecord.role);
     if (dmSkill) {
