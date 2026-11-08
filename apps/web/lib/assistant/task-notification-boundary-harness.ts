@@ -156,17 +156,17 @@ export async function tnTeardown(): Promise<void> {
     /* ignore */
   }
   try {
-    const { getChatThreadStorageForTests } = await import('../../../../packages/mastra/src/chat-controller.ts');
+    const { getChatThreadStorageForTests } = await import('../../../../packages/mastra/src/chat-controller');
     const store = getChatThreadStorageForTests();
-    if (store && typeof (store as { shutdown?: () => Promise<void> }).shutdown === 'function') {
-      await (store as { shutdown: () => Promise<void> }).shutdown();
+    if (store && typeof (store as unknown as { shutdown?: () => Promise<void> }).shutdown === 'function') {
+      await (store as unknown as { shutdown: () => Promise<void> }).shutdown();
     }
   } catch {
     /* ignore */
   }
   try {
-    const pub = await import('../../../../packages/scheduler/src/redis-pub.ts');
-    const redis = await import('../../../../packages/scheduler/src/redis.ts');
+    const pub = await import('../../../../packages/scheduler/src/redis-pub');
+    const redis = await import('../../../../packages/scheduler/src/redis');
     // redis-pub eagerly constructs redisPub; redis.ts also eagerly constructs the
     // deprecated `connection` singleton on the same import. Quitting only redisPub
     // leaves that second socket open and prevents a natural node:test exit (H4).

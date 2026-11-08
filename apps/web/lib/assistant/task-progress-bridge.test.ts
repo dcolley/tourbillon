@@ -375,7 +375,7 @@ function fakeOrm(): { orm: TaskProgressOrm; where: unknown[] } {
 }
 
 function fakeDb(opts: {
-  agent?: { id: string; companyId: string; status: string };
+  agent?: { id: string; companyId: string; status: string; runtimeConfig?: unknown };
   company?: { status: string };
 }): { query: TaskProgressDbQuery; agentLookups: unknown[]; companyLookups: unknown[] } {
   const agentLookups: unknown[] = [];
@@ -533,7 +533,7 @@ test('getAgent (db-backed, S10): through buildTaskProgressBridgeDeps — a pause
  * the namespace (or drops `.db`) fails on identity/assertion, not by accident.
  */
 function fakeDbModule(opts: {
-  agent?: { id: string; companyId: string; status: string };
+  agent?: { id: string; companyId: string; status: string; runtimeConfig?: unknown };
   company?: { status: string };
   task?: { sourceThreadId: string | null } | null;
   taskError?: Error;

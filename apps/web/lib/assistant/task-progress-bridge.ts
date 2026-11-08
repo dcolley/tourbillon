@@ -43,7 +43,7 @@ import {
 
 /** The `@tourbillon/db` slice getAgent reads (softs S10: injectable fake in tests). */
 export interface TaskProgressDbQuery {
-  agents: { findFirst(args: unknown): Promise<{ id: string; companyId: string; status: string } | undefined> };
+  agents: { findFirst(args: unknown): Promise<{ id: string; companyId: string; status: string; runtimeConfig?: unknown } | undefined> };
   companies: { findFirst(args: unknown): Promise<{ status: string } | undefined> };
 }
 

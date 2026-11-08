@@ -550,6 +550,7 @@ test('TN-FAIL-CLEAN-CONTROL', { timeout: 30_000 }, () => {
         PATH: process.env.PATH,
         HOME: process.env.HOME,
         NODE_PATH: process.env.NODE_PATH,
+        NODE_ENV: process.env.NODE_ENV ?? 'test',
         DATABASE_URL: process.env.DATABASE_URL,
         REDIS_URL: process.env.REDIS_URL,
         TN_DISPOSABLE: '1',
