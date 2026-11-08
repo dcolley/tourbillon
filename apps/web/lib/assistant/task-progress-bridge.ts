@@ -340,10 +340,12 @@ export async function realDeliverGetOrCreateChatController(
   const chat = await loadChat();
   const controller = await chat.getOrCreateChatController(agent as ChatAgentSeam as Agent);
   // Mastra 1.81: the live session for (resourceId, scope) is getSession(chatSessionId(...)).
-  return {
+  // Attach the lookup helper to the REAL controller so origin-bound getChatSession
+  // can still call createSession (H3). A bare wrapper object is not an AgentController.
+  return Object.assign(controller, {
     getSessionByResource: (resourceId: string, scope: string) =>
       controller.getSession(chatSessionId(resourceId, scope)),
-  };
+  });
 }
 
 /**
