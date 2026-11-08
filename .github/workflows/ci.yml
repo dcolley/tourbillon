@@ -13,8 +13,7 @@ name: CI
 
 on:
   push:
-    # test/114-*: stacked #114 PG-evidence branch (no PR by design) still gets CI.
-    branches: [main, 'test/114-*']
+    branches: [main]
   pull_request:
 
 permissions:
