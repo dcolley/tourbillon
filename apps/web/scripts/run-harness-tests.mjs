@@ -37,6 +37,7 @@ export const WEB_ROOT = fileURLToPath(new URL('..', import.meta.url));
  * packages/scheduler/src/ci-coverage-s316-s4-s328-s4.test.ts.
  */
 export const HARNESS_TEST_FILES = [
+  'lib/auth/run-id-header-114.test.ts', // #114: run-id header never replaces the signed run
   'lib/chat-send-key.test.ts',
   'lib/harness/callback-chat.test.ts',
   'lib/harness/callback-gate.test.ts',

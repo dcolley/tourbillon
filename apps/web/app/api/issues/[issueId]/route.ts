@@ -4,6 +4,7 @@ import { changesBetween, TRACKED_CHANGE_FIELDS } from '@/lib/activity-correlatio
 import { and, eq } from 'drizzle-orm';
 import { IssueAssigneeError, resolveIssueAssignees } from '@tourbillon/shared';
 import { authenticateAgentToken } from '@/lib/auth/agent-token-auth';
+import { authenticatedRunId } from '@/lib/auth/run-id-header';
 import { logAgentApiRequest, logAgentApiResponse, summarizeBody } from '@/lib/agent-api-trace';
 import { enqueueHeartbeat } from '@/lib/wake-client';
 import { statusesThatReleaseCheckoutLock, CHECKOUT_LOCK_CLEAR_FIELDS } from '@/lib/checkout-lock';
@@ -19,7 +20,9 @@ export async function PATCH(
   const runCtx = await authenticateAgentToken(token);
   if (!runCtx) return NextResponse.json({ error: 'Invalid token' }, { status: 401 });
 
-  const runId = req.headers.get('x-paperclip-run-id');
+  const runIdCheck = authenticatedRunId(req.headers, runCtx);
+  if (runIdCheck.denied) return runIdCheck.denied;
+  const runId = runIdCheck.runId;
   const body = (await req.json()) as {
     status?: string;
     comment?: string;
@@ -31,7 +34,7 @@ export async function PATCH(
 
   logAgentApiRequest(`/api/issues/${issueId}`, 'PATCH', runCtx, {
     issueId: issueId,
-    headerRunId: runId,
+    authRunId: runId,
     body: summarizeBody(body),
   });
 
