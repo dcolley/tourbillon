@@ -6,7 +6,7 @@
  * the pinned manifest: every expected test name passed, nothing failed, no unexpected or missing
  * tests, and the process exited 0 on its own (no --test-force-exit, no name pattern).
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -24,8 +24,9 @@ const tsx = join(WEB_ROOT, 'node_modules', '.bin', 'tsx');
 const r = spawnSync(tsx, ['--test', '--test-reporter=tap', manifest.file], {
   cwd: WEB_ROOT, encoding: 'utf8', timeout: 10 * 60_000, maxBuffer: 64 * 1024 * 1024,
 });
-process.stdout.write(r.stdout ?? '');
-process.stderr.write(r.stderr ?? '');
+// Synchronous writes: process.exit() on a pipe can drop buffered async stdout (CI logs).
+writeSync(1, r.stdout ?? '');
+writeSync(2, r.stderr ?? '');
 if (r.error) { console.error(r.error.message); process.exit(1); }
 
 const leafOk = new Set();
@@ -46,5 +47,5 @@ if (r.status !== 0) { console.error(`run-pg-114-tests: test process exit ${r.sta
 if (notOk.length) { console.error(`run-pg-114-tests: failed: ${notOk.join(' | ')}`); bad = true; }
 if (missing.length) { console.error(`run-pg-114-tests: manifest tests not passed: ${missing.join(' | ')}`); bad = true; }
 if (extra.length) { console.error(`run-pg-114-tests: tests not in manifest: ${extra.join(' | ')}`); bad = true; }
-console.log(`run-pg-114-tests: ${leafOk.size}/${expected.size} pinned tests passed, exit ${r.status}`);
-process.exit(bad ? 1 : 0);
+writeSync(1, `run-pg-114-tests: ${leafOk.size}/${expected.size} pinned tests passed, exit ${r.status}, ${bad ? 'FAIL' : 'OK'}\n`);
+process.exitCode = bad ? 1 : 0;
