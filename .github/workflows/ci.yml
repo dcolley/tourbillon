@@ -6,7 +6,6 @@ name: CI
 # gate only ever ran on developer machines, so type regressions reached review.
 # S328-S4: the `unit-tests` job below runs the service-FREE subset (shared, scheduler
 # minus packages/scheduler/scripts/run-unit-tests.mjs SERVICE_BOUND, apps/web lib/harness and lib/chat-send-key.test.ts (S305-S1)).
-# Suites that need Postgres/Redis stay a local/pre-merge concern until an infra recipe exists.
 # S316-S4 / S322-S4: shared + scheduler are linted alongside company-computer, so the
 # harness adapters (hermes-adapter, opencode-adapter, wake-runner) are no longer a blind spot.
 # Both are pinned by packages/scheduler/src/ci-coverage-s316-s4-s328-s4.test.ts.
@@ -65,3 +64,49 @@ jobs:
       - run: pnpm --filter @tourbillon/shared test:unit
       - run: pnpm --filter @tourbillon/scheduler test:unit
       - run: pnpm --filter web test:harness
+
+  # Task-notification certification (v2.1): disposable pgvector/pg16 + Redis 7,
+  # existing drizzle journal only (no new migration), exact pinned B command.
+  task-notification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: tourbillon_tn
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d tourbillon_tn"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/tourbillon_tn
+      REDIS_URL: redis://127.0.0.1:6379
+      TN_DISPOSABLE: "1"
+      TOURBILLON_AGENT_TOKEN_SECRET: ci-task-notification-token-secret-not-used-live
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm db:migrate
+      - name: Task-notification certification
+        working-directory: apps/web
+        run: node scripts/run-task-notification-tests.mjs
