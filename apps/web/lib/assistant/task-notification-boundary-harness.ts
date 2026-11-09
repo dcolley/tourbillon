@@ -426,6 +426,105 @@ export function countNoticeMessages(messages: string[], taskId: string, stage?: 
   }).length;
 }
 
+export function deliveryAccount(taskId: string, model?: { callLog: Array<{ identity: string; notice: boolean }> }) {
+  const redisCopies = redisTerminalEvents(taskId);
+  const claims = claimOutcomeLog.filter((c) => JSON.stringify(c).includes(taskId));
+  const queues = tnSignalRecords({ taskId });
+  const modelNotice = model ? model.callLog.filter((c) => c.notice).length : 0;
+  const modelUser = model ? model.callLog.filter((c) => !c.notice).length : 0;
+  return { redisCopies, claims, queues, modelNotice, modelUser };
+}
+
+type AssemblySnap = {
+  className: string;
+  id: string;
+  storageClass: string | undefined;
+  storageId: string | undefined;
+  memoryClass: string | undefined;
+  toolIds: string[];
+};
+
+async function listControllerTools(controller: object): Promise<string[]> {
+  const rec = controller as {
+    agent?: { listTools?: (opts?: unknown) => Promise<Record<string, unknown>> };
+    getAgent?: () => { listTools?: (opts?: unknown) => Promise<Record<string, unknown>> };
+  };
+  const agent = rec.agent ?? rec.getAgent?.();
+  if (!agent || typeof agent.listTools !== 'function') return [];
+  const tools = await agent.listTools();
+  return Object.keys(tools ?? {}).sort();
+}
+
+export async function snapshotControllerAssembly(controller: object): Promise<AssemblySnap> {
+  const rec = controller as {
+    id?: string;
+    constructor?: { name?: string };
+    storage?: { constructor?: { name?: string }; id?: string };
+    memory?: { constructor?: { name?: string } };
+    getStorage?: () => { constructor?: { name?: string }; id?: string };
+    getMemory?: () => { constructor?: { name?: string } };
+  };
+  const storage = rec.storage ?? rec.getStorage?.();
+  const memory = rec.memory ?? rec.getMemory?.();
+  return {
+    className: rec.constructor?.name ?? typeof controller,
+    id: String(rec.id ?? ''),
+    storageClass: storage?.constructor?.name,
+    storageId: storage && 'id' in storage ? String(storage.id) : undefined,
+    memoryClass: memory?.constructor?.name,
+    toolIds: await listControllerTools(controller),
+  };
+}
+
+/**
+ * C1: the H1 model-only override must not change controller class/id, storage,
+ * tools or memory versus the production assembly of the same agent record.
+ */
+export async function assertC1ModelOnlyOverride(
+  controller: object,
+  record: { id: string; companyId: string },
+  restoreOverride: () => void,
+): Promise<void> {
+  const { createChatController, unregisterChatModelOverride, buildChatControllerId } = await import(
+    '../../../../packages/mastra/src/chat-controller'
+  );
+  const { getChatThreadStorageForTests } = await import('../../../../packages/mastra/src/chat-controller');
+  const overridden = await snapshotControllerAssembly(controller);
+  unregisterChatModelOverride({ companyId: record.companyId, agentId: record.id });
+  let production: AssemblySnap | undefined;
+  try {
+    const twin = await createChatController(record as never);
+    production = await snapshotControllerAssembly(twin);
+  } finally {
+    restoreOverride();
+  }
+  if (!production) throw new Error('C1: production twin was not assembled');
+  const store = getChatThreadStorageForTests();
+  if (overridden.className !== production.className) {
+    throw new Error(`C1 class mismatch: override=${overridden.className} production=${production.className}`);
+  }
+  if (overridden.id !== production.id) {
+    throw new Error(`C1 controller id mismatch: override=${overridden.id} production=${production.id}`);
+  }
+  if (overridden.id !== buildChatControllerId(record.id)) {
+    throw new Error(`C1 controller id is not the production formula (${overridden.id})`);
+  }
+  if (overridden.storageClass !== production.storageClass) {
+    throw new Error(`C1 storage class mismatch: override=${overridden.storageClass} production=${production.storageClass}`);
+  }
+  if (store.constructor?.name !== 'PostgresStore') {
+    throw new Error(`C1 production storage is not PostgresStore (${store.constructor?.name})`);
+  }
+  if (overridden.memoryClass !== production.memoryClass) {
+    throw new Error(`C1 memory class mismatch: override=${overridden.memoryClass} production=${production.memoryClass}`);
+  }
+  const a = overridden.toolIds.join(',');
+  const b = production.toolIds.join(',');
+  if (a !== b) {
+    throw new Error(`C1 tools mismatch: override=[${a}] production=[${b}]`);
+  }
+}
+
 export function tnTrace(step: string, extra?: Record<string, unknown>): void {
   const payload = extra && Object.keys(extra).length > 0 ? ` ${JSON.stringify(extra)}` : "";
   console.log(`[TN-TRACE] ${new Date().toISOString()} ${step}${payload}`);

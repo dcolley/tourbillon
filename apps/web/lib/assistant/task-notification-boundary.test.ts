@@ -28,6 +28,8 @@ import {
   invokeDefaultPoller,
   progressEvent,
   publishProgress,
+  deliveryAccount,
+  assertC1ModelOnlyOverride,
   recordVerdict,
   persistVerdicts,
   startRedisObserver,
@@ -78,10 +80,26 @@ test('TN-DEFAULT-PATH', { timeout: 90_000 }, async (t) => {
   await bridgeStart();
   const f = await buildFixture({ seedPin: 't2' });
   try {
+    const { registerChatModelOverride } = await import('@tourbillon/mastra/chat');
+    await assertC1ModelOnlyOverride(f.controllerA, f.recordA as { id: string; companyId: string }, () => {
+      registerChatModelOverride({ companyId: f.companyId, agentId: f.agentId }, { resolveModel: () => f.models.a.mock as never });
+    });
     const poll = await invokeDefaultPoller(progressEvent(f));
     assert.ok((poll.started ?? 0) >= 1, 'default poller claimed and started a run');
     await waitFor('T1 notice', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done') >= 1);
-    assert.ok(redisTerminalEvents(f.taskId).length >= 1, 'independent Redis observer saw poller publish');
+    await waitFor('poller Redis copies', async () => redisTerminalEvents(f.taskId).length >= 2);
+    const acct = deliveryAccount(f.taskId, f.models.a);
+    const stages = acct.redisCopies.map((row) => {
+      const p = row.payload as { stage?: string };
+      return typeof p === 'object' && p && p.stage ? p.stage : JSON.stringify(row.payload);
+    });
+    assert.ok(stages.includes('started'), `Redis observer saw started: ${stages.join(',')}`);
+    assert.ok(stages.includes('done'), `Redis observer saw done: ${stages.join(',')}`);
+    assert.equal(acct.redisCopies.length, 2, 'exact Redis copies (started+done) from default poller');
+    assert.ok(acct.claims.some((c) => c.outcome === true && String(c.detail ?? '').startsWith('poller:')), 'poller claim won');
+    assert.ok(acct.claims.some((c) => c.outcome === true && !String(c.detail ?? '').startsWith('poller:')), 'bridge claim won');
+    assert.ok(acct.queues.length >= 1, 'queueSignal entries recorded');
+    assert.equal(acct.modelUser, 0, 'DEFAULT-PATH: no user-identity run');
     const t1 = await tnFreshMessages(f.t1);
     const t2 = await tnFreshMessages(f.t2);
     assert.equal(countNoticeMessages(t1, f.taskId, 'done'), 1);
@@ -99,7 +117,11 @@ async function idleCell(name: string, stage: string, status: string) {
   await bridgeStart();
   const f = await buildFixture({ seedPin: 't2' });
   try {
-    await publishProgress(progressEvent(f, { stage, status }));
+    await publishProgress(progressEvent(f, {
+      stage,
+      status,
+      ...(stage === 'waiting_on_user' ? { detail: 'ask: confirm the vendor' } : {}),
+    }));
     await waitFor(`${name} T1`, async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, stage) >= 1);
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, stage), 1, 'exactly one terminal notice on T1');
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t2), f.taskId), 0, 'nothing on pin T2');
@@ -126,6 +148,34 @@ test('TN-IDLE-DONE', { timeout: 90_000 }, async (t) => {
 test('TN-IDLE-FAIL', { timeout: 90_000 }, async (t) => {
   if (await skipIfIncompatible(t, 'TN-IDLE-FAIL')) return;
   await idleCell('TN-IDLE-FAIL', 'failed', 'failed');
+});
+
+test('TN-IDLE-ASK', { timeout: 90_000 }, async (t) => {
+  if (await skipIfIncompatible(t, 'TN-IDLE-ASK')) return;
+  await idleCell('TN-IDLE-ASK', 'waiting_on_user', 'succeeded');
+});
+
+test('TN-NO-FALSE-RUN', { timeout: 90_000 }, async (t) => {
+  if (await skipIfIncompatible(t, 'TN-NO-FALSE-RUN')) return;
+  await bridgeReset();
+  await bridgeStart();
+  const f = await buildFixture({ seedPin: 't2' });
+  try {
+    const event = progressEvent(f, { stage: 'done', status: 'succeeded' });
+    await publishProgress(event);
+    await waitFor('TN-NO-FALSE-RUN T1', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done') >= 1);
+    const acct = deliveryAccount(f.taskId, f.models.a);
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done'), 1, 'exactly one terminal notice');
+    assert.equal(tnSignalRecords({ taskId: f.taskId, tagName: 'task-progress' }).length, 1, 'exactly one queueSignal');
+    assert.equal(acct.modelUser, 0, 'no extra user/notification run');
+    assert.equal(await f.readPin(), f.pinBefore, 'pin unchanged');
+    recordVerdict('TN-NO-FALSE-RUN', 'GREEN');
+  } catch (err) {
+    recordVerdict('TN-NO-FALSE-RUN', 'RED', err instanceof Error ? err.message : String(err));
+    throw err;
+  } finally {
+    await f.cleanup();
+  }
 });
 
 test('TN-BUSY-UNRELATED-PIN', { timeout: 120_000 }, async (t) => {
@@ -188,6 +238,10 @@ test('TN-BUSY-ORIGIN-HELD', { timeout: 120_000 }, async (t) => {
     await waitFor('queue entered while origin held', async () => tnSignalRecords({ taskId: f.taskId }).length >= 1, 15_000);
     assert.ok(redisTerminalEvents(f.taskId).length >= 1, 'Redis terminal observed during hold');
     assert.equal(f.models.a.callLog.filter((c) => c.notice).length, 0, 'zero terminal-model-entry during hold');
+    const heldAcct = deliveryAccount(f.taskId, f.models.a);
+    assert.ok(heldAcct.claims.some((c) => c.outcome === true), 'claim recorded during hold');
+    assert.equal(heldAcct.queues.length, 1, 'exactly one queueSignal while origin held');
+    assert.equal(heldAcct.modelNotice, 0, 'zero terminal-model-entry during hold (accounted)');
     const mid = await tnFreshMessages(f.t1);
     assert.equal(countNoticeMessages(mid, f.taskId), 0, 'B-NO-EARLY: no persist while origin held');
     f.models.a.releaseChunks();
@@ -195,6 +249,9 @@ test('TN-BUSY-ORIGIN-HELD', { timeout: 120_000 }, async (t) => {
     await waitFor('T1 after origin release', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done') >= 1);
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done'), 1);
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t2), f.taskId), 0);
+    const after = deliveryAccount(f.taskId, f.models.a);
+    assert.equal(after.queues.length, 1, 'no extra queueSignal after release');
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done'), 1);
     assert.equal(await f.readPin(), f.pinBefore, 'pin still T2');
     recordVerdict('TN-BUSY-ORIGIN-HELD', 'GREEN');
   } catch (err) {
@@ -316,18 +373,23 @@ test('TN-ONCE-DUP', { timeout: 90_000 }, async (t) => {
     const event = progressEvent(f, { runId: 'run-dup' });
     await publishProgress(event);
     await waitFor('first notice', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done') >= 1);
-    const copiesAfterFirst = redisTerminalEvents(f.taskId).length;
-    const noticeCallsAfterFirst = f.models.a.callLog.filter((c) => c.notice).length;
+    await waitFor('first Redis copy', async () => redisTerminalEvents(f.taskId).length >= 1);
+    const first = deliveryAccount(f.taskId, f.models.a);
+    assert.equal(first.redisCopies.length, 1, 'exact first Redis copy');
+    const noticeCallsAfterFirst = first.modelNotice;
     await publishProgress(event);
-    await new Promise((r) => setTimeout(r, 800));
-    assert.ok(copiesAfterFirst >= 1, 'first Redis copy observed');
-    assert.ok(redisTerminalEvents(f.taskId).length >= 2, 'second Redis copy independently observed');
-    const claims = claimOutcomeLog.filter((c) => JSON.stringify(c).includes(f.taskId) || JSON.stringify(c).includes('run-dup'));
+    await waitFor('second Redis copy', async () => redisTerminalEvents(f.taskId).length >= 2);
+    await waitFor('duplicate claim lost', async () =>
+      claimOutcomeLog.some((c) => (JSON.stringify(c).includes(f.taskId) || JSON.stringify(c).includes('run-dup')) && c.outcome === false),
+    );
+    const acct = deliveryAccount(f.taskId, f.models.a);
+    const claims = acct.claims.filter((c) => JSON.stringify(c).includes(f.taskId) || JSON.stringify(c).includes('run-dup'));
+    assert.equal(acct.redisCopies.length, 2, 'exact two Redis copies (first + duplicate publish)');
     assert.ok(claims.some((c) => c.outcome === true), 'first claim won');
     assert.ok(claims.some((c) => c.outcome === false), 'second claim lost (duplicate)');
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done'), 1);
     assert.equal(tnSignalRecords({ taskId: f.taskId, tagName: 'task-progress' }).length, 1);
-    assert.equal(f.models.a.callLog.filter((c) => c.notice).length, noticeCallsAfterFirst, 'no extra model/run after duplicate publish');
+    assert.equal(acct.modelNotice, noticeCallsAfterFirst, 'no extra model/run after duplicate publish');
     recordVerdict('TN-ONCE-DUP', 'GREEN');
   } catch (err) {
     recordVerdict('TN-ONCE-DUP', 'RED', err instanceof Error ? err.message : String(err));
@@ -437,6 +499,10 @@ test('TN-MODEL-OVERRIDE-ISOLATION', { timeout: 60_000 }, async (t) => {
     await session.sendMessage({ content: 'TN-BYSTANDER hello' });
     await waitFor('bystander model', async () => f.models.bystander.callLog.length >= 1, 15_000);
     assert.equal(f.models.a.callLog.length, 0, 'fixture A model unused by bystander');
+    const { registerChatModelOverride } = await import('@tourbillon/mastra/chat');
+    await assertC1ModelOnlyOverride(f.controllerA, f.recordA as { id: string; companyId: string }, () => {
+      registerChatModelOverride({ companyId: f.companyId, agentId: f.agentId }, { resolveModel: () => f.models.a.mock as never });
+    });
     recordVerdict('TN-MODEL-OVERRIDE-ISOLATION', 'GREEN');
   } catch (err) {
     recordVerdict('TN-MODEL-OVERRIDE-ISOLATION', 'RED', err instanceof Error ? err.message : String(err));
