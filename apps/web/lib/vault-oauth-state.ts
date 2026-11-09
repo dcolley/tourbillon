@@ -1,28 +1,33 @@
 /**
  * Vault OAuth `state` signing and browser+company binding (#112).
  *
- * HMAC key is derived: HMAC-SHA256(BETTER_AUTH_SECRET, "tourbillon-vault-oauth-state-v2").
- * Unset/known-default secret → fail closed (no fallback). Verification uses timingSafeEqual
- * with a length pre-check. State v2 binds nonce + companyId + exp (max 600s); the nonce also
- * lives in an httpOnly cookie named per company so newest-wins cannot cross companies.
+ * HMAC key is derived: HMAC-SHA256(BETTER_AUTH_SECRET, "tourbillon-vault-oauth-state-v2")
+ * (key = secret bytes, data = label). Unset/known-default secret → fail closed.
+ * Verification: timingSafeEqual with length pre-check.
  *
- * Callback NEVER clears the nonce cookie (delayed-response race: Set-Cookie applies on arrival).
+ * State v2 binds nonce + companyId + exp (max 600s). Nonce also lives in an httpOnly cookie
+ * named per company (`tourbillon_vault_oauth_nonce.<companyId>`) so newest-wins cannot cross companies.
+ *
+ * Callback NEVER clears the nonce cookie (Set-Cookie applies on arrival; a clear would race).
  * Single-use is the durable verification-table consume only.
  *
- * Never log the secret, state, or cookie value. This module only logs the env var name.
+ * Clock: oauthNowMs() — override with env TB112_NOW_MS (unix ms) in tests so exp check,
+ * verification sweep and consume share one clock. Zero skew: nowSec >= exp denies.
+ *
+ * Never log the secret, state, or cookie value.
  */
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import { isDefaultOrUnsetJwtSecret, isInsecureDevBoardAuth, type BoardRequestHeaders } from './board-auth';
 
 export const OAUTH_STATE_SECRET_ENV = 'BETTER_AUTH_SECRET';
+/** Domain-separation label; HMAC key = BETTER_AUTH_SECRET, data = this string. */
 export const OAUTH_STATE_KEY_INFO = 'tourbillon-vault-oauth-state-v2';
 export const OAUTH_NOT_CONFIGURED_ERROR = 'oauth_state_secret_not_configured';
 export const OAUTH_CALLBACK_PATH = '/api/vault/oauth/callback';
 export const OAUTH_STATE_TTL_SEC = 10 * 60;
 export const OAUTH_NONCE_COOKIE_PREFIX = 'tourbillon_vault_oauth_nonce.';
 
-/** Neutral copy for NEW company_user OAuth without an authenticated user identity. */
 export const USER_SCOPE_UNSUPPORTED_MESSAGE =
   'Personal (user-scope) connections are not supported yet. Use a company or agent connection.';
 export const USER_SCOPE_UNSUPPORTED_ERROR = 'user_scope_unsupported';
@@ -46,9 +51,20 @@ export type OAuthStateError =
   | 'missing_nonce'
   | 'nonce_mismatch';
 
+/** Single clock for exp / sweep / consume. Tests set TB112_NOW_MS. */
+export function oauthNowMs(): number {
+  const raw = process.env.TB112_NOW_MS;
+  if (raw !== undefined && raw !== '') {
+    const n = Number(raw);
+    if (Number.isFinite(n)) return n;
+  }
+  return Date.now();
+}
+
 function oauthStateKey(): Buffer | null {
   if (isDefaultOrUnsetJwtSecret()) return null;
   const secret = process.env[OAUTH_STATE_SECRET_ENV]!.trim();
+  // key = secret, data = domain label (S2)
   return createHmac('sha256', secret).update(OAUTH_STATE_KEY_INFO).digest();
 }
 
@@ -63,7 +79,6 @@ export function logOAuthStateSecretMissing(stage: 'start' | 'finish'): void {
   );
 }
 
-/** Company-scoped cookie name so newest-wins cannot invalidate another company's flow. */
 export function oauthNonceCookieName(companyId: string): string {
   return `${OAUTH_NONCE_COOKIE_PREFIX}${companyId}`;
 }
@@ -85,8 +100,8 @@ export function verifyOAuthState(payload: unknown, signature: unknown): boolean 
 
 export function buildOAuthState(
   fields: { serverId: string; scope: OAuthStateScope; agentId?: string; companyId: string },
-  nowMs: number = Date.now(),
-): { state: string; nonce: string; expiresAt: Date; companyId: string } | null {
+  nowMs: number = oauthNowMs(),
+): { state: string; nonce: string; expiresAt: Date; companyId: string; exp: number } | null {
   const nonce = randomBytes(32).toString('base64url');
   const exp = Math.floor(nowMs / 1000) + OAUTH_STATE_TTL_SEC;
   const body: OAuthStatePayload = {
@@ -102,7 +117,7 @@ export function buildOAuthState(
   const signature = signOAuthState(payload);
   if (!signature) return null;
   const state = Buffer.from(JSON.stringify({ payload, signature })).toString('base64');
-  return { state, nonce, expiresAt: new Date(exp * 1000), companyId: fields.companyId };
+  return { state, nonce, expiresAt: new Date(exp * 1000), companyId: fields.companyId, exp };
 }
 
 function isStatePayload(v: unknown): v is OAuthStatePayload {
@@ -128,15 +143,11 @@ function sameNonce(a: string, b: string): boolean {
   return timingSafeEqual(ha, hb);
 }
 
-/**
- * Verify returned state against the company-scoped nonce cookie.
- * Company/agent ownership and single-use are checked by the callback (board session + DB).
- * Zero clock skew: nowSec >= exp → state_expired.
- */
+/** Zero skew: floor(nowMs/1000) >= exp → state_expired. */
 export function readOAuthState(
   state: string,
   nonceCookie: string | null | undefined,
-  nowMs: number = Date.now(),
+  nowMs: number = oauthNowMs(),
 ): { ok: true; value: OAuthStatePayload } | { ok: false; error: OAuthStateError } {
   let envelope: unknown;
   try {
@@ -171,10 +182,6 @@ export function oauthNonceCookieOptions(headers: BoardRequestHeaders) {
   };
 }
 
-/**
- * Redirect to /settings with a RELATIVE Location (RFC 9110 §10.2.2).
- * Never builds an origin from Host / X-Forwarded-Host / nextUrl.origin.
- */
 export function settingsRedirect(pathAndQuery: string): NextResponse {
   if (!pathAndQuery.startsWith('/settings')) {
     throw new Error('settingsRedirect only redirects within /settings');

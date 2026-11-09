@@ -1,17 +1,13 @@
 /**
- * #112: server-side single-use store for vault OAuth state nonces.
- *
- * Uses Better Auth's existing `verification` table (identifier / value / expiresAt) — no
- * migration. Rows are namespaced by OAUTH_NONCE_IDENTIFIER and hold only the SHA-256 of the
- * nonce, never the nonce itself.
- *
- * authorize: recordOAuthNonce inserts one row per flow (and sweeps expired rows for this id).
- * callback: consumeOAuthNonce is a single DELETE … WHERE value = hash AND expiresAt > now
- * RETURNING id — atomic in Postgres, so a state redeems at most once under concurrency.
+ * #112: durable single-use store for vault OAuth nonces (Better Auth `verification` table).
+ * No migration. Rows: identifier = OAUTH_NONCE_IDENTIFIER, value = SHA-256(nonce).
+ * Both DELETE predicates keep `identifier = OAUTH_NONCE_IDENTIFIER` (M4).
+ * Clock: oauthNowMs() from vault-oauth-state (TB112_NOW_MS in tests).
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { db, verification } from '@tourbillon/db';
 import { and, eq, gt, lt } from 'drizzle-orm';
+import { oauthNowMs } from './vault-oauth-state';
 
 export const OAUTH_NONCE_IDENTIFIER = 'tourbillon:vault-oauth-state';
 
@@ -20,7 +16,7 @@ function hashNonce(nonce: string): string {
 }
 
 export async function recordOAuthNonce(nonce: string, expiresAt: Date): Promise<void> {
-  const now = new Date();
+  const now = new Date(oauthNowMs());
   await db
     .delete(verification)
     .where(and(eq(verification.identifier, OAUTH_NONCE_IDENTIFIER), lt(verification.expiresAt, now)));
@@ -34,15 +30,16 @@ export async function recordOAuthNonce(nonce: string, expiresAt: Date): Promise<
   });
 }
 
-/** True exactly once per recorded, unexpired nonce; false for unknown / expired / already used. */
+/** Atomic claim. False for unknown / expired / already used. */
 export async function consumeOAuthNonce(nonce: string): Promise<boolean> {
+  const now = new Date(oauthNowMs());
   const rows = await db
     .delete(verification)
     .where(
       and(
         eq(verification.identifier, OAUTH_NONCE_IDENTIFIER),
         eq(verification.value, hashNonce(nonce)),
-        gt(verification.expiresAt, new Date()),
+        gt(verification.expiresAt, now),
       ),
     )
     .returning({ id: verification.id });

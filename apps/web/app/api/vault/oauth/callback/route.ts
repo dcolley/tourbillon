@@ -1,5 +1,4 @@
 import type { NextRequest } from 'next/server';
-import { NextResponse } from 'next/server';
 import { db, agents } from '@tourbillon/db';
 import { vaultSecrets } from '@tourbillon/db/schema';
 import { eq, and } from 'drizzle-orm';
@@ -18,23 +17,21 @@ import {
 import { consumeOAuthNonce } from '@/lib/vault-oauth-nonce-store';
 
 /**
- * GET /api/vault/oauth/callback
- *
- * Consume/cleanup order (#112 case 9 — spelled out for the PR body too):
- *  1. Secret configured? else redirect oauth_state_secret_not_configured — NO consume, NO cookie clear.
- *  2. Provider `error` query → redirect encoded error — NO consume.
+ * Consume/cleanup order (#112 case 9):
+ *  1. Secret configured? else oauth_state_secret_not_configured — NO consume, NO cookie Set-Cookie.
+ *  2. Provider `error` query → encoded error — NO consume.
  *  3. Missing code/state → missing_parameters — NO consume.
- *  4. readOAuthState (sig/shape/exp/cookie match) → invalid_* / state_expired / missing_nonce /
- *     nonce_mismatch — NO consume. Cookie is NEVER cleared on any callback outcome.
- *  5. requireBoardCompany → 401/403 JSON — NO consume.
- *  6. companyId mismatch → company_mismatch — NO consume.
- *  7. company_user scope → user_scope_unsupported — NO consume.
- *  8. agent missing / other company / archived → agent_not_in_company — NO consume.
- *  9. consumeOAuthNonce (atomic DELETE…RETURNING) → state_already_used if false.
- * 10. Provider token exchange — on failure after consume: token_exchange_failed; state is spent;
- *     caller must start a fresh authorize (no same-state retry).
- * 11. Vault write — on failure after consume: callback_failed; state spent; fresh authorize.
- * 12. Success → connected=; state spent; cookie left for maxAge/overwrite (no clear).
+ *  4. readOAuthState → invalid_state | invalid_state_signature | state_expired | missing_nonce |
+ *     nonce_mismatch — NO consume. Callback NEVER emits nonce Set-Cookie.
+ *  5. requireBoardCompany → 401/403 — NO consume.
+ *  6. company_mismatch — NO consume.
+ *  7. company_user → user_scope_unsupported — NO consume.
+ *  8. agent missing/other company/archived → agent_not_in_company — NO consume.
+ *  9. unsupported_provider / not_configured (GitHub client id/secret) — NO consume (before claim).
+ * 10. consumeOAuthNonce — state_already_used if false; DB error → callback_failed, NO exchange.
+ * 11. Provider exchange — token_exchange_failed / provider error body; state spent; fresh authorize.
+ * 12. encryptCredential / vault write — callback_failed; state spent; fresh authorize.
+ * 13. Success → connected=; state spent; no cookie clear.
  */
 export async function GET(req: NextRequest) {
   if (!isOAuthStateSecretConfigured()) {
@@ -56,9 +53,6 @@ export async function GET(req: NextRequest) {
       return settingsRedirect('/settings?oauth_error=missing_parameters');
     }
 
-    // Cookie looked up after a cheap base64 peek is awkward; read company from state only after
-    // signature verify inside readOAuthState. We need the cookie name (= companyId) first, so
-    // parse the unsigned envelope only to learn companyId for cookie lookup, then fully verify.
     let companyIdHint: string | undefined;
     try {
       const envelope = JSON.parse(Buffer.from(state, 'base64').toString('utf8')) as {
@@ -104,72 +98,85 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    // Single use BEFORE exchange.
-    if (!(await consumeOAuthNonce(nonce))) {
+    // Config / provider gate BEFORE consume (M2) — misconfig must not burn states.
+    if (serverId !== 'github-mcp') {
+      return settingsRedirect('/settings?oauth_error=unsupported_provider');
+    }
+    const clientId = process.env.GITHUB_OAUTH_CLIENT_ID;
+    const clientSecret = process.env.GITHUB_OAUTH_CLIENT_SECRET;
+    if (!clientId || !clientSecret) {
+      return settingsRedirect('/settings?oauth_error=not_configured');
+    }
+
+    let consumed = false;
+    try {
+      consumed = await consumeOAuthNonce(nonce);
+    } catch {
+      return settingsRedirect('/settings?oauth_error=callback_failed');
+    }
+    if (!consumed) {
       return settingsRedirect('/settings?oauth_error=state_already_used');
     }
 
-    if (serverId === 'github-mcp') {
-      const clientId = process.env.GITHUB_OAUTH_CLIENT_ID;
-      const clientSecret = process.env.GITHUB_OAUTH_CLIENT_SECRET;
+    const baseUrl = process.env.BETTER_AUTH_URL || 'http://localhost:3002';
+    const redirectUri = `${baseUrl}/api/vault/oauth/callback`;
 
-      if (!clientId || !clientSecret) {
-        return settingsRedirect('/settings?oauth_error=not_configured');
-      }
+    const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({
+        client_id: clientId,
+        client_secret: clientSecret,
+        code,
+        redirect_uri: redirectUri,
+      }),
+    });
 
-      const baseUrl = process.env.BETTER_AUTH_URL || 'http://localhost:3002';
-      const redirectUri = `${baseUrl}/api/vault/oauth/callback`;
+    if (!tokenResponse.ok) {
+      return settingsRedirect('/settings?oauth_error=token_exchange_failed');
+    }
 
-      const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-        },
-        body: JSON.stringify({
-          client_id: clientId,
-          client_secret: clientSecret,
-          code,
-          redirect_uri: redirectUri,
-        }),
-      });
+    const tokenData = (await tokenResponse.json()) as {
+      error?: string;
+      access_token?: string;
+      refresh_token?: string;
+      expires_in?: number;
+      scope?: string;
+    };
 
-      if (!tokenResponse.ok) {
-        return settingsRedirect('/settings?oauth_error=token_exchange_failed');
-      }
+    if (tokenData.error || !tokenData.access_token) {
+      return settingsRedirect(
+        `/settings?oauth_error=${encodeURIComponent(tokenData.error || 'token_exchange_failed')}`,
+      );
+    }
 
-      const tokenData = (await tokenResponse.json()) as {
-        error?: string;
-        access_token?: string;
-        refresh_token?: string;
-        expires_in?: number;
-        scope?: string;
-      };
+    const tokens: OAuthTokens = {
+      accessToken: tokenData.access_token,
+      refreshToken: tokenData.refresh_token,
+      expiresAt: tokenData.expires_in ? Date.now() + tokenData.expires_in * 1000 : undefined,
+      scope: tokenData.scope,
+    };
 
-      if (tokenData.error || !tokenData.access_token) {
-        return settingsRedirect(
-          `/settings?oauth_error=${encodeURIComponent(tokenData.error || 'token_exchange_failed')}`,
-        );
-      }
+    let encryptedValue: string;
+    try {
+      encryptedValue = encryptCredential(tokens);
+    } catch {
+      return settingsRedirect('/settings?oauth_error=callback_failed');
+    }
 
-      const tokens: OAuthTokens = {
-        accessToken: tokenData.access_token,
-        refreshToken: tokenData.refresh_token,
-        expiresAt: tokenData.expires_in ? Date.now() + tokenData.expires_in * 1000 : undefined,
-        scope: tokenData.scope,
-      };
+    const conditions = [
+      eq(vaultSecrets.companyId, company.id),
+      eq(vaultSecrets.serverId, serverId),
+      eq(vaultSecrets.scope, scope),
+    ];
+    if (scope === 'agent' && agentId) {
+      conditions.push(eq(vaultSecrets.agentId, agentId));
+    }
 
-      const encryptedValue = encryptCredential(tokens);
-
-      const conditions = [
-        eq(vaultSecrets.companyId, company.id),
-        eq(vaultSecrets.serverId, serverId),
-        eq(vaultSecrets.scope, scope),
-      ];
-      if (scope === 'agent' && agentId) {
-        conditions.push(eq(vaultSecrets.agentId, agentId));
-      }
-
+    try {
       const existing = await db.query.vaultSecrets.findFirst({
         where: and(...conditions),
       });
@@ -195,11 +202,11 @@ export async function GET(req: NextRequest) {
           needsReauth: false,
         });
       }
-
-      return settingsRedirect(`/settings?connected=${encodeURIComponent(serverId)}`);
+    } catch {
+      return settingsRedirect('/settings?oauth_error=callback_failed');
     }
 
-    return settingsRedirect('/settings?oauth_error=unsupported_provider');
+    return settingsRedirect(`/settings?connected=${encodeURIComponent(serverId)}`);
   } catch (error) {
     console.error('Error in OAuth callback:', error);
     return settingsRedirect('/settings?oauth_error=callback_failed');
