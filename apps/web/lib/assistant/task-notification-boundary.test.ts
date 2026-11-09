@@ -41,6 +41,8 @@ import {
   tnFreshMessages,
   countNoticeMessages,
   tnSetQueueHold,
+  tnQueueHoldActive,
+  sessionIdentityOf,
   tnSignalRecords,
   tnTeardown,
   waitFor,
@@ -81,9 +83,33 @@ test('TN-DEFAULT-PATH', { timeout: 90_000 }, async (t) => {
   const f = await buildFixture({ seedPin: 't2' });
   try {
     const { registerChatModelOverride } = await import('@tourbillon/mastra/chat');
-    await assertC1ModelOnlyOverride(f.controllerA, f.recordA as { id: string; companyId: string }, () => {
-      registerChatModelOverride({ companyId: f.companyId, agentId: f.agentId }, { resolveModel: () => f.models.a.mock as never });
-    });
+    await assertC1ModelOnlyOverride(
+      f.controllerA,
+      f.recordA as { id: string; companyId: string },
+      () => {
+        registerChatModelOverride({ companyId: f.companyId, agentId: f.agentId }, { resolveModel: () => f.models.a.mock as never });
+      },
+      { threadId: f.t2 },
+    );
+    assert.equal(tnQueueHoldActive(), false, 'DEFAULT-PATH is pristine model-only: no TN-DRAIN-TIMEOUT queueSignal hold');
+    const chat = await import('@/lib/chat');
+    const { chatSessionId } = await import('@/lib/chat/session-id');
+    const resourceA = chat.chatResourceId(f.companyId);
+    const resourceB = chat.chatResourceId(f.companyIdB);
+    assert.notEqual(resourceA, resourceB, 'distinct resource identities');
+    assert.notEqual(f.controllerA.id, f.controllerB.id, 'distinct controller identities');
+    assert.notEqual(
+      chat.chatControllerId(f.agentId),
+      chat.chatControllerId(f.agentIdB),
+      'distinct controller cache keys',
+    );
+    const sessionA = sessionIdentityOf(f.userSession);
+    const rawSessionB = await chat.getChatSession(f.controllerB as never, f.recordB as never, { threadId: f.t1b });
+    const sessionB = sessionIdentityOf(rawSessionB);
+    assert.notEqual(sessionA.sessionId, sessionB.sessionId, 'distinct session identities (ids, not thread ids)');
+    assert.notEqual(sessionA.resourceId, sessionB.resourceId, 'distinct session resource ids');
+    assert.equal(sessionA.sessionId, chatSessionId(resourceA), 'A session id follows production formula');
+    assert.equal(sessionB.sessionId, chatSessionId(resourceB), 'B session id follows production formula');
     const poll = await invokeDefaultPoller(progressEvent(f));
     assert.ok((poll.started ?? 0) >= 1, 'default poller claimed and started a run');
     await waitFor('T1 notice', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done') >= 1);
@@ -105,6 +131,7 @@ test('TN-DEFAULT-PATH', { timeout: 90_000 }, async (t) => {
     assert.equal(countNoticeMessages(t1, f.taskId, 'done'), 1);
     assert.equal(countNoticeMessages(t2, f.taskId), 0);
     assert.equal(f.controllerA.id !== f.controllerB.id, true, 'distinct real controller identities');
+    assert.equal(tnQueueHoldActive(), false, 'DEFAULT-PATH still has no drain-timeout queue hold after delivery');
     assert.equal(await f.readPin(), f.pinBefore, 'pin unchanged');
     recordVerdict('TN-DEFAULT-PATH', 'GREEN');
   } finally {
@@ -500,9 +527,14 @@ test('TN-MODEL-OVERRIDE-ISOLATION', { timeout: 60_000 }, async (t) => {
     await waitFor('bystander model', async () => f.models.bystander.callLog.length >= 1, 15_000);
     assert.equal(f.models.a.callLog.length, 0, 'fixture A model unused by bystander');
     const { registerChatModelOverride } = await import('@tourbillon/mastra/chat');
-    await assertC1ModelOnlyOverride(f.controllerA, f.recordA as { id: string; companyId: string }, () => {
-      registerChatModelOverride({ companyId: f.companyId, agentId: f.agentId }, { resolveModel: () => f.models.a.mock as never });
-    });
+    await assertC1ModelOnlyOverride(
+      f.controllerA,
+      f.recordA as { id: string; companyId: string },
+      () => {
+        registerChatModelOverride({ companyId: f.companyId, agentId: f.agentId }, { resolveModel: () => f.models.a.mock as never });
+      },
+      { threadId: f.t2 },
+    );
     recordVerdict('TN-MODEL-OVERRIDE-ISOLATION', 'GREEN');
   } catch (err) {
     recordVerdict('TN-MODEL-OVERRIDE-ISOLATION', 'RED', err instanceof Error ? err.message : String(err));
@@ -579,12 +611,18 @@ test('TN-STOP-IDEMPOTENT', { timeout: 20_000 }, async (t) => {
 
 test('TN-DRAIN-TIMEOUT', { timeout: 30_000 }, async (t) => {
   if (await skipIfIncompatible(t, 'TN-DRAIN-TIMEOUT')) return;
+  // Control instrumentation only: tnSetQueueHold delays Session.queueSignal so
+  // stop() can observe an admitted-but-unsettled delivery. This is NOT the
+  // product default path. The pristine model-only default path is TN-DEFAULT-PATH,
+  // which asserts tnQueueHoldActive() === false before and after delivery.
   await bridgeReset();
   await bridgeStart({ drainTimeoutMs: 800 });
   const f = await buildFixture({ seedPin: 't2' });
   try {
+    assert.equal(tnQueueHoldActive(), false, 'hold is off until this control injects it');
     const hold = new Promise<void>(() => {});
     tnSetQueueHold(hold);
+    assert.equal(tnQueueHoldActive(), true, 'TN-DRAIN-TIMEOUT injected queueSignal hold');
     await publishProgress(progressEvent(f));
     await waitFor('admitted', async () => tnSignalRecords({ taskId: f.taskId }).length >= 1, 8_000);
     const t0 = Date.now();

@@ -270,6 +270,11 @@ export function tnSetQueueHold(gate: Promise<void> | null): void {
   queueHold = gate;
 }
 
+/** True only while TN-DRAIN-TIMEOUT (or similar) has injected a queueSignal hold. */
+export function tnQueueHoldActive(): boolean {
+  return queueHold != null;
+}
+
 function collectPromptText(node: unknown): string {
   if (typeof node === "string") return node;
   if (!node || typeof node !== "object") return "";
@@ -476,29 +481,64 @@ export async function snapshotControllerAssembly(controller: object): Promise<As
   };
 }
 
+export function sessionIdentityOf(session: object): { sessionId: string; resourceId: string } {
+  const rec = session as {
+    identity?: { getId?: () => string; getResourceId?: () => string };
+    getId?: () => string;
+    id?: string;
+    getResourceId?: () => string;
+    resourceId?: string;
+  };
+  const sessionId =
+    (typeof rec.identity?.getId === 'function' ? rec.identity.getId() : undefined) ??
+    (typeof rec.getId === 'function' ? rec.getId() : undefined) ??
+    rec.id;
+  const resourceId =
+    (typeof rec.identity?.getResourceId === 'function' ? rec.identity.getResourceId() : undefined) ??
+    (typeof rec.getResourceId === 'function' ? rec.getResourceId() : undefined) ??
+    rec.resourceId;
+  if (!sessionId || !resourceId) {
+    throw new Error(`session identity missing sessionId=${String(sessionId)} resourceId=${String(resourceId)}`);
+  }
+  return { sessionId: String(sessionId), resourceId: String(resourceId) };
+}
+
 /**
- * C1: the H1 model-only override must not change controller class/id, storage,
- * tools or memory versus the production assembly of the same agent record.
+ * C1: the H1 model-only override must not change controller class/id, cache-key
+ * formula, session identity keys, storage, tools or memory versus a production
+ * twin of the same agent record. The twin is an independent controller, so this
+ * compares identity keys (session id + resource id from the production formula),
+ * never object equality of sessions across the two controllers.
  */
 export async function assertC1ModelOnlyOverride(
   controller: object,
   record: { id: string; companyId: string },
   restoreOverride: () => void,
+  opts?: { threadId?: string },
 ): Promise<void> {
-  const { createChatController, unregisterChatModelOverride, buildChatControllerId } = await import(
+  const { createChatController, unregisterChatModelOverride, buildChatControllerId, buildChatResourceId } = await import(
     '../../../../packages/mastra/src/chat-controller'
   );
   const { getChatThreadStorageForTests } = await import('../../../../packages/mastra/src/chat-controller');
+  const { chatSessionId } = await import('../chat/session-id');
+  const chat = await import('@/lib/chat');
   const overridden = await snapshotControllerAssembly(controller);
+  const threadId = opts?.threadId ?? `tn-c1-${record.id}`;
+  const overSession = await chat.getChatSession(controller as never, record as never, { threadId });
+  const overSess = sessionIdentityOf(overSession);
   unregisterChatModelOverride({ companyId: record.companyId, agentId: record.id });
   let production: AssemblySnap | undefined;
+  let prodSess: { sessionId: string; resourceId: string } | undefined;
   try {
     const twin = await createChatController(record as never);
     production = await snapshotControllerAssembly(twin);
+    const prodSession = await chat.getChatSession(twin as never, record as never, { threadId });
+    prodSess = sessionIdentityOf(prodSession);
   } finally {
     restoreOverride();
   }
   if (!production) throw new Error('C1: production twin was not assembled');
+  if (!prodSess) throw new Error('C1: production twin session was not assembled');
   const store = getChatThreadStorageForTests();
   if (overridden.className !== production.className) {
     throw new Error(`C1 class mismatch: override=${overridden.className} production=${production.className}`);
@@ -507,7 +547,7 @@ export async function assertC1ModelOnlyOverride(
     throw new Error(`C1 controller id mismatch: override=${overridden.id} production=${production.id}`);
   }
   if (overridden.id !== buildChatControllerId(record.id)) {
-    throw new Error(`C1 controller id is not the production formula (${overridden.id})`);
+    throw new Error(`C1 controller id/cache key is not the production formula (${overridden.id})`);
   }
   if (overridden.storageClass !== production.storageClass) {
     throw new Error(`C1 storage class mismatch: override=${overridden.storageClass} production=${production.storageClass}`);
@@ -522,6 +562,18 @@ export async function assertC1ModelOnlyOverride(
   const b = production.toolIds.join(',');
   if (a !== b) {
     throw new Error(`C1 tools mismatch: override=[${a}] production=[${b}]`);
+  }
+  const expectedResource = buildChatResourceId(record.companyId);
+  const expectedSessionId = chatSessionId(expectedResource);
+  if (overSess.resourceId !== expectedResource || prodSess.resourceId !== expectedResource) {
+    throw new Error(
+      `C1 session resourceId mismatch: override=${overSess.resourceId} production=${prodSess.resourceId} expected=${expectedResource}`,
+    );
+  }
+  if (overSess.sessionId !== expectedSessionId || prodSess.sessionId !== expectedSessionId) {
+    throw new Error(
+      `C1 session id mismatch: override=${overSess.sessionId} production=${prodSess.sessionId} expected=${expectedSessionId}`,
+    );
   }
 }
 
