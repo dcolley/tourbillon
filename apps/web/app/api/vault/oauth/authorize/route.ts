@@ -5,11 +5,15 @@ import { and, eq } from 'drizzle-orm';
 import { requireBoardCompany } from '@/lib/board-route-auth';
 import {
   OAUTH_NOT_CONFIGURED_ERROR,
+  USER_SCOPE_UNSUPPORTED_MESSAGE,
+  buildOAuthState,
   isOAuthStateSecretConfigured,
   logOAuthStateSecretMissing,
+  oauthNonceCookieName,
+  oauthNonceCookieOptions,
   settingsRedirect,
-  signOAuthState,
 } from '@/lib/vault-oauth-state';
+import { recordOAuthNonce } from '@/lib/vault-oauth-nonce-store';
 
 const authorizeSchema = z.object({
   serverId: z.string().min(1),
@@ -31,79 +35,85 @@ export async function GET(req: NextRequest) {
 
   try {
     const { searchParams } = new URL(req.url);
-    
+
     const params = {
       serverId: searchParams.get('serverId'),
       scope: searchParams.get('scope'),
       userId: searchParams.get('userId') || undefined,
       agentId: searchParams.get('agentId') || undefined,
     };
-    
+
     const validated = authorizeSchema.parse(params);
 
-    // Agent-scoped grants must target an agent in the board's company (other company → 404).
+    // #112: board sessions carry no user identity; refuse NEW company_user OAuth clearly.
+    if (validated.scope === 'company_user' || validated.userId) {
+      return NextResponse.json({ error: USER_SCOPE_UNSUPPORTED_MESSAGE }, { status: 400 });
+    }
+    if ((validated.scope === 'agent') !== Boolean(validated.agentId)) {
+      return NextResponse.json(
+        { error: 'agentId is required for agent-scoped grants and not allowed otherwise' },
+        { status: 400 },
+      );
+    }
+
+    // Agent-scoped grants: must be in the board company and not archived (404 same as unknown).
     if (validated.agentId) {
       const agent = await db.query.agents.findFirst({
         where: and(eq(agents.id, validated.agentId), eq(agents.companyId, auth.value.id)),
       });
-      if (!agent) return NextResponse.json({ error: 'Agent not found' }, { status: 404 });
+      if (!agent || agent.status === 'archived') {
+        return NextResponse.json({ error: 'Agent not found' }, { status: 404 });
+      }
     }
-    
+
     if (validated.serverId === 'github-mcp') {
       const clientId = process.env.GITHUB_OAUTH_CLIENT_ID;
-      
+
       if (!clientId) {
-        return NextResponse.json(
-          { error: 'GitHub OAuth not configured' },
-          { status: 500 }
-        );
+        return NextResponse.json({ error: 'GitHub OAuth not configured' }, { status: 500 });
       }
-      
+
       const baseUrl = process.env.BETTER_AUTH_URL || 'http://localhost:3002';
       const redirectUri = `${baseUrl}/api/vault/oauth/callback`;
-      
-      const statePayload = JSON.stringify({
+
+      const built = buildOAuthState({
         serverId: validated.serverId,
         scope: validated.scope,
-        userId: validated.userId,
         agentId: validated.agentId,
+        companyId: auth.value.id,
       });
-      const signature = signOAuthState(statePayload);
-      if (!signature) {
+      if (!built) {
         logOAuthStateSecretMissing('start');
         return settingsRedirect(`/settings?oauth_error=${OAUTH_NOT_CONFIGURED_ERROR}`);
       }
-      const state = Buffer.from(JSON.stringify({
-        payload: statePayload,
-        signature,
-      })).toString('base64');
-      
+      await recordOAuthNonce(built.nonce, built.expiresAt);
+
       const githubAuthUrl = new URL('https://github.com/login/oauth/authorize');
       githubAuthUrl.searchParams.set('client_id', clientId);
       githubAuthUrl.searchParams.set('redirect_uri', redirectUri);
       githubAuthUrl.searchParams.set('scope', 'repo,user');
-      githubAuthUrl.searchParams.set('state', state);
-      
-      return NextResponse.redirect(githubAuthUrl.toString());
+      githubAuthUrl.searchParams.set('state', built.state);
+
+      const res = NextResponse.redirect(githubAuthUrl.toString());
+      res.cookies.set(
+        oauthNonceCookieName(auth.value.id),
+        built.nonce,
+        oauthNonceCookieOptions(req.headers),
+      );
+      return res;
     }
-    
-    return NextResponse.json(
-      { error: 'Unsupported OAuth provider' },
-      { status: 400 }
-    );
+
+    return NextResponse.json({ error: 'Unsupported OAuth provider' }, { status: 400 });
   } catch (error) {
     console.error('Error in OAuth authorize:', error);
-    
+
     if (error instanceof z.ZodError) {
       return NextResponse.json(
         { error: 'Invalid query parameters', details: error.issues },
-        { status: 400 }
+        { status: 400 },
       );
     }
-    
-    return NextResponse.json(
-      { error: 'Failed to initiate OAuth flow' },
-      { status: 500 }
-    );
+
+    return NextResponse.json({ error: 'Failed to initiate OAuth flow' }, { status: 500 });
   }
 }

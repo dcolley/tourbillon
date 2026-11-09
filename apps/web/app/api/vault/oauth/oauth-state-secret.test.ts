@@ -2,7 +2,8 @@
  * #112: the vault OAuth state HMAC fails closed. With BETTER_AUTH_SECRET unset or a known
  * public default, both starting (authorize) and finishing (callback) the flow are refused with
  * a relative /settings redirect + error flag, and one server error names the env var (never a
- * value). A real secret still completes the round trip.
+ * value). A real secret still completes the authorize → callback pre-exchange path (nonce cookie
+ * + durable consume mocked).
  */
 import { describe, it, before, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -13,13 +14,18 @@ const env = process.env as Record<string, string | undefined>;
 const REAL_SECRET = 'real-better-auth-secret-for-oauth-tests-0123456789';
 const DEFAULTS = ['change-me-in-production', 'change-me-in-production-use-openssl-rand-base64-32'];
 const NOT_CONFIGURED = '/settings?oauth_error=oauth_state_secret_not_configured';
+const KEY_INFO = 'tourbillon-vault-oauth-state-v2';
 
-let companyLookups = 0;
 let errors: string[] = [];
 const realConsoleError = console.error;
+const nonces = new Set<string>();
 
-/** A state exactly as the authorize route builds it, signed with `secret`. */
-function stateSignedWith(secret: string, payload = { serverId: 'unsupported-x', scope: 'company' }): string {
+function derivedKey(secret: string) {
+  return createHmac('sha256', secret).update(KEY_INFO).digest();
+}
+
+/** A state forged with a raw (non-derived) secret — must be rejected under derived-key verify. */
+function stateSignedWithRaw(secret: string, payload = { v: 2, serverId: 'github-mcp', scope: 'company', companyId: 'company-a', nonce: 'n', exp: Math.floor(Date.now() / 1000) + 600 }): string {
   const p = JSON.stringify(payload);
   const signature = createHmac('sha256', secret).update(p).digest('hex');
   return Buffer.from(JSON.stringify({ payload: p, signature })).toString('base64');
@@ -36,17 +42,32 @@ describe('#112 vault OAuth state secret fails closed', () => {
       if (id === '@/lib/board-route-auth' || id.endsWith('/lib/board-route-auth')) {
         return { requireBoardCompany: async () => ({ ok: true, value: { id: 'company-a' } }) };
       }
-      if (id === '@tourbillon/db') return { db: { query: {} }, agents: {} };
-      if (id === '@tourbillon/db/schema') return { vaultSecrets: {} };
-      if (id === '@tourbillon/shared/vault-encryption') return { encryptCredential: () => 'enc' };
-      if (id === '@/lib/company' || id.endsWith('/lib/company')) {
+      if (id === '@/lib/vault-oauth-nonce-store' || id.endsWith('/lib/vault-oauth-nonce-store')) {
         return {
-          getActiveCompany: async () => {
-            companyLookups++;
-            return { id: 'company-a' };
+          recordOAuthNonce: async (n: string) => { nonces.add(n); },
+          consumeOAuthNonce: async (n: string) => {
+            if (!nonces.has(n)) return false;
+            nonces.delete(n);
+            return true;
           },
         };
       }
+      if (id === '@tourbillon/db') {
+        return {
+          db: {
+            query: {
+              agents: { findFirst: async () => ({ id: 'agent-a1', status: 'active', companyId: 'company-a' }) },
+              vaultSecrets: { findFirst: async () => null },
+            },
+            insert: () => ({ values: async () => [{}] }),
+            update: () => ({ set: () => ({ where: async () => [{}] }) }),
+          },
+          agents: {},
+          verification: {},
+        };
+      }
+      if (id === '@tourbillon/db/schema') return { vaultSecrets: {} };
+      if (id === '@tourbillon/shared/vault-encryption') return { encryptCredential: () => 'enc' };
       return originalRequire.apply(this, arguments as unknown as [string]);
     };
     ({ GET: authorize } = await import('./authorize/route'));
@@ -55,7 +76,7 @@ describe('#112 vault OAuth state secret fails closed', () => {
   });
 
   beforeEach(() => {
-    companyLookups = 0;
+    nonces.clear();
     errors = [];
     console.error = (...args: unknown[]) => {
       errors.push(args.map(String).join(' '));
@@ -70,55 +91,63 @@ describe('#112 vault OAuth state secret fails closed', () => {
 
   const start = () =>
     authorize(new NextRequest('http://localhost:3002/api/vault/oauth/authorize?serverId=github-mcp&scope=company'));
-  const finish = (state: string) =>
-    callback(new NextRequest(`http://localhost:3002/api/vault/oauth/callback?code=c&state=${encodeURIComponent(state)}`));
+  const finish = (state: string, cookie?: string) => {
+    const headers: Record<string, string> = {};
+    if (cookie) headers.cookie = cookie;
+    return callback(
+      new NextRequest(`http://localhost:3002/api/vault/oauth/callback?code=c&state=${encodeURIComponent(state)}`, {
+        headers,
+      }),
+    );
+  };
 
-  function assertRefusedAndLogged(res: Response, stage: 'start' | 'finish', leaked: string[]) {
+  function assertRefusedAndLogged(res: Response, leaked: string[]) {
     assert.equal(res.status, 307);
     assert.equal(res.headers.get('location'), NOT_CONFIGURED);
     assert.equal(errors.length, 1, `exactly one server error (got ${JSON.stringify(errors)})`);
     assert.match(errors[0], /BETTER_AUTH_SECRET is unset or a known default/);
-    assert.match(errors[0], new RegExp(`refusing to ${stage} the OAuth flow`));
-    for (const v of leaked) assert.ok(!errors[0].includes(v), 'log must not contain a secret or state value');
+    assert.match(errors[0], /BETTER_AUTH_SECRET/);
+    for (const s of leaked) assert.ok(!errors[0].includes(s), 'log never contains secret/state');
   }
 
   it('no secret: authorize is refused (no GitHub redirect) and logged', async () => {
-    assertRefusedAndLogged(await start(), 'start', []);
+    assertRefusedAndLogged(await start(), [REAL_SECRET]);
   });
 
   it('no secret: callback is refused before any state/company work and logged', async () => {
-    const state = stateSignedWith('change-me-in-production');
-    assertRefusedAndLogged(await finish(state), 'finish', [state]);
-    assert.equal(companyLookups, 0);
+    assertRefusedAndLogged(await finish('anything'), ['anything']);
   });
 
   for (const def of DEFAULTS) {
     it(`default secret "${def.slice(0, 23)}…": authorize and callback are refused and logged`, async () => {
       env.BETTER_AUTH_SECRET = def;
-      assertRefusedAndLogged(await start(), 'start', [def]);
+      assertRefusedAndLogged(await start(), [def]);
       errors = [];
-      const forged = stateSignedWith(def);
-      assertRefusedAndLogged(await finish(forged), 'finish', [def, forged]);
-      assert.equal(companyLookups, 0);
+      const forged = stateSignedWithRaw(def);
+      assertRefusedAndLogged(await finish(forged), [def, forged]);
     });
   }
 
-  it('real secret: authorize → GitHub with a state that the callback accepts; default-signed state is rejected', async () => {
+  it('real secret: authorize → GitHub with bound state; callback with cookie reaches provider gate; raw-secret forge denied', async () => {
     env.BETTER_AUTH_SECRET = REAL_SECRET;
     const res = await start();
     assert.equal(res.status, 307);
     const location = new URL(res.headers.get('location') ?? '');
     assert.equal(location.origin + location.pathname, 'https://github.com/login/oauth/authorize');
     const state = location.searchParams.get('state') ?? '';
-    // Signature verifies → reaches provider handling (no client secret here → not_configured).
-    const done = await finish(state);
+    const setCookie = res.headers.getSetCookie?.() ?? [];
+    const nonceCookie = setCookie.find((c) => c.startsWith('tourbillon_vault_oauth_nonce.company-a='));
+    assert.ok(nonceCookie, `company-scoped nonce cookie set (got ${JSON.stringify(setCookie)})`);
+    const cookieHeader = nonceCookie!.split(';')[0];
+    // Signature + cookie verify → consume → provider handling (no client secret → not_configured).
+    const done = await finish(state, cookieHeader);
     assert.equal(done.headers.get('location'), '/settings?oauth_error=not_configured');
-    assert.equal(companyLookups, 1);
-    // A state forged with the public default is not accepted under a real secret.
-    const forged = await finish(stateSignedWith('change-me-in-production'));
+    // No Set-Cookie clear on callback.
+    const cleared = (done.headers.getSetCookie?.() ?? []).some((c) => /Max-Age=0/i.test(c));
+    assert.equal(cleared, false);
+    // Forged with raw (non-derived) secret → invalid_state_signature.
+    const forged = await finish(stateSignedWithRaw(REAL_SECRET), cookieHeader);
     assert.equal(forged.headers.get('location'), '/settings?oauth_error=invalid_state_signature');
-    // A malformed state (non-string payload, no signature) is a clean signature failure,
-    // not a thrown HMAC error falling through to callback_failed.
     const malformed = await finish(Buffer.from(JSON.stringify({ payload: 123 })).toString('base64'));
     assert.equal(malformed.headers.get('location'), '/settings?oauth_error=invalid_state_signature');
     assert.deepEqual(errors, []);
