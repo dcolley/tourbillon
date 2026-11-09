@@ -225,6 +225,42 @@ const mutants = [
     // Prefer a test that inserts a colliding foreign identifier — use sequential replay as RED if consume breaks.
     testOverride: null,
   },
+  {
+    id: 'X5-authorize-ignores-company',
+    test: 'authorize other-company agent → 404 before nonce insert; zero verification rows',
+    note: 'S355-S2 (Test X5): drop the authorize company filter — the real-PG leaf must go RED (SURVIVED in mocked-only coverage before this pack).',
+    apply: () =>
+      patch(azPath, (s) => {
+        const find = 'where: and(eq(agents.id, validated.agentId), eq(agents.companyId, auth.value.id)),';
+        if (!s.includes(find)) throw new Error('authorize company filter missing');
+        return s.replace(find, 'where: eq(agents.id, validated.agentId),');
+      }),
+  },
+  {
+    id: 'X6-callback-drop-scope-agentid-guard',
+    test: 'signed inconsistent scope/agentId states → invalid_state before consume; rows unconsumed; zero exchanges',
+    note: 'S355-S3 (Test X6): delete the callback scope/agentId consistency guard — the signed inconsistent pair must go RED.',
+    apply: () =>
+      patch(cbPath, (s) => {
+        const find = `    if ((scope === 'agent') !== Boolean(agentId)) {
+      return settingsRedirect('/settings?oauth_error=invalid_state');
+    }
+`;
+        if (!s.includes(find)) throw new Error('scope/agentId guard missing');
+        return s.replace(find, '    /* skip scope/agentId guard (X6 mutant) */\n');
+      }),
+  },
+  {
+    id: 'S-secure-false-always',
+    test: 'authorize Set-Cookie carries Secure under non-insecure-dev headers; loopback insecure-dev omits it',
+    note: 'S355-S4: force secure:false in oauthNonceCookieOptions — non-insecure-dev assertion must go RED.',
+    apply: () =>
+      patch(statePath, (s) => {
+        const find = 'secure: !isInsecureDevBoardAuth(headers),';
+        if (!s.includes(find)) throw new Error('secure option missing');
+        return s.replace(find, 'secure: false, /* S mutant */');
+      }),
+  },
 ];
 
 // Soft: identifier-drop may SURVIVE; classified SOFT-SURVIVED below.
