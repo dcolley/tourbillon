@@ -51,8 +51,9 @@ import {
   waitFor,
   tnTrace,
   withAckGate,
+  withPsubscribeFailure,
 } from './task-notification-boundary-harness';
-import { startTaskProgressSignalBridge, __resetTaskProgressSignalBridgeForTests, redisClaimClient, TaskProgressBridgeStopError } from './task-progress-bridge';
+import { startTaskProgressSignalBridge, __resetTaskProgressSignalBridgeForTests, redisClaimClient, TaskProgressBridgeStopError, createOwnedRedisClaimClient } from './task-progress-bridge';
 
 const INCOMPAT = 'MISSING_EVIDENCE/HARNESS_INCOMPATIBLE';
 
@@ -611,6 +612,24 @@ test('TN-STOP-BEFORE-ACK', { timeout: 20_000 }, async (t) => {
   recordVerdict('TN-STOP-BEFORE-ACK', 'GREEN');
 });
 
+test('TN-STOP-ACK-FAILURE', { timeout: 20_000 }, async (t) => {
+  if (await skipIfIncompatible(t, 'TN-STOP-ACK-FAILURE')) return;
+  await bridgeReset();
+  const handle = await withPsubscribeFailure(
+    () => startTaskProgressSignalBridge({ log: { warn: () => {} }, drainTimeoutMs: 800 }),
+    'injected ACK failure',
+  );
+  const t0 = Date.now();
+  const stopping = handle.stop();
+  await assert.rejects(() => handle.ready, /injected ACK failure/);
+  const report = await stopping;
+  const took = Date.now() - t0;
+  assert.ok(took < 5_000, `stop-on-ACK-failure settled in ${took}ms`);
+  assert.equal(report.timedOut, false, 'ACK failure stop is not a drain timeout');
+  await __resetTaskProgressSignalBridgeForTests();
+  recordVerdict('TN-STOP-ACK-FAILURE', 'GREEN');
+});
+
 test('TN-STOP-BORROWED-CLIENTS', { timeout: 20_000 }, async (t) => {
   if (await skipIfIncompatible(t, 'TN-STOP-BORROWED-CLIENTS')) return;
   await bridgeReset();
@@ -760,14 +779,35 @@ test('TN-CONCURRENT-SAME-COMPANY-AGENTS', { timeout: 90_000 }, async (t) => {
 test('TN-START-CONCURRENT', { timeout: 30_000 }, async (t) => {
   if (await skipIfIncompatible(t, 'TN-START-CONCURRENT')) return;
   await bridgeReset();
-  const first = startTaskProgressSignalBridge({ log: { warn: () => {} } });
-  const second = startTaskProgressSignalBridge({ log: { warn: () => {} } });
-  await first.ready;
-  await second.ready;
-  await first.stop();
-  await second.stop().catch(() => {});
-  await __resetTaskProgressSignalBridgeForTests();
-  recordVerdict('TN-START-CONCURRENT', 'GREEN');
+  await stopRedisObserver();
+  const admin = new Redis(process.env.REDIS_URL as string, { maxRetriesPerRequest: 1 });
+  const clientCount = async () =>
+    String(await admin.call('CLIENT', 'LIST'))
+      .split('\n')
+      .filter((line) => line.trim().length > 0).length;
+  try {
+    const baseline = await clientCount();
+    const first = startTaskProgressSignalBridge({ log: { warn: () => {} } });
+    const second = startTaskProgressSignalBridge({ log: { warn: () => {} } });
+    assert.equal(first, second, 'concurrent starts share one handle (exactly one subscription)');
+    await first.ready;
+    await second.ready;
+    const mid = await clientCount();
+    assert.ok(mid > baseline, 'the single subscription opened owned clients');
+    assert.ok(mid - baseline <= 3, `exactly one subscription worth of clients (delta=${mid - baseline})`);
+    const report = await first.stop();
+    const again = await second.stop();
+    assert.deepEqual(again, report, 'second stop is the same idempotent report');
+    const after = await clientCount();
+    assert.ok(after <= baseline, `the single owned subscription was released (after=${after} baseline=${baseline})`);
+    recordVerdict('TN-START-CONCURRENT', 'GREEN');
+  } catch (err) {
+    recordVerdict('TN-START-CONCURRENT', 'RED', err instanceof Error ? err.message : String(err));
+    throw err;
+  } finally {
+    await admin.quit();
+    await __resetTaskProgressSignalBridgeForTests();
+  }
 });
 
 test('TN-CLAIM-FAIL-OPEN', { timeout: 90_000 }, async (t) => {
@@ -851,31 +891,99 @@ test('TN-SUBSCRIBE-DELAYED-ACK', { timeout: 20_000 }, async (t) => {
 test('TN-START-FAIL-RETRY', { timeout: 30_000 }, async (t) => {
   if (await skipIfIncompatible(t, 'TN-START-FAIL-RETRY')) return;
   await bridgeReset();
-  const leaked: Redis[] = [];
+  await stopRedisObserver();
+  const admin = new Redis(process.env.REDIS_URL as string, { maxRetriesPerRequest: 1 });
+  const clientCount = async () =>
+    String(await admin.call('CLIENT', 'LIST'))
+      .split('\n')
+      .filter((line) => line.trim().length > 0).length;
+  let claimQuit = 0;
+  let createdClaims = 0;
   try {
-    const handle1 = startTaskProgressSignalBridge({
-      log: { warn: () => {} },
-      createSubscriber: () => {
-        const client = new Redis(process.env.REDIS_URL as string, { maxRetriesPerRequest: 1 });
-        leaked.push(client);
-        client.psubscribe = (async () => {
-          throw new Error('injected subscribe failure');
-        }) as typeof client.psubscribe;
-        return client;
-      },
-    });
+    const baseline = await clientCount();
+    const handle1 = await withPsubscribeFailure(
+      () =>
+        startTaskProgressSignalBridge({
+          log: { warn: () => {} },
+          createClaimClient: () => {
+            createdClaims += 1;
+            const inner = createOwnedRedisClaimClient();
+            return {
+              claim: (key: string, ttl: number) => inner.claim(key, ttl),
+              quit: async () => {
+                claimQuit += 1;
+                await inner.quit();
+              },
+            };
+          },
+        }),
+      'injected subscribe failure',
+    );
     await assert.rejects(() => handle1.ready, /injected subscribe failure/);
-    await __resetTaskProgressSignalBridgeForTests();
+    assert.equal(createdClaims, 1, 'failed start created one owned claim client');
+    assert.equal(claimQuit, 1, 'product released the owned claim client before ready rejected');
+    assert.ok(
+      (await clientCount()) <= baseline,
+      'product released every owned Redis client before retry (no test-finally cleanup)',
+    );
     const handle2 = startTaskProgressSignalBridge({ log: { warn: () => {} } });
+    assert.notEqual(handle2, handle1, 'retry is a fresh handle, not the failed singleton');
     await handle2.ready;
     await handle2.stop();
-    await __resetTaskProgressSignalBridgeForTests();
     recordVerdict('TN-START-FAIL-RETRY', 'GREEN');
   } catch (err) {
     recordVerdict('TN-START-FAIL-RETRY', 'RED', err instanceof Error ? err.message : String(err));
     throw err;
   } finally {
-    await Promise.all(leaked.map((c) => c.quit().catch(() => c.disconnect())));
+    await admin.quit();
+    await __resetTaskProgressSignalBridgeForTests();
+  }
+});
+
+test('TN-CLEANUP-SECONDARY-OBSERVABLE', { timeout: 30_000 }, async (t) => {
+  if (await skipIfIncompatible(t, 'TN-CLEANUP-SECONDARY-OBSERVABLE')) return;
+  await bridgeReset();
+  const f = await buildFixture({ seedPin: 't2' });
+  try {
+    const handle = startTaskProgressSignalBridge({
+      log: { warn: () => {} },
+      drainTimeoutMs: 800,
+      createClaimClient: () => ({
+        claim: async () => true,
+        quit: async () => {
+          throw new Error('injected claim quit failure');
+        },
+      }),
+    });
+    await handle.ready;
+    assert.equal(tnQueueHoldActive(), false);
+    const hold = new Promise<void>(() => {});
+    tnSetQueueHold(hold);
+    await publishProgress(progressEvent(f));
+    await waitFor('admitted before secondary cleanup', async () => tnSignalRecords({ taskId: f.taskId }).length >= 1, 8_000);
+    let error: Error | null = null;
+    try {
+      await handle.stop();
+    } catch (err) {
+      error = err instanceof Error ? err : new Error(String(err));
+    }
+    tnSetQueueHold(null);
+    assert.ok(error instanceof TaskProgressBridgeStopError, 'primary drain-timeout assertion is retained');
+    assert.equal(error.report.timedOut, true, 'primary failure is the drain timeout');
+    assert.ok((error.report.admitted ?? 0) >= 1, 'primary report.admitted');
+    assert.ok(
+      error.report.unsettled.includes('claim'),
+      `secondary cleanup failure remains observable (unsettled=${error.report.unsettled.join(',')})`,
+    );
+    recordVerdict('TN-CLEANUP-SECONDARY-OBSERVABLE', 'GREEN');
+  } catch (err) {
+    tnSetQueueHold(null);
+    recordVerdict('TN-CLEANUP-SECONDARY-OBSERVABLE', 'RED', err instanceof Error ? err.message : String(err));
+    throw err;
+  } finally {
+    tnSetQueueHold(null);
+    await f.cleanup();
+    await __resetTaskProgressSignalBridgeForTests();
   }
 });
 

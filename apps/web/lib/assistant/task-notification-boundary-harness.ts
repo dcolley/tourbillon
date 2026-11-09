@@ -1294,6 +1294,21 @@ export function bridgeCurrentHandle() {
   return bridgeHandle;
 }
 
+export async function withPsubscribeFailure<T>(fn: () => Promise<T> | T, message = 'injected ACK failure'): Promise<T> {
+  const probe = new Redis(process.env.REDIS_URL as string, { lazyConnect: true });
+  const proto = Object.getPrototypeOf(probe) as { psubscribe: (...args: unknown[]) => unknown };
+  const original = proto.psubscribe;
+  proto.psubscribe = async function failing() {
+    throw new Error(message);
+  };
+  try {
+    return await fn();
+  } finally {
+    proto.psubscribe = original;
+    probe.disconnect();
+  }
+}
+
 export async function withAckGate<T>(fn: () => Promise<T>, gate: Promise<void>): Promise<T> {
   const probe = new Redis(process.env.REDIS_URL as string, { lazyConnect: true });
   const proto = Object.getPrototypeOf(probe) as { psubscribe: (...args: unknown[]) => unknown };

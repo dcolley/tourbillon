@@ -651,14 +651,18 @@ export function startTaskProgressSignalBridge(options: StartBridgeOptions = {}):
   const readyPromise = subscriber
     .psubscribe('sse:*')
     .then(() => undefined)
-    .catch((err: unknown) => {
-      // Failed start: release every owned client so a retry starts clean (TN-START-FAIL-RETRY).
+    .catch(async (err: unknown) => {
+      // Failed start: release every owned client AND clear the singleton before
+      // ready rejects, so a retry cannot reuse this handle or its sockets
+      // (TN-START-FAIL-RETRY). Do not fire-and-forget cleanup.
       instance.readyFailure = err;
-      void closeOwnedClients(instance).finally(() => {
+      try {
+        await closeOwnedClients(instance);
+      } finally {
         if (globalForBridge.tourbillonTaskProgressBridge === instance) {
           delete globalForBridge.tourbillonTaskProgressBridge;
         }
-      });
+      }
       throw err;
     });
   instance.readyPromise = readyPromise;
