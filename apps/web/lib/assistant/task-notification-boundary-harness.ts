@@ -481,9 +481,9 @@ export async function snapshotControllerAssembly(controller: object): Promise<As
   };
 }
 
-export function sessionIdentityOf(session: object): { sessionId: string; resourceId: string } {
+export function sessionIdentityOf(session: object): { sessionId: string; resourceId: string; ownerId: string } {
   const rec = session as {
-    identity?: { getId?: () => string; getResourceId?: () => string };
+    identity?: { getId?: () => string; getResourceId?: () => string; getOwnerId?: () => string };
     getId?: () => string;
     id?: string;
     getResourceId?: () => string;
@@ -497,10 +497,69 @@ export function sessionIdentityOf(session: object): { sessionId: string; resourc
     (typeof rec.identity?.getResourceId === 'function' ? rec.identity.getResourceId() : undefined) ??
     (typeof rec.getResourceId === 'function' ? rec.getResourceId() : undefined) ??
     rec.resourceId;
+  const ownerId = typeof rec.identity?.getOwnerId === 'function' ? rec.identity.getOwnerId() : '';
   if (!sessionId || !resourceId) {
     throw new Error(`session identity missing sessionId=${String(sessionId)} resourceId=${String(resourceId)}`);
   }
-  return { sessionId: String(sessionId), resourceId: String(resourceId) };
+  return { sessionId: String(sessionId), resourceId: String(resourceId), ownerId: String(ownerId) };
+}
+
+export const TN_USABLE_SENTINEL = 'TN-USABLE-SENTINEL';
+
+export function usableSentinelToken(threadId: string): string {
+  return `${TN_USABLE_SENTINEL}:${threadId}`;
+}
+
+export async function persistUsableSentinel(controller: object, record: unknown, threadId: string): Promise<void> {
+  const token = usableSentinelToken(threadId);
+  const already = await tnFreshMessages(threadId);
+  if (already.some((row) => row.includes(token))) return;
+  let resourceId = 'tn-sentinel';
+  if (chatMod) {
+    const session = await chatMod.getChatSession(controller as never, record as never, {
+      threadId,
+      scope: `tn-sentinel:${threadId}`,
+    });
+    try {
+      resourceId = sessionIdentityOf(session as object).resourceId;
+    } catch {
+      /* keep fallback resource id */
+    }
+  }
+  const store = await openReader();
+  const memory = (await store.getStore('memory')) as {
+    saveMessages?: (args: { messages: unknown[] }) => Promise<unknown>;
+  } | null;
+  if (!memory || typeof memory.saveMessages !== 'function') {
+    throw new Error('TN plumbing: memory.saveMessages missing; cannot persist a usable sentinel');
+  }
+  // Persist as a user-role seed (listMessages can drop system-role rows).
+  // The token is not a notice: it contains neither NOTICE_MARKER nor task-progress.
+  await memory.saveMessages({
+    messages: [
+      {
+        id: `tn-sentinel-${threadId}`,
+        threadId,
+        resourceId,
+        role: 'user',
+        createdAt: new Date(),
+        content: {
+          format: 2,
+          parts: [{ type: 'text', text: token }],
+        },
+      },
+    ],
+  });
+}
+
+export async function assertThreadsUsable(threadIds: string[]): Promise<void> {
+  for (const threadId of threadIds) {
+    const token = usableSentinelToken(threadId);
+    const rows = await tnFreshMessages(threadId);
+    if (!rows.some((row) => row.includes(token))) {
+      throw new Error(`usable sentinel not readable on ${threadId}`);
+    }
+  }
 }
 
 /**
@@ -890,6 +949,16 @@ export async function buildFixture(opts: {
     controllerC = await chatMod.getOrCreateChatController(recordC as never);
     await chatMod.getChatSession(controllerC, recordC as never, { threadId: t1c, scope: `tn-seed:${t1c}` });
   }
+  // Contract §3: every bystander/wrong-thread fixture must exist and be usable —
+  // persist a sentinel and read it back through the fresh reader before any event.
+  await persistUsableSentinel(controllerA, recordA, t1);
+  await persistUsableSentinel(controllerA, recordA, t2);
+  await persistUsableSentinel(controllerA, recordA, t3);
+  await persistUsableSentinel(controllerA, recordA, t9);
+  await persistUsableSentinel(controllerA, recordA, tOrigin2);
+  await persistUsableSentinel(controllerB, recordB, t1b);
+  if (controllerC && recordC) await persistUsableSentinel(controllerC, recordC, t1c);
+  await assertThreadsUsable([t1, t2, t3, t9, tOrigin2, t1b]);
 
   if (!protoPatched) {
     const proto = Object.getPrototypeOf(userSession);

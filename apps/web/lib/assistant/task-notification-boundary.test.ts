@@ -43,6 +43,7 @@ import {
   tnSetQueueHold,
   tnQueueHoldActive,
   sessionIdentityOf,
+  assertThreadsUsable,
   tnSignalRecords,
   tnTeardown,
   waitFor,
@@ -65,6 +66,11 @@ async function skipIfIncompatible(t: { name: string }, name: string): Promise<bo
   return true;
 }
 
+async function assertC4Pin(f: { readPin: () => Promise<string | null>; pinBefore: string | null }, expected?: string | null) {
+  const want = expected !== undefined ? expected : f.pinBefore;
+  assert.equal(await f.readPin(), want, want === f.pinBefore ? 'C4 pin unchanged' : 'C4 pin after delivery');
+}
+
 test('TN-PROVENANCE-PREFLIGHT', { timeout: 30_000 }, async () => {
   await assertBoundaryPrerequisites();
   recordVerdict(
@@ -82,6 +88,7 @@ test('TN-DEFAULT-PATH', { timeout: 90_000 }, async (t) => {
   await bridgeStart();
   const f = await buildFixture({ seedPin: 't2' });
   try {
+    await assertThreadsUsable([f.t2, f.t3, f.t9]);
     const { registerChatModelOverride } = await import('@tourbillon/mastra/chat');
     await assertC1ModelOnlyOverride(
       f.controllerA,
@@ -130,9 +137,10 @@ test('TN-DEFAULT-PATH', { timeout: 90_000 }, async (t) => {
     const t2 = await tnFreshMessages(f.t2);
     assert.equal(countNoticeMessages(t1, f.taskId, 'done'), 1);
     assert.equal(countNoticeMessages(t2, f.taskId), 0);
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t9), f.taskId), 0, 'nothing on usable T9');
     assert.equal(f.controllerA.id !== f.controllerB.id, true, 'distinct real controller identities');
     assert.equal(tnQueueHoldActive(), false, 'DEFAULT-PATH still has no drain-timeout queue hold after delivery');
-    assert.equal(await f.readPin(), f.pinBefore, 'pin unchanged');
+    await assertC4Pin(f);
     recordVerdict('TN-DEFAULT-PATH', 'GREEN');
   } finally {
     await f.cleanup();
@@ -144,6 +152,7 @@ async function idleCell(name: string, stage: string, status: string) {
   await bridgeStart();
   const f = await buildFixture({ seedPin: 't2' });
   try {
+    await assertThreadsUsable([f.t2, f.t3, f.t9]);
     await publishProgress(progressEvent(f, {
       stage,
       status,
@@ -152,7 +161,8 @@ async function idleCell(name: string, stage: string, status: string) {
     await waitFor(`${name} T1`, async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, stage) >= 1);
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, stage), 1, 'exactly one terminal notice on T1');
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t2), f.taskId), 0, 'nothing on pin T2');
-    assert.equal(await f.readPin(), f.pinBefore, 'pin unchanged');
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t9), f.taskId), 0, 'nothing on usable T9');
+    await assertC4Pin(f);
     assert.equal(f.userSession.thread.getId(), f.t2, 'user session stayed on T2');
     const sigs = tnSignalRecords({ taskId: f.taskId, tagName: 'task-progress' });
     assert.equal(sigs.length, 1);
@@ -188,14 +198,17 @@ test('TN-NO-FALSE-RUN', { timeout: 90_000 }, async (t) => {
   await bridgeStart();
   const f = await buildFixture({ seedPin: 't2' });
   try {
+    await assertThreadsUsable([f.t2, f.t3, f.t9]);
     const event = progressEvent(f, { stage: 'done', status: 'succeeded' });
     await publishProgress(event);
     await waitFor('TN-NO-FALSE-RUN T1', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done') >= 1);
     const acct = deliveryAccount(f.taskId, f.models.a);
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done'), 1, 'exactly one terminal notice');
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t2), f.taskId), 0, 'nothing on pin T2');
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t9), f.taskId), 0, 'nothing on usable T9');
     assert.equal(tnSignalRecords({ taskId: f.taskId, tagName: 'task-progress' }).length, 1, 'exactly one queueSignal');
     assert.equal(acct.modelUser, 0, 'no extra user/notification run');
-    assert.equal(await f.readPin(), f.pinBefore, 'pin unchanged');
+    await assertC4Pin(f);
     recordVerdict('TN-NO-FALSE-RUN', 'GREEN');
   } catch (err) {
     recordVerdict('TN-NO-FALSE-RUN', 'RED', err instanceof Error ? err.message : String(err));
@@ -218,6 +231,7 @@ test('TN-BUSY-UNRELATED-PIN', { timeout: 120_000 }, async (t) => {
     tnTrace("unrelated:got-runId", { runId });
     tnTrace('unrelated:after-hold', { runId, userThread: f.userSession.thread.getId(), pin: f.pinBefore });
     assert.ok(runId, 'B-HOLD: T2 run id non-null');
+    await assertThreadsUsable([f.t2, f.t3, f.t9]);
     tnTrace('unrelated:before-publish');
     await publishProgress(progressEvent(f));
     tnTrace('unrelated:after-publish', { signals: tnSignalRecords({ taskId: f.taskId }).length, calls: f.models.a.callLog.length });
@@ -225,9 +239,10 @@ test('TN-BUSY-UNRELATED-PIN', { timeout: 120_000 }, async (t) => {
     tnTrace('unrelated:after-T1-wait', { runIdNow: f.userSession.getCurrentRunId() });
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done'), 1);
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t2), f.taskId), 0);
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t9), f.taskId), 0, 'nothing on usable T9');
     assert.equal(f.userSession.getCurrentRunId(), runId, 'held T2 run not cancelled/rebound');
     assert.equal(f.userSession.thread.getId(), f.t2);
-    assert.equal(await f.readPin(), f.pinBefore);
+    await assertC4Pin(f);
     tnTrace('unrelated:before-release');
     f.models.a.releaseChunks();
     tnTrace('unrelated:after-release, awaiting held send');
@@ -261,6 +276,7 @@ test('TN-BUSY-ORIGIN-HELD', { timeout: 120_000 }, async (t) => {
     await waitFor('origin run id', async () => !!f.userSession.getCurrentRunId(), 15_000);
     const early = await tnFreshMessages(f.t1);
     assert.equal(countNoticeMessages(early, f.taskId), 0, 'B-NO-EARLY before publish');
+    await assertThreadsUsable([f.t2, f.t3, f.t9]);
     await publishProgress(progressEvent(f));
     await waitFor('queue entered while origin held', async () => tnSignalRecords({ taskId: f.taskId }).length >= 1, 15_000);
     assert.ok(redisTerminalEvents(f.taskId).length >= 1, 'Redis terminal observed during hold');
@@ -276,10 +292,11 @@ test('TN-BUSY-ORIGIN-HELD', { timeout: 120_000 }, async (t) => {
     await waitFor('T1 after origin release', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done') >= 1);
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done'), 1);
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t2), f.taskId), 0);
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t9), f.taskId), 0, 'nothing on usable T9');
     const after = deliveryAccount(f.taskId, f.models.a);
     assert.equal(after.queues.length, 1, 'no extra queueSignal after release');
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done'), 1);
-    assert.equal(await f.readPin(), f.pinBefore, 'pin still T2');
+    await assertC4Pin(f);
     recordVerdict('TN-BUSY-ORIGIN-HELD', 'GREEN');
   } catch (err) {
     f.models.a.releaseChunks();
@@ -298,11 +315,11 @@ test('TN-CONCURRENT-THREAD-SWITCH', { timeout: 90_000 }, async (t) => {
   await bridgeStart();
   const f = await buildFixture({ seedPin: 't2' });
   try {
+    assert.equal(f.pinBefore, f.t2, 'pin started on T2');
+    await assertThreadsUsable([f.t2, f.t3, f.t9]);
     const pub = publishProgress(progressEvent(f));
-    await waitFor(
-      'delivery interval before switch',
-      async () => redisTerminalEvents(f.taskId).length >= 1 || tnSignalRecords({ taskId: f.taskId }).length >= 1,
-    );
+    await waitFor('delivery interval before switch', async () => redisTerminalEvents(f.taskId).length >= 1);
+    assert.ok(redisTerminalEvents(f.taskId).length >= 1, 'Redis observer established the delivery interval (no sleep)');
     f.userSession.thread.switch({ threadId: f.t3 });
     await f.pool.query(
       `insert into assistant_active_threads (company_id, agent_id, thread_id, updated_at)
@@ -315,8 +332,9 @@ test('TN-CONCURRENT-THREAD-SWITCH', { timeout: 90_000 }, async (t) => {
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done'), 1);
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t2), f.taskId), 0);
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t3), f.taskId), 0);
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t9), f.taskId), 0, 'nothing on usable T9');
     assert.equal(f.userSession.thread.getId(), f.t3, 'newest user choice T3 remains');
-    assert.equal(await f.readPin(), f.t3, 'pin left at user-chosen T3');
+    await assertC4Pin(f, f.t3);
     recordVerdict('TN-CONCURRENT-THREAD-SWITCH', 'GREEN');
   } catch (err) {
     recordVerdict('TN-CONCURRENT-THREAD-SWITCH', 'RED', err instanceof Error ? err.message : String(err));
@@ -332,6 +350,9 @@ test('TN-CONCURRENT-ORIGIN-NOTICES', { timeout: 90_000 }, async (t) => {
   await bridgeStart();
   const f = await buildFixture({ seedPin: 't2', secondOriginNotice: true });
   try {
+    assert.notEqual(f.t1, f.tOrigin2, 'second origin is a distinct thread, not T1');
+    assert.notEqual(f.taskId, f.taskId2, 'second task is distinct');
+    await assertThreadsUsable([f.t1, f.tOrigin2, f.t2, f.t3, f.t9]);
     await Promise.all([
       publishProgress(progressEvent(f, { runId: 'run-a' })),
       publishProgress(progressEvent({ ...f, taskId: f.taskId2 }, { runId: 'run-b' })),
@@ -350,6 +371,9 @@ test('TN-CONCURRENT-ORIGIN-NOTICES', { timeout: 90_000 }, async (t) => {
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t2), f.taskId2), 0);
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t3), f.taskId), 0);
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t3), f.taskId2), 0);
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t9), f.taskId), 0, 'nothing on usable T9 for task 1');
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t9), f.taskId2), 0, 'nothing on usable T9 for task 2');
+    await assertC4Pin(f);
     recordVerdict('TN-CONCURRENT-ORIGIN-NOTICES', 'GREEN');
   } catch (err) {
     recordVerdict('TN-CONCURRENT-ORIGIN-NOTICES', 'RED', err instanceof Error ? err.message : String(err));
@@ -366,6 +390,13 @@ test('TN-CONCURRENT-AGENT-COMPANY', { timeout: 90_000 }, async (t) => {
   const f = await buildFixture({ seedPin: 't2', secondCompany: true });
   try {
     assert.notEqual(f.controllerA.id, f.controllerB.id, 'C-SHARED-IDENTITY: distinct controller ids');
+    await assertThreadsUsable([f.t1, f.t1b, f.t2, f.t9]);
+    const chatIds = await import('@/lib/chat');
+    assert.notEqual(chatIds.chatControllerId(f.agentId), chatIds.chatControllerId(f.agentIdB), 'distinct controller cache keys');
+    const sessA = sessionIdentityOf(f.userSession);
+    const sessB = sessionIdentityOf(await chatIds.getChatSession(f.controllerB as never, f.recordB as never, { threadId: f.t1b }));
+    assert.notEqual(sessA.resourceId, sessB.resourceId, 'distinct session resource ids (cross-company)');
+    assert.notEqual(sessA.sessionId, sessB.sessionId, 'distinct session ids (cross-company)');
     await Promise.all([
       publishProgress(progressEvent(f, { runId: 'run-a' })),
       publishProgress(
@@ -382,6 +413,7 @@ test('TN-CONCURRENT-AGENT-COMPANY', { timeout: 90_000 }, async (t) => {
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskIdB), 0, 'no cross-company leak onto A');
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t1b), f.taskId), 0, 'no cross-company leak onto B');
     assert.notEqual(f.controllerA.id, f.controllerB.id);
+    await assertC4Pin(f);
     recordVerdict('TN-CONCURRENT-AGENT-COMPANY', 'GREEN');
   } catch (err) {
     recordVerdict('TN-CONCURRENT-AGENT-COMPANY', 'RED', err instanceof Error ? err.message : String(err));
@@ -397,6 +429,7 @@ test('TN-ONCE-DUP', { timeout: 90_000 }, async (t) => {
   await bridgeStart();
   const f = await buildFixture({ seedPin: 't2' });
   try {
+    await assertThreadsUsable([f.t2, f.t3, f.t9]);
     const event = progressEvent(f, { runId: 'run-dup' });
     await publishProgress(event);
     await waitFor('first notice', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done') >= 1);
@@ -417,6 +450,9 @@ test('TN-ONCE-DUP', { timeout: 90_000 }, async (t) => {
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done'), 1);
     assert.equal(tnSignalRecords({ taskId: f.taskId, tagName: 'task-progress' }).length, 1);
     assert.equal(acct.modelNotice, noticeCallsAfterFirst, 'no extra model/run after duplicate publish');
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t2), f.taskId), 0, 'nothing on pin T2');
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t9), f.taskId), 0, 'nothing on usable T9');
+    await assertC4Pin(f);
     recordVerdict('TN-ONCE-DUP', 'GREEN');
   } catch (err) {
     recordVerdict('TN-ONCE-DUP', 'RED', err instanceof Error ? err.message : String(err));
@@ -432,14 +468,14 @@ test('TN-WRONG-THREAD-LIVE', { timeout: 90_000 }, async (t) => {
   await bridgeStart();
   const f = await buildFixture({ seedPin: 't9' });
   try {
-    const chat = await import('@/lib/chat');
-    const wrong = await chat.getChatSession(f.controllerA as never, f.recordA as never, { threadId: f.t9 });
-    await wrong.sendMessage({ content: 'seed usable wrong thread' });
+    assert.equal(f.pinBefore, f.t9, 'pin started on usable T9');
+    await assertThreadsUsable([f.t1, f.t2, f.t9]);
     await publishProgress(progressEvent(f));
     await waitFor('origin notice', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done') >= 1);
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done'), 1);
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t9), f.taskId), 0);
-    assert.equal(await f.readPin(), f.t9);
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t2), f.taskId), 0, 'nothing on usable T2');
+    await assertC4Pin(f, f.t9);
     recordVerdict('TN-WRONG-THREAD-LIVE', 'GREEN');
   } catch (err) {
     recordVerdict('TN-WRONG-THREAD-LIVE', 'RED', err instanceof Error ? err.message : String(err));
@@ -664,8 +700,12 @@ test('TN-RESTART-FRESH-CLIENTS', { timeout: 60_000 }, async (t) => {
   await bridgeStart();
   const f = await buildFixture({ seedPin: 't2' });
   try {
+    await assertThreadsUsable([f.t2, f.t9]);
     await publishProgress(progressEvent(f));
     await waitFor('notice after restart', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done') >= 1);
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t2), f.taskId), 0);
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t9), f.taskId), 0);
+    await assertC4Pin(f);
     recordVerdict('TN-RESTART-FRESH-CLIENTS', 'GREEN');
   } catch (err) {
     recordVerdict('TN-RESTART-FRESH-CLIENTS', 'RED', err instanceof Error ? err.message : String(err));
@@ -685,14 +725,26 @@ test('TN-CONCURRENT-SAME-COMPANY-AGENTS', { timeout: 90_000 }, async (t) => {
     f = await buildFixture({ seedPin: 't2', secondAgentSameCompany: true });
     assert.ok(f.controllerC, 'same-company agent C controller');
     assert.notEqual(f.controllerA.id, f.controllerC!.id, 'distinct controllers for two agents in one company');
+    const chatSame = await import('@/lib/chat');
+    assert.notEqual(chatSame.chatControllerId(f.agentId), chatSame.chatControllerId(f.agentIdC), 'distinct controller cache keys');
+    const sameA = sessionIdentityOf(f.userSession);
+    const sameC = sessionIdentityOf(await chatSame.getChatSession(f.controllerC as never, f.recordC as never, { threadId: f.t1c }));
+    assert.equal(sameA.resourceId, sameC.resourceId, 'same-company agents share resource id');
+    const ownerA = sameA.ownerId || String(f.controllerA.id);
+    const ownerC = sameC.ownerId || String(f.controllerC!.id);
+    assert.notEqual(ownerA, ownerC, 'distinct session hosts (same company)');
+    await assertThreadsUsable([f.t1, f.t1c, f.t2, f.t9]);
     await publishProgress(progressEvent(f, { runId: 'run-a' }));
     await publishProgress(progressEvent({ companyId: f.companyId, agentId: f.agentIdC, taskId: f.taskIdC }, { runId: 'run-c' }));
     await waitFor('A own notice', async () => countNoticeMessages(await tnFreshMessages(f!.t1), f!.taskId, 'done') >= 1);
     await waitFor('C own notice', async () => countNoticeMessages(await tnFreshMessages(f!.t1c), f!.taskIdC, 'done') >= 1);
-    assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done'), 1);
-    assert.equal(countNoticeMessages(await tnFreshMessages(f.t1c), f.taskIdC, 'done'), 1);
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done'), 1, 'exact one notice for A');
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t1c), f.taskIdC, 'done'), 1, 'exact one notice for C');
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskIdC), 0, 'no same-company cross-agent leak onto A');
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t1c), f.taskId), 0, 'no same-company cross-agent leak onto C');
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t9), f.taskId), 0, 'nothing on usable T9 for A');
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t9), f.taskIdC), 0, 'nothing on usable T9 for C');
+    await assertC4Pin(f);
     recordVerdict('TN-CONCURRENT-SAME-COMPANY-AGENTS', 'GREEN');
   } catch (err) {
     recordVerdict('TN-CONCURRENT-SAME-COMPANY-AGENTS', 'RED', err instanceof Error ? err.message : String(err));
@@ -727,9 +779,13 @@ test('TN-CLAIM-FAIL-OPEN', { timeout: 90_000 }, async (t) => {
   });
   const f = await buildFixture({ seedPin: 't2' });
   try {
+    await assertThreadsUsable([f.t2, f.t9]);
     await publishProgress(progressEvent(f));
     await waitFor('fail-open still delivers', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done') >= 1);
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done'), 1);
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t2), f.taskId), 0);
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t9), f.taskId), 0);
+    await assertC4Pin(f);
     recordVerdict('TN-CLAIM-FAIL-OPEN', 'GREEN');
   } catch (err) {
     recordVerdict('TN-CLAIM-FAIL-OPEN', 'RED', err instanceof Error ? err.message : String(err));
@@ -745,8 +801,12 @@ test('TN-DRAIN-SUCCESS', { timeout: 60_000 }, async (t) => {
   await bridgeStart();
   const f = await buildFixture({ seedPin: 't2' });
   try {
+    await assertThreadsUsable([f.t2, f.t9]);
     await publishProgress(progressEvent(f));
     await waitFor('notice before successful drain', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done') >= 1);
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t2), f.taskId), 0);
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t9), f.taskId), 0);
+    await assertC4Pin(f);
     const report = (await bridgeStop()) as { admitted?: number; completed?: number; timedOut?: boolean; pending?: number };
     assert.equal(report.timedOut, false);
     assert.ok((report.admitted ?? 0) >= 1);
