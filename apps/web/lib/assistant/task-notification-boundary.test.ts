@@ -53,7 +53,15 @@ import {
   withAckGate,
   withPsubscribeFailure,
 } from './task-notification-boundary-harness';
-import { startTaskProgressSignalBridge, __resetTaskProgressSignalBridgeForTests, redisClaimClient, TaskProgressBridgeStopError, createOwnedRedisClaimClient } from './task-progress-bridge';
+import * as taskProgressBridge from './task-progress-bridge';
+
+const {
+  startTaskProgressSignalBridge,
+  __resetTaskProgressSignalBridgeForTests,
+  redisClaimClient,
+  TaskProgressBridgeStopError,
+  createOwnedRedisClaimClient,
+} = taskProgressBridge;
 
 const INCOMPAT = 'MISSING_EVIDENCE/HARNESS_INCOMPATIBLE';
 

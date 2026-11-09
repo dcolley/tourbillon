@@ -11,7 +11,19 @@ import { join } from 'node:path';
 
 const WEB_ROOT = fileURLToPath(new URL('..', import.meta.url));
 
+// C-PIN-RESTORE is excluded under the no-switch H3 design.
 const KILLS = [
+  { control: 'C-SCOPE-LOOKUP', cell: 'TN-ORIGIN-LOOKUP-COMPANY-SCOPE', expect: 'kill' },
+  { control: 'C-HIJACK', cell: 'TN-DEFAULT-PATH', expect: 'kill' },
+  { control: 'C-SHARED-IDENTITY', cell: 'TN-CONCURRENT-AGENT-COMPANY', expect: 'kill' },
+  { control: 'C-SHARED-CTRL', cell: 'TN-CONCURRENT-AGENT-COMPANY', expect: 'kill' },
+  { control: 'C-PUB', cell: 'TN-IDLE-DONE', expect: 'kill' },
+  { control: 'C-DEDUPE', cell: 'TN-ONCE-DUP', expect: 'kill' },
+  { control: 'C-PERSIST', cell: 'TN-IDLE-DONE', expect: 'kill' },
+  { control: 'C-THREAD', cell: 'TN-WRONG-THREAD-LIVE', expect: 'kill' },
+  { control: 'C-WRONG-THREAD-DEFAULT', cell: 'TN-WRONG-THREAD-LIVE', expect: 'kill' },
+  { control: 'C-PIN-FOLLOW', cell: 'TN-WRONG-THREAD-LIVE', expect: 'kill' },
+  { control: 'C-ACK', cell: 'TN-IDLE-DONE', expect: 'kill' },
   { control: 'C-DRESS-ASK', cell: 'TN-IDLE-FAIL', expect: 'kill' },
   { control: 'C-FALSE-RUN', cell: 'TN-IDLE-DONE', expect: 'kill' },
   { control: 'C-BRIDGE', cell: 'TN-IDLE-DONE', expect: 'kill' },
@@ -19,8 +31,6 @@ const KILLS = [
   { control: 'C-WAKE', cell: 'TN-IDLE-DONE', expect: 'kill' },
   { control: 'C-WAKE', cell: 'TN-BUSY-UNRELATED-PIN', expect: 'kill' },
   { control: 'C-SETTLE', cell: 'TN-BUSY-ORIGIN-HELD', expect: 'kill' },
-  { control: 'C-PIN-FOLLOW', cell: 'TN-WRONG-THREAD-LIVE', expect: 'kill' },
-  { control: 'C-SHARED-CTRL', cell: 'TN-CONCURRENT-AGENT-COMPANY', expect: 'kill' },
   { control: 'C-BUSY-OTHER-DROP', cell: 'TN-IDLE-DONE', expect: 'pass' },
   { control: 'C-BUSY-OTHER-DROP', cell: 'TN-BUSY-UNRELATED-PIN', expect: 'kill' },
 ];
@@ -55,7 +65,7 @@ function runCell(cell, envExtra = {}) {
     {
       cwd: WEB_ROOT,
       encoding: 'utf8',
-      timeout: 90_000,
+      timeout: 150_000,
       env,
     },
   );
