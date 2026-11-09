@@ -40,7 +40,7 @@ if (process.env.TN_DISPOSABLE !== '1') {
   process.exit(1);
 }
 
-const outDir = process.env.TN_EVIDENCE_DIR || '/tmp/tb-notify-impl/evidence/phase2-m1';
+const outDir = process.env.TN_EVIDENCE_DIR || join(WEB_ROOT, '.tn-controls-evidence');
 const logDir = join(outDir, 'logs');
 mkdirSync(logDir, { recursive: true });
 
