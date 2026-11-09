@@ -8,6 +8,13 @@ export {
   buildChatResourceId,
   buildChatControllerId,
   buildChatPermissionRules,
+  // TN-MODEL (H1): fixture-scoped model-only override registry — test-registration surface
+  // only; nothing in the production path imports these.
+  registerChatModelOverride,
+  unregisterChatModelOverride,
+  listChatModelOverrideKeys,
+  type ChatAssemblyDeps,
+  type ChatModelOverrideRegistration,
   type ChatControllerState,
   type ChatResourceContext,
 } from './chat-controller';

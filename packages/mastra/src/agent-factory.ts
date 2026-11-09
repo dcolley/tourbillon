@@ -261,7 +261,7 @@ export async function assembleAgentTools(
   }
 
   // Remove sendToAgent when DMs are disabled (default: enabled)
-  const mailEnabled = runtimeConfig.mail?.enabled ?? true;
+  const mailEnabled = runtimeConfig?.mail?.enabled ?? true;
   if (!mailEnabled) {
     delete tools.sendToAgentTool;
   }

@@ -146,6 +146,7 @@ describe('S328-S4: CI runs the service-free shared + scheduler + harness unit te
     assert.deepEqual(
       [...webRunner.HARNESS_TEST_FILES].sort(),
       [
+        'lib/auth/run-id-header-114.test.ts',
         'lib/chat-send-key.test.ts',
         'lib/harness/callback-chat.test.ts',
         'lib/harness/callback-gate.test.ts',
