@@ -1045,7 +1045,13 @@ test('TN-FAIL-CLEAN-CONTROL', { timeout: 90_000 }, () => {
   recordVerdict('TN-FAIL-CLEAN-CONTROL', 'GREEN');
 });
 
-test('TN-TEARDOWN', { timeout: 30_000 }, async () => {
+test('TN-TEARDOWN', { timeout: 30_000 }, async (t) => {
+  if (await skipIfIncompatible(t, 'TN-TEARDOWN')) {
+    await bridgeReset();
+    await tnTeardown();
+    persistVerdicts();
+    return;
+  }
   const admin = new Redis(process.env.REDIS_URL as string, { maxRetriesPerRequest: 1 });
   const numpat = async () => Number(await admin.call('PUBSUB', 'NUMPAT'));
   const clientCount = async () =>

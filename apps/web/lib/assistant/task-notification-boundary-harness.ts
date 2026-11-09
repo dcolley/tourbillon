@@ -1243,19 +1243,21 @@ export async function bridgeStart(opts: Record<string, unknown> = {}): Promise<v
       try { await accountingClaim.quit(); } catch { /* previous borrowed wrapper */ }
       accountingClaim = null;
     }
-    const { createOwnedRedisClaimClient } = bridgeMod;
-    const owned = createOwnedRedisClaimClient();
-    extra.claimClient = {
-      claim: async (key: string, ttl: number) => {
-        const outcome = await owned.claim(key, ttl);
-        claimOutcomeLog.push({ key, outcome, at: new Date().toISOString() });
-        return outcome;
-      },
-      quit: () => owned.quit(),
-    };
-    // Injected, so stop() will treat it as borrowed unless we quit in teardown.
-    extra._ownedClaimForAccounting = owned;
-    accountingClaim = owned;
+    const createOwned = bridgeMod.createOwnedRedisClaimClient;
+    if (typeof createOwned === 'function') {
+      const owned = createOwned();
+      extra.claimClient = {
+        claim: async (key: string, ttl: number) => {
+          const outcome = await owned.claim(key, ttl);
+          claimOutcomeLog.push({ key, outcome, at: new Date().toISOString() });
+          return outcome;
+        },
+        quit: () => owned.quit(),
+      };
+      // Injected, so stop() will treat it as borrowed unless we quit in teardown.
+      extra._ownedClaimForAccounting = owned;
+      accountingClaim = owned;
+    }
   }
   const handle = bridgeMod.startTaskProgressSignalBridge(extra as never);
 
