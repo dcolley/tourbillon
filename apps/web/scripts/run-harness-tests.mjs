@@ -41,6 +41,7 @@ export const HARNESS_TEST_FILES = [
   'lib/chat-send-key.test.ts',
   'lib/harness/callback-chat.test.ts',
   'lib/harness/callback-gate.test.ts',
+  'lib/vault-oauth-state-clock.test.ts',
 ];
 
 const HARNESS_DIR = 'lib/harness';

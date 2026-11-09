@@ -150,6 +150,7 @@ describe('S328-S4: CI runs the service-free shared + scheduler + harness unit te
         'lib/chat-send-key.test.ts',
         'lib/harness/callback-chat.test.ts',
         'lib/harness/callback-gate.test.ts',
+        'lib/vault-oauth-state-clock.test.ts',
       ],
       'web harness suite is exactly these files — add/remove deliberately, in both places',
     );

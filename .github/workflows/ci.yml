@@ -146,3 +146,39 @@ jobs:
       - name: Task-notification certification
         working-directory: apps/web
         run: node scripts/run-task-notification-tests.mjs
+
+  # #112: real-Postgres evidence for vault OAuth state binding. Disposable service only;
+  # schema via pnpm --filter @tourbillon/db migrate on that throwaway DB. Pinned file+names:
+  # apps/web/lib/auth/vault-oauth-state-112.pg-manifest.json.
+  pg-112-oauth-state:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: tb112
+          POSTGRES_PASSWORD: tb112
+          POSTGRES_DB: tb112_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tb112 -d tb112_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://tb112:tb112@127.0.0.1:5432/tb112_test
+      REDIS_URL: redis://127.0.0.1:1
+      VAULT_ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @tourbillon/db migrate
+      - run: node scripts/run-pg-112-tests.mjs
+        working-directory: apps/web
