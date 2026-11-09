@@ -90,6 +90,11 @@ export async function startRedisObserver(): Promise<void> {
   await redisObserver.psubscribe('sse:*');
 }
 
+export function redisObserverAccounting(): { alive: boolean; pmessageHandlers: number } {
+  if (!redisObserver) return { alive: false, pmessageHandlers: 0 };
+  return { alive: true, pmessageHandlers: redisObserver.listenerCount('pmessage') };
+}
+
 export async function stopRedisObserver(): Promise<void> {
   if (!redisObserver) return;
   try {

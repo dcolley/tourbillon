@@ -17,8 +17,10 @@ test('TN-FAIL-CLEAN-INNER', { timeout: 60_000 }, async () => {
   const admin = new Redis(process.env.REDIS_URL as string, { maxRetriesPerRequest: 1 });
   try {
     assert.equal(await admin.ping(), 'PONG', 'FAIL-CLEAN child acquired Redis');
+    console.log('TN-FAIL-CLEAN:acquired-redis');
     const rows = await f.pool.query('select 1 as ok');
     assert.equal(rows.rows[0]?.ok, 1, 'FAIL-CLEAN child acquired Postgres');
+    console.log('TN-FAIL-CLEAN:acquired-pg');
     assert.ok(f.taskId, 'FAIL-CLEAN child inserted fixture rows');
     assert.equal(1, 2, 'deliberate failing control after acquiring PG and Redis');
   } finally {

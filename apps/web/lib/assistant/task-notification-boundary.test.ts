@@ -33,6 +33,8 @@ import {
   recordVerdict,
   persistVerdicts,
   startRedisObserver,
+  stopRedisObserver,
+  redisObserverAccounting,
   redisTerminalEvents,
   claimOutcomeLog,
   redisTerminalLog,
@@ -50,7 +52,7 @@ import {
   tnTrace,
   withAckGate,
 } from './task-notification-boundary-harness';
-import { startTaskProgressSignalBridge, __resetTaskProgressSignalBridgeForTests, redisClaimClient } from './task-progress-bridge';
+import { startTaskProgressSignalBridge, __resetTaskProgressSignalBridgeForTests, redisClaimClient, TaskProgressBridgeStopError } from './task-progress-bridge';
 
 const INCOMPAT = 'MISSING_EVIDENCE/HARNESS_INCOMPATIBLE';
 
@@ -614,21 +616,21 @@ test('TN-STOP-BORROWED-CLIENTS', { timeout: 20_000 }, async (t) => {
   await bridgeReset();
   const client = new Redis(process.env.REDIS_URL as string, { maxRetriesPerRequest: 2 });
   let quitCalled = false;
-  await bridgeStart({
-    claimClient: {
-      claim: async (key: string, ttl: number) => {
-        const result = await client.set(key, '1', 'EX', ttl, 'NX');
-        return result === 'OK';
-      },
-      quit: async () => {
-        quitCalled = true;
-      },
+  const borrowed = {
+    claim: async (key: string, ttl: number) => {
+      const result = await client.set(key, '1', 'EX', ttl, 'NX');
+      return result === 'OK';
     },
-  });
+    quit: async () => {
+      quitCalled = true;
+    },
+    ping: () => client.ping(),
+  };
+  await bridgeStart({ claimClient: borrowed });
   const report = (await bridgeStop()) as { closedOwnedClients?: string[] };
   assert.equal(quitCalled, false, 'borrowed claim client was never quit');
   assert.equal((report.closedOwnedClients ?? []).includes('claim'), false);
-  assert.equal(await client.ping(), 'PONG', 'the same borrowed client still answers PING');
+  assert.equal(await borrowed.ping(), 'PONG', 'the same borrowed client still answers PING');
   await client.quit();
   recordVerdict('TN-STOP-BORROWED-CLIENTS', 'GREEN');
 });
@@ -671,14 +673,15 @@ test('TN-DRAIN-TIMEOUT', { timeout: 30_000 }, async (t) => {
     const took = Date.now() - t0;
     tnSetQueueHold(null);
     assert.ok(error, 'timeout must reject, never pass');
-    assert.match(error!.message, /did not settle|drain|pending/i);
-    const report = (error as { report?: { admitted?: number; completed?: number; pending?: number; unsettled?: unknown; timedOut?: boolean } }).report;
-    assert.ok(report, 'stop rejection carries a report');
-    assert.ok((report!.admitted ?? 0) >= 1, 'report.admitted');
-    assert.ok(typeof report!.completed === 'number', 'report.completed');
-    assert.ok(typeof report!.pending === 'number', 'report.pending');
-    assert.ok(report!.unsettled !== undefined, 'report.unsettled');
-    assert.equal(report!.timedOut, true);
+    assert.ok(error instanceof TaskProgressBridgeStopError, 'stop rejects with TaskProgressBridgeStopError');
+    assert.match(error.message, /did not settle|drain|pending/i);
+    const report = error.report;
+    assert.ok(report, 'stop rejection carries error.report (GREEN only after these fields)');
+    assert.ok((report.admitted ?? 0) >= 1, 'report.admitted');
+    assert.ok(typeof report.completed === 'number', 'report.completed');
+    assert.ok(typeof report.pending === 'number', 'report.pending');
+    assert.ok(report.unsettled !== undefined, 'report.unsettled');
+    assert.equal(report.timedOut, true);
     assert.ok(took < 6_000, `bounded drain ${took}ms`);
     recordVerdict('TN-DRAIN-TIMEOUT', 'GREEN');
   } catch (err) {
@@ -919,17 +922,54 @@ test('TN-FAIL-CLEAN-CONTROL', { timeout: 90_000 }, () => {
   );
   assert.notEqual(child.status, 143, 'must not be watchdog SIGTERM');
   assert.equal(child.signal, null);
+  const childOut = `${child.stdout ?? ''}\n${child.stderr ?? ''}`;
+  assert.match(childOut, /TN-FAIL-CLEAN:acquired-redis/, 'child acquired Redis before failing');
+  assert.match(childOut, /TN-FAIL-CLEAN:acquired-pg/, 'child acquired Postgres before failing');
+  assert.match(childOut, /deliberate failing control after acquiring PG and Redis/, 'induced failure is the acquire-then-fail assertion');
   recordVerdict('TN-FAIL-CLEAN-CONTROL', 'GREEN');
 });
 
-test('TN-TEARDOWN', { timeout: 20_000 }, async () => {
+test('TN-TEARDOWN', { timeout: 30_000 }, async () => {
   const admin = new Redis(process.env.REDIS_URL as string, { maxRetriesPerRequest: 1 });
-  const baseline = Number(await admin.call('PUBSUB', 'NUMPAT'));
-  await bridgeReset();
-  await tnTeardown();
-  persistVerdicts();
-  const after = Number(await admin.call('PUBSUB', 'NUMPAT'));
-  assert.ok(after <= baseline, `NUMPAT after teardown ${after} <= baseline ${baseline}`);
-  await admin.quit();
-  recordVerdict('TN-TEARDOWN', 'GREEN');
+  const numpat = async () => Number(await admin.call('PUBSUB', 'NUMPAT'));
+  const clientCount = async () =>
+    String(await admin.call('CLIENT', 'LIST'))
+      .split('\n')
+      .filter((line) => line.trim().length > 0).length;
+  try {
+    await bridgeReset();
+    await stopRedisObserver();
+    const baselineNumpat = await numpat();
+    const baselineClients = await clientCount();
+    const baselineHandlers = redisObserverAccounting();
+    assert.equal(baselineHandlers.alive, false, 'observer down before the live interval');
+    assert.equal(baselineHandlers.pmessageHandlers, 0, 'no live pmessage handler at baseline');
+
+    await startRedisObserver();
+    await bridgeStart();
+    const midHandlers = redisObserverAccounting();
+    assert.equal(midHandlers.alive, true, 'observer live during subscription');
+    assert.ok(midHandlers.pmessageHandlers >= 1, 'live pmessage handler while subscribed');
+    const midNumpat = await numpat();
+    const midClients = await clientCount();
+    assert.ok(midClients > baselineClients, `client count rose while live (mid=${midClients} baseline=${baselineClients})`);
+    // NUMPAT counts unique patterns, not connections; record mid for the artifact.
+    assert.ok(midNumpat >= baselineNumpat, `NUMPAT mid=${midNumpat} baseline=${baselineNumpat}`);
+
+    await tnTeardown();
+    persistVerdicts();
+    const afterNumpat = await numpat();
+    const afterClients = await clientCount();
+    const afterHandlers = redisObserverAccounting();
+    assert.equal(afterHandlers.alive, false, 'no live observer after teardown');
+    assert.equal(afterHandlers.pmessageHandlers, 0, 'no live pmessage handler after teardown');
+    assert.equal(afterNumpat, baselineNumpat, `NUMPAT returned to baseline (mid=${midNumpat} after=${afterNumpat} baseline=${baselineNumpat})`);
+    assert.ok(afterClients <= baselineClients, `clients closed (after=${afterClients} baseline=${baselineClients} mid=${midClients})`);
+    recordVerdict('TN-TEARDOWN', 'GREEN');
+  } catch (err) {
+    recordVerdict('TN-TEARDOWN', 'RED', err instanceof Error ? err.message : String(err));
+    throw err;
+  } finally {
+    await admin.quit();
+  }
 });
