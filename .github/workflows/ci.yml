@@ -135,8 +135,6 @@ jobs:
       # S354-S1 / S354-S4 / S355-S8: the certification job must enforce FIXED
       # capability — INCOMPAT verdicts or a missing verdicts.json fail the job.
       TN_REQUIRE_FIXED_CAPABLE: "1"
-      # Writable evidence dir so verdicts.json is written where the capable check reads it.
-      TN_EVIDENCE_DIR: ${{ runner.temp }}/tn-evidence
       TOURBILLON_AGENT_TOKEN_SECRET: ci-task-notification-token-secret-not-used-live
     steps:
       - uses: actions/checkout@v4
@@ -149,6 +147,10 @@ jobs:
       - run: pnpm db:migrate
       - name: Task-notification certification
         working-directory: apps/web
+        # Writable evidence dir so verdicts.json is written where the capable check
+        # reads it. Step-level env: the `runner` context is not allowed in job-level env.
+        env:
+          TN_EVIDENCE_DIR: ${{ runner.temp }}/tn-evidence
         run: node scripts/run-task-notification-tests.mjs
 
   # #112: real-Postgres evidence for vault OAuth state binding. Disposable service only;
