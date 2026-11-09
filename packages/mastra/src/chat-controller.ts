@@ -203,10 +203,72 @@ function assembleChatSystemPrompt(
  * Test seam for the chat assembly wiring (see chat-controller.wiring.test.ts). Production
  * callers omit it; tests inject recorders/stubs to pin the call sites that hand chat its
  * chat-scoped Memory, provider resolution, params-sized budget and OM config.
+ *
+ * TN-MODEL (H1, contract v2.1 §14.1): `getLanguageModel` is the MODEL-ONLY override, consumed
+ * at exactly ONE site — the Agent's `model:` below. It changes NOTHING else: the real Agent,
+ * AgentController identity/cache key, PostgresStore thread storage, tools, skills, memory and
+ * provider resolution all run the production path. It is reachable ONLY through the
+ * test-fixture registration below (no env var, config, endpoint or production path enables
+ * it), keyed per (companyId, agentId), and fixtures remove their registration in `finally`.
  */
 export interface ChatAssemblyDeps {
   getMemory?: typeof getAgentMemory;
   resolveProviderRow?: typeof resolveAgentProviderRow;
+  getLanguageModel?: typeof getLanguageModelForAgent;
+}
+
+// ─── TN-MODEL: fixture-scoped model-only override registry (H1) ─────────────────────────────
+//
+// Contract v2.1 §14.1 + reconciliation C1: the certification harness may double ONLY the
+// model, and only through the REAL registry/controller path. This module-level registry is
+// the entire mechanism:
+//  - keyed by (companyId, agentId) — each fixture gets its own model; registrations of one
+//    fixture can never serve another company/agent (C-SHARED-IDENTITY observes this);
+//  - consulted ONLY inside createChatController when a registration EXISTS for that exact
+//    company+agent; with no registration the production `getLanguageModelForAgent` runs
+//    unchanged (production default untouched);
+//  - no environment variable, config flag, HTTP endpoint, or any other production surface
+//    consults or populates it — only these exported functions do;
+//  - fixtures MUST unregister in `finally` (the returned unregister is idempotent).
+
+export interface ChatModelOverrideRegistration {
+  resolveModel: NonNullable<ChatAssemblyDeps['getLanguageModel']>;
+}
+
+const chatModelOverrides = new Map<string, ChatModelOverrideRegistration>();
+
+function chatModelOverrideScopeKey(companyId: string, agentId: string): string {
+  return `${companyId}::${agentId}`;
+}
+
+/** Register a model-only override for ONE company+agent fixture. Returns an idempotent unregister. */
+export function registerChatModelOverride(
+  scope: { companyId: string; agentId: string },
+  registration: ChatModelOverrideRegistration,
+): () => void {
+  const key = chatModelOverrideScopeKey(scope.companyId, scope.agentId);
+  chatModelOverrides.set(key, registration);
+  return () => {
+    // Idempotent + identity-checked: never drop a NEWER registration for the same key.
+    if (chatModelOverrides.get(key) === registration) chatModelOverrides.delete(key);
+  };
+}
+
+/** Remove the override for one company+agent (idempotent). */
+export function unregisterChatModelOverride(scope: { companyId: string; agentId: string }): void {
+  chatModelOverrides.delete(chatModelOverrideScopeKey(scope.companyId, scope.agentId));
+}
+
+/** Introspection for fixtures/tests: which (companyId::agentId) keys currently have overrides. */
+export function listChatModelOverrideKeys(): string[] {
+  return [...chatModelOverrides.keys()];
+}
+
+function lookupChatModelOverride(
+  companyId: string,
+  agentId: string,
+): ChatModelOverrideRegistration | undefined {
+  return chatModelOverrides.get(chatModelOverrideScopeKey(companyId, agentId));
 }
 
 /**
@@ -334,7 +396,9 @@ export async function createChatAgentWithSkills(
     id: `${effectiveRecord.id}-chat`,
     name: `${effectiveRecord.name} (chat)`,
     instructions: systemPrompt,
-    model: getLanguageModelForAgent(modelSource, providerRecord, {
+    // TN-MODEL (H1): the ONLY consumer of the model-only override. Undefined deps =>
+    // production getLanguageModelForAgent, byte-for-byte the previous call.
+    model: (deps?.getLanguageModel ?? getLanguageModelForAgent)(modelSource, providerRecord, {
       apiModeOverride: chatApiMode,
     }),
     tools: tools as never,
@@ -380,7 +444,14 @@ export async function createChatController(
     },
   deps?: ChatAssemblyDeps,
 ): Promise<AgentController<ChatControllerState>> {
-  const agent = await createChatAgentWithSkills(agentRecord, options, deps);
+  // TN-MODEL (H1): if — and ONLY if — a fixture registered a model-only override for this
+  // exact company+agent, thread it into assembly for the single `model:` site. No
+  // registration => deps untouched => production resolver path is byte-for-byte unchanged.
+  const modelOverride = lookupChatModelOverride(agentRecord.companyId, agentRecord.id);
+  const assemblyDeps: ChatAssemblyDeps | undefined = modelOverride
+    ? { ...deps, getLanguageModel: modelOverride.resolveModel }
+    : deps;
+  const agent = await createChatAgentWithSkills(agentRecord, options, assemblyDeps);
   // S195-S4 (#195 ACCEPT): this used to also resolve the provider row and compute a
   // contextBudget here - both were dead (the Agent built above already carries the
   // params-sized budget and provider wiring; see buildChatRunConfig in

@@ -110,16 +110,31 @@ export interface TaskProgressAgentRecord {
   status: string;
   /** companies.status — same rule; a paused/archived tenant must not be woken (S4, #196-B1 class). */
   companyStatus: string;
+  /**
+   * agents.runtime_config (NOT NULL, DB default {}). Origin-bound getChatSession /
+   * createChatController read runtimeConfig.mail; dropping this field makes
+   * `runtimeConfig.mail` throw and silently fails notice delivery (H3).
+   */
+  runtimeConfig?: unknown;
 }
 
 export interface TaskProgressBridgeDeps<A extends TaskProgressAgentRecord> {
   /** The agent row by id (null when missing/archived-and-gone). */
   getAgent(agentId: string): Promise<A | null>;
-  /** The agent's PINNED free-chat thread (assistant_active_threads), or null when none yet. */
-  getActiveThreadId(scope: { companyId: string; agentId: string }): Promise<string | null>;
   /**
-   * Deliver one typed signal on the agent's free-chat session (queue for the next turn;
-   * Mastra wakes the thread when idle). Return false when the target session is unavailable.
+   * TN-ORIGIN (v2 §1.1, §14.3 R8): the TASK'S OWN originating thread, resolved from the
+   * authoritative scoped `chat_tasks.source_thread_id` row for (companyId, agentId, chatTaskId).
+   * The active pin (assistant_active_threads) is NEVER consulted for routing — a notice for a
+   * task created on T1 must persist on T1 whatever thread the agent's chat is pinned to.
+   * A missing task / missing origin returns an explicit skip reason (no pin fallback, H2);
+   * a lookup ERROR must propagate (surfaced, never counted as a skip — C3).
+   */
+  getTaskOrigin(event: TaskProgressEvent): Promise<TaskProgressOriginResolution>;
+  /**
+   * Deliver one typed signal on the ORIGIN thread's free-chat session (queue for the next
+   * turn; Mastra wakes the thread when idle, queues behind the run when the ORIGIN itself is
+   * busy). An unrelated busy thread must never drop or delay this delivery (v2 §1.3/§6).
+   * Return false when the target session is unavailable.
    */
   deliver(agent: A, threadId: string, payload: TaskProgressSignalPayload): Promise<boolean>;
   /**
@@ -130,21 +145,37 @@ export interface TaskProgressBridgeDeps<A extends TaskProgressAgentRecord> {
   log?: { warn: (msg: string, data?: Record<string, unknown>) => void };
 }
 
+/**
+ * Explicit origin-resolution outcomes (H2, reconciliation C3). Malformed/legacy rows
+ * (task gone, or created before source_thread_id existed) skip with a RECORDED reason and
+ * zero queue entries anywhere — this is a diagnostic boundary for exceptional input only,
+ * never a waiver for a valid-T1 delivery. `skipped:*` outcomes never fall back to the pin.
+ */
+export type TaskProgressOriginResolution =
+  | { threadId: string }
+  | { skip: 'task-not-found' }
+  | { skip: 'missing-origin' };
+
 export type TaskProgressHandled =
   | 'queued'
   | 'skipped:duplicate'
   | 'skipped:no-agent'
   | 'skipped:company-mismatch'
   | 'skipped:inactive'
-  | 'skipped:no-thread'
+  | 'skipped:task-not-found'
+  | 'skipped:missing-origin'
   | 'skipped:no-session';
 
 /**
- * Route one Run Task progress event to the agent's pinned free-chat thread. A never-chatted
- * agent (no pinned thread) is skipped — there is no conversation to wake. A paused/archived
- * agent or company is skipped too (S4 — same class as the #196-B1 runner guard: an inactive
- * tenant must not be woken into an LLM turn). A duplicate seen by another replica is skipped
- * (S2 — claim first, before any db work). Never throws.
+ * Route one Run Task progress event to the task's ORIGINATING thread (TASK-1 audit column
+ * `chat_tasks.source_thread_id`, resolved company+agent scoped). The active pin is never a
+ * routing input (v2 §1.1/§14.3 R8): a task created on T1 delivers on T1 whatever thread the
+ * chat is pinned to, idle or busy. A missing task or missing origin is an explicit recorded
+ * skip (no pin fallback, H2/C3) — zero queue entries, and the claim already consumed for the
+ * event identity stays consumed (no retry promise). A lookup error PROPAGATES (surfaced, not
+ * a skip). A paused/archived agent or company is skipped (S4 — same class as the #196-B1
+ * runner guard: an inactive tenant must not be woken into an LLM turn). A duplicate seen by
+ * another replica is skipped (S2 — claim first, before any db work).
  */
 export async function handleTaskProgressEvent<A extends TaskProgressAgentRecord>(
   deps: TaskProgressBridgeDeps<A>,
@@ -169,10 +200,20 @@ export async function handleTaskProgressEvent<A extends TaskProgressAgentRecord>
     });
     return 'skipped:inactive';
   }
-  const threadId = await deps.getActiveThreadId({ companyId: event.companyId, agentId: event.agentId });
-  if (!threadId) return 'skipped:no-thread';
+  // TN-ORIGIN: authoritative scoped origin lookup. Errors propagate (C3: an error is an
+  // error, never a silent skip); absence gets an explicit recorded skip reason (H2).
+  const origin = await deps.getTaskOrigin(event);
+  if ('skip' in origin) {
+    deps.log?.warn(`[concierge-signal] task progress skipped (${origin.skip})`, {
+      agentId: event.agentId,
+      chatTaskId: event.chatTaskId,
+      companyId: event.companyId,
+      claimConsumed: true,
+    });
+    return `skipped:${origin.skip}`;
+  }
   const payload = taskProgressSignalPayload(event);
-  const delivered = await deps.deliver(agent, threadId, payload);
+  const delivered = await deps.deliver(agent, origin.threadId, payload);
   return delivered ? 'queued' : 'skipped:no-session';
 }
 

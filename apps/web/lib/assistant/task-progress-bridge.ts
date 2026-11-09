@@ -4,9 +4,13 @@
  * Runs once per web server process (started from instrumentation.ts). Pattern-subscribes the
  * company SSE channels, filters `chat_task_progress` events published by the scheduler's
  * TASK-RUNNER poller, and queues each one as a typed reactive `task-progress` signal on the
- * agent's PINNED free-chat thread — reusing the SAME AgentController session the dashboard
- * chat uses, so the signal shares the queue with the human's queued follow-ups (Mastra
- * ordering: idle → wakes the thread now; active → delivered after the current run).
+ * task's ORIGINATING free-chat thread (TASK-1 `chat_tasks.source_thread_id`, company+agent
+ * scoped) — reusing the SAME AgentController the dashboard chat uses. When the origin thread
+ * is the live user session's own thread the notice shares that session queue (Mastra
+ * ordering: idle → wakes the thread now; active → delivered after the current run). When it
+ * is not, delivery runs through an origin-bound distinct session created by the SAME real
+ * controller: the active pin is never read or written and no session's thread is switched
+ * (TN-ORIGIN / H3).
  *
  * Heartbeats and the existing SSE chip path are untouched: this is an extra consumer of the
  * event the scheduler already publishes (no parallel notification bus — product lock).
@@ -33,11 +37,13 @@ import {
   taskProgressClaimKey,
   type TaskProgressAgentRecord,
   type TaskProgressBridgeDeps,
+  type TaskProgressEvent,
+  type TaskProgressOriginResolution,
 } from './task-progress-signals';
 
 /** The `@tourbillon/db` slice getAgent reads (softs S10: injectable fake in tests). */
 export interface TaskProgressDbQuery {
-  agents: { findFirst(args: unknown): Promise<{ id: string; companyId: string; status: string } | undefined> };
+  agents: { findFirst(args: unknown): Promise<{ id: string; companyId: string; status: string; runtimeConfig?: unknown } | undefined> };
   companies: { findFirst(args: unknown): Promise<{ status: string } | undefined> };
 }
 
@@ -58,16 +64,26 @@ export interface TaskProgressDbTables {
 }
 
 /**
- * The lazy `@tourbillon/db` module slice getAgent consumes on the DEFAULT path (softs S15):
- * the drizzle instance behind `db.query.*` plus the table objects handed to `eq`. Injectable
- * so a test can assert the DEFAULT path actually queries the module's `db` EXPORT — the B1
- * regression (passing the module namespace itself, which has no `query`) fails against an
- * object identity the fake module controls, without a live Postgres.
+ * The `@tourbillon/db` module slice the bridge consumes on the DEFAULT path (softs S15):
+ * the drizzle instance behind `db.query.*` plus the table objects handed to `eq`, plus the
+ * TN-ORIGIN scoped task lookup (H2). Injectable so a test can pin that the DEFAULT path
+ * actually queries the module's `db` EXPORT — the B1 regression (passing the module
+ * namespace itself, which has no `query`) fails against an object identity the fake module
+ * controls, without a live Postgres.
  */
 export interface TaskProgressDbModule {
   db: { query: TaskProgressDbQuery };
   agents: TaskProgressDbTables['agents'];
   companies: TaskProgressDbTables['companies'];
+  /**
+   * TN-ORIGIN (H2): the scoped chat-task read. MUST be the module's own `getChatTask`
+   * (company+agent scoped `chat_tasks` query) — a foreign-scope id never resolves to another
+   * tenant's row. Only `sourceThreadId` is consumed here.
+   */
+  getChatTask(
+    scope: { companyId: string; agentId: string },
+    input: { id: string },
+  ): Promise<{ sourceThreadId: string | null } | null>;
 }
 
 /** A seen-transition claim outlives any plausible SSE redelivery window (pub/sub has none). */
@@ -81,7 +97,10 @@ export const TASK_PROGRESS_CLAIM_TTL_SECONDS = 900;
  * export types — an `as unknown as TaskProgressDbModule` erasure no longer fits here, because
  * the interface's minimal `db` (`{ query }`) is not assignable to the real drizzle client.
  */
-export type RealDbModuleSlice = Pick<typeof import('@tourbillon/db'), 'db' | 'agents' | 'companies'>;
+export type RealDbModuleSlice = Pick<
+  typeof import('@tourbillon/db'),
+  'db' | 'agents' | 'companies' | 'getChatTask'
+>;
 
 /**
  * S17 compile pin: build the bridge's db-module slice from the REAL exports. `satisfies`
@@ -96,6 +115,9 @@ export function sliceRealDbModule(mod: typeof import('@tourbillon/db')): RealDbM
     db: mod.db,
     agents: mod.agents,
     companies: mod.companies,
+    // TN-ORIGIN (H2): the module's OWN scoped getChatTask — the default origin lookup runs
+    // the real company+agent-scoped query, not an ad-hoc reimplementation.
+    getChatTask: mod.getChatTask,
   } satisfies TaskProgressDbModule;
 }
 
@@ -169,10 +191,43 @@ export async function getAgent(
     companyId: row.companyId,
     status: row.status,
     companyStatus: company.status,
+    // Pass through the NOT NULL runtime_config column. Stripping it makes the
+    // origin-bound H3 session path throw on `runtimeConfig.mail` in skill-loader
+    // / agent-factory when a controller is assembled from this record.
+    runtimeConfig: row.runtimeConfig ?? {},
   };
 }
 
-// ─── deliver policy (session lookup / idle retarget / busy skip) ───────────────────────────
+// ─── TN-ORIGIN: authoritative scoped origin lookup (H2) ──────────────────────────────────
+
+/**
+ * Resolve the task's originating thread from the AUTHORITATIVE `chat_tasks.source_thread_id`
+ * row, company+agent scoped (the event's own tenant pair — a task id belonging to another
+ * company/agent NEVER resolves to a foreign thread, R8; C-SCOPE-LOOKUP kills scope drops).
+ *
+ * Outcomes (H2 / reconciliation C3):
+ *  - missing task            -> { skip: 'task-not-found' }  (recorded skip, claim consumed, no retry promise)
+ *  - present, null/empty origin -> { skip: 'missing-origin' } (legacy/malformed row)
+ *  - present with origin     -> { threadId }                 (the only routing source — the pin is never consulted)
+ *  - DB ERROR                -> PROPAGATES (surfaced as an error, never a silent skip).
+ *
+ * Lazy like getAgent: the `@tourbillon/db` import happens on the default path only.
+ */
+export async function getTaskOriginFromDb(
+  event: TaskProgressEvent,
+  sources: { loadDb?: () => Promise<TaskProgressDbModule> } = {},
+): Promise<TaskProgressOriginResolution> {
+  const real = await (sources.loadDb ?? loadRealDbModule)();
+  const row = await real.getChatTask(
+    { companyId: event.companyId, agentId: event.agentId },
+    { id: event.chatTaskId },
+  );
+  if (!row) return { skip: 'task-not-found' };
+  if (!row.sourceThreadId) return { skip: 'missing-origin' };
+  return { threadId: row.sourceThreadId };
+}
+
+// ─── deliver policy (origin-targeted session selection; NO pin mutation) ───────────────────
 
 /** The Session slice deliver() uses (structurally duck-typed, like the pure helpers). */
 export interface DeliverSession extends QueueSignalSession {
@@ -196,12 +251,31 @@ export interface DeliverDeps {
 }
 
 /**
+ * Deterministic session-id scope for the ORIGIN-BOUND delivery session of one free-chat
+ * agent. The user's live session stays at `chatSessionId(resourceId, scope)` untouched; the
+ * notice is queued through a DISTINCT real session `${scope}::origin:${threadId}` created by
+ * the SAME controller (H3 feasibility: Mastra 1.81 keys
+ * the run queue by (resourceId, threadId), so an idle origin wakes immediately and a busy
+ * origin queues behind its OWN run, while an unrelated busy thread is simply a different
+ * key — no pin mutation, no thread switching, no drop-because-someone-is-busy).
+ */
+export function taskProgressOriginScope(scope: string, threadId: string): string {
+  return `${scope}::origin:${threadId}`;
+}
+
+/**
  * Build the deliver policy over injected chat plumbing (S1: testable with a fake controller).
  *
- * Queue one payload on the agent's free-chat AG-UI session (the one the dashboard uses:
- * resourceId = company free-chat, scope = agui:<agentId>). An idle session on another thread
- * is moved onto the pinned thread first (same rule as Clear-chat retargeting); a session busy
- * on another thread is left alone — hijacking a live run's thread is not what progress is for.
+ * Queue one payload on the ORIGIN thread's free-chat AG-UI session (resourceId = company
+ * free-chat, scope = agui:<agentId>):
+ *  - the live user session is already bound to the origin thread -> share its queue (the
+ *    notice serializes behind the human's own queued work on the ORIGIN thread, Mastra-owned);
+ *  - otherwise (user session on another thread, idle or busy, or no session yet) -> deliver
+ *    through the origin-bound session created via the SAME real controller.
+ *
+ * HARD RULES (v2 §1.1/§1.3, §14.3 R1–R3, C4–C6): the active pin is never read or written
+ * here; an existing session's thread is NEVER switched; a busy UNRELATED thread is never a
+ * reason to drop or delay this notice. Only the origin thread's own busy run serializes it.
  */
 export function createDeliver(deps: DeliverDeps) {
   return async function deliver(
@@ -212,14 +286,20 @@ export function createDeliver(deps: DeliverDeps) {
     const resourceId = await deps.resourceId(agent);
     const scope = aguiSessionScope(agent);
     const controller = await deps.getOrCreateChatController(agent);
-    let session = await controller.getSessionByResource(resourceId, scope);
-    if (!session) {
-      session = await deps.getChatSession(controller, agent, { resourceId, scope, threadId });
-    } else if (session.thread.getId() !== threadId) {
-      if (session.getCurrentRunId()) return false;
-      await session.thread.switch({ threadId });
+    const userSession = await controller.getSessionByResource(resourceId, scope);
+    if (userSession && userSession.thread.getId() === threadId) {
+      // Same-thread fast path: one shared queue with the human's queued follow-ups.
+      await queueTaskProgressSignal(userSession, payload);
+      return true;
     }
-    await queueTaskProgressSignal(session, payload);
+    // Origin-bound distinct session (never touch the user session's thread, idle or busy).
+    const originSession = await deps.getChatSession(controller, agent, {
+      resourceId,
+      scope: taskProgressOriginScope(scope, threadId),
+      threadId,
+    });
+    if (!originSession) return false;
+    await queueTaskProgressSignal(originSession, payload);
     return true;
   };
 }
@@ -264,13 +344,19 @@ export async function realDeliverGetOrCreateChatController(
   const chat = await loadChat();
   const controller = await chat.getOrCreateChatController(agent as ChatAgentSeam as Agent);
   // Mastra 1.81: the live session for (resourceId, scope) is getSession(chatSessionId(...)).
-  return {
+  // Attach the lookup helper to the REAL controller so origin-bound getChatSession
+  // can still call createSession (H3). A bare wrapper object is not an AgentController.
+  return Object.assign(controller, {
     getSessionByResource: (resourceId: string, scope: string) =>
       controller.getSession(chatSessionId(resourceId, scope)),
-  };
+  });
 }
 
-const realDeliver = createDeliver({
+/**
+ * The PRODUCTION deliver policy (default `deliver` dep). Exported so the certification
+ * harness can assert the default path actually wires THIS function (no injected deliver).
+ */
+export const realDeliver = createDeliver({
   resourceId: async (agent) => (await import('@/lib/chat')).chatResourceId(agent.companyId),
   // S18 + S19b: two CHECKED assertion steps through the named `ChatAgentSeam` — never through
   // `unknown`/`any` (the S18/S19a eslint rules in eslint.config.mjs flag those). The first
@@ -304,6 +390,7 @@ export function redisClaimClient(client: RedisClaimCommands = new IORedis(proces
         return (await client.set(key, '1', 'EX', ttlSeconds, 'NX')) === 'OK';
       } catch (err) {
         // Fail OPEN: a duplicate signal is cheaper than a dropped notification.
+        // (TN-CLAIM-FAIL-OPEN: this fail-open semantics is UNCHANGED by the lifecycle work.)
         console.warn('[concierge-signal] claim failed; delivering anyway (at-least-once)', {
           key,
           error: err instanceof Error ? err.message : String(err),
@@ -314,45 +401,146 @@ export function redisClaimClient(client: RedisClaimCommands = new IORedis(proces
   };
 }
 
+/** A claim client the BRIDGE created and therefore owns (stop closes it). */
+export interface OwnedClaimClient extends ClaimClient {
+  quit(): Promise<void>;
+}
+
+/**
+ * Build a bridge-owned claim client on its own connection (a subscriber connection cannot
+ * issue commands). The bridge's stop() quits exactly this client — never a caller-injected
+ * one (TN-STOP-BORROWED-CLIENTS: injected deps stay caller-owned in every branch).
+ */
+export function createOwnedRedisClaimClient(
+  url: string = process.env.REDIS_URL ?? 'redis://localhost:6379',
+): OwnedClaimClient {
+  const client = new IORedis(url, { maxRetriesPerRequest: null });
+  const claimClient = redisClaimClient(client);
+  return {
+    claim: (key, ttlSeconds) => claimClient.claim(key, ttlSeconds),
+    quit: async () => {
+      await client.quit();
+    },
+  };
+}
+
 // ─── deps assembly + subscriber loop ───────────────────────────────────────────────────────
 
 export interface TaskProgressBridgeWiring {
   getAgent?: (agentId: string) => Promise<TaskProgressAgentRecord | null>;
-  getActiveThreadId?: (scope: { companyId: string; agentId: string }) => Promise<string | null>;
+  /**
+   * TN-ORIGIN (H2): scoped origin resolution. Default = getTaskOriginFromDb (real scoped
+   * getChatTask). The active pin (assistant_active_threads) is NOT part of routing any more.
+   */
+  getTaskOrigin?: (event: TaskProgressEvent) => Promise<TaskProgressOriginResolution>;
   deliver?: (agent: TaskProgressAgentRecord, threadId: string, payload: TaskProgressSignalPayload) => Promise<boolean>;
+  /** Borrowed claim client: the bridge NEVER closes an injected client (C7). */
   claimClient?: ClaimClient;
   log?: { warn: (msg: string, data?: Record<string, unknown>) => void };
 }
 
-/** Assemble the pure-core deps from (overridable) real collaborators. */
+/**
+ * Assemble the pure-core deps from (overridable) real collaborators.
+ * NOTE: when no `claimClient` is injected this assembles its OWN claim client (the caller of
+ * the standalone assembly is then responsible for its lifetime — the BRIDGE lifecycle path
+ * always injects the (owned-or-borrowed) client itself so stop() can close exactly what the
+ * bridge created).
+ */
 export function buildTaskProgressBridgeDeps(wiring: TaskProgressBridgeWiring = {}): TaskProgressBridgeDeps<TaskProgressAgentRecord> {
-  const claimClient = wiring.claimClient ?? redisClaimClient();
+  const claimClient = wiring.claimClient ?? createOwnedRedisClaimClient();
   return {
     getAgent: wiring.getAgent ?? getAgent,
-    getActiveThreadId:
-      wiring.getActiveThreadId ??
-      ((scope) => import('@/lib/assistant/thread-store').then((m) => m.getActiveAssistantThreadId(scope))),
+    getTaskOrigin: wiring.getTaskOrigin ?? ((event) => getTaskOriginFromDb(event)),
     deliver: wiring.deliver ?? realDeliver,
     claimEvent: (event) => claimClient.claim(taskProgressClaimKey(event), TASK_PROGRESS_CLAIM_TTL_SECONDS),
     log: wiring.log ?? { warn: (msg, data) => console.warn(msg, data ?? '') },
   };
 }
 
+// ─── lifecycle: owned handle with ACK, bounded drain, idempotent stop (H4) ────────────────
+
 /** The Subscriber slice the bridge uses (an IORedis satisfies it structurally). */
 export interface BridgeSubscriber {
   on(event: 'pmessage', listener: (pattern: string, channel: string, message: string) => void): unknown;
+  /** Exact-handler removal on stop (TN-TEARDOWN: the retained exact handler must be detached). */
+  off?(event: 'pmessage', listener: (pattern: string, channel: string, message: string) => void): unknown;
+  /** Resolves on the redis psubscribe ACK — the bridge's ready barrier (B-SUB). */
   psubscribe(pattern: string): Promise<unknown>;
+  punsubscribe?(pattern?: string): Promise<unknown>;
+  quit?(): Promise<unknown>;
+  disconnect?(): unknown;
+}
+
+/** Production bound for draining admitted deliveries on stop (H4). Timeouts FAIL (C7). */
+export const TASK_PROGRESS_DRAIN_TIMEOUT_MS = 10_000;
+
+export interface TaskProgressBridgeStopReport {
+  /** Events admitted by the pmessage handler since start. */
+  admitted: number;
+  /** Admitted deliveries that settled (success OR logged error). */
+  completed: number;
+  /** Still-open admitted deliveries when the drain window closed. */
+  pending: number;
+  drained: boolean;
+  timedOut: boolean;
+  /** Owned clients closed by this stop (borrowed clients never appear here). */
+  closedOwnedClients: string[];
+  /** Owned resources that could not be settled — reported, never hidden. */
+  unsettled: string[];
+  punsubscribed: boolean;
+}
+
+/** stop() REJECTS with this on a drain timeout, carrying the full report (C7). */
+export class TaskProgressBridgeStopError extends Error {
+  readonly name = 'TaskProgressBridgeStopError';
+  constructor(
+    message: string,
+    readonly report: TaskProgressBridgeStopReport,
+  ) {
+    super(`${message} (admitted=${report.admitted} completed=${report.completed} pending=${report.pending} unsettled=${report.unsettled.join(',') || 'none'})`);
+  }
+}
+
+export interface TaskProgressBridgeHandle {
+  /** Resolves when the bridge-OWNED psubscribe is ACKed (B-SUB). Rejects on subscribe failure. */
+  ready: Promise<void>;
+  /** Idempotent async stop: repeat calls return the same promise/report (TN-STOP-IDEMPOTENT). */
+  stop(): Promise<TaskProgressBridgeStopReport>;
 }
 
 export interface StartBridgeOptions extends TaskProgressBridgeWiring {
   createSubscriber?: () => BridgeSubscriber;
+  /** Override the bridge-owned claim factory (tests). Ignored when claimClient is injected. */
+  createClaimClient?: () => OwnedClaimClient;
+  /**
+   * Drain bound for stop(). Production default 10 s; ONLY the deterministic timeout cell
+   * configures a shorter value — no other cell waits on the bound (C7).
+   */
+  drainTimeoutMs?: number;
+}
+
+interface BridgeInstance {
+  handle: TaskProgressBridgeHandle;
+  stopPromise?: Promise<TaskProgressBridgeStopReport>;
+  stopping: boolean;
+  readyPromise?: Promise<void>;
+  readyFailure?: unknown;
+  subscriber: BridgeSubscriber;
+  subscriberOwned: boolean;
+  claim: OwnedClaimClient | null;
+  claimOwned: boolean;
+  handler: (pattern: string, channel: string, message: string) => void;
+  admitted: Set<Promise<void>>;
+  counters: { admitted: number; completed: number };
+  punsubscribed: boolean;
+  drainTimeoutMs: number;
 }
 
 // S18: intersection cast instead of `globalThis as unknown as {...}` — still one checked
 // step (the `typeof globalThis` leg keeps every existing global visible; only the optional
 // bridge slot is added).
 const globalForBridge = globalThis as typeof globalThis & {
-  tourbillonTaskProgressBridge?: { started: boolean };
+  tourbillonTaskProgressBridge?: BridgeInstance;
 };
 
 function defaultSubscriber(): BridgeSubscriber {
@@ -361,31 +549,228 @@ function defaultSubscriber(): BridgeSubscriber {
   });
 }
 
-/** Start the redis → queueSignal bridge (idempotent per process). `options` are test seams. */
-export function startTaskProgressSignalBridge(options: StartBridgeOptions = {}): void {
-  if (globalForBridge.tourbillonTaskProgressBridge) return;
-  globalForBridge.tourbillonTaskProgressBridge = { started: true };
-
-  const sub = (options.createSubscriber ?? defaultSubscriber)();
-  const deps = buildTaskProgressBridgeDeps(options);
-  sub.on('pmessage', (_pattern: string, channel: string, message: string) => {
-    if (!channel.startsWith('sse:')) return;
-    const event = parseTaskProgressMessage(message);
-    if (!event) return;
-    void handleTaskProgressEvent(deps, event).catch((err) => {
-      console.warn('[concierge-signal] task-progress delivery failed', {
-        agentId: event.agentId,
-        chatTaskId: event.chatTaskId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T | `__timeout__:${string}`> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<`__timeout__:${string}`>((resolve) => {
+    timer = setTimeout(() => resolve(`__timeout__:${label}`), ms);
   });
-  void sub.psubscribe('sse:*').catch((err) => {
-    console.warn('[concierge-signal] bridge subscribe failed', err);
+  return Promise.race([p, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
   });
 }
 
-/** Test hook: let startTaskProgressSignalBridge run again in-process (mirrors the guard). */
-export function __resetTaskProgressSignalBridgeForTests(): void {
-  delete globalForBridge.tourbillonTaskProgressBridge;
+const isTimeout = (v: unknown): boolean => typeof v === 'string' && v.startsWith('__timeout__:');
+
+/**
+ * Start the redis → queueSignal bridge (idempotent per process). Returns the OWNERSHIP
+ * handle (TN-SUBSCRIBE-ACK / TN-START-CONCURRENT / TN-STOP-*):
+ *  - the singleton slot (and therefore concurrent starts) settles on ONE subscription: the
+ *    instance is installed in the global slot BEFORE awaiting the psubscribe ACK, so a
+ *    second start never double-subscribes (not merely a flag flipped after the ACK);
+ *  - `ready` resolves on the bridge-OWNED psubscribe ACK (B-SUB), rejects on failure after
+ *    owned clients are cleaned up, leaving the slot clear for a safe retry;
+ *  - stop() detaches the exact pmessage handler, punsubscribes, drains admitted deliveries
+ *    under the bounded policy (timeout = FAILURE with counts, never a false-clean pass),
+ *    then quits ONLY the clients the bridge created. Borrowed clients are never closed.
+ *    Restart never reuses quit clients (fresh factories per start).
+ *
+ * `options` are test seams. Production callers (instrumentation) use the defaults and may
+ * ignore the handle.
+ */
+export function startTaskProgressSignalBridge(options: StartBridgeOptions = {}): TaskProgressBridgeHandle {
+  const existing = globalForBridge.tourbillonTaskProgressBridge;
+  if (existing && !existing.stopping) return existing.handle;
+  if (existing?.stopping) {
+    // Start during stop: await the in-flight stop, then start fresh — never stack a
+    // subscription onto a closing instance, never leak a client. The placeholder handle
+    // delegates so callers get ONE owned subscription once the fresh start settles.
+    const started = existing.stopPromise!.then(() => startTaskProgressSignalBridge(options));
+    return {
+      ready: started.then((handle) => handle.ready),
+      stop: () => started.then((handle) => handle.stop()),
+    };
+  }
+
+  const subscriber = (options.createSubscriber ?? defaultSubscriber)();
+  const subscriberOwned = !options.createSubscriber;
+  // Claim ownership: an injected claimClient stays borrowed (never closed by stop); with no
+  // injection the bridge CREATES its own owned client and closes it on stop.
+  const ownedClaim: OwnedClaimClient | null = options.claimClient
+    ? null
+    : (options.createClaimClient ?? createOwnedRedisClaimClient)();
+  const effectiveWiring: TaskProgressBridgeWiring = ownedClaim
+    ? { ...options, claimClient: ownedClaim }
+    : options;
+
+  const instance: BridgeInstance = {
+    handle: undefined as never,
+    stopping: false,
+    subscriber,
+    subscriberOwned,
+    claim: ownedClaim,
+    claimOwned: !!ownedClaim,
+    handler: undefined as never,
+    admitted: new Set(),
+    counters: { admitted: 0, completed: 0 },
+    punsubscribed: false,
+    drainTimeoutMs: options.drainTimeoutMs ?? TASK_PROGRESS_DRAIN_TIMEOUT_MS,
+  };
+
+  const deps = buildTaskProgressBridgeDeps(effectiveWiring);
+
+  instance.handler = (pattern: string, channel: string, message: string) => {
+    if (instance.stopping) return; // refuse NEW admissions once stop is in flight
+    if (!channel.startsWith('sse:')) return;
+    const event = parseTaskProgressMessage(message);
+    if (!event) return;
+    instance.counters.admitted += 1;
+    const p: Promise<void> = (async () => {
+      try {
+        await handleTaskProgressEvent(deps, event);
+      } catch (err) {
+        // Handler errors SURFACE (warn with full error; C3: an error is never a silent skip)
+        // and count as completed for the drain — they must not hold stop hostage.
+        console.warn('[concierge-signal] task-progress delivery failed', {
+          agentId: event.agentId,
+          chatTaskId: event.chatTaskId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      } finally {
+        instance.counters.completed += 1;
+      }
+    })();
+    instance.admitted.add(p);
+    void p.finally(() => instance.admitted.delete(p));
+  };
+  subscriber.on('pmessage', instance.handler);
+
+  // Install the singleton BEFORE awaiting the ACK: concurrent starts resolve to this same
+  // handle (exactly ONE owned subscription), and stop-before-ready is representable.
+  globalForBridge.tourbillonTaskProgressBridge = instance;
+
+  const readyPromise = subscriber
+    .psubscribe('sse:*')
+    .then(() => undefined)
+    .catch(async (err: unknown) => {
+      // Failed start: release every owned client AND clear the singleton before
+      // ready rejects, so a retry cannot reuse this handle or its sockets
+      // (TN-START-FAIL-RETRY). Do not fire-and-forget cleanup.
+      instance.readyFailure = err;
+      try {
+        await closeOwnedClients(instance);
+      } finally {
+        if (globalForBridge.tourbillonTaskProgressBridge === instance) {
+          delete globalForBridge.tourbillonTaskProgressBridge;
+        }
+      }
+      throw err;
+    });
+  instance.readyPromise = readyPromise;
+
+  const stop = (): Promise<TaskProgressBridgeStopReport> => {
+    if (instance.stopPromise) return instance.stopPromise; // idempotent
+    instance.stopping = true;
+    instance.stopPromise = settleStop(instance);
+    return instance.stopPromise;
+  };
+
+  instance.handle = { ready: readyPromise, stop };
+  return instance.handle;
+}
+
+async function settleStop(instance: BridgeInstance): Promise<TaskProgressBridgeStopReport> {
+  // 1) Detach the exact pmessage handler and stop admitting.
+  try {
+    instance.subscriber.off?.('pmessage', instance.handler);
+  } catch {
+    /* detach failure never masks the drain result; reported via unsettled below if quit fails */
+  }
+  // 2) Settle the subscription startup deterministically — bounded, even if the ACK never
+  //    arrives or failed (TN-STOP-BEFORE-ACK / TN-STOP-ACK-FAILURE: never hang).
+  if (instance.readyPromise) {
+    await withTimeout(instance.readyPromise.catch(() => undefined), instance.drainTimeoutMs, 'subscription-settle');
+  }
+  // 3) Punsubscribe (NUMPAT returns to baseline; TN-TEARDOWN).
+  try {
+    const r = await withTimeout(Promise.resolve(instance.subscriber.punsubscribe?.('sse:*')), instance.drainTimeoutMs, 'punsubscribe');
+    instance.punsubscribed = !isTimeout(r);
+  } catch {
+    instance.punsubscribed = false;
+  }
+  // 4) Drain admitted deliveries under the bound (H4). A timeout is a FAILURE, not a pass.
+  const pendingNow = [...instance.admitted];
+  const drainResult = pendingNow.length
+    ? await withTimeout(Promise.allSettled(pendingNow).then(() => true), instance.drainTimeoutMs, 'drain')
+    : true;
+  const drained = drainResult === true;
+  // 5) Close owned clients ONLY (borrowed stay open for their caller).
+  const closed = await closeOwnedClients(instance);
+  if (globalForBridge.tourbillonTaskProgressBridge === instance) {
+    delete globalForBridge.tourbillonTaskProgressBridge; // clear the singleton only after shutdown
+  }
+  const report: TaskProgressBridgeStopReport = {
+    admitted: instance.counters.admitted,
+    completed: instance.counters.completed,
+    pending: instance.admitted.size,
+    drained,
+    timedOut: !drained,
+    closedOwnedClients: closed.closed,
+    unsettled: closed.unsettled,
+    punsubscribed: instance.punsubscribed,
+  };
+  if (!drained) {
+    throw new TaskProgressBridgeStopError('task-progress bridge stop: admitted deliveries did not settle within the drain bound', report);
+  }
+  return report;
+}
+
+async function closeOwnedClients(
+  instance: BridgeInstance,
+): Promise<{ closed: string[]; unsettled: string[] }> {
+  const closed: string[] = [];
+  const unsettled: string[] = [];
+  if (instance.subscriberOwned) {
+    try {
+      const r = await withTimeout(Promise.resolve(instance.subscriber.quit?.()), instance.drainTimeoutMs, 'subscriber-quit');
+      if (isTimeout(r)) throw new Error('quit timed out');
+      closed.push('subscriber');
+    } catch {
+      // last-resort force-close so the process can still exit naturally
+      try {
+        instance.subscriber.disconnect?.();
+        closed.push('subscriber:forced-disconnect');
+      } catch {
+        unsettled.push('subscriber');
+      }
+    }
+  }
+  if (instance.claimOwned && instance.claim) {
+    try {
+      const r = await withTimeout(instance.claim.quit(), instance.drainTimeoutMs, 'claim-quit');
+      if (isTimeout(r)) throw new Error('quit timed out');
+      closed.push('claim');
+    } catch {
+      unsettled.push('claim');
+    }
+  }
+  return { closed, unsettled };
+}
+
+/**
+ * Test hook: fully stops the running bridge (awaits the REAL stop, not a flag flip) so
+ * `startTaskProgressSignalBridge` can run again in-process with FRESH clients. A stop
+ * failure surfaces but never hangs the caller past the drain bound.
+ */
+export async function __resetTaskProgressSignalBridgeForTests(): Promise<void> {
+  const instance = globalForBridge.tourbillonTaskProgressBridge;
+  if (!instance) return;
+  try {
+    await instance.handle.stop();
+  } catch {
+    /* stop already reported its failure via the rejection; reset must not mask it further
+       nor hang — the slot is cleared below so the next start cannot reuse these clients. */
+    if (globalForBridge.tourbillonTaskProgressBridge === instance) {
+      delete globalForBridge.tourbillonTaskProgressBridge;
+    }
+  }
 }
