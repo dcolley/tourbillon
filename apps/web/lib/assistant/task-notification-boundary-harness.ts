@@ -72,6 +72,7 @@ export const claimOutcomeLog: Array<{ key?: string; outcome: boolean; detail?: s
 let redisObserver: Redis | null = null;
 let accountingClaim: { quit: () => Promise<void> } | null = null;
 let ackMutantSubscriber: Redis | null = null;
+let liveUserSession: { getCurrentRunId(): string | null | undefined } | null = null;
 
 export async function startRedisObserver(): Promise<void> {
   if (redisObserver) return;
@@ -724,6 +725,7 @@ export async function buildFixture(opts: {
   }
 
   const userSession = await chatMod.getChatSession(controllerA, recordA as never, { threadId: t2 });
+  liveUserSession = userSession as { getCurrentRunId(): string | null | undefined };
   // Seed sibling threads on DISTINCT session scopes so we do not switch the user session.
   await chatMod.getChatSession(controllerA, recordA as never, { threadId: t1, scope: `tn-seed:${t1}` });
   await chatMod.getChatSession(controllerA, recordA as never, { threadId: t3, scope: `tn-seed:${t3}` });
@@ -932,13 +934,67 @@ export async function bridgeStart(opts: Record<string, unknown> = {}): Promise<v
     };
   }
   if (control === 'C-BUSY-OTHER-DROP') {
-    extra.deliver = async () => false;
+    extra.deliver = async (
+      agent: { id: string; companyId: string },
+      threadId: string,
+      payload: unknown,
+    ) => {
+      // Drop only when some live run is active (origin held or unrelated pin held).
+      // Idle cells have no current run id, so they must still deliver (the idle/busy split).
+      if (liveUserSession?.getCurrentRunId()) {
+        tnTrace('C-BUSY-OTHER-DROP: dropped because a live run is active');
+        return false;
+      }
+      tnTrace('C-BUSY-OTHER-DROP: idle — forwarding to realDeliver');
+      return bridgeMod!.realDeliver(agent as never, threadId, payload as never);
+    };
   }
-  if (control === 'C-WAKE' || control === 'C-SETTLE') {
-    extra.deliver = async () => true; // pretend delivered; nothing queued
+  if (control === 'C-WAKE') {
+    extra.deliver = async () => true; // B-SUB up; pretend delivered; nothing queued or persisted
+  }
+  if (control === 'C-SETTLE') {
+    extra.deliver = async (agent: { id: string; companyId: string }, threadId: string, payload: unknown) => {
+      // Reach a valid origin-thread session (same controller / default scope as the
+      // live chat), queue so B-QUEUE is observable, then settle immediately with
+      // ifActive/ifIdle persist — write the terminal signal to memory while the
+      // origin run is still held (B-NO-EARLY). Distinct from C-WAKE (no pretend-delivered).
+      const chat = chatMod!;
+      const record = (await db.select().from(agents)).find((r) => r.id === agent.id);
+      const controller = await chat.getOrCreateChatController(record as never);
+      const session = await chat.getChatSession(controller, record as never, { threadId });
+      const { queueTaskProgressSignal } = await import('./task-progress-signals');
+      await queueTaskProgressSignal(session as never, payload as never);
+      const body = payload as { tagName?: string; attributes?: Record<string, unknown>; contents?: string };
+      const send = session as unknown as {
+        sendSignal: (
+          input: Record<string, unknown>,
+          opts?: Record<string, unknown>,
+        ) => { accepted: Promise<unknown>; persisted?: Promise<unknown> };
+      };
+      const sent = send.sendSignal(
+        {
+          type: 'reactive',
+          tagName: body.tagName,
+          attributes: body.attributes,
+          contents: body.contents,
+        },
+        {
+          ifActive: { behavior: 'persist' },
+          ifIdle: { behavior: 'persist' },
+        },
+      );
+      await sent.accepted;
+      if (sent.persisted) await sent.persisted;
+      tnTrace('C-SETTLE: persisted terminal signal while a run may still be held');
+      return true;
+    };
   }
   if (control === 'C-BRIDGE') {
-    return;
+    // Start the subscriber (B-SUB) but refuse to enter the queue.
+    extra.deliver = async () => {
+      tnTrace('C-BRIDGE: subscribed but refusing queue entry');
+      return false;
+    };
   }
   if (control === 'C-DEDUPE') {
     extra.claimClient = {
