@@ -80,6 +80,10 @@ function parseTap(output) {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  // S355-S5: every certification log must carry the SHA of the tree under test.
+  const headSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: join(WEB_ROOT, '..', '..'), encoding: 'utf8' }).stdout.trim();
+  console.log(`run-task-notification-tests: HEAD=${headSha}`);
+
   if (process.env.TN_DISPOSABLE !== '1') {
     console.error('run-task-notification-tests: TN_DISPOSABLE=1 is required');
     process.exit(1);
@@ -187,6 +191,9 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
       console.error('TN-CAPABLE: capability-gated INCOMPAT is forbidden on FIXED', incompat);
       process.exit(1);
     }
+    console.log(
+      `TN-CAPABLE: TN_REQUIRE_FIXED_CAPABLE=1 enforced — ${verdicts.length} verdicts read, 0 INCOMPAT (FIXED capability accepted)`,
+    );
   }
 
   process.exit(result.status ?? 1);

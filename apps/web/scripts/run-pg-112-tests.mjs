@@ -5,6 +5,9 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const WEB_ROOT = fileURLToPath(new URL('..', import.meta.url));
+// S355-S5: every suite log must carry the SHA of the tree under test (no stale SHAs).
+const headSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: join(WEB_ROOT, '..', '..'), encoding: 'utf8' }).stdout.trim();
+console.log(`run-pg-112-tests: HEAD=${headSha}`);
 const manifest = JSON.parse(readFileSync(join(WEB_ROOT, 'lib/auth/vault-oauth-state-112.pg-manifest.json'), 'utf8'));
 const url = new URL(process.env.DATABASE_URL ?? 'postgres://x@invalid/none');
 if (!['127.0.0.1', 'localhost'].includes(url.hostname) || !url.pathname.slice(1).startsWith('tb112_')) {
