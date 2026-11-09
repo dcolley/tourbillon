@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db, issues, activityLog, shouldInsertCheckoutActivity } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
 import { authenticateAgentToken } from '@/lib/auth/agent-token-auth';
+import { authenticatedRunId } from '@/lib/auth/run-id-header';
 import { logAgentApiRequest, logAgentApiResponse, summarizeBody } from '@/lib/agent-api-trace';
 import { isStaleCheckoutRun } from '@/lib/checkout-lock';
 
@@ -16,12 +17,14 @@ export async function POST(
   const runCtx = await authenticateAgentToken(token);
   if (!runCtx) return NextResponse.json({ error: 'Invalid token' }, { status: 401 });
 
-  const runId = req.headers.get('x-paperclip-run-id') ?? runCtx.runId;
+  const runIdCheck = authenticatedRunId(req.headers, runCtx);
+  if (runIdCheck.denied) return runIdCheck.denied;
+  const runId = runIdCheck.runId;
   const body = await req.json() as { agentId: string; expectedStatuses: string[] };
 
   logAgentApiRequest(`/api/issues/${issueId}/checkout`, 'POST', runCtx, {
     issueId: issueId,
-    headerRunId: runId,
+    authRunId: runId,
     body: summarizeBody(body),
   });
 

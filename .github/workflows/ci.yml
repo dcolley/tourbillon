@@ -6,6 +6,7 @@ name: CI
 # gate only ever ran on developer machines, so type regressions reached review.
 # S328-S4: the `unit-tests` job below runs the service-FREE subset (shared, scheduler
 # minus packages/scheduler/scripts/run-unit-tests.mjs SERVICE_BOUND, apps/web lib/harness and lib/chat-send-key.test.ts (S305-S1)).
+# Suites that need Postgres/Redis stay a local/pre-merge concern until an infra recipe exists.
 # S316-S4 / S322-S4: shared + scheduler are linted alongside company-computer, so the
 # harness adapters (hermes-adapter, opencode-adapter, wake-runner) are no longer a blind spot.
 # Both are pinned by packages/scheduler/src/ci-coverage-s316-s4-s328-s4.test.ts.
@@ -64,6 +65,41 @@ jobs:
       - run: pnpm --filter @tourbillon/shared test:unit
       - run: pnpm --filter @tourbillon/scheduler test:unit
       - run: pnpm --filter web test:harness
+
+  # #114: real-Postgres evidence for the run-id header fix. Disposable service container only
+  # (no live DB, no credentials, no deploy); schema applied with the repo's normal migration
+  # runner to that throwaway database. Pinned file + test names: apps/web/lib/auth/run-id-header-114.pg-manifest.json.
+  pg-114-run-id-header:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: tb114
+          POSTGRES_PASSWORD: tb114
+          POSTGRES_DB: tb114_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tb114 -d tb114_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://tb114:tb114@127.0.0.1:5432/tb114_test
+      REDIS_URL: redis://127.0.0.1:1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @tourbillon/db migrate
+      - run: node scripts/run-pg-114-tests.mjs
+        working-directory: apps/web
 
   # Task-notification certification (v2.1): disposable pgvector/pg16 + Redis 7,
   # existing drizzle journal only (no new migration), exact pinned B command.
