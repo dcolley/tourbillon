@@ -32,6 +32,13 @@
     "write failure via disposable PG trigger \u2192 callback_failed; retry denied; fresh authorize ok",
     "not_configured and unsupported_provider before consume; provider tokenData.error after consume",
     "non-disclosure canaries: code, token, client secret, nonce absent from logs/bodies/Location",
-    "malformed and wrong-length signatures \u2192 exact invalid_state_signature (not callback_failed)"
+    "malformed and wrong-length signatures \u2192 exact invalid_state_signature (not callback_failed)",
+    "callback company_user signed state \u2192 user_scope_unsupported; no consume/exchange/write",
+    "signed A-state naming agent B1 \u2192 agent_not_in_company; no consume/exchange/write",
+    "tamper agentId/scope/nonce/exp without resign \u2192 invalid_state_signature; nothing consumed",
+    "DB error during consume \u2192 callback_failed; no exchange/write; row intact",
+    "case 8 arrival-order: old write-failure response has no clear; new flow ok",
+    "consume DELETE keeps identifier predicate; foreign-identifier same-hash row untouched",
+    "consume uses shared clock: row expires when TB112_NOW_MS passes expiresAt"
   ]
 }

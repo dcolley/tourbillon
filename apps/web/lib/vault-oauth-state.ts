@@ -11,7 +11,7 @@
  * Callback NEVER clears the nonce cookie (Set-Cookie applies on arrival; a clear would race).
  * Single-use is the durable verification-table consume only.
  *
- * Clock: oauthNowMs() — override with env TB112_NOW_MS (unix ms) in tests so exp check,
+ * Clock: oauthNowMs() — tests may set TB112_NOW_MS (unix ms; ignored when NODE_ENV=production) so exp check,
  * verification sweep and consume share one clock. Zero skew: nowSec >= exp denies.
  *
  * Never log the secret, state, or cookie value.
@@ -53,10 +53,14 @@ export type OAuthStateError =
 
 /** Single clock for exp / sweep / consume. Tests set TB112_NOW_MS. */
 export function oauthNowMs(): number {
-  const raw = process.env.TB112_NOW_MS;
-  if (raw !== undefined && raw !== '') {
-    const n = Number(raw);
-    if (Number.isFinite(n)) return n;
+  // Ignore the test seam in production (case-insensitive), same spirit as isInsecureDevBoardAuth.
+  const nodeEnv = (process.env.NODE_ENV ?? '').toLowerCase();
+  if (nodeEnv !== 'production') {
+    const raw = process.env.TB112_NOW_MS;
+    if (raw !== undefined && raw !== '') {
+      const n = Number(raw);
+      if (Number.isFinite(n)) return n;
+    }
   }
   return Date.now();
 }

@@ -4,6 +4,8 @@
  * migrated with `pnpm --filter @tourbillon/db migrate`. Refuses any other DATABASE_URL.
  *
  * Real: authorize/callback handlers, board session + mobile JWT auth, @tourbillon/db, nonce store,
+ * Agents with status paused or pending_approval are allowed at both ends (contract only denies archived).
+ *
  * vault encrypt. Synthetic: counted `fetch` for GitHub token exchange only (and optional write fail).
  */
 import { describe, it, before, after, beforeEach } from 'node:test';
@@ -306,7 +308,7 @@ describe('#112 vault OAuth state (real PG)', () => {
       const [n, ...rest] = part.trim().split('=');
       if (n) ctxCookies.set(n, rest.join('='));
     }
-    const soon = buildOAuthState({ serverId: 'github-mcp', scope: 'company', companyId: 'company-a' }, Date.now() - 590_000)!;
+    const soon = buildOAuthState({ serverId: 'github-mcp', scope: 'company', companyId: 'company-a' }, Date.now() - 599_000)!;
     await recordOAuthNonce(soon.nonce, soon.expiresAt);
     ctxCookies.set(oauthNonceCookieName('company-a'), soon.nonce);
     const soonRes = await doCallback(`code=ok&state=${encodeURIComponent(soon.state)}`, { host: '127.0.0.1' });
@@ -571,6 +573,11 @@ describe('#112 vault OAuth state (real PG)', () => {
     const start = await doAuthorize('serverId=github-mcp&scope=company', auth);
     const setCookie = (start.headers.getSetCookie?.() ?? []).find((c) => c.startsWith('tourbillon_vault_oauth_nonce.company-a='))!;
     assert.match(setCookie, /Max-Age=600/i);
+    assert.match(setCookie, /HttpOnly/i);
+    assert.match(setCookie, /Path=\/api\/vault\/oauth\/callback/i);
+    assert.match(setCookie, /SameSite=Lax/i);
+    // Host is loopback; insecure-dev may omit Secure. Assert attribute presence of SameSite/Path/HttpOnly above;
+    // Secure is required when NOT insecure-dev — here Host=127.0.0.1 so Secure may be absent.
     const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
     const payload = JSON.parse(JSON.parse(Buffer.from(state, 'base64').toString()).payload);
     assert.equal(payload.exp, Math.floor(now / 1000) + 600);
@@ -772,26 +779,70 @@ describe('#112 vault OAuth state (real PG)', () => {
   it('non-disclosure canaries: code, token, client secret, nonce absent from logs/bodies/Location', async () => {
     const auth = await boardSessionAuth();
     const logged: string[] = [];
-    const orig = console.error;
-    console.error = (...a: unknown[]) => { logged.push(a.map(String).join(' ')); };
+    const capture = (...a: unknown[]) => { logged.push(a.map(String).join(' ')); };
+    const origE = console.error;
+    const origL = console.log;
+    const origW = console.warn;
+    console.error = capture;
+    console.log = capture;
+    console.warn = capture;
     const canaryCode = 'canary-oauth-code-112';
     const canaryNonce = 'canary-nonce-value-should-not-leak';
+    const assertClean = (blob: string) => {
+      assert.ok(!blob.includes(canaryCode), 'code leaked');
+      assert.ok(!blob.includes(env.GITHUB_OAUTH_CLIENT_SECRET!), 'client secret leaked');
+      assert.ok(!blob.includes(canaryNonce), 'canary nonce leaked');
+      assert.ok(!blob.toLowerCase().includes('access_token'));
+    };
     try {
+      // success path
       const start = await doAuthorize('serverId=github-mcp&scope=company', auth);
       const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
       const nonce = ctxCookies.get(oauthNonceCookieName('company-a'))!;
       const res = await doCallback(`code=${canaryCode}&state=${encodeURIComponent(state)}`, auth);
       const loc = res.headers.get('location') ?? '';
       const body = await res.clone().text().catch(() => '');
-      const blob = [loc, body, ...logged].join('\n');
-      assert.ok(!blob.includes(canaryCode));
-      assert.ok(!blob.includes(env.GITHUB_OAUTH_CLIENT_SECRET!));
-      assert.ok(!blob.includes(nonce));
-      assert.ok(!blob.includes(canaryNonce));
-      assert.ok(!loc.includes('tok') && !blob.toLowerCase().includes('access_token'));
+      assertClean([loc, body, ...logged, nonce].join('\n').replace(nonce, 'REDACTED_NONCE_CHECK'));
+      // nonce itself must not appear in loc/body/logs (check without stuffing nonce into blob)
+      const publicBlob = [loc, body, ...logged].join('\n');
+      assert.ok(!publicBlob.includes(nonce));
       assert.equal(loc, '/settings?connected=github-mcp');
+
+      // exchange-fail path
+      logged.length = 0;
+      const st2 = await doAuthorize('serverId=github-mcp&scope=company', auth);
+      const state2 = new URL(st2.headers.get('location')!).searchParams.get('state')!;
+      fetchImpl = async () => {
+        exchanges++;
+        return new Response('nope', { status: 500 });
+      };
+      const failEx = await doCallback(`code=${canaryCode}&state=${encodeURIComponent(state2)}`, auth);
+      assertClean([(failEx.headers.get('location') ?? ''), ...logged].join('\n'));
+
+      // catch-all / write-fail path via PG trigger
+      logged.length = 0;
+      fetchImpl = async () => {
+        exchanges++;
+        return new Response(JSON.stringify({ access_token: 'tok', scope: 'repo' }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        });
+      };
+      await q(`CREATE OR REPLACE FUNCTION tb112_deny_vault_write() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'tb112 induced write failure'; END; $$ LANGUAGE plpgsql`);
+      await q(`DROP TRIGGER IF EXISTS tb112_deny_vault ON vault_secrets`);
+      await q(`CREATE TRIGGER tb112_deny_vault BEFORE INSERT OR UPDATE ON vault_secrets FOR EACH ROW EXECUTE FUNCTION tb112_deny_vault_write()`);
+      try {
+        const st3 = await doAuthorize('serverId=github-mcp&scope=company', auth);
+        const state3 = new URL(st3.headers.get('location')!).searchParams.get('state')!;
+        const failW = await doCallback(`code=${canaryCode}&state=${encodeURIComponent(state3)}`, auth);
+        assertClean([(failW.headers.get('location') ?? ''), ...logged].join('\n'));
+      } finally {
+        await q(`DROP TRIGGER IF EXISTS tb112_deny_vault ON vault_secrets`);
+        await q(`DROP FUNCTION IF EXISTS tb112_deny_vault_write()`);
+      }
     } finally {
-      console.error = orig;
+      console.error = origE;
+      console.log = origL;
+      console.warn = origW;
     }
   });
 
@@ -809,5 +860,175 @@ describe('#112 vault OAuth state (real PG)', () => {
     assert.equal((await doCallback(`code=c&state=${encodeURIComponent(malformed)}`, { host: '127.0.0.1' })).headers.get('location'), '/settings?oauth_error=invalid_state_signature');
   });
 
+
+
+  it('callback company_user signed state → user_scope_unsupported; no consume/exchange/write', async () => {
+    const auth = await boardSessionAuth();
+    for (const part of auth.cookie!.split(';')) {
+      const [n, ...rest] = part.trim().split('=');
+      if (n) ctxCookies.set(n, rest.join('='));
+    }
+    const built = buildOAuthState({ serverId: 'github-mcp', scope: 'company_user', companyId: 'company-a' })!;
+    await recordOAuthNonce(built.nonce, built.expiresAt);
+    ctxCookies.set(oauthNonceCookieName('company-a'), built.nonce);
+    const before = await snap();
+    const vaultBefore = await q(`select id, scope, encrypted_value from vault_secrets where id='vs-user'`);
+    const res = await doCallback(`code=ok&state=${encodeURIComponent(built.state)}`, auth);
+    assert.equal(res.headers.get('location'), '/settings?oauth_error=user_scope_unsupported');
+    assert.equal(exchanges, 0);
+    const afterVer = await q(`select count(*)::int as n from verification where identifier='tourbillon:vault-oauth-state'`);
+    assert.equal(Number(afterVer[0].n), 1, 'nonce row must remain unconsumed');
+    const vaultAfter = await q(`select id, scope, encrypted_value from vault_secrets where id='vs-user'`);
+    assert.deepEqual(vaultAfter, vaultBefore);
+    void before;
+  });
+
+  it('signed A-state naming agent B1 → agent_not_in_company; no consume/exchange/write', async () => {
+    const auth = await boardSessionAuth();
+    for (const part of auth.cookie!.split(';')) {
+      const [n, ...rest] = part.trim().split('=');
+      if (n) ctxCookies.set(n, rest.join('='));
+    }
+    const built = buildOAuthState({
+      serverId: 'github-mcp',
+      scope: 'agent',
+      agentId: 'agent-b1',
+      companyId: 'company-a',
+    })!;
+    await recordOAuthNonce(built.nonce, built.expiresAt);
+    ctxCookies.set(oauthNonceCookieName('company-a'), built.nonce);
+    const before = await q(`select count(*)::int as n from verification where identifier='tourbillon:vault-oauth-state'`);
+    const res = await doCallback(`code=ok&state=${encodeURIComponent(built.state)}`, auth);
+    assert.equal(res.headers.get('location'), '/settings?oauth_error=agent_not_in_company');
+    assert.equal(exchanges, 0);
+    const after = await q(`select count(*)::int as n from verification where identifier='tourbillon:vault-oauth-state'`);
+    assert.equal(Number(after[0].n), Number(before[0].n));
+    const vault = await q(`select count(*)::int as n from vault_secrets where company_id='company-a' and server_id='github-mcp' and scope='agent'`);
+    assert.equal(Number(vault[0].n), 0);
+  });
+
+  it('tamper agentId/scope/nonce/exp without resign → invalid_state_signature; nothing consumed', async () => {
+    const auth = await boardSessionAuth();
+    const start = await doAuthorize('serverId=github-mcp&scope=agent&agentId=agent-a1', auth);
+    const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
+    const envl = JSON.parse(Buffer.from(state, 'base64').toString('utf8')) as { payload: string; signature: string };
+    const base = JSON.parse(envl.payload) as Record<string, unknown>;
+    const before = await q(`select count(*)::int as n from verification where identifier='tourbillon:vault-oauth-state'`);
+    const fields: Array<[string, unknown]> = [
+      ['agentId', 'agent-a2'],
+      ['scope', 'company'],
+      ['nonce', 'tampered-nonce-value-not-resign'],
+      ['exp', (base.exp as number) + 99999],
+    ];
+    for (const [field, val] of fields) {
+      const p = { ...base, [field]: val };
+      const tampered = Buffer.from(JSON.stringify({ payload: JSON.stringify(p), signature: envl.signature })).toString('base64');
+      const res = await doCallback(`code=c&state=${encodeURIComponent(tampered)}`, auth);
+      assert.equal(
+        res.headers.get('location'),
+        '/settings?oauth_error=invalid_state_signature',
+        `field ${field}`,
+      );
+    }
+    assert.equal(exchanges, 0);
+    const after = await q(`select count(*)::int as n from verification where identifier='tourbillon:vault-oauth-state'`);
+    assert.equal(Number(after[0].n), Number(before[0].n));
+  });
+
+  it('DB error during consume → callback_failed; no exchange/write; row intact', async () => {
+    const auth = await boardSessionAuth();
+    const start = await doAuthorize('serverId=github-mcp&scope=company', auth);
+    const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
+    await q(`CREATE OR REPLACE FUNCTION tb112_deny_consume() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'tb112 induced consume failure'; END; $$ LANGUAGE plpgsql`);
+    await q(`DROP TRIGGER IF EXISTS tb112_deny_consume ON verification`);
+    await q(`CREATE TRIGGER tb112_deny_consume BEFORE DELETE ON verification FOR EACH ROW WHEN (OLD.identifier = 'tourbillon:vault-oauth-state') EXECUTE FUNCTION tb112_deny_consume()`);
+    try {
+      const before = await q(`select count(*)::int as n from verification where identifier='tourbillon:vault-oauth-state'`);
+      const res = await doCallback(`code=ok&state=${encodeURIComponent(state)}`, auth);
+      assert.equal(res.headers.get('location'), '/settings?oauth_error=callback_failed');
+      assert.equal(exchanges, 0);
+      const after = await q(`select count(*)::int as n from verification where identifier='tourbillon:vault-oauth-state'`);
+      assert.equal(Number(after[0].n), Number(before[0].n));
+    } finally {
+      await q(`DROP TRIGGER IF EXISTS tb112_deny_consume ON verification`);
+      await q(`DROP FUNCTION IF EXISTS tb112_deny_consume()`);
+    }
+  });
+
+  it('case 8 arrival-order: old write-failure response has no clear; new flow ok', async () => {
+    const auth = await boardSessionAuth();
+    // First flow: authorize, then induce write failure after consume to capture response
+    const startOld = await doAuthorize('serverId=github-mcp&scope=company', auth);
+    const stateOld = new URL(startOld.headers.get('location')!).searchParams.get('state')!;
+    await q(`CREATE OR REPLACE FUNCTION tb112_deny_vault_write() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'tb112 induced write failure'; END; $$ LANGUAGE plpgsql`);
+    await q(`DROP TRIGGER IF EXISTS tb112_deny_vault ON vault_secrets`);
+    await q(`CREATE TRIGGER tb112_deny_vault BEFORE INSERT OR UPDATE ON vault_secrets FOR EACH ROW EXECUTE FUNCTION tb112_deny_vault_write()`);
+    let oldFail: Response;
+    try {
+      oldFail = await doCallback(`code=ok&state=${encodeURIComponent(stateOld)}`, auth);
+    } finally {
+      await q(`DROP TRIGGER IF EXISTS tb112_deny_vault ON vault_secrets`);
+      await q(`DROP FUNCTION IF EXISTS tb112_deny_vault_write()`);
+    }
+    assert.equal(oldFail.headers.get('location'), '/settings?oauth_error=callback_failed');
+    assert.equal((oldFail.headers.getSetCookie?.() ?? []).some((c) => /tourbillon_vault_oauth_nonce/i.test(c)), false);
+
+    // New authorize (new cookie) then deliver old write-failure Set-Cookie list into jar
+    const startNew = await doAuthorize('serverId=github-mcp&scope=company', auth);
+    const stateNew = new URL(startNew.headers.get('location')!).searchParams.get('state')!;
+    const cookieAfterNew = ctxCookies.get(oauthNonceCookieName('company-a'));
+    for (const raw of oldFail.headers.getSetCookie?.() ?? []) {
+      // simulate browser applying delayed old response (would wipe if Max-Age=0)
+      const [pair] = raw.split(';');
+      const eq = pair.indexOf('=');
+      if (eq < 0) continue;
+      const name = pair.slice(0, eq);
+      const value = pair.slice(eq + 1);
+      if (/Max-Age=0/i.test(raw) || value === '') ctxCookies.delete(name);
+      else ctxCookies.set(name, value);
+    }
+    assert.equal(ctxCookies.get(oauthNonceCookieName('company-a')), cookieAfterNew);
+    const done = await doCallback(`code=ok&state=${encodeURIComponent(stateNew)}`, auth);
+    assert.equal(done.headers.get('location'), '/settings?connected=github-mcp');
+  });
+
+
+  it('consume DELETE keeps identifier predicate; foreign-identifier same-hash row untouched', async () => {
+    const auth = await boardSessionAuth();
+    const start = await doAuthorize('serverId=github-mcp&scope=company', auth);
+    const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
+    const nonce = ctxCookies.get(oauthNonceCookieName('company-a'))!;
+    const { createHash } = await import('node:crypto');
+    const hash = createHash('sha256').update(nonce).digest('hex');
+    await q(`insert into verification (id, identifier, value, "expiresAt", "createdAt", "updatedAt")
+      values ('ver-foreign', 'other:identifier', '${hash}', now() + interval '10 minutes', now(), now())`);
+    const res = await doCallback(`code=ok&state=${encodeURIComponent(state)}`, auth);
+    assert.equal(res.headers.get('location'), '/settings?connected=github-mcp');
+    const foreign = await q(`select identifier from verification where id='ver-foreign'`);
+    assert.equal(foreign.length, 1);
+    assert.equal(foreign[0].identifier, 'other:identifier');
+    await q(`delete from verification where id='ver-foreign'`);
+  });
+
+
+  it('consume uses shared clock: row expires when TB112_NOW_MS passes expiresAt', async () => {
+    const t0 = 1_800_000_000_000;
+    env.TB112_NOW_MS = String(t0);
+    const built = buildOAuthState({ serverId: 'github-mcp', scope: 'company', companyId: 'company-a' }, t0)!;
+    await recordOAuthNonce(built.nonce, built.expiresAt);
+    // Still valid just before exp
+    env.TB112_NOW_MS = String(t0 + 599_000);
+    const { consumeOAuthNonce } = await import('../vault-oauth-nonce-store');
+    // peek: should still be consumable
+    const peek = await q(`select count(*)::int as n from verification where identifier='tourbillon:vault-oauth-state'`);
+    assert.equal(Number(peek[0].n), 1);
+    // Past exp on shared clock — consume must refuse without deleting
+    env.TB112_NOW_MS = String(t0 + 600_000);
+    const ok = await consumeOAuthNonce(built.nonce);
+    assert.equal(ok, false);
+    const after = await q(`select count(*)::int as n from verification where identifier='tourbillon:vault-oauth-state'`);
+    assert.equal(Number(after[0].n), 1);
+    delete env.TB112_NOW_MS;
+  });
 
 });

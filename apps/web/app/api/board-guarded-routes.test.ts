@@ -54,38 +54,53 @@ function chain(run: () => Row[]) {
   return c;
 }
 const tables = Object.fromEntries(
-  ['approvals', 'agents', 'companies', 'issues', 'activityLog', 'heartbeatRuns', 'hitlEvents', 'hitlLinkTokens'].map((n) => [n, table(n)]),
+  ['approvals', 'agents', 'companies', 'issues', 'activityLog', 'heartbeatRuns', 'hitlEvents', 'hitlLinkTokens', 'verification'].map((n) => [n, table(n)]),
 );
 const nameOf = (t: unknown) => (t as { __table: string }).__table;
+const fakeDbOps = {
+  update: (t: unknown) => ({
+    set: (v: Row) => ({
+      where: (cond: Cond) =>
+        chain(() => {
+          const rows = (store[nameOf(t)] ?? []).filter((r) => match(r, cond));
+          rows.forEach((r) => Object.assign(r, v));
+          return rows;
+        }),
+    }),
+  }),
+  select: () => ({
+    from: (t: unknown) => ({ where: (cond: Cond) => chain(() => (store[nameOf(t)] ?? []).filter((r) => match(r, cond))) }),
+  }),
+  insert: (t: unknown) => ({
+    values: (v: Row) =>
+      chain(() => {
+        (store[nameOf(t)] ??= []).push(v);
+        return [v];
+      }),
+  }),
+  delete: (t: unknown) => ({
+    where: (cond: Cond) =>
+      chain(() => {
+        const rows = store[nameOf(t)] ?? [];
+        const kept: Row[] = [];
+        const removed: Row[] = [];
+        for (const r of rows) {
+          if (match(r, cond)) removed.push(r);
+          else kept.push(r);
+        }
+        store[nameOf(t)] = kept;
+        return removed;
+      }),
+  }),
+};
 const fakeDb = {
   query: new Proxy({}, {
     get: (_t, name: string) => ({
       findFirst: async ({ where }: { where?: Cond } = {}) => (store[name] ?? []).find((r) => match(r, where)),
     }),
   }),
-  transaction: async <T>(fn: (tx: unknown) => Promise<T>) =>
-    fn({
-      update: (t: unknown) => ({
-        set: (v: Row) => ({
-          where: (cond: Cond) =>
-            chain(() => {
-              const rows = (store[nameOf(t)] ?? []).filter((r) => match(r, cond));
-              rows.forEach((r) => Object.assign(r, v));
-              return rows;
-            }),
-        }),
-      }),
-      select: () => ({
-        from: (t: unknown) => ({ where: (cond: Cond) => chain(() => (store[nameOf(t)] ?? []).filter((r) => match(r, cond))) }),
-      }),
-      insert: (t: unknown) => ({
-        values: (v: Row) =>
-          chain(() => {
-            (store[nameOf(t)] ??= []).push(v);
-            return [v];
-          }),
-      }),
-    }),
+  ...fakeDbOps,
+  transaction: async <T>(fn: (tx: unknown) => Promise<T>) => fn(fakeDbOps),
 };
 
 // ---- request state (next/headers) --------------------------------------------------------------
@@ -186,6 +201,7 @@ describe('#106 board-guarded routes', () => {
         isNull: (col: { c: string }) => ({ op: 'fn', f: (r: Row) => r[col.c] == null }),
         isNotNull: (col: { c: string }) => ({ op: 'fn', f: (r: Row) => r[col.c] != null }),
         lte: (col: { c: string }, val: Date) => ({ op: 'fn', f: (r: Row) => r[col.c] != null && (r[col.c] as Date) <= val }),
+        lt: (col: { c: string }, val: Date) => ({ op: 'fn', f: (r: Row) => r[col.c] != null && (r[col.c] as Date) < val }),
         gt: (col: { c: string }, val: Date) => ({ op: 'fn', f: (r: Row) => r[col.c] != null && (r[col.c] as Date) > val }),
         asc: (c: unknown) => c,
         desc: (c: unknown) => c,
@@ -274,6 +290,7 @@ describe('#106 board-guarded routes', () => {
     store.heartbeatRuns = [{ id: 'run-a', companyId: 'company-a' }, { id: 'run-b', companyId: 'company-b' }];
     store.issues = [];
     store.activityLog = [];
+    store.verification = [];
   });
 
   // ---------------------------------------------------------------- approvals/[id]/decide
