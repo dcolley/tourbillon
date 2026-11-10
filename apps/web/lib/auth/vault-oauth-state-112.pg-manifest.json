@@ -39,6 +39,9 @@
     "DB error during consume \u2192 callback_failed; no exchange/write; row intact",
     "case 8 arrival-order: old write-failure response has no clear; new flow ok",
     "consume DELETE keeps identifier predicate; foreign-identifier same-hash row untouched",
-    "consume uses shared clock: row expires when TB112_NOW_MS passes expiresAt"
+    "consume uses shared clock: row expires when TB112_NOW_MS passes expiresAt",
+    "authorize other-company agent \u2192 404 before nonce insert; zero verification rows",
+    "signed inconsistent scope/agentId states \u2192 invalid_state before consume; rows unconsumed; zero exchanges",
+    "authorize Set-Cookie carries Secure under non-insecure-dev headers; loopback insecure-dev omits it"
   ]
 }

@@ -565,50 +565,59 @@ describe('#112 vault OAuth state (real PG)', () => {
   it('authorize issues exp=now+600, matching verification expiresAt, Max-Age=600 (shared clock)', async () => {
     const now = 1_700_000_000_000;
     env.TB112_NOW_MS = String(now);
-    const auth = await boardSessionAuth();
-    for (const part of auth.cookie!.split(';')) {
-      const [n, ...rest] = part.trim().split('=');
-      if (n) ctxCookies.set(n, rest.join('='));
+    try {
+      const auth = await boardSessionAuth();
+      for (const part of auth.cookie!.split(';')) {
+        const [n, ...rest] = part.trim().split('=');
+        if (n) ctxCookies.set(n, rest.join('='));
+      }
+      const start = await doAuthorize('serverId=github-mcp&scope=company', auth);
+      const setCookie = (start.headers.getSetCookie?.() ?? []).find((c) => c.startsWith('tourbillon_vault_oauth_nonce.company-a='))!;
+      assert.match(setCookie, /Max-Age=600/i);
+      assert.match(setCookie, /HttpOnly/i);
+      assert.match(setCookie, /Path=\/api\/vault\/oauth\/callback/i);
+      assert.match(setCookie, /SameSite=Lax/i);
+      // Host is loopback; insecure-dev may omit Secure. Assert attribute presence of SameSite/Path/HttpOnly above;
+      // Secure is required when NOT insecure-dev — here Host=127.0.0.1 so Secure may be absent.
+      // (The Secure-required / insecure-dev-absent pair lives in the Secure leaf below — S355-S4.)
+      const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
+      const payload = JSON.parse(JSON.parse(Buffer.from(state, 'base64').toString()).payload);
+      assert.equal(payload.exp, Math.floor(now / 1000) + 600);
+      const rows = await q(`select "expiresAt" from verification where identifier='tourbillon:vault-oauth-state'`);
+      assert.equal(rows.length, 1);
+      const expMs = new Date(rows[0].expiresAt as string).getTime();
+      assert.equal(expMs, payload.exp * 1000);
+    } finally {
+      // S355-S6: shared-clock env must never leak past this leaf, even on assertion failure.
+      delete env.TB112_NOW_MS;
     }
-    const start = await doAuthorize('serverId=github-mcp&scope=company', auth);
-    const setCookie = (start.headers.getSetCookie?.() ?? []).find((c) => c.startsWith('tourbillon_vault_oauth_nonce.company-a='))!;
-    assert.match(setCookie, /Max-Age=600/i);
-    assert.match(setCookie, /HttpOnly/i);
-    assert.match(setCookie, /Path=\/api\/vault\/oauth\/callback/i);
-    assert.match(setCookie, /SameSite=Lax/i);
-    // Host is loopback; insecure-dev may omit Secure. Assert attribute presence of SameSite/Path/HttpOnly above;
-    // Secure is required when NOT insecure-dev — here Host=127.0.0.1 so Secure may be absent.
-    const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
-    const payload = JSON.parse(JSON.parse(Buffer.from(state, 'base64').toString()).payload);
-    assert.equal(payload.exp, Math.floor(now / 1000) + 600);
-    const rows = await q(`select "expiresAt" from verification where identifier='tourbillon:vault-oauth-state'`);
-    assert.equal(rows.length, 1);
-    const expMs = new Date(rows[0].expiresAt as string).getTime();
-    assert.equal(expMs, payload.exp * 1000);
-    delete env.TB112_NOW_MS;
   });
 
   it('clock-injected: exactly at exp → state_expired; verification row unconsumed', async () => {
+    // S355-S6: TB112_NOW_MS restored in a finally — no frozen-clock leak on assert failure.
     const now = 1_700_000_100_000;
     env.TB112_NOW_MS = String(now - 600_000);
-    const auth = await boardSessionAuth();
-    for (const part of auth.cookie!.split(';')) {
-      const [n, ...rest] = part.trim().split('=');
-      if (n) ctxCookies.set(n, rest.join('='));
+    try {
+      const auth = await boardSessionAuth();
+      for (const part of auth.cookie!.split(';')) {
+        const [n, ...rest] = part.trim().split('=');
+        if (n) ctxCookies.set(n, rest.join('='));
+      }
+      const built = buildOAuthState({ serverId: 'github-mcp', scope: 'company', companyId: 'company-a' })!;
+      await recordOAuthNonce(built.nonce, built.expiresAt);
+      ctxCookies.set(oauthNonceCookieName('company-a'), built.nonce);
+      env.TB112_NOW_MS = String(now); // nowSec == exp
+      assert.equal(built.exp, Math.floor((now - 600_000) / 1000) + 600);
+      assert.equal(Math.floor(now / 1000), built.exp);
+      const before = await q(`select count(*)::int as n from verification where identifier='tourbillon:vault-oauth-state'`);
+      const res = await doCallback(`code=ok&state=${encodeURIComponent(built.state)}`, { host: '127.0.0.1' });
+      assert.equal(res.headers.get('location'), '/settings?oauth_error=state_expired');
+      assert.equal(exchanges, 0);
+      const after = await q(`select count(*)::int as n from verification where identifier='tourbillon:vault-oauth-state'`);
+      assert.equal(Number(after[0].n), Number(before[0].n));
+    } finally {
+      delete env.TB112_NOW_MS;
     }
-    const built = buildOAuthState({ serverId: 'github-mcp', scope: 'company', companyId: 'company-a' })!;
-    await recordOAuthNonce(built.nonce, built.expiresAt);
-    ctxCookies.set(oauthNonceCookieName('company-a'), built.nonce);
-    env.TB112_NOW_MS = String(now); // nowSec == exp
-    assert.equal(built.exp, Math.floor((now - 600_000) / 1000) + 600);
-    assert.equal(Math.floor(now / 1000), built.exp);
-    const before = await q(`select count(*)::int as n from verification where identifier='tourbillon:vault-oauth-state'`);
-    const res = await doCallback(`code=ok&state=${encodeURIComponent(built.state)}`, { host: '127.0.0.1' });
-    assert.equal(res.headers.get('location'), '/settings?oauth_error=state_expired');
-    assert.equal(exchanges, 0);
-    const after = await q(`select count(*)::int as n from verification where identifier='tourbillon:vault-oauth-state'`);
-    assert.equal(Number(after[0].n), Number(before[0].n));
-    delete env.TB112_NOW_MS;
   });
 
   it('logged-out callback → 401; agent bearer → 403; nonce row intact', async () => {
@@ -1011,24 +1020,118 @@ describe('#112 vault OAuth state (real PG)', () => {
   });
 
 
+  it('authorize other-company agent → 404 before nonce insert; zero verification rows', async () => {
+    // S355-S2 (X5 pin): authorize must filter agents by the board company in REAL PG,
+    // not just in the mocked board-guarded suite. agent-b1 lives in company-b.
+    const auth = await boardSessionAuth();
+    const before = await q(`select count(*)::int as n from verification where identifier='tourbillon:vault-oauth-state'`);
+    const res = await doAuthorize('serverId=github-mcp&scope=agent&agentId=agent-b1', auth);
+    assert.equal(res.status, 404, `foreign-agent authorize status ${res.status} (company filter must reject before nonce insert)`);
+    assert.equal(((await res.json()) as { error: string }).error, 'Agent not found');
+    const after = await q(`select count(*)::int as n from verification where identifier='tourbillon:vault-oauth-state'`);
+    assert.equal(Number(after[0].n), Number(before[0].n), 'no verification row may be inserted for a foreign agent');
+    assert.equal(exchanges, 0);
+  });
+
+  it('signed inconsistent scope/agentId states → invalid_state before consume; rows unconsumed; zero exchanges', async () => {
+    // S355-S3 (X6 pin): a VALIDLY signed state whose scope↔agentId pairing is inconsistent
+    // (HMAC intact — built through buildOAuthState, not tampered) must be rejected before
+    // consume/exchange/vault write.
+    const auth = await boardSessionAuth();
+    for (const part of auth.cookie!.split(';')) {
+      const [n, ...rest] = part.trim().split('=');
+      if (n) ctxCookies.set(n, rest.join('='));
+    }
+    const cells = [
+      { label: 'company scope with agentId set', fields: { serverId: 'github-mcp', scope: 'company' as const, agentId: 'agent-a1', companyId: 'company-a' } },
+      { label: 'agent scope without agentId', fields: { serverId: 'github-mcp', scope: 'agent' as const, companyId: 'company-a' } },
+    ];
+    const built = [];
+    for (const c of cells) {
+      const b = buildOAuthState(c.fields)!;
+      await recordOAuthNonce(b.nonce, b.expiresAt);
+      built.push({ ...c, state: b.state, nonce: b.nonce });
+    }
+    const before = await q(`select count(*)::int as n from verification where identifier='tourbillon:vault-oauth-state'`);
+    assert.equal(Number(before[0].n), 2, 'both signed states recorded');
+    for (const c of built) {
+      // Cookie must match THIS state's nonce so the guard, not nonce_mismatch, is what rejects.
+      ctxCookies.set(oauthNonceCookieName('company-a'), c.nonce);
+      const res = await doCallback(`code=ok&state=${encodeURIComponent(c.state)}`, auth);
+      assert.equal(res.headers.get('location'), '/settings?oauth_error=invalid_state', c.label);
+    }
+    assert.equal(exchanges, 0, 'no token exchange before the scope/agentId guard');
+    const after = await q(`select count(*)::int as n from verification where identifier='tourbillon:vault-oauth-state'`);
+    assert.equal(Number(after[0].n), 2, 'verification rows must remain unconsumed');
+    const vault = await q(`select count(*)::int as n from vault_secrets where server_id='github-mcp' and id <> 'vs-user'`);
+    assert.equal(Number(vault[0].n), 0, 'zero vault writes (vs-user seed excluded)');
+  });
+
+  it('authorize Set-Cookie carries Secure under non-insecure-dev headers; loopback insecure-dev omits it', async () => {
+    // S355-S4 (Secure pin): oauthNonceCookieOptions derives secure from the REAL
+    // isInsecureDevBoardAuth(headers) — production-like headers must yield Secure, the
+    // loopback dev opt-in may omit it. Mutant `secure: false` goes RED on the first assert.
+    const { BOARD_INSECURE_DEV_ENV } = await import('../board-auth');
+    const savedFlag = env[BOARD_INSECURE_DEV_ENV];
+    try {
+      // A) Not insecure-dev: opt-in flag unset + non-loopback Host → Secure REQUIRED.
+      delete env[BOARD_INSECURE_DEV_ENV];
+      const host = 'board.example.test';
+      const session = await createBoardSessionToken(new Headers({ host }));
+      assert.ok(session);
+      const start = await doAuthorize('serverId=github-mcp&scope=company', {
+        cookie: `tourbillon_board_session=${session}; active_company_id=company-a`,
+        host,
+      });
+      assert.equal(start.status, 307, `authorize status ${start.status}`);
+      const sc = (start.headers.getSetCookie?.() ?? []).find((c) => c.startsWith('tourbillon_vault_oauth_nonce.company-a='));
+      assert.ok(sc, 'nonce Set-Cookie present (production-like)');
+      assert.ok(/;\s*Secure\b/i.test(sc!), `Secure required when not insecure-dev: ${sc}`);
+      assert.match(sc!, /HttpOnly/i);
+      assert.match(sc!, /Path=\/api\/vault\/oauth\/callback/i);
+      assert.match(sc!, /SameSite=Lax/i);
+
+      // B) Documented insecure-dev loopback path: flag on + loopback Host → Secure absent.
+      env[BOARD_INSECURE_DEV_ENV] = '1';
+      const devSession = await createBoardSessionToken(new Headers({ host: '127.0.0.1' }));
+      assert.ok(devSession);
+      const startDev = await doAuthorize('serverId=github-mcp&scope=company', {
+        cookie: `tourbillon_board_session=${devSession}; active_company_id=company-a`,
+        host: '127.0.0.1',
+      });
+      assert.equal(startDev.status, 307);
+      const scDev = (startDev.headers.getSetCookie?.() ?? []).find((c) => c.startsWith('tourbillon_vault_oauth_nonce.company-a='));
+      assert.ok(scDev, 'nonce Set-Cookie present (insecure-dev)');
+      assert.ok(!/;\s*Secure\b/i.test(scDev!), `loopback insecure-dev keeps Secure optional (documented): ${scDev}`);
+    } finally {
+      if (savedFlag === undefined) delete env[BOARD_INSECURE_DEV_ENV];
+      else env[BOARD_INSECURE_DEV_ENV] = savedFlag;
+    }
+  });
+
   it('consume uses shared clock: row expires when TB112_NOW_MS passes expiresAt', async () => {
+    // S355-S6: TB112_NOW_MS must be restored in a finally — a failed assert must not leak
+    // the frozen clock into later leaves.
     const t0 = 1_800_000_000_000;
     env.TB112_NOW_MS = String(t0);
-    const built = buildOAuthState({ serverId: 'github-mcp', scope: 'company', companyId: 'company-a' }, t0)!;
-    await recordOAuthNonce(built.nonce, built.expiresAt);
-    // Still valid just before exp
-    env.TB112_NOW_MS = String(t0 + 599_000);
-    const { consumeOAuthNonce } = await import('../vault-oauth-nonce-store');
-    // peek: should still be consumable
-    const peek = await q(`select count(*)::int as n from verification where identifier='tourbillon:vault-oauth-state'`);
-    assert.equal(Number(peek[0].n), 1);
-    // Past exp on shared clock — consume must refuse without deleting
-    env.TB112_NOW_MS = String(t0 + 600_000);
-    const ok = await consumeOAuthNonce(built.nonce);
-    assert.equal(ok, false);
-    const after = await q(`select count(*)::int as n from verification where identifier='tourbillon:vault-oauth-state'`);
-    assert.equal(Number(after[0].n), 1);
-    delete env.TB112_NOW_MS;
+    try {
+      const built = buildOAuthState({ serverId: 'github-mcp', scope: 'company', companyId: 'company-a' }, t0)!;
+      await recordOAuthNonce(built.nonce, built.expiresAt);
+      // Still valid just before exp
+      env.TB112_NOW_MS = String(t0 + 599_000);
+      const { consumeOAuthNonce } = await import('../vault-oauth-nonce-store');
+      // peek: should still be consumable
+      const peek = await q(`select count(*)::int as n from verification where identifier='tourbillon:vault-oauth-state'`);
+      assert.equal(Number(peek[0].n), 1);
+      // Past exp on shared clock — consume must refuse without deleting
+      env.TB112_NOW_MS = String(t0 + 600_000);
+      const ok = await consumeOAuthNonce(built.nonce);
+      assert.equal(ok, false);
+      const after = await q(`select count(*)::int as n from verification where identifier='tourbillon:vault-oauth-state'`);
+      assert.equal(Number(after[0].n), 1);
+    } finally {
+      delete env.TB112_NOW_MS;
+    }
   });
 
 });
