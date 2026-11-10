@@ -217,6 +217,13 @@ export interface AssembleAgentToolsOptions {
    * EXECUTES the queued work; re-queueing via addMyTask there is wrong (would loop the task).
    */
   chatTaskTools?: boolean | 'run-task-wake';
+  /**
+   * #348 Studio: last-mile tool filter applied to the fully assembled tool map
+   * (after MCP + secret redaction). Studio hydration passes a filter that drops
+   * Company-Computer tools — CC stays dark there even when the toolset is
+   * assigned (C3e). Heartbeat/chat paths never set this.
+   */
+  toolFilter?: (tools: Record<string, unknown>) => Record<string, unknown>;
 }
 
 export async function assembleAgentTools(
@@ -325,7 +332,8 @@ export async function createAgentWithSkills(
   agentRecord: AgentRecord,
   options?: AssembleAgentToolsOptions
 ): Promise<Agent> {
-  const tools = await assembleAgentTools(agentRecord, options);
+  const assembled = await assembleAgentTools(agentRecord, options);
+  const tools = options?.toolFilter ? options.toolFilter(assembled) : assembled;
 
   const prepared = await prepareAgentSkills(agentRecord);
   const systemPrompt = assembleSystemPrompt(agentRecord, prepared);
