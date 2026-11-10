@@ -33,6 +33,7 @@
     "./egress-allow-list": "./src/egress-allow-list.ts",
     "./monorepo-root": "./src/monorepo-root.ts",
     "./observability": "./src/observability.ts",
+  "./mastra-studio": "./src/mastra-studio.ts",
     "./tool-catalog": "./src/tool-catalog.ts",
     "./company-settings": "./src/company-settings.ts",
     "./mcp-registry": "./src/mcp-registry.ts",

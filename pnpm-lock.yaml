@@ -111,7 +111,7 @@ importers:
         version: 8.4.0(@bull-board/ui@8.4.0(bullmq@5.81.3(supports-color@8.1.1)))(bullmq@5.81.3(supports-color@8.1.1))
       '@bull-board/hono':
         specifier: ^8.4.0
-        version: 8.4.0(bullmq@5.81.3(supports-color@8.1.1))(hono@4.12.32)
+        version: 8.4.0(bullmq@5.81.3(supports-color@8.1.1))(hono@4.13.13)
       '@bull-board/ui':
         specifier: ^8.4.0
         version: 8.4.0(bullmq@5.81.3(supports-color@8.1.1))
@@ -138,7 +138,13 @@ importers:
         version: 6.43.7
       '@hono/node-server':
         specifier: ^2.0.12
-        version: 2.0.12(hono@4.12.32)
+        version: 2.0.12(hono@4.13.13)
+      '@mastra/core':
+        specifier: 1.81.0
+        version: 1.81.0(@bufbuild/protobuf@2.16.0)(@grpc/grpc-js@1.14.7)(@opentelemetry/api@1.10.0)(ai@6.0.208(zod@4.6.5))(bufferutil@4.1.0)(express@5.2.1(supports-color@8.1.1))(rxjs@7.8.1)(supports-color@8.1.1)(zod-to-json-schema@3.25.2(zod@4.6.5))(zod@4.6.5)
+      '@mastra/next':
+        specifier: 0.2.39
+        version: 0.2.39(@hono/node-server@2.0.12(hono@4.13.13))(@mastra/core@1.81.0(@bufbuild/protobuf@2.16.0)(@grpc/grpc-js@1.14.7)(@opentelemetry/api@1.10.0)(ai@6.0.208(zod@4.6.5))(bufferutil@4.1.0)(express@5.2.1(supports-color@8.1.1))(rxjs@7.8.1)(supports-color@8.1.1)(zod-to-json-schema@3.25.2(zod@4.6.5))(zod@4.6.5))(bufferutil@4.1.0)(hono@4.13.13)(zod@4.6.5)
       '@mdxeditor/editor':
         specifier: ^4.1.1
         version: 4.1.1(@codemirror/language@6.12.3)(@lezer/highlight@1.2.3)(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(supports-color@8.1.1)(typescript@6.0.3)(yjs@13.6.31)
@@ -186,7 +192,7 @@ importers:
         version: 17.4.2
       drizzle-orm:
         specifier: 'catalog:'
-        version: 0.45.2(@electric-sql/pglite@0.5.11)(@libsql/client@0.17.4(bufferutil@4.1.0))(@opentelemetry/api@1.10.0)(kysely@0.29.2)(pg@8.23.1)(postgres@3.4.9)
+        version: 0.45.2(@electric-sql/pglite@0.5.11)(@libsql/client@0.17.4)(@opentelemetry/api@1.10.0)(kysely@0.29.2)(pg@8.23.1)(postgres@3.4.9)
       fast-xml-parser:
         specifier: ^5.10.1
         version: 5.10.1
@@ -194,8 +200,8 @@ importers:
         specifier: ^1.7.2
         version: 1.7.2(next@16.2.12(@babel/core@7.29.7(supports-color@8.1.1))(@opentelemetry/api@1.10.0)(babel-plugin-react-compiler@1.0.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))
       hono:
-        specifier: ^4.12.32
-        version: 4.12.32
+        specifier: ^4.13.5
+        version: 4.13.13
       ioredis:
         specifier: ^5.11.1
         version: 5.11.1(supports-color@8.1.1)
@@ -304,7 +310,7 @@ importers:
         version: link:../shared
       drizzle-orm:
         specifier: 'catalog:'
-        version: 0.45.2(@electric-sql/pglite@0.5.11)(@libsql/client@0.17.4(bufferutil@4.1.0))(@opentelemetry/api@1.10.0)(kysely@0.29.2)(pg@8.23.1)(postgres@3.4.9)
+        version: 0.45.2(@electric-sql/pglite@0.5.11)(@libsql/client@0.17.4)(@opentelemetry/api@1.10.0)(kysely@0.29.2)(pg@8.23.1)(postgres@3.4.9)
       postgres:
         specifier: ^3.4.9
         version: 3.4.9
@@ -369,7 +375,7 @@ importers:
         version: 26.1.2
       drizzle-orm:
         specifier: 'catalog:'
-        version: 0.45.2(@electric-sql/pglite@0.5.11)(@libsql/client@0.17.4(bufferutil@4.1.0))(@opentelemetry/api@1.10.0)(kysely@0.29.2)(pg@8.23.1)(postgres@3.4.9)
+        version: 0.45.2(@electric-sql/pglite@0.5.11)(@libsql/client@0.17.4)(@opentelemetry/api@1.10.0)(kysely@0.29.2)(pg@8.23.1)(postgres@3.4.9)
       tsx:
         specifier: ^4.23.1
         version: 4.23.1
@@ -390,7 +396,7 @@ importers:
         version: link:../shared
       drizzle-orm:
         specifier: 'catalog:'
-        version: 0.45.2(@electric-sql/pglite@0.5.11)(@libsql/client@0.17.4(bufferutil@4.1.0))(@opentelemetry/api@1.10.0)(kysely@0.29.2)(pg@8.23.1)(postgres@3.4.9)
+        version: 0.45.2(@electric-sql/pglite@0.5.11)(@libsql/client@0.17.4)(@opentelemetry/api@1.10.0)(kysely@0.29.2)(pg@8.23.1)(postgres@3.4.9)
       ioredis:
         specifier: ^5.11.1
         version: 5.11.1(supports-color@8.1.1)
@@ -427,7 +433,7 @@ importers:
         version: 10.0.1
       drizzle-orm:
         specifier: 'catalog:'
-        version: 0.45.2(@electric-sql/pglite@0.5.11)(@libsql/client@0.17.4(bufferutil@4.1.0))(@opentelemetry/api@1.10.0)(kysely@0.29.2)(pg@8.23.1)(postgres@3.4.9)
+        version: 0.45.2(@electric-sql/pglite@0.5.11)(@libsql/client@0.17.4)(@opentelemetry/api@1.10.0)(kysely@0.29.2)(pg@8.23.1)(postgres@3.4.9)
       zod:
         specifier: 'catalog:'
         version: 4.6.5
@@ -1880,6 +1886,13 @@ packages:
     peerDependencies:
       hono: ^4
 
+  '@hono/node-ws@1.3.1':
+    resolution: {integrity: sha512-vo/MwCnpJAVHBkGzWjCJ28wF45fYHAfbPZcH2rodZODHtch2GHA94KtMfusmVycTUtsLAsaNsHhtY6P8X3RQsA==}
+    engines: {node: '>=18.14.1'}
+    peerDependencies:
+      '@hono/node-server': ^1.19.11
+      hono: ^4.6.0
+
   '@hono/standard-validator@0.4.0':
     resolution: {integrity: sha512-MxOm1asDh9j7c1D0KiWwppSbFgAQxTRO4YEhjMrJn3lF1BIcXenPdgjSGKDRfQmZdaTaMA8slQLETgVOKyJxFw==}
     peerDependencies:
@@ -2437,6 +2450,13 @@ packages:
     peerDependencies:
       zod: ^3.25.0 || ^4.0.0
 
+  '@mastra/hono@1.7.23':
+    resolution: {integrity: sha512-7qLZDJ+Qm3+79KJpPwlgp6zTtdMIv0rWHCh4XPMjsBMjJA0MhTnC+Uv+j/VAfzMALazp5MkI2q3p03dOyxNV5g==}
+    engines: {node: '>=22.13.0'}
+    peerDependencies:
+      '@mastra/core': '>=1.80.0-0 <2.0.0-0'
+      hono: ^4.13.5
+
   '@mastra/mcp@2.7.0':
     resolution: {integrity: sha512-4lvp+n7wYwRtLthbtRF2WRVSxZQsui+qasGOUZ8300xJ0QpM5sTivlxOfyUF4TdUZse30Iv99p7fAnSePT78iA==}
     engines: {node: '>=22.13.0'}
@@ -2450,6 +2470,13 @@ packages:
     engines: {node: '>=22.13.0'}
     peerDependencies:
       '@mastra/core': '>=1.80.0-0 <2.0.0-0'
+
+  '@mastra/next@0.2.39':
+    resolution: {integrity: sha512-JhWHOfFsQutsux5HCvcfedaRIwttWV2y49rsy3B/dWREyJS6Scqcw1fRY30ATs/2GewYqhfuPaLJkIaJr0I+dw==}
+    engines: {node: '>=22.13.0'}
+    peerDependencies:
+      '@mastra/core': '>=1.80.0-0 <2.0.0-0'
+      hono: ^4.13.5
 
   '@mastra/observability@1.23.0':
     resolution: {integrity: sha512-uF6dBXIhIckDQ3DEHdM9B3R+hD2ieHPSadwz3wt4dKwjPTHbjLYzwek+qYKHIWkITokzGTNXkxvuiICpEB7kKA==}
@@ -2474,6 +2501,13 @@ packages:
     resolution: {integrity: sha512-8tuRZkVL7JE5A7pH2/GV3khYM+R8xHa+WPSjykq4OjKT2O4s9mNpPl8174dEN8TZUYetUAtxZM0HVM24ON0UQg==}
     engines: {node: '>=22.13.0'}
     peerDependencies:
+      zod: ^3.25.0 || ^4.0.0
+
+  '@mastra/server@1.81.0':
+    resolution: {integrity: sha512-mJB2nU/oLb6aLS8RlBRZIB9DzREzHtkY1fA5fToV1xUsW2qOf9FvIhQy1g8NbsV6bL99MeoIbky9GveEaWOE0g==}
+    engines: {node: '>=22.13.0'}
+    peerDependencies:
+      '@mastra/core': '>=1.80.0-0 <2.0.0-0'
       zod: ^3.25.0 || ^4.0.0
 
   '@mdxeditor/editor@4.1.1':
@@ -5417,9 +5451,6 @@ packages:
     resolution: {integrity: sha512-IEMIf7298kXuZSRFoGfMYrl7is8LpavODgbNz1cwIudv7KwVFnuU+UsMporfq6PD6aXSlawZlARiA3UywCTfMw==}
     hasBin: true
 
-  fastq@1.20.1:
-    resolution: {integrity: sha512-GGToxJ/w1x32s/D2EKND7kTil4n8OVk/9mycTc4VDza13lOvpUZTGX3mFSCtV9ksdGBVzvsyAVLM6mHFThxXxw==}
-
   fastq@1.20.3:
     resolution: {integrity: sha512-XKv5nnLs6nLF71NgiKJLIZFLkPyIEuOselLG7ujZnGrRfQK8HpvY+WqKhAJUAdLomwVHErVS4LfxFlPq0/FTAw==}
 
@@ -5448,6 +5479,9 @@ packages:
 
   fetch-nodeshim@0.4.10:
     resolution: {integrity: sha512-m6I8ALe4L4XpdETy7MJZWs6L1IVMbjs99bwbpIKphxX+0CTns4IKDWJY0LWfr4YsFjfg+z1TjzTMU8lKl8rG0w==}
+
+  fetch-to-node@2.1.0:
+    resolution: {integrity: sha512-Wq05j6LE1GrWpT2t1YbCkyFY6xKRJq3hx/oRJdWEJpZlik3g25MmdJS6RFm49iiMJw6zpZuBOrgihOgy2jGyAA==}
 
   figures@6.1.0:
     resolution: {integrity: sha512-d+l3qxjSesT4V7v2fh+QnmFnUWv9lSpjarhShNTgBOfA0ttejbQUAlHLitbjkoRiDulW0OPoQPYIGhIC8ohejg==}
@@ -5726,14 +5760,6 @@ packages:
     resolution: {integrity: sha512-7pRGQbFLBSy+SmCKHIZB3a8pzalnsYflvGRXyS1P7vucEGlkL23QitQ++wNCuMT25Q3TbGH2JUuTdYnWMY/GIw==}
     peerDependencies:
       hono: ^4.11.2
-
-  hono@4.12.27:
-    resolution: {integrity: sha512-1yrb/+w6HWQJrUCLkJ2IF5jNIPvvFkblV5RNOYl6bV+OA6p9GLcMpHFFGTosSvHvcAUibuUukRqhlYI4z32C7Q==}
-    engines: {node: '>=16.9.0'}
-
-  hono@4.12.32:
-    resolution: {integrity: sha512-XcuyW9qE2kJn07PkecMOBd5Vq/hMy7mmGw+idz1yblbg9N17ijJODrvPkn7/dwL3Kulj8LcRJ69DLOWf91dRUg==}
-    engines: {node: '>=16.9.0'}
 
   hono@4.13.13:
     resolution: {integrity: sha512-CQ46U0ZkAGmbT/4UxdzzGJpacP2IeKgY4a5/tOI9AABbpOMfK739wfDXmv1usCk+3RkKj1hQy4/fjhiwa2xlrA==}
@@ -6378,10 +6404,6 @@ packages:
 
   lru-cache@10.4.3:
     resolution: {integrity: sha512-JNAzZcXrCt42VGLuYz0zfAzDfAvJWW6AfYlDBQyDV5DClI2m5sAmK+OIO7s59XfsRsWHp02jAJrRadPRGTt6SQ==}
-
-  lru-cache@11.5.1:
-    resolution: {integrity: sha512-RPimw/7aMdv2oqRrxKwvZXcPfwBrn/JZ2xYcY9Hus/6LaS3VOAKVWKWgNLCFSiOm1ESXinjsDlidVU7JlnCN2A==}
-    engines: {node: 20 || >=22}
 
   lru-cache@11.5.3:
     resolution: {integrity: sha512-U4N8FgzmWxc8k1VH8Kr6lQg18U7Fjvby6wXHVRX/ZZ7IwWbRMgrRbP0Wrb5q5NVinryp4SQampHKdvtecItxUg==}
@@ -8498,11 +8520,6 @@ packages:
   yallist@3.1.1:
     resolution: {integrity: sha512-a4UGQaWPH59mOXUYnAG2ewncQS4i4F43Tv3JoAM+s2VDAmS9NsK8GpDMLrCHPksFT7h3K6TOoUNn2pb7RoXx4g==}
 
-  yaml@2.9.0:
-    resolution: {integrity: sha512-2AvhNX3mb8zd6Zy7INTtSpl1F15HW6Wnqj0srWlkKLcpYl/gMIMJiyuGq2KeI2YFxUPjdlB+3Lc10seMLtL4cA==}
-    engines: {node: '>= 14.6'}
-    hasBin: true
-
   yaml@2.9.1:
     resolution: {integrity: sha512-3NxN8+78OdzbT7C/WjGsyfPAtJaN3FNDsWxv7Y7mcDsT/oOmgW8BpyQQFFBnvZE3j9Y2Sdz1ULFLezL7Eb2yFw==}
     engines: {node: '>= 14.6'}
@@ -9216,7 +9233,7 @@ snapshots:
       '@better-auth/core': 1.6.25(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.1)(@opentelemetry/api@1.10.0)(better-call@1.3.7(zod@4.6.5))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0)
       '@better-auth/utils': 0.4.2
     optionalDependencies:
-      drizzle-orm: 0.45.2(@electric-sql/pglite@0.5.11)(@libsql/client@0.17.4(bufferutil@4.1.0))(@opentelemetry/api@1.10.0)(kysely@0.29.2)(pg@8.23.1)(postgres@3.4.9)
+      drizzle-orm: 0.45.2(@electric-sql/pglite@0.5.11)(@libsql/client@0.17.4)(@opentelemetry/api@1.10.0)(kysely@0.29.2)(pg@8.23.1)(postgres@3.4.9)
 
   '@better-auth/kysely-adapter@1.6.25(@better-auth/core@1.6.25(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.1)(@opentelemetry/api@1.10.0)(better-call@1.3.7(zod@4.6.5))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(@better-auth/utils@0.4.2)(kysely@0.29.2)':
     dependencies:
@@ -9261,12 +9278,12 @@ snapshots:
     optionalDependencies:
       bullmq: 5.81.3(supports-color@8.1.1)
 
-  '@bull-board/hono@8.4.0(bullmq@5.81.3(supports-color@8.1.1))(hono@4.12.32)':
+  '@bull-board/hono@8.4.0(bullmq@5.81.3(supports-color@8.1.1))(hono@4.13.13)':
     dependencies:
       '@bull-board/api': 8.4.0(@bull-board/ui@8.4.0(bullmq@5.81.3(supports-color@8.1.1)))(bullmq@5.81.3(supports-color@8.1.1))
       '@bull-board/ui': 8.4.0(bullmq@5.81.3(supports-color@8.1.1))
       ejs: 6.0.1
-      hono: 4.12.32
+      hono: 4.13.13
     transitivePeerDependencies:
       - bull
       - bullmq
@@ -10268,17 +10285,22 @@ snapshots:
       yargs: 17.7.3
     optional: true
 
-  '@hono/node-server@1.19.14(hono@4.12.27)':
-    dependencies:
-      hono: 4.12.27
-
   '@hono/node-server@1.19.14(hono@4.13.13)':
     dependencies:
       hono: 4.13.13
 
-  '@hono/node-server@2.0.12(hono@4.12.32)':
+  '@hono/node-server@2.0.12(hono@4.13.13)':
     dependencies:
-      hono: 4.12.32
+      hono: 4.13.13
+
+  '@hono/node-ws@1.3.1(@hono/node-server@2.0.12(hono@4.13.13))(bufferutil@4.1.0)(hono@4.13.13)':
+    dependencies:
+      '@hono/node-server': 2.0.12(hono@4.13.13)
+      hono: 4.13.13
+      ws: 8.22.0(bufferutil@4.1.0)
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
 
   '@hono/standard-validator@0.4.0(@standard-schema/spec@1.1.0)(hono@4.13.13)':
     dependencies:
@@ -10930,6 +10952,20 @@ snapshots:
       - zod-openapi
       - zod-to-json-schema
 
+  '@mastra/hono@1.7.23(@hono/node-server@2.0.12(hono@4.13.13))(@mastra/core@1.81.0(@bufbuild/protobuf@2.16.0)(@grpc/grpc-js@1.14.7)(@opentelemetry/api@1.10.0)(ai@6.0.208(zod@4.6.5))(bufferutil@4.1.0)(express@5.2.1(supports-color@8.1.1))(rxjs@7.8.1)(supports-color@8.1.1)(zod-to-json-schema@3.25.2(zod@4.6.5))(zod@4.6.5))(bufferutil@4.1.0)(hono@4.13.13)(zod@4.6.5)':
+    dependencies:
+      '@hono/node-ws': 1.3.1(@hono/node-server@2.0.12(hono@4.13.13))(bufferutil@4.1.0)(hono@4.13.13)
+      '@mastra/core': 1.81.0(@bufbuild/protobuf@2.16.0)(@grpc/grpc-js@1.14.7)(@opentelemetry/api@1.10.0)(ai@6.0.208(zod@4.6.5))(bufferutil@4.1.0)(express@5.2.1(supports-color@8.1.1))(rxjs@7.8.1)(supports-color@8.1.1)(zod-to-json-schema@3.25.2(zod@4.6.5))(zod@4.6.5)
+      '@mastra/server': 1.81.0(@mastra/core@1.81.0(@bufbuild/protobuf@2.16.0)(@grpc/grpc-js@1.14.7)(@opentelemetry/api@1.10.0)(ai@6.0.208(zod@4.6.5))(bufferutil@4.1.0)(express@5.2.1(supports-color@8.1.1))(rxjs@7.8.1)(supports-color@8.1.1)(zod-to-json-schema@3.25.2(zod@4.6.5))(zod@4.6.5))(zod@4.6.5)
+      fetch-to-node: 2.1.0
+      hono: 4.13.13
+      ws: 8.22.0(bufferutil@4.1.0)
+    transitivePeerDependencies:
+      - '@hono/node-server'
+      - bufferutil
+      - utf-8-validate
+      - zod
+
   '@mastra/mcp@2.7.0(@mastra/core@1.81.0(@bufbuild/protobuf@2.16.0)(@grpc/grpc-js@1.14.7)(@opentelemetry/api@1.10.0)(ai@6.0.208(zod@4.6.5))(bufferutil@4.1.0)(express@5.2.1(supports-color@8.1.1))(rxjs@7.8.1)(supports-color@8.1.1)(zod-to-json-schema@3.25.2(zod@4.6.5))(zod@4.6.5))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(zod@4.6.5)':
     dependencies:
       '@mastra/core': 1.81.0(@bufbuild/protobuf@2.16.0)(@grpc/grpc-js@1.14.7)(@opentelemetry/api@1.10.0)(ai@6.0.208(zod@4.6.5))(bufferutil@4.1.0)(express@5.2.1(supports-color@8.1.1))(rxjs@7.8.1)(supports-color@8.1.1)(zod-to-json-schema@3.25.2(zod@4.6.5))(zod@4.6.5)
@@ -10960,6 +10996,18 @@ snapshots:
       zod: 4.6.7
     transitivePeerDependencies:
       - supports-color
+
+  '@mastra/next@0.2.39(@hono/node-server@2.0.12(hono@4.13.13))(@mastra/core@1.81.0(@bufbuild/protobuf@2.16.0)(@grpc/grpc-js@1.14.7)(@opentelemetry/api@1.10.0)(ai@6.0.208(zod@4.6.5))(bufferutil@4.1.0)(express@5.2.1(supports-color@8.1.1))(rxjs@7.8.1)(supports-color@8.1.1)(zod-to-json-schema@3.25.2(zod@4.6.5))(zod@4.6.5))(bufferutil@4.1.0)(hono@4.13.13)(zod@4.6.5)':
+    dependencies:
+      '@mastra/core': 1.81.0(@bufbuild/protobuf@2.16.0)(@grpc/grpc-js@1.14.7)(@opentelemetry/api@1.10.0)(ai@6.0.208(zod@4.6.5))(bufferutil@4.1.0)(express@5.2.1(supports-color@8.1.1))(rxjs@7.8.1)(supports-color@8.1.1)(zod-to-json-schema@3.25.2(zod@4.6.5))(zod@4.6.5)
+      '@mastra/hono': 1.7.23(@hono/node-server@2.0.12(hono@4.13.13))(@mastra/core@1.81.0(@bufbuild/protobuf@2.16.0)(@grpc/grpc-js@1.14.7)(@opentelemetry/api@1.10.0)(ai@6.0.208(zod@4.6.5))(bufferutil@4.1.0)(express@5.2.1(supports-color@8.1.1))(rxjs@7.8.1)(supports-color@8.1.1)(zod-to-json-schema@3.25.2(zod@4.6.5))(zod@4.6.5))(bufferutil@4.1.0)(hono@4.13.13)(zod@4.6.5)
+      '@mastra/server': 1.81.0(@mastra/core@1.81.0(@bufbuild/protobuf@2.16.0)(@grpc/grpc-js@1.14.7)(@opentelemetry/api@1.10.0)(ai@6.0.208(zod@4.6.5))(bufferutil@4.1.0)(express@5.2.1(supports-color@8.1.1))(rxjs@7.8.1)(supports-color@8.1.1)(zod-to-json-schema@3.25.2(zod@4.6.5))(zod@4.6.5))(zod@4.6.5)
+      hono: 4.13.13
+    transitivePeerDependencies:
+      - '@hono/node-server'
+      - bufferutil
+      - utf-8-validate
+      - zod
 
   '@mastra/observability@1.23.0(@mastra/core@1.81.0(@bufbuild/protobuf@2.16.0)(@grpc/grpc-js@1.14.7)(@opentelemetry/api@1.10.0)(ai@6.0.208(zod@4.6.5))(bufferutil@4.1.0)(express@5.2.1(supports-color@8.1.1))(rxjs@7.8.1)(supports-color@8.1.1)(zod-to-json-schema@3.25.2(zod@4.6.5))(zod@4.6.5))(zod@4.6.5)':
     dependencies:
@@ -11011,6 +11059,12 @@ snapshots:
       json-schema-to-zod: 2.8.1
       zod: 4.6.7
       zod-from-json-schema: 0.5.2
+
+  '@mastra/server@1.81.0(@mastra/core@1.81.0(@bufbuild/protobuf@2.16.0)(@grpc/grpc-js@1.14.7)(@opentelemetry/api@1.10.0)(ai@6.0.208(zod@4.6.5))(bufferutil@4.1.0)(express@5.2.1(supports-color@8.1.1))(rxjs@7.8.1)(supports-color@8.1.1)(zod-to-json-schema@3.25.2(zod@4.6.5))(zod@4.6.5))(zod@4.6.5)':
+    dependencies:
+      '@mastra/core': 1.81.0(@bufbuild/protobuf@2.16.0)(@grpc/grpc-js@1.14.7)(@opentelemetry/api@1.10.0)(ai@6.0.208(zod@4.6.5))(bufferutil@4.1.0)(express@5.2.1(supports-color@8.1.1))(rxjs@7.8.1)(supports-color@8.1.1)(zod-to-json-schema@3.25.2(zod@4.6.5))(zod@4.6.5)
+      hono: 4.13.13
+      zod: 4.6.5
 
   '@mdxeditor/editor@4.1.1(@codemirror/language@6.12.3)(@lezer/highlight@1.2.3)(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(supports-color@8.1.1)(typescript@6.0.3)(yjs@13.6.31)':
     dependencies:
@@ -11120,7 +11174,7 @@ snapshots:
 
   '@modelcontextprotocol/sdk@1.29.0(supports-color@8.1.1)(zod@3.25.76)':
     dependencies:
-      '@hono/node-server': 1.19.14(hono@4.12.27)
+      '@hono/node-server': 1.19.14(hono@4.13.13)
       ajv: 8.20.0
       ajv-formats: 3.0.1(ajv@8.20.0)
       content-type: 1.0.5
@@ -11130,7 +11184,7 @@ snapshots:
       eventsource-parser: 3.1.0
       express: 5.2.1(supports-color@8.1.1)
       express-rate-limit: 8.5.2(express@5.2.1(supports-color@8.1.1))
-      hono: 4.12.27
+      hono: 4.13.13
       jose: 6.2.3
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.1
@@ -11219,7 +11273,7 @@ snapshots:
   '@nodelib/fs.walk@1.2.8':
     dependencies:
       '@nodelib/fs.scandir': 2.1.5
-      fastq: 1.20.1
+      fastq: 1.20.3
 
   '@nolyfill/is-core-module@1.0.39': {}
 
@@ -12822,7 +12876,7 @@ snapshots:
       zod: 4.6.5
     optionalDependencies:
       drizzle-kit: 0.31.10
-      drizzle-orm: 0.45.2(@electric-sql/pglite@0.5.11)(@libsql/client@0.17.4(bufferutil@4.1.0))(@opentelemetry/api@1.10.0)(kysely@0.29.2)(pg@8.23.1)(postgres@3.4.9)
+      drizzle-orm: 0.45.2(@electric-sql/pglite@0.5.11)(@libsql/client@0.17.4)(@opentelemetry/api@1.10.0)(kysely@0.29.2)(pg@8.23.1)(postgres@3.4.9)
       next: 16.2.12(@babel/core@7.29.7(supports-color@8.1.1))(@opentelemetry/api@1.10.0)(babel-plugin-react-compiler@1.0.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       pg: 8.23.1
       react: 19.2.8
@@ -13446,7 +13500,7 @@ snapshots:
       esbuild: 0.25.12
       tsx: 4.23.15
 
-  drizzle-orm@0.45.2(@electric-sql/pglite@0.5.11)(@libsql/client@0.17.4(bufferutil@4.1.0))(@opentelemetry/api@1.10.0)(kysely@0.29.2)(pg@8.23.1)(postgres@3.4.9):
+  drizzle-orm@0.45.2(@electric-sql/pglite@0.5.11)(@libsql/client@0.17.4)(@opentelemetry/api@1.10.0)(kysely@0.29.2)(pg@8.23.1)(postgres@3.4.9):
     optionalDependencies:
       '@electric-sql/pglite': 0.5.11
       '@libsql/client': 0.17.4(bufferutil@4.1.0)
@@ -14211,10 +14265,6 @@ snapshots:
       strnum: 2.4.1
       xml-naming: 0.3.0
 
-  fastq@1.20.1:
-    dependencies:
-      reusify: 1.1.0
-
   fastq@1.20.3:
     dependencies:
       reusify: 1.1.0
@@ -14238,6 +14288,8 @@ snapshots:
       picomatch: 4.0.4
 
   fetch-nodeshim@0.4.10: {}
+
+  fetch-to-node@2.1.0: {}
 
   figures@6.1.0:
     dependencies:
@@ -14555,10 +14607,6 @@ snapshots:
       - zod
       - zod-openapi
       - zod-to-json-schema
-
-  hono@4.12.27: {}
-
-  hono@4.12.32: {}
 
   hono@4.13.13: {}
 
@@ -15152,8 +15200,6 @@ snapshots:
 
   lru-cache@10.4.3: {}
 
-  lru-cache@11.5.1: {}
-
   lru-cache@11.5.3: {}
 
   lru-cache@5.1.1:
@@ -15416,7 +15462,7 @@ snapshots:
       metro-cache: 0.84.5(supports-color@8.1.1)
       metro-core: 0.84.5
       metro-runtime: 0.84.5
-      yaml: 2.9.0
+      yaml: 2.9.1
     transitivePeerDependencies:
       - bufferutil
       - supports-color
@@ -16280,7 +16326,7 @@ snapshots:
 
   path-scurry@2.0.2:
     dependencies:
-      lru-cache: 11.5.1
+      lru-cache: 11.5.3
       minipass: 7.1.3
 
   path-to-regexp@8.4.2: {}
@@ -17964,8 +18010,6 @@ snapshots:
   y18n@5.0.8: {}
 
   yallist@3.1.1: {}
-
-  yaml@2.9.0: {}
 
   yaml@2.9.1: {}
 
