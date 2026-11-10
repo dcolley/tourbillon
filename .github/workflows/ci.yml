@@ -100,6 +100,27 @@ jobs:
       - run: node scripts/run-pg-114-tests.mjs
         working-directory: apps/web
 
+  # #348: internal-only Mastra Studio security suite (flag parser, socket guard,
+  # CORS, path allowlist, hydration CC-filter, route matrix, real-adapter smoke).
+  # Service-free; closed DATABASE_URL/REDIS_URL ports so a hidden service
+  # dependency fails here. Suite pinned in apps/web/scripts/run-mastra-studio-tests.mjs.
+  mastra-studio:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DATABASE_URL: postgres://ci:***@127.0.0.1:1/unused
+      REDIS_URL: redis://127.0.0.1:1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: node scripts/run-mastra-studio-tests.mjs
+        working-directory: apps/web
+
   # Task-notification certification (v2.1): disposable pgvector/pg16 + Redis 7,
   # existing drizzle journal only (no new migration), exact pinned B command.
   task-notification:
