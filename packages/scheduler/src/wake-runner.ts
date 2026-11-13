@@ -216,7 +216,8 @@ async function recordHeartbeatSuccess(
   await publishHeartbeatRunUpdate(companyId, runId, 'succeeded', agentRecord.id);
 
   if (isMastraTracingEnabled()) {
-    await flushObservability();
+    // Collector outage must not fail a completed run — same guard as the failure path.
+    await flushObservability().catch(() => undefined);
   }
 }
 
@@ -1087,7 +1088,8 @@ async function recordHarnessResult(
       .where(eq(heartbeatRuns.id, runId));
 
     if (isMastraTracingEnabled()) {
-      await flushObservability();
+      // Collector outage must not fail a completed run — same guard as the failure path.
+      await flushObservability().catch(() => undefined);
     }
     return;
   }
