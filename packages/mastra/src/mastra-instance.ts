@@ -8,10 +8,14 @@ import {
   isObservabilityEnabled,
   isPhoenixCollectorEnabled,
   isMastraTracingEnabled,
+  observabilityFlushTimeoutMs,
   phoenixCollectorEndpoint,
   phoenixProjectName,
   shouldStoreModelChunks,
   createTraceLogger,
+  flushUnitsSafely,
+  sanitizeFlushErrorText,
+  type FlushUnit,
 } from '@tourbillon/shared';
 import { TourbillonPostgresExporter } from './observability/tourbillon-postgres-exporter';
 import { SecretValueRedactionProcessor } from './observability/secret-value-redaction';
@@ -24,6 +28,21 @@ const globalForMastra = globalThis as unknown as {
 
 const tracer = createTraceLogger('mastra-instance', {});
 
+/**
+ * Phoenix/Arize OTLP exporter. The underlying `@mastra/otel-exporter` enables the log
+ * signal by default, which derives a `/v1/logs` endpoint from the traces URL — Phoenix
+ * has no OTLP log ingest, so every log export there is a 405, and the exporter does
+ * not read `OTEL_LOGS_EXPORTER`. Turn the signal off at the source.
+ */
+export function buildArizeExporter(): ObservabilityExporter {
+  return new ArizeExporter({
+    endpoint: phoenixCollectorEndpoint(),
+    apiKey: process.env.PHOENIX_API_KEY || undefined,
+    projectName: phoenixProjectName(),
+    signals: { traces: true, logs: false },
+  });
+}
+
 function buildExporters(): ObservabilityExporter[] {
   const exporters: ObservabilityExporter[] = [];
 
@@ -32,13 +51,7 @@ function buildExporters(): ObservabilityExporter[] {
   }
 
   if (isPhoenixCollectorEnabled()) {
-    exporters.push(
-      new ArizeExporter({
-        endpoint: phoenixCollectorEndpoint(),
-        apiKey: process.env.PHOENIX_API_KEY || undefined,
-        projectName: phoenixProjectName(),
-      }),
-    );
+    exporters.push(buildArizeExporter());
   }
 
   return exporters;
@@ -193,10 +206,36 @@ export function ensureMastraAgentRegistered(agentId: string, name?: string): voi
   ensurePlaceholderAgent(getMastraInstance(), agentId, name);
 }
 
+/**
+ * Flush pending spans/logs to every registered exporter. Always resolves: a collector
+ * that is down, rejecting, or hung must never fail the heartbeat that called it.
+ * Each unit is flushed independently under OBSERVABILITY_FLUSH_TIMEOUT_MS; failures
+ * are logged as warnings with credential-free error text.
+ */
 export async function flushObservability(): Promise<void> {
   if (!isMastraTracingEnabled()) return;
-  const instance = getMastraInstance().observability.getDefaultInstance();
-  await instance?.flush();
-  const exporters = instance?.getExporters() ?? [];
-  await Promise.all(exporters.map((exporter) => exporter.flush()));
+
+  let instance: ReturnType<Mastra['observability']['getDefaultInstance']> | undefined;
+  try {
+    instance = getMastraInstance().observability.getDefaultInstance();
+  } catch (err) {
+    tracer.warn('observability flush skipped: Mastra instance unavailable', {
+      error: sanitizeFlushErrorText(err),
+    });
+    return;
+  }
+  if (!instance) return;
+
+  const units: FlushUnit[] = [
+    { label: 'observability-instance', flush: () => instance!.flush() },
+    ...(instance.getExporters() ?? []).map((exporter, i) => ({
+      label: `exporter:${(exporter as { name?: string })?.name || i}`,
+      flush: () => exporter.flush(),
+    })),
+  ];
+
+  await flushUnitsSafely(units, {
+    timeoutMs: observabilityFlushTimeoutMs(),
+    warn: (message) => tracer.warn(message),
+  });
 }

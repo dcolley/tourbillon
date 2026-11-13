@@ -100,6 +100,16 @@ export function phoenixApiBaseUrl(): string | undefined {
   return `${url.origin}${path}`;
 }
 
+/**
+ * Max milliseconds a wake waits for a single observability exporter flush before
+ * warning and moving on. Bounds a hung collector so it cannot block a heartbeat for
+ * the exporter's full (multi-second) internal timeout.
+ */
+export function observabilityFlushTimeoutMs(): number {
+  const parsed = parseInt(process.env.OBSERVABILITY_FLUSH_TIMEOUT_MS ?? '5000', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 5000;
+}
+
 export function shouldStoreModelChunks(): boolean {
   return process.env.OBSERVABILITY_STORE_MODEL_CHUNKS === 'true';
 }
