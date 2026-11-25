@@ -218,11 +218,13 @@
             <h2>Security</h2>
             <ul>
                 <li><strong>Tenant isolation:</strong> All queries filter by <code>companyId</code></li>
-                <li><strong>Run-scoped API keys:</strong> Bearer tokens encode <code>{ runId, agentId, companyId }</code></li>
+                <li><strong>Signed agent API tokens:</strong> Tools and chat authenticate to the web API with HMAC-SHA256-signed Bearer tokens (<code>pm_run_…</code> heartbeat runs, <code>pm_chat_…</code> interactive chat; <code>packages/shared/src/agent-token.ts</code>). The payload encodes <code>{ runId, agentId, companyId }</code> (chat tokens carry <code>chatSessionId</code>) plus <code>iat</code>/<code>exp</code>, signed with the dedicated <code>TOURBILLON_AGENT_TOKEN_SECRET</code> (≥32 chars, no default — minting and verification fail closed when unset). Run tokens expire at heartbeat timeout + 15 min grace (capped at 24 h); chat tokens last 2 h and are re-minted on cache refresh</li>
+                <li><strong>Token verification:</strong> Constant-time signature check, then a DB lookup — the run must exist, be <code>running</code>, and match the token's <code>agentId</code>/<code>companyId</code>; a chat token's session must belong to its agent; archived agents are refused. Tokens are never logged (harness error output scrubs them)</li>
                 <li><strong>Atomic locks:</strong> <code>checkoutIssue</code> uses DB-level locking to prevent concurrent work</li>
                 <li><strong>Approval gates:</strong> High-risk actions blocked until human approval</li>
                 <li><strong>Budget ceilings:</strong> Per-agent token budgets enforced before wake</li>
             </ul>
+            <p>Unsigned pre-signing tokens are rejected outright. At a deploy, in-flight runs still holding such tokens are not re-issued mid-run: their next agent-API call gets a 401, the run fails cleanly, and the next wake mints a fresh signed token.</p>
         </section>
 
         <section>
