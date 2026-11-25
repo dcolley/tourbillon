@@ -286,7 +286,9 @@ describe('#114 real PG', () => {
     fd.set('assigneeAgentId', 'agent-a1');
     const res = await boardComment({ error: null }, fd);
     assert.equal(res, undefined, 'success path ends in redirect, no error state');
-    assert.deepEqual(redirects, ['/issue/iss-free?saved=1']);
+    // #366: generated links prefer the human identifier (iss-free is seeded as CA-1 for
+    // company-a); guid URLs keep resolving, but the board action now LINKS by identifier.
+    assert.deepEqual(redirects, ['/issue/CA-1?saved=1']);
     const acts = (await activity()).filter((a) => a.action === 'issue.commented');
     assert.equal(acts.length, 1);
     assert.equal(acts[0].actor_type, 'user');

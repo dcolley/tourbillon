@@ -477,8 +477,20 @@ export function createOwnedNoticePublisher(
   url: string = process.env.REDIS_URL ?? 'redis://localhost:6379',
 ): { publish(channel: string, message: string): Promise<number>; quit(): Promise<void> } {
   const client = new IORedis(url, { maxRetriesPerRequest: null });
+  // TB-363 (R2): this process-wide publisher must never hold the event loop open (the task-
+  // notification CI job exits on idle handles; an ioredis client keeps a socket + reconnect
+  // timer). Stay UNREFED except during an in-flight publish — the poke itself is best-effort.
+  const asAny = client as unknown as { ref?: () => void; unref?: () => void };
+  asAny.unref?.();
   return {
-    publish: (channel, message) => client.publish(channel, message),
+    publish: async (channel, message) => {
+      asAny.ref?.();
+      try {
+        return await client.publish(channel, message);
+      } finally {
+        asAny.unref?.();
+      }
+    },
     quit: async () => {
       await client.quit();
     },
