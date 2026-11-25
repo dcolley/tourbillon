@@ -182,7 +182,7 @@ export function taskProgressSignalPayload(event: TaskProgressEventShape): TaskPr
       // answer — a reply in this thread resumes the task (status pending, #340 contract).
       contents = `Background task "${title}" is waiting on the human${
         event.detail ? `: ${event.detail}` : ''
-      }. Ask them for exactly that; they can reply here, and the task resumes (status pending) when they answer.`;
+      }. Ask them for exactly that; they can reply here; resume the task (status pending) when they answer.`;
       break;
     case 'failed':
       // #340 honesty: a runner failure is a FAILURE, not a question for the human.
