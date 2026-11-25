@@ -258,6 +258,7 @@ Key configuration (all in `.env`):
 | `SCHEDULER_API_KEY` | Wake/schedule auth | `change-me-in-production` |
 | `SCHEDULER_WAKE_PORT` | WakeRunner HTTP port | `3003` |
 | `SCHEDULER_WAKE_URL` | Web → scheduler base URL | `http://127.0.0.1:3003` |
+| `TOURBILLON_AGENT_TOKEN_SECRET` | HMAC key for agent run/chat tokens (≥32 chars; unset fails closed) | (required — generate with `openssl rand -base64 48`) |
 | `MEMORY_SEMANTIC_RECALL` | Enable pgvector semantic memory | `false` |
 | `OBSERVABILITY_ENABLED` | Export Mastra spans to PostgreSQL | `false` |
 | `PHOENIX_COLLECTOR_ENABLED` | Export Mastra spans to Arize Phoenix | `false` |
@@ -265,10 +266,13 @@ Key configuration (all in `.env`):
 ## Security
 
 - **Tenant isolation:** All queries filter by `companyId`
-- **Run-scoped API keys:** Bearer tokens encode `{ runId, agentId, companyId }`
+- **Signed agent API tokens:** Tools and chat authenticate to the web API with HMAC-SHA256-signed Bearer tokens (`pm_run_…` for heartbeat runs, `pm_chat_…` for interactive chat; `packages/shared/src/agent-token.ts`). The payload encodes `{ runId, agentId, companyId }` (chat tokens carry `chatSessionId`) plus `iat`/`exp`, signed with the dedicated `TOURBILLON_AGENT_TOKEN_SECRET` (≥32 chars, no default — minting and verification fail closed when unset). Run tokens expire at heartbeat timeout + 15 min grace (capped at 24 h); chat tokens last 2 h and are re-minted on cache refresh.
+- **Token verification:** Constant-time signature check, then a DB lookup — the run must exist, be `running`, and match the token's `agentId`/`companyId`; a chat token's session must belong to its agent; archived agents are refused. Tokens are never logged (harness error output scrubs them).
 - **Atomic locks:** `checkoutIssue` uses DB-level locking to prevent concurrent work
 - **Approval gates:** High-risk actions blocked until human approval
 - **Budget ceilings:** Per-agent token budgets enforced before wake
+
+Unsigned pre-signing tokens are rejected outright. At a deploy, in-flight runs still holding such tokens are not re-issued mid-run: their next agent-API call gets a 401, the run fails cleanly, and the next wake mints a fresh signed token.
 
 ## Deployment
 
