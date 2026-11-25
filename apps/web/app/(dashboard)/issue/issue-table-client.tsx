@@ -325,14 +325,14 @@ export function IssueTableClient({
                   <tr key={issue.id} className="hover:bg-accent/30">
                     <td className="px-4 py-3">
                       <Link
-                        href={`/issue/${issue.id}`}
+                        href={`/issue/${encodeURIComponent(issue.identifier)}`}
                         className="font-mono text-xs text-primary hover:underline"
                       >
                         {issue.identifier}
                       </Link>
                     </td>
                     <td className="px-4 py-3">
-                      <Link href={`/issue/${issue.id}`} className="font-medium hover:underline">
+                      <Link href={`/issue/${encodeURIComponent(issue.identifier)}`} className="font-medium hover:underline">
                         {issue.title}
                       </Link>
                     </td>

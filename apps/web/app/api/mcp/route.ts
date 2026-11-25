@@ -1143,7 +1143,7 @@ async function handleGetIssue(tokenCompanyId: string, params: any) {
   }
   validateCompanyAccess(tokenCompanyId, company_id);
 
-  const detail = await getIssueDetail(issue_id);
+  const detail = await getIssueDetail(issue_id, { activeCompanyId: company_id });
   if (!detail) {
     throw new Error('Issue not found');
   }

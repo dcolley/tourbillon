@@ -70,13 +70,13 @@ export function NewIssueDialog({
     : projects;
 
   useEffect(() => {
-    if (state?.success && state.issueId) {
+    if (state?.success && state.issueIdentifier) {
       startTransition(() => {
         setOpen(false);
-        router.push(`/issue/${state.issueId}`);
+        router.push(`/issue/${state.issueIdentifier}`);
       });
     }
-  }, [state?.success, state?.issueId, router]);
+  }, [state?.success, state?.issueIdentifier, router]);
 
   return (
     <>

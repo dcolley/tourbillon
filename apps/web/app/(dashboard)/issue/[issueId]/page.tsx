@@ -16,7 +16,7 @@ import { IssueExecutionPanel } from './issue-execution-panel';
 import { IssueObservabilityTab } from './issue-observability-tab';
 import { DeepLinkCompanySync } from '@/components/deep-link-company-sync';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { getCompanyById } from '@/lib/company';
+import { getActiveCompanyOrNull, getCompanyById } from '@/lib/company';
 import { STICKY_TOOLBAR_ROOT_ATTR } from '@/lib/sticky-toolbar';
 import { ChatPageContext } from '@/components/chat/chat-page-context';
 import { OpenInChatButton } from '@/components/chat/open-in-chat-button';
@@ -30,7 +30,8 @@ export default async function IssueDetailPage({
 }) {
   const { issueId } = await params;
   const { saved } = await searchParams;
-  const detail = await getIssueDetail(issueId);
+  const activeCompany = await getActiveCompanyOrNull();
+  const detail = await getIssueDetail(issueId, { activeCompanyId: activeCompany?.id });
   if (!detail) notFound();
 
   const companyId = detail.issue.companyId;
@@ -40,7 +41,7 @@ export default async function IssueDetailPage({
     listProjectOptions(undefined, companyId),
   ]);
 
-  const { comments } = await listIssueComments(issueId, companyId, { order: 'desc' });
+  const { comments } = await listIssueComments(detail.issue.id, companyId, { order: 'desc' });
 
   const { issue, assignee, goal, project, activity, heartbeatRuns, heartbeatJobs } = detail;
   const [company, activityViews] = await Promise.all([
@@ -166,6 +167,7 @@ export default async function IssueDetailPage({
 
       <IssueDescriptionSection
         issueId={issue.id}
+        issueIdentifier={issue.identifier}
         description={issue.description}
         action={updateIssueDescriptionAction}
       />
@@ -295,7 +297,7 @@ export default async function IssueDetailPage({
           </>
         }
         observability={
-          <IssueObservabilityTab issueId={issueId} agents={observabilityAgents} />
+          <IssueObservabilityTab issueId={issue.id} agents={observabilityAgents} />
         }
       />
     </div>

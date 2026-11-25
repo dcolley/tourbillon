@@ -63,7 +63,7 @@ function row(over: Partial<ActivityLogEntry>): ActivityLogEntry {
 describe('ACT-1 activity view: item links', () => {
   it('names and links every item kind, never a bare id label', () => {
     const l = lookup();
-    assert.deepEqual(linkFor('issue', ISSUE, l), { kind: 'issue', id: ISSUE, label: 'TST-1 Fix the build', href: `/issue/${ISSUE}` });
+    assert.deepEqual(linkFor('issue', ISSUE, l), { kind: 'issue', id: ISSUE, label: 'TST-1 Fix the build', href: '/issue/TST-1' });
     assert.equal(linkFor('agent', AGENT, l).href, '/agent/ceo');
     assert.equal(linkFor('agent', AGENT, l).label, 'CEO');
     assert.equal(linkFor('run', RUN, l).label, 'run 44444444');

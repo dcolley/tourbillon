@@ -27,6 +27,7 @@ import {
   CHECKOUT_LOCK_CLEAR_FIELDS,
   statusesThatReleaseCheckoutLock,
 } from './checkout-lock';
+import { isIssueIdentifier, isIssueUuid, pickIssueCandidate } from './issue-identification';
 
 const PRIORITIES: IssuePriority[] = ['critical', 'high', 'medium', 'low'];
 const STATUSES: IssueStatus[] = [
@@ -238,18 +239,19 @@ export interface IssueDetail {
   heartbeatJobs: JobSummary[];
 }
 
-export async function getIssueDetail(issueId: string): Promise<IssueDetail | null> {
+async function loadIssueDetailByGuid(issueGuid: string): Promise<IssueDetail | null> {
   const row = await db
     .select({ issue: issues, agent: agents, goal: goals, project: projects })
     .from(issues)
     .leftJoin(agents, eq(issues.assigneeAgentId, agents.id))
     .leftJoin(goals, eq(issues.goalId, goals.id))
     .leftJoin(projects, eq(issues.projectId, projects.id))
-    .where(eq(issues.id, issueId))
+    .where(eq(issues.id, issueGuid))
     .limit(1);
 
   const record = row[0];
   if (!record) return null;
+  const issueGuidResolved = record.issue.id;
 
   const [activity, heartbeatJobs] = await Promise.all([
     db
@@ -259,12 +261,12 @@ export async function getIssueDetail(issueId: string): Promise<IssueDetail | nul
         and(
           eq(activityLog.companyId, record.issue.companyId),
           eq(activityLog.entityType, 'issue'),
-          eq(activityLog.entityId, issueId),
+          eq(activityLog.entityId, issueGuidResolved),
         ),
       )
       .orderBy(desc(activityLog.createdAt))
       .limit(100),
-    findHeartbeatJobsForTask(issueId),
+    findHeartbeatJobsForTask(issueGuidResolved),
   ]);
 
   const runIds = new Set<string>();
@@ -294,6 +296,31 @@ export async function getIssueDetail(issueId: string): Promise<IssueDetail | nul
     heartbeatRuns: runs,
     heartbeatJobs,
   };
+}
+
+/**
+ * Resolve an issue detail by either its guid (uuid) or its human identifier
+ * (e.g. `TOUR-590`). Identifier matching is case-insensitive and global —
+ * on a cross-company collision the active company wins.
+ */
+export async function getIssueDetail(
+  issueId: string,
+  opts?: { activeCompanyId?: string | null },
+): Promise<IssueDetail | null> {
+  const input = issueId.trim();
+  if (!input) return null;
+
+  if (isIssueUuid(input)) return loadIssueDetailByGuid(input);
+  if (!isIssueIdentifier(input)) return null;
+
+  const candidates = await db
+    .select({ id: issues.id, companyId: issues.companyId, createdAt: issues.createdAt })
+    .from(issues)
+    .where(sql`upper(${issues.identifier}) = upper(${input})`);
+
+  const picked = pickIssueCandidate(candidates, opts?.activeCompanyId);
+  if (!picked) return null;
+  return loadIssueDetailByGuid(picked.id);
 }
 
 export interface UpdateIssueInput {
