@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { stripDashboardContext } from '@/lib/chat/dashboard-context';
+import { isTaskProgressSignalRow } from '@/lib/agui/client/thread-history';
 import { selectThreadToBind } from './thread-selection';
 import { chatStreamEffectsFor, chatStreamMessageFor, type ChatStreamEvent } from './chat-stream-events';
 
@@ -72,6 +73,12 @@ export function chatMessagePlainText(message: ChatMessage): string {
 export function isChatUserMessage(message: ChatMessage): boolean {
   if (message.role === 'user') return true;
   if (message.role !== 'signal') return false;
+  // TB-363 (MUST-2): a task-progress signal row carries the fan-out's human line in a plain
+  // TEXT part — it is the runner/tool NOTICE, not a human message. Counting it as a user
+  // message would draw (and optimistic-dedup) a fake right-aligned user bubble for the notice.
+  if (isTaskProgressSignalRow({ ...message, type: (message.content as { type?: unknown })?.type ?? (message as { type?: unknown }).type })) {
+    return false;
+  }
   const parts = message.content?.parts;
   if (!Array.isArray(parts)) return false;
   return parts.some(

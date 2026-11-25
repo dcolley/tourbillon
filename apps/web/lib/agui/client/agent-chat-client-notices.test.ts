@@ -21,6 +21,10 @@ const RESOURCE = 'company-co-1:chat:free';
 let ids = 0;
 const newId = () => `tb363-id-${++ids}`;
 
+// TB-363 (MUST-2): VERBATIM real Mastra 1.81 accepted-signal row (PG probe): role 'signal',
+// a plain TEXT part carrying the human line, content.metadata.signal with the attributes,
+// top-level type 'task-progress'. (NOT the synthetic data-signal shape used in early drafts —
+// on base the real shape rendered as a fake user bubble; the fix must suppress that.)
 const signalRow = (id: string, stage: string, contents?: string) => ({
   id,
   role: 'signal',
@@ -28,16 +32,20 @@ const signalRow = (id: string, stage: string, contents?: string) => ({
     format: 2,
     parts: [
       {
-        type: 'data-signal',
-        data: {
-          tagName: 'task-progress',
-          type: 'reactive',
-          contents: contents ?? `Background task done: "Ship the runbook".`,
-          attributes: { taskId: 'task-1', runId: 'run-1', stage, status: stage === 'failed' ? 'failed' : 'succeeded' },
-        },
+        type: 'text',
+        text: contents ?? `Background task done: "Ship the runbook".`,
       },
     ],
+    metadata: {
+      signal: {
+        id,
+        type: 'reactive',
+        tagName: 'task-progress',
+        attributes: { taskId: 'task-1', runId: 'run-1', stage, status: stage === 'failed' ? 'failed' : 'succeeded' },
+      },
+    },
   },
+  type: 'task-progress',
 });
 
 const userMsg = (id: string, text: string) => ({ id, role: 'user', content: { parts: [{ type: 'text', text }] } });

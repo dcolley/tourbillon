@@ -178,6 +178,29 @@ function signalBag(message: StoredThreadMessage): { contents?: unknown; tagName?
   return null;
 }
 
+/**
+ * TB-363 (MUST-2): true when a stored row IS a task-progress signal row (real Mastra 1.81
+ * shape: role 'signal' + a plain TEXT part + content.metadata.signal.tagName 'task-progress';
+ * older rows may carry a data-signal part instead). Such a row is the runner/tool fan-out's
+ * NOTICE — never a fake user turn. Shared by the history renderer and the live SSE path.
+ */
+export function isTaskProgressSignalRow(message: { role?: unknown; content?: unknown; type?: unknown }): boolean {
+  if (message.role !== 'signal') return false;
+  if ((message as { type?: unknown }).type === 'task-progress') return true;
+  const parts = partsOf(message.content);
+  if (
+    parts?.some(
+      (p) =>
+        p.type === 'data-signal' &&
+        ((p.data as Record<string, unknown> | undefined)?.tagName ?? (p as Record<string, unknown>).tagName) === 'task-progress',
+    )
+  ) {
+    return true;
+  }
+  const meta = (message.content as { metadata?: { signal?: Record<string, unknown> } } | null | undefined)?.metadata?.signal;
+  return Boolean(meta && (meta.tagName ?? meta.type) === 'task-progress');
+}
+
 function taskProgressNoticeItem(message: StoredThreadMessage): AgentChatItem | null {
   if (message.role !== 'signal') return null;
   const bag = signalBag(message);
@@ -238,11 +261,17 @@ export function chatItemsFromStoredMessages(messages: readonly StoredThreadMessa
   for (const message of messages) {
     if (!message || typeof message.id !== 'string') continue;
     if (isUserTurn(message)) {
-      const text = stripDashboardContext(userText(message));
-      if (text.trim()) push({ kind: 'user', id: message.id, text, mode: 'run', delivery: 'delivered' }, message.createdAt);
-      // TB-363 (R1): a task-progress signal row is a NOTICE, not an (empty) user turn.
+      // TB-363 (MUST-2): a task-progress signal row is the fan-out's NOTICE — it carries the
+      // human line in a plain TEXT part, so the user-turn branch below would draw a fake
+      // right-aligned user bubble for it and the notice would show TWICE (bubble + notice).
+      // Such rows render ONLY as the notice item.
       const notice = taskProgressNoticeItem(message);
-      if (notice) push(notice, message.createdAt);
+      if (notice) {
+        push(notice, message.createdAt);
+      } else {
+        const text = stripDashboardContext(userText(message));
+        if (text.trim()) push({ kind: 'user', id: message.id, text, mode: 'run', delivery: 'delivered' }, message.createdAt);
+      }
     } else if (message.role === 'assistant') {
       for (const item of assistantItems(message)) push(item, message.createdAt);
     }
