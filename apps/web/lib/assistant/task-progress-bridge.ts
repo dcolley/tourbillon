@@ -478,17 +478,24 @@ export function createOwnedNoticePublisher(
 ): { publish(channel: string, message: string): Promise<number>; quit(): Promise<void> } {
   const client = new IORedis(url, { maxRetriesPerRequest: null });
   // TB-363 (R2): this process-wide publisher must never hold the event loop open (the task-
-  // notification CI job exits on idle handles; an ioredis client keeps a socket + reconnect
-  // timer). Stay UNREFED except during an in-flight publish — the poke itself is best-effort.
-  const asAny = client as unknown as { ref?: () => void; unref?: () => void };
-  asAny.unref?.();
+  // notification CI job exits on idle handles). ioredis 5 exposes NO unref() on the Redis
+  // instance — the net.Socket lives on `connector.stream` and must be unrefed on EVERY
+  // connect (a reconnect produces a new, re-refed socket). Publishes still complete: the
+  // loop is alive for the rest of the cell, and the poke is best-effort by contract.
+  const unrefSocket = () => {
+    const stream = (client as unknown as { connector?: { stream?: { unref?: () => void } | null } }).connector?.stream;
+    stream?.unref?.();
+  };
+  client.on('connect', unrefSocket);
+  unrefSocket();
   return {
     publish: async (channel, message) => {
-      asAny.ref?.();
+      const stream = (client as unknown as { connector?: { stream?: { ref?: () => void } | null } }).connector?.stream;
+      stream?.ref?.();
       try {
         return await client.publish(channel, message);
       } finally {
-        asAny.unref?.();
+        stream?.unref?.();
       }
     },
     quit: async () => {
