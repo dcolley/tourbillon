@@ -483,14 +483,14 @@ export function createOwnedNoticePublisher(
   // connect (a reconnect produces a new, re-refed socket). Publishes still complete: the
   // loop is alive for the rest of the cell, and the poke is best-effort by contract.
   const unrefSocket = () => {
-    const stream = (client as unknown as { connector?: { stream?: { unref?: () => void } | null } }).connector?.stream;
+    const stream = (client as unknown as { connector?: { stream?: { ref?: () => void; unref?: () => void } | null } }).connector?.stream;
     stream?.unref?.();
   };
   client.on('connect', unrefSocket);
   unrefSocket();
   return {
     publish: async (channel, message) => {
-      const stream = (client as unknown as { connector?: { stream?: { ref?: () => void } | null } }).connector?.stream;
+      const stream = (client as unknown as { connector?: { stream?: { ref?: () => void; unref?: () => void } | null } }).connector?.stream;
       stream?.ref?.();
       try {
         return await client.publish(channel, message);
