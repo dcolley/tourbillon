@@ -127,10 +127,12 @@ describe('TB-363 task-progress notices in stored transcript', () => {
 
   it('A8: started → needs-input → done render in that order, including same-millisecond events', () => {
     const at = '2026-11-25T09:00:00.000Z';
+    // Adversarial ids: chronologically later rows sort EARLIER lexicographically (real Mastra
+    // ids are content-hashed, not monotonic), so an id-sorted render is observable here.
     const items = chatItemsFromStoredMessages([
-      signalRow('o1', 'started', { createdAt: at }),
-      signalRow('o2', 'waiting_on_user', { contents: 'waiting: which env? reply here', createdAt: at }),
-      signalRow('o3', 'done', { createdAt: at }),
+      signalRow('zz-1', 'started', { createdAt: at }),
+      signalRow('yy-2', 'waiting_on_user', { contents: 'waiting: which env? reply here', createdAt: at }),
+      signalRow('aa-3', 'done', { createdAt: at }),
     ]);
     assert.deepEqual(
       notices(items).map((i) => i.stage),
