@@ -390,6 +390,15 @@ export type SSEEventType =
    * dead 'task_run_update' member must not come back.
    */
   | 'chat_task_progress'
+  /**
+   * TB-363 (R2): after the web bridge DELIVERS a task-progress event into the origin thread's
+   * session queue, it publishes `{ type: TASK_PROGRESS_NOTICE_SSE_TYPE, companyId, agentId,
+   * threadId, chatTaskId, runId, stage }` on the same `sse:{companyId}` channel. Consumers:
+   * the open assistant chat (EventSource on /api/sse/[companyId] → AgentChatClient
+   * .handleTaskNotice), which merges the thread's history so the persisted notice row becomes
+   * a visible notice item without a reload. Emitted only on 'queued' (never on a skip).
+   */
+  | 'chat_task_notice'
   | 'agent.budget_exceeded'
   | 'issue.status_changed'
   | 'issue.assigned'
@@ -404,6 +413,9 @@ export type SSEEventType =
  * SSEEventType (an enum rename, like the old `task_run_update` drift), the build breaks here.
  */
 export const TASK_PROGRESS_SSE_TYPE = 'chat_task_progress' satisfies SSEEventType;
+
+/** TB-363 (R2): see the SSEEventType member doc. Open-page notice poke, post-delivery only. */
+export const TASK_PROGRESS_NOTICE_SSE_TYPE = 'chat_task_notice' satisfies SSEEventType;
 
 /**
  * S307-S2 (#304 softs): the ONE status union for `chat_task_progress` events. It used to be

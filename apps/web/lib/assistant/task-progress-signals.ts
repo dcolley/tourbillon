@@ -142,7 +142,15 @@ export interface TaskProgressBridgeDeps<A extends TaskProgressAgentRecord> {
    * another replica already claimed this transition, skip. Called before any db work.
    */
   claimEvent(event: TaskProgressEvent): Promise<boolean>;
-  log?: { warn: (msg: string, data?: Record<string, unknown>) => void };
+  /**
+   * TB-363 (R2): called after a SUCCESSFUL delivery ('queued') with the resolved origin
+   * threadId — the bridge publishes a `chat_task_notice` poke on `sse:{companyId}` so an open
+   * chat page merges the thread's history and shows the notice without a reload. Called once
+   * per delivered event (never on a skip). A notify failure must never fail delivery: the
+   * implementation logs (S3) — the queue entry is already persisted.
+   */
+  notify?: (event: TaskProgressEvent, threadId: string) => Promise<void> | void;
+  log?: { warn: (msg: string, data?: Record<string, unknown>) => void } | undefined;
 }
 
 /**
@@ -214,7 +222,20 @@ export async function handleTaskProgressEvent<A extends TaskProgressAgentRecord>
   }
   const payload = taskProgressSignalPayload(event);
   const delivered = await deps.deliver(agent, origin.threadId, payload);
-  return delivered ? 'queued' : 'skipped:no-session';
+  if (!delivered) return 'skipped:no-session';
+  // TB-363 (R2): poke the open page AFTER the queue entry is in (never on a skip). A notify
+  // error is surfaced (S3) but never turns a delivered notice into a failure.
+  try {
+    await deps.notify?.(event, origin.threadId);
+  } catch (err) {
+    deps.log?.warn('[concierge-signal] task progress notice poke failed (delivered)', {
+      agentId: event.agentId,
+      chatTaskId: event.chatTaskId,
+      threadId: origin.threadId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  return 'queued';
 }
 
 /** Convenience for deps implementations: map a progress event onto the queueConciergeSignal call. */

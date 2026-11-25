@@ -429,6 +429,13 @@ export function createOwnedRedisClaimClient(
 export interface TaskProgressBridgeWiring {
   getAgent?: (agentId: string) => Promise<TaskProgressAgentRecord | null>;
   /**
+   * TB-363 (R2): post-delivery open-page poke. Default = publishTaskProgressNoticeOnSse (one
+   * `chat_task_notice` JSON on `sse:{companyId}` via the bridge-owned publisher connection).
+   * Injectable so a test pins that a delivered event pokes exactly once with the origin
+   * threadId and a skipped event never pokes.
+   */
+  notify?: (event: TaskProgressEvent, threadId: string) => Promise<void> | void;
+  /**
    * TN-ORIGIN (H2): scoped origin resolution. Default = getTaskOriginFromDb (real scoped
    * getChatTask). The active pin (assistant_active_threads) is NOT part of routing any more.
    */
@@ -452,10 +459,51 @@ export function buildTaskProgressBridgeDeps(wiring: TaskProgressBridgeWiring = {
     getAgent: wiring.getAgent ?? getAgent,
     getTaskOrigin: wiring.getTaskOrigin ?? ((event) => getTaskOriginFromDb(event)),
     deliver: wiring.deliver ?? realDeliver,
+    notify: wiring.notify ?? ((event, threadId) => publishTaskProgressNoticeOnSse(event, threadId)),
     claimEvent: (event) => claimClient.claim(taskProgressClaimKey(event), TASK_PROGRESS_CLAIM_TTL_SECONDS),
     log: wiring.log ?? { warn: (msg, data) => console.warn(msg, data ?? '') },
   };
 }
+
+// ─── TB-363 (R2): post-delivery open-page poke on the company SSE channel ──────────────────
+
+/** The redis slice the notice publisher drives. */
+export interface NoticePublishCommands {
+  publish(channel: string, message: string): Promise<number> | number;
+}
+
+/** Bridge-owned notice publisher connection (separate from the subscriber connection). */
+export function createOwnedNoticePublisher(
+  url: string = process.env.REDIS_URL ?? 'redis://localhost:6379',
+): { publish(channel: string, message: string): Promise<number>; quit(): Promise<void> } {
+  const client = new IORedis(url, { maxRetriesPerRequest: null });
+  return {
+    publish: (channel, message) => client.publish(channel, message),
+    quit: async () => {
+      await client.quit();
+    },
+  };
+}
+
+/** Lazily-created process-wide notice publisher (production path; tests inject `notify`). */
+let defaultNoticeClient: { publish(channel: string, message: string): Promise<number>; quit(): Promise<void> } | null = null;
+
+export async function publishTaskProgressNoticeOnSse(event: TaskProgressEvent, threadId: string): Promise<void> {
+  const { TASK_PROGRESS_NOTICE_SSE_TYPE } = await import('@tourbillon/shared/types');
+  defaultNoticeClient ??= createOwnedNoticePublisher();
+  const payload = JSON.stringify({
+    type: TASK_PROGRESS_NOTICE_SSE_TYPE,
+    companyId: event.companyId,
+    agentId: event.agentId,
+    chatTaskId: event.chatTaskId,
+    runId: event.runId,
+    stage: event.stage,
+    threadId,
+  });
+  await defaultNoticeClient.publish(`sse:${event.companyId}`, payload);
+}
+
+/**
 
 // ─── lifecycle: owned handle with ACK, bounded drain, idempotent stop (H4) ────────────────
 

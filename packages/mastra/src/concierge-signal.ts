@@ -178,9 +178,11 @@ export function taskProgressSignalPayload(event: TaskProgressEventShape): TaskPr
       break;
     case 'waiting_on_user':
       // #339: the go-between wake — relay the STATED ask (#340 contract), never invent one.
+      // TB-363 A2: the stored notice text is what the human sees, so it must also say HOW to
+      // answer — a reply in this thread resumes the task (status pending, #340 contract).
       contents = `Background task "${title}" is waiting on the human${
         event.detail ? `: ${event.detail}` : ''
-      }. Ask them for exactly that, and resume the task (status pending) when they answer.`;
+      }. Ask them for exactly that; they can reply here, and the task resumes (status pending) when they answer.`;
       break;
     case 'failed':
       // #340 honesty: a runner failure is a FAILURE, not a question for the human.

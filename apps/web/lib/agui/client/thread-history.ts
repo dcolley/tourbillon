@@ -148,6 +148,59 @@ function assistantItems(message: StoredThreadMessage): AgentChatItem[] {
 const isUserTurn = (m: StoredThreadMessage) => m.role === 'user' || m.role === 'signal';
 
 /**
+ * TB-363 (R1): a persisted task-progress signal (role 'signal') is the runner/tool fan-out's
+ * notice row — Mastra stores it as a `data-signal` part (or, in raw memory rows, under
+ * `content.metadata.signal`) with tagName 'task-progress' and attributes {taskId, runId,
+ * stage, status}. Base rendered these as NOTHING (userText reads only text /
+ * data-user-message, so the row's text is '' and the user-turn branch dropped it). Surface it
+ * as its own notice item; the model may say nothing, the notice still shows.
+ */
+function signalBag(message: StoredThreadMessage): { contents?: unknown; tagName?: unknown; type?: unknown; attributes?: unknown } | null {
+  const parts = partsOf(message.content);
+  const signalPart = parts?.find(
+    (p) => p.type === 'data-signal' && ((p.data as Record<string, unknown> | undefined)?.tagName ?? (p as Record<string, unknown>).tagName) === 'task-progress',
+  );
+  if (signalPart) return (signalPart.data ?? signalPart) as Record<string, unknown>;
+  const meta = (message.content as { metadata?: { signal?: Record<string, unknown> } } | null | undefined)?.metadata?.signal;
+  if (meta && (meta.tagName ?? meta.type) === 'task-progress') return meta;
+  return null;
+}
+
+function taskProgressNoticeItem(message: StoredThreadMessage): AgentChatItem | null {
+  if (message.role !== 'signal') return null;
+  const bag = signalBag(message);
+  if (!bag) return null;
+  const attrs = (bag.attributes && typeof bag.attributes === 'object' ? bag.attributes : {}) as Record<string, unknown>;
+  const stage = typeof attrs.stage === 'string' && attrs.stage ? attrs.stage : typeof bag.type === 'string' ? bag.type : 'update';
+  const title = typeof attrs.title === 'string' && attrs.title ? attrs.title : undefined;
+  const rawContents = typeof bag.contents === 'string' ? bag.contents : '';
+  const label =
+    stage === 'waiting_on_user'
+      ? 'Waiting on you'
+      : stage === 'failed'
+        ? 'Failed'
+        : stage === 'done'
+          ? 'Done'
+          : stage === 'started'
+            ? 'Started'
+            : stage === 'needs_review'
+              ? 'Needs another look'
+              : stage;
+  const text = rawContents.trim() || `Task ${label}${title ? `: "${title}"` : ''}.`;
+  const taskId = typeof attrs.taskId === 'string' ? attrs.taskId : undefined;
+  const runId = typeof attrs.runId === 'string' ? attrs.runId : undefined;
+  return {
+    kind: 'notice',
+    id: `${message.id}:notice`,
+    noticeKind: 'task-progress',
+    stage,
+    text,
+    ...(taskId ? { taskId } : {}),
+    ...(runId ? { runId } : {}),
+  };
+}
+
+/**
  * Persisted thread messages (oldest first) → assistant chat items: user turns (dashboard context block
  * removed), assistant text, reasoning and tool calls. System / tool-role messages are not shown.
  * A tool call stored twice (call, then result) keeps one item with the latest state.
@@ -175,6 +228,9 @@ export function chatItemsFromStoredMessages(messages: readonly StoredThreadMessa
     if (isUserTurn(message)) {
       const text = stripDashboardContext(userText(message));
       if (text.trim()) push({ kind: 'user', id: message.id, text, mode: 'run', delivery: 'delivered' }, message.createdAt);
+      // TB-363 (R1): a task-progress signal row is a NOTICE, not an (empty) user turn.
+      const notice = taskProgressNoticeItem(message);
+      if (notice) push(notice, message.createdAt);
     } else if (message.role === 'assistant') {
       for (const item of assistantItems(message)) push(item, message.createdAt);
     }
