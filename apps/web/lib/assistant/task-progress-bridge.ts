@@ -504,6 +504,18 @@ export async function publishTaskProgressNoticeOnSse(event: TaskProgressEvent, t
 }
 
 /**
+ * TB-363 (A11/R3): the WEB-host tool-path publisher — publishes a tool-driven transition onto
+ * the SAME `sse:{companyId}` channel + wire type the scheduler uses, so the existing bridge
+ * (claim → origin → queueSignal) is the single delivery path for runner AND tool events. Wired
+ * from instrumentation via setChatTaskProgressPublisher.
+ */
+export async function publishChatTaskProgressToSse(
+  event: import('@tourbillon/mastra/concierge-signal').ChatTaskProgressPublishEvent,
+): Promise<void> {
+  const { TASK_PROGRESS_SSE_TYPE } = await import('@tourbillon/shared/types');
+  defaultNoticeClient ??= createOwnedNoticePublisher();
+  await defaultNoticeClient.publish(`sse:${event.companyId}`, JSON.stringify({ type: TASK_PROGRESS_SSE_TYPE, ...event }));
+}
 
 // ─── lifecycle: owned handle with ACK, bounded drain, idempotent stop (H4) ────────────────
 

@@ -8,6 +8,7 @@ import { describeDatabaseTarget, probeDatabase } from '@tourbillon/db';
 import { DEFAULT_DB_ATTEMPT_TIMEOUT_MS, waitForDb, type Logger } from './startup';
 import { sweepOrphanedRunsOnStartup, reconcileChatTaskRunsOnStartup } from './startup-sweep';
 import { createStaleRunProgressSink, createTaskProgressPublisher } from './task-runner';
+import { setChatTaskProgressPublisher } from '@tourbillon/mastra/concierge-signal';
 
 /**
  * S1 (#202 ACCEPT softs): the boot side-effects are injectable so the startup path — above all
@@ -40,7 +41,14 @@ const productionBootDeps: SchedulerBootDeps = {
       onSettled: createStaleRunProgressSink(createTaskProgressPublisher()),
     }),
   sweepStaleEgressSockets,
-  startWakeServer,
+  startWakeServer: () => {
+    // TB-363 (A11/R3): Run Task wakes — where the agent moves its OWN chat tasks with
+    // updateMyTask / completeMyTask — execute in THIS process. The tool-path publish seam uses
+    // the scheduler's own redis publisher, so a tool move lands on the same sse:{companyId}
+    // channel and the same event identity as the runner's emits (bridge claim collapses them).
+    setChatTaskProgressPublisher(createTaskProgressPublisher());
+    return startWakeServer();
+  },
   startStaleSweepInterval,
   bootMastraSchedules,
   startTaskRunnerPolling,

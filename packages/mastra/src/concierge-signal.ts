@@ -209,3 +209,77 @@ function randomId(): string {
   // crypto.randomUUID is available on every Node we support; tiny indirection for stubs.
   return globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2);
 }
+
+// ─── TB-363 (A11 / R3): the TOOL-PATH progress publish seam ──────────────────
+//
+// Before this, ONLY the scheduler published `chat_task_progress` — a status move the
+// concierge made itself with updateMyTask / completeMyTask (Derek's #363 repro) produced an
+// audit row and NO event, so the human never saw a notice. These moves now publish exactly
+// one event per real transition through this host-injected seam, using the SAME wire shape
+// and the SAME event identity (companyId:chatTaskId:runId:stage = taskProgressClaimKey) as
+// the runner, so the web bridge's claim collapses a tool move and the runner settle of the
+// same transition into ONE notice (A11b). Hosts (apps/web instrumentation, scheduler-main /
+// wake boot) inject the redis publisher; without one the transition is lost but NEVER silent
+// (S3): a warn names the gap.
+
+/** One `chat_task_progress` publish (structurally the scheduler's ChatTaskProgressEvent). */
+export interface ChatTaskProgressPublishEvent {
+  companyId: string;
+  agentId: string;
+  chatTaskId: string;
+  runId: string;
+  stage: TaskProgressStage;
+  status: TaskProgressStatus;
+  title: string;
+  /** Ask/failure text, clamped to the scheduler's 300-char event cap. */
+  detail?: string;
+}
+
+export type ChatTaskProgressPublisher = (event: ChatTaskProgressPublishEvent) => void | Promise<void>;
+
+let chatTaskProgressPublisher: ChatTaskProgressPublisher | null = null;
+
+/** Host wiring: called once per process (web instrumentation / scheduler boot). null = unset. */
+export function setChatTaskProgressPublisher(publisher: ChatTaskProgressPublisher | null): void {
+  chatTaskProgressPublisher = publisher;
+}
+
+/** Test seam: is a publisher wired? (No production caller.) */
+export function getChatTaskProgressPublisher(): ChatTaskProgressPublisher | null {
+  return chatTaskProgressPublisher;
+}
+
+/**
+ * Publish one tool-path transition. Fire-and-forget like the scheduler publisher; a missing
+ * publisher or a throwing publisher is SURFACED via console.warn (S3), never silent, and must
+ * never fail the tool call that asked for it.
+ */
+export function publishChatTaskProgress(event: ChatTaskProgressPublishEvent): boolean {
+  const clamped: ChatTaskProgressPublishEvent = event.detail
+    ? { ...event, detail: event.detail.slice(0, 300) }
+    : event;
+  if (!chatTaskProgressPublisher) {
+    console.warn('[chat-task-progress] no progress publisher wired — transition not announced', {
+      chatTaskId: clamped.chatTaskId,
+      stage: clamped.stage,
+    });
+    return false;
+  }
+  try {
+    void Promise.resolve(chatTaskProgressPublisher(clamped)).catch((err) => {
+      console.warn('[chat-task-progress] progress publish failed', {
+        chatTaskId: clamped.chatTaskId,
+        stage: clamped.stage,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+    return true;
+  } catch (err) {
+    console.warn('[chat-task-progress] progress publish threw', {
+      chatTaskId: clamped.chatTaskId,
+      stage: clamped.stage,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+}
