@@ -54,6 +54,14 @@ import {
   withPsubscribeFailure,
 } from './task-notification-boundary-harness';
 import * as taskProgressBridge from './task-progress-bridge';
+import { chatItemsFromStoredMessages, type StoredThreadMessage } from '@/lib/agui/client/thread-history';
+// Source import (not the package subpath): TN cells must certify the CURRENT seam, not a stale
+// built dist — same reason the harness createRequires packages/mastra.
+import {
+  setChatTaskProgressPublisher,
+  publishChatTaskProgress,
+  type ChatTaskProgressPublishEvent,
+} from '../../../../packages/mastra/src/concierge-signal';
 
 const {
   startTaskProgressSignalBridge,
@@ -1045,7 +1053,154 @@ test('TN-FAIL-CLEAN-CONTROL', { timeout: 90_000 }, () => {
   recordVerdict('TN-FAIL-CLEAN-CONTROL', 'GREEN');
 });
 
-test('TN-TEARDOWN', { timeout: 30_000 }, async (t) => {
+
+// ─── TB-363: what the BROWSER renders from the persisted rows (contract A1/A2/A5/A9/A11 + R2) ─
+//
+// The pre-existing cells certify the ROW; #363 was filed because the row rendered as NOTHING.
+// These cells run the rows through the real client parser (chatItemsFromStoredMessages) with a
+// FRESH independent reader — in-memory fakes do not count (A9).
+
+async function tb363Items(threadId: string) {
+  const rows = await tnFreshMessages(threadId);
+  const msgs: StoredThreadMessage[] = [];
+  for (const raw of rows) {
+    try {
+      const o = JSON.parse(raw) as Record<string, unknown>;
+      let content: unknown = o.content;
+      if (typeof content === 'string') content = JSON.parse(content);
+      msgs.push({ id: String(o.id ?? ''), role: String(o.role ?? ''), content } as StoredThreadMessage);
+    } catch {
+      /* row not JSON-parseable (blob fallback) — the item assertion below still guards the case */
+    }
+  }
+  return chatItemsFromStoredMessages(msgs);
+}
+const tb363Notices = (items: ReturnType<typeof chatItemsFromStoredMessages>) =>
+  items.filter((i) => (i as { kind?: string }).kind === 'notice') as Array<{ stage?: string; text?: string }>;
+
+async function tb363Cell(name: string, fn: (f: Awaited<ReturnType<typeof buildFixture>>) => Promise<void>) {
+  await bridgeReset();
+  await bridgeStart();
+  const f = await buildFixture({ seedPin: 't2' });
+  try {
+    await fn(f);
+    recordVerdict(name, 'GREEN');
+  } catch (err) {
+    recordVerdict(name, 'RED', err instanceof Error ? err.message : String(err));
+    throw err;
+  } finally {
+    setChatTaskProgressPublisher(null);
+    await f.cleanup();
+  }
+}
+
+test('TN-TB363-A1-A9-DONE-VISIBLE', { timeout: 90_000 }, async (t) => {
+  if (await skipIfIncompatible(t, 'TN-TB363-A1-A9-DONE-VISIBLE')) return;
+  await tb363Cell('TN-TB363-A1-A9-DONE-VISIBLE', async (f) => {
+    await publishProgress(progressEvent(f, { stage: 'done', status: 'succeeded', title: 'Ship the runbook' }));
+    await waitFor('A1 row', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done') >= 1);
+    await waitFor('A1 item', async () => tb363Notices(await tb363Items(f.t1)).length >= 1);
+    const n = tb363Notices(await tb363Items(f.t1));
+    assert.equal(n.length, 1, 'A9 fresh reader: exactly one rendered notice item');
+    assert.equal(n[0]!.stage, 'done');
+    assert.match(n[0]!.text!, /Ship the runbook/, 'the notice shows the task title');
+    assert.equal(tb363Notices(await tb363Items(f.t2)).length, 0, 'nothing rendered on pin T2');
+    assert.equal(tb363Notices(await tb363Items(f.t9)).length, 0, 'nothing rendered on usable T9');
+  });
+});
+
+test('TN-TB363-A2-ASK-VISIBLE', { timeout: 90_000 }, async (t) => {
+  if (await skipIfIncompatible(t, 'TN-TB363-A2-ASK-VISIBLE')) return;
+  await tb363Cell('TN-TB363-A2-ASK-VISIBLE', async (f) => {
+    await publishProgress(
+      progressEvent(f, { stage: 'waiting_on_user', status: 'succeeded', detail: 'ask: confirm the vendor' }),
+    );
+    await waitFor('A2 item', async () => tb363Notices(await tb363Items(f.t1)).length >= 1);
+    const n = tb363Notices(await tb363Items(f.t1));
+    assert.equal(n.length, 1);
+    assert.equal(n[0]!.stage, 'waiting_on_user');
+    assert.match(n[0]!.text!, /confirm the vendor/, 'the full ask is visible, never a generic needs-input');
+    assert.match(n[0]!.text!, /reply here/, 'the notice says how to answer');
+  });
+});
+
+test('TN-TB363-A5-FAIL-VISIBLE', { timeout: 90_000 }, async (t) => {
+  if (await skipIfIncompatible(t, 'TN-TB363-A5-FAIL-VISIBLE')) return;
+  await tb363Cell('TN-TB363-A5-FAIL-VISIBLE', async (f) => {
+    await publishProgress(
+      progressEvent(f, { stage: 'failed', status: 'failed', detail: 'worker died (exit 137)' }),
+    );
+    await waitFor('A5 item', async () => tb363Notices(await tb363Items(f.t1)).length >= 1);
+    const n = tb363Notices(await tb363Items(f.t1));
+    assert.equal(n.length, 1);
+    assert.equal(n[0]!.stage, 'failed', 'distinct from needs-input (M9)');
+    assert.match(n[0]!.text!, /worker died \(exit 137\)/, 'the reason is in the visible notice');
+  });
+});
+
+test('TN-TB363-A11-TOOL-ONCE', { timeout: 90_000 }, async (t) => {
+  if (await skipIfIncompatible(t, 'TN-TB363-A11-TOOL-ONCE')) return;
+  await tb363Cell('TN-TB363-A11-TOOL-ONCE', async (f) => {
+    // The concierge moved the task itself: the tool-path seam publishes through the SAME
+    // publisher the scheduler uses. Then the runner settles the same transition.
+    setChatTaskProgressPublisher((e) => publishProgress(e as unknown as Record<string, unknown>));
+    const runId = 'tn-tool-run';
+    publishChatTaskProgress({
+      companyId: f.companyId,
+      agentId: f.agentId,
+      chatTaskId: f.taskId,
+      runId,
+      stage: 'done',
+      status: 'succeeded',
+      title: 'Ship the runbook',
+    });
+    await waitFor('A11 tool notice', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done') >= 1);
+    await publishProgress(progressEvent(f, { stage: 'done', status: 'succeeded', title: 'Ship the runbook', runId }));
+    await new Promise((r) => setTimeout(r, 1500));
+    assert.equal(
+      countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done'),
+      1,
+      'M14b: tool move + runner settle of one transition collapse to ONE row (same identity)',
+    );
+    const n = tb363Notices(await tb363Items(f.t1));
+    assert.equal(n.length, 1, 'and ONE rendered item');
+    assert.equal(n[0]!.stage, 'done');
+  });
+});
+
+test('TN-TB363-R2-NOTICE-POKE', { timeout: 90_000 }, async (t) => {
+  if (await skipIfIncompatible(t, 'TN-TB363-R2-NOTICE-POKE')) return;
+  await bridgeReset();
+  await startRedisObserver();
+  await bridgeStart();
+  const f = await buildFixture({ seedPin: 't2' });
+  try {
+    await publishProgress(progressEvent(f, { stage: 'done', status: 'succeeded' }));
+    await waitFor('R2 row', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done') >= 1);
+    await waitFor(
+      'R2 poke',
+      async () =>
+        redisTerminalLog.some(
+          (e) => (e.payload as { type?: string })?.type === 'chat_task_notice',
+        ),
+    );
+    const poke = redisTerminalLog
+      .map((e) => e.payload as Record<string, unknown>)
+      .find((p) => p.type === 'chat_task_notice')!;
+    assert.equal(poke.threadId, f.t1, 'the open-page poke names the ORIGIN thread');
+    assert.equal(poke.companyId, f.companyId);
+    assert.equal(poke.stage, 'done');
+    recordVerdict('TN-TB363-R2-NOTICE-POKE', 'GREEN');
+  } catch (err) {
+    recordVerdict('TN-TB363-R2-NOTICE-POKE', 'RED', err instanceof Error ? err.message : String(err));
+    throw err;
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('TN-TEARDOWN'
+, { timeout: 30_000 }, async (t) => {
   if (await skipIfIncompatible(t, 'TN-TEARDOWN')) {
     await bridgeReset();
     await tnTeardown();

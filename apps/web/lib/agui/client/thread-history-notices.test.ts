@@ -153,4 +153,38 @@ describe('TB-363 task-progress notices in stored transcript', () => {
     );
     assert.equal(notices(items).length, 1, 'the item is a notice rendered FROM the signal itself, not a model reply');
   });
+
+  it('A9: the REAL Mastra 1.81 stored shape (text part + content.metadata.signal + top-level type) renders one notice', () => {
+    // Verbatim shape of an accepted signal row read back from PostgresStore in the TN cells
+    // (tnFreshMessages probe, 25 Nov): the human line is the TEXT part; attributes/stage live on
+    // content.metadata.signal; the row carries top-level type 'task-progress'.
+    const row = {
+      id: 'sig-eb21d4c6',
+      role: 'signal',
+      content: {
+        format: 2,
+        parts: [{ type: 'text', text: 'Background task done: "Ship the runbook".', createdAt: 1795617080022 }],
+        metadata: {
+          signal: {
+            id: 'sig-eb21d4c6',
+            type: 'reactive',
+            tagName: 'task-progress',
+            createdAt: '2026-11-25T14:31:20.021Z',
+            acceptedAt: '2026-11-25T14:31:19.988Z',
+            attributes: { taskId: 'task-1', runId: 'run-1', stage: 'done', status: 'succeeded' },
+          },
+        },
+      },
+      createdAt: '2026-11-25T14:31:20.021Z',
+      threadId: 't1',
+      resourceId: 'company-1:chat:free',
+      type: 'task-progress',
+    };
+    const items = chatItemsFromStoredMessages([row as unknown as StoredThreadMessage]);
+    const n = notices(items);
+    assert.equal(n.length, 1);
+    assert.equal(n[0]!.stage, 'done');
+    assert.equal(n[0]!.taskId, 'task-1');
+    assert.match(n[0]!.text, /Background task done: "Ship the runbook"\./, 'the text part is the visible notice');
+  });
 });

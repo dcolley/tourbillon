@@ -107,8 +107,12 @@ export async function stopRedisObserver(): Promise<void> {
 }
 
 export function redisTerminalEvents(taskId?: string): Array<{ channel: string; payload: unknown; at: string }> {
-  if (!taskId) return [...redisTerminalLog];
-  return redisTerminalLog.filter((row) => JSON.stringify(row.payload).includes(taskId));
+  // TB-363 (R2): the open-page poke (`chat_task_notice`) rides the SAME sse:{companyId} channel
+  // and carries the chatTaskId — it is a display refresh hint, not a progress event, and must
+  // not inflate progress-copy oracles (TN-ONCE-DUP counts progress copies exactly).
+  const pokes = (row: { payload: unknown }) => (row.payload as { type?: string } | null)?.type === 'chat_task_notice';
+  if (!taskId) return redisTerminalLog.filter((row) => !pokes(row));
+  return redisTerminalLog.filter((row) => !pokes(row) && JSON.stringify(row.payload).includes(taskId));
 }
 
 type MastraChat = typeof import('@tourbillon/mastra/chat');
@@ -698,14 +702,17 @@ export async function loadPublisher(): Promise<Publisher> {
   const href = new URL('../../../../packages/scheduler/src/task-runner.ts', import.meta.url).href;
   const importer = new Function('specifier', 'return import(specifier)') as (s: string) => Promise<Record<string, unknown>>;
   const mod = await importer(href);
-  if (typeof mod.createTaskProgressPublisher !== 'function' || typeof mod.createDefaultTaskRunnerDeps !== 'function') {
+  // tsx may surface the scheduler source (CommonJS package) as a CJS namespace: named exports
+  // ride on `default`. Unwrap so the identity checks below see the real functions.
+  const ns = { ...mod, ...((mod as { default?: Record<string, unknown> }).default ?? {}) } as Record<string, unknown>;
+  if (typeof ns.createTaskProgressPublisher !== 'function' || typeof ns.createDefaultTaskRunnerDeps !== 'function') {
     throw new Error('TN plumbing: task-runner missing createTaskProgressPublisher / createDefaultTaskRunnerDeps');
   }
-  const src = Function.prototype.toString.call(mod.createTaskProgressPublisher);
+  const src = Function.prototype.toString.call(ns.createTaskProgressPublisher);
   if (!src.includes('redis-pub') && !src.includes('redisPub')) {
     throw new Error('TN plumbing: createTaskProgressPublisher is not the Redis publisher');
   }
-  const deps = (mod.createDefaultTaskRunnerDeps as (o?: Record<string, unknown>) => { emitProgress?: Publisher })({
+  const deps = (ns.createDefaultTaskRunnerDeps as (o?: Record<string, unknown>) => { emitProgress?: Publisher })({
     log: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
   });
   if (typeof deps.emitProgress !== 'function') {
@@ -740,10 +747,11 @@ export async function invokeDefaultPoller(event: Record<string, unknown>): Promi
   const href = new URL('../../../../packages/scheduler/src/task-runner.ts', import.meta.url).href;
   const importer = new Function('specifier', 'return import(specifier)') as (s: string) => Promise<Record<string, unknown>>;
   const mod = await importer(href);
-  if (typeof mod.pollTaskRunner !== 'function' || typeof mod.createDefaultTaskRunnerDeps !== 'function') {
+  const ns = { ...mod, ...((mod as { default?: Record<string, unknown> }).default ?? {}) } as Record<string, unknown>;
+  if (typeof ns.pollTaskRunner !== 'function' || typeof ns.createDefaultTaskRunnerDeps !== 'function') {
     throw new Error('TN plumbing: pollTaskRunner / createDefaultTaskRunnerDeps missing');
   }
-  const defaults = (mod.createDefaultTaskRunnerDeps as (o?: Record<string, unknown>) => Record<string, unknown>)({
+  const defaults = (ns.createDefaultTaskRunnerDeps as (o?: Record<string, unknown>) => Record<string, unknown>)({
     log: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
   });
   if (typeof defaults.emitProgress !== 'function') {
@@ -787,7 +795,7 @@ export async function invokeDefaultPoller(event: Record<string, unknown>): Promi
     logActivity: async () => undefined,
     readTaskState: async () => ({ status: 'done', notes: null }),
   };
-  const summary = (await (mod.pollTaskRunner as (d: unknown, o?: unknown) => Promise<{
+  const summary = (await (ns.pollTaskRunner as (d: unknown, o?: unknown) => Promise<{
     polled: number;
     started: Array<{ runId: string; done: Promise<unknown> }>;
   }>)(deps, { wakeSettleGuardSec: 8, taskCap: 2, maxConcurrentRuns: 4 })) as {

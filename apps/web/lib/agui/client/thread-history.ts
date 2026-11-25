@@ -162,7 +162,19 @@ function signalBag(message: StoredThreadMessage): { contents?: unknown; tagName?
   );
   if (signalPart) return (signalPart.data ?? signalPart) as Record<string, unknown>;
   const meta = (message.content as { metadata?: { signal?: Record<string, unknown> } } | null | undefined)?.metadata?.signal;
-  if (meta && (meta.tagName ?? meta.type) === 'task-progress') return meta;
+  if (meta && (meta.tagName ?? meta.type) === 'task-progress') {
+    // Mastra 1.81 stores an accepted signal as role 'signal' with a plain TEXT part plus
+    // content.metadata.signal ({id,type,tagName,createdAt,acceptedAt,attributes}) — the human
+    // line is the text part (verified against real PG rows in the TN cells), and the row also
+    // carries top-level `type: 'task-progress'`.
+    const text = parts?.find((p) => p.type === 'text') as { text?: unknown } | undefined;
+    return { ...meta, ...(typeof text?.text === 'string' && text.text ? { contents: text.text } : {}) };
+  }
+  if ((message as { type?: unknown }).type === 'task-progress') {
+    const text = parts?.find((p) => p.type === 'text') as { text?: unknown } | undefined;
+    const attrs = (message as { attributes?: unknown }).attributes;
+    return { tagName: 'task-progress', type: 'task-progress', ...(typeof text?.text === 'string' ? { contents: text.text } : {}), ...(attrs ? { attributes: attrs } : {}) };
+  }
   return null;
 }
 
