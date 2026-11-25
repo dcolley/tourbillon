@@ -6,11 +6,21 @@ import { assigneesFromFormSelect } from '@tourbillon/shared';
 import { addIssueComment } from '@/lib/issue-comments';
 import { createIssue, updateIssue, IssueValidationError } from '@/lib/issues';
 import { releaseIssueCheckoutLock } from '@/lib/checkout-lock';
-import { db, issues } from '@tourbillon/db';
+import { db, issues, type Issue } from '@tourbillon/db';
 import { eq } from 'drizzle-orm';
 import { requireBoardSession } from '@/lib/company';
 
-export type CreateIssueState = { error: string | null; success?: boolean; issueId?: string };
+export type CreateIssueState = {
+  error: string | null;
+  success?: boolean;
+  issueId?: string;
+  issueIdentifier?: string;
+};
+
+function revalidateIssuePaths(issue: { id: string; identifier: string }): void {
+  revalidatePath(`/issue/${issue.id}`);
+  revalidatePath(`/issue/${issue.identifier}`);
+}
 
 export async function createIssueAction(
   _prev: CreateIssueState,
@@ -45,8 +55,8 @@ export async function createIssueAction(
   revalidatePath('/project');
   if (goalId) revalidatePath(`/goal/${goalId}`);
   if (projectId) revalidatePath(`/project/${projectId}`);
-  revalidatePath(`/issue/${created.id}`);
-  return { error: null, success: true, issueId: created.id };
+  revalidatePath(`/issue/${created.identifier}`);
+  return { error: null, success: true, issueId: created.id, issueIdentifier: created.identifier };
 }
 
 export type UpdateIssueDescriptionState = { error: string | null; success?: boolean };
@@ -58,8 +68,9 @@ export async function updateIssueDescriptionAction(
   await requireBoardSession();
   const issueId = formData.get('issueId') as string;
 
+  let updated: Issue;
   try {
-    await updateIssue(issueId, {
+    updated = await updateIssue(issueId, {
       description: (formData.get('description') as string) || null,
     });
   } catch (err) {
@@ -70,7 +81,7 @@ export async function updateIssueDescriptionAction(
   }
 
   revalidatePath('/issue');
-  revalidatePath(`/issue/${issueId}`);
+  revalidateIssuePaths(updated);
   return { error: null, success: true };
 }
 
@@ -86,8 +97,9 @@ export async function updateIssueAction(
   const goalId = formData.get('goalId') as string;
   const projectId = formData.get('projectId') as string;
 
+  let updated: Issue;
   try {
-    await updateIssue(issueId, {
+    updated = await updateIssue(issueId, {
       title: formData.get('title') as string,
       priority: formData.get('priority') as string,
       status: formData.get('status') as string,
@@ -104,7 +116,7 @@ export async function updateIssueAction(
   }
 
   revalidatePath('/issue');
-  revalidatePath(`/issue/${issueId}`);
+  revalidateIssuePaths(updated);
   revalidatePath('/goal');
   revalidatePath('/project');
   if (projectId) revalidatePath(`/project/${projectId}`);
@@ -163,8 +175,8 @@ export async function commentOnIssueAction(
   }
 
   revalidatePath('/issue');
-  revalidatePath(`/issue/${issueId}`);
-  redirect(`/issue/${issueId}?saved=1`);
+  revalidateIssuePaths(issue);
+  redirect(`/issue/${issue.identifier}?saved=1`);
 }
 
 export async function releaseCheckoutLockAction(formData: FormData): Promise<void> {
@@ -172,13 +184,13 @@ export async function releaseCheckoutLockAction(formData: FormData): Promise<voi
   const issueId = formData.get('issueId') as string;
   if (!issueId) return;
 
-  await releaseIssueCheckoutLock(issueId, {
+  const released = await releaseIssueCheckoutLock(issueId, {
     type: 'user',
     id: 'dashboard',
     name: 'Dashboard',
   });
 
   revalidatePath('/issue');
-  revalidatePath(`/issue/${issueId}`);
-  redirect(`/issue/${issueId}?saved=1`);
+  revalidateIssuePaths(released);
+  redirect(`/issue/${released.identifier}?saved=1`);
 }

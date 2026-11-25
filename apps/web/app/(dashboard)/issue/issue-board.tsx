@@ -51,7 +51,7 @@ function IssueCard({ issue, agent }: IssueListRow) {
     : agent?.name;
 
   return (
-    <Link href={`/issue/${issue.id}`}>
+    <Link href={`/issue/${encodeURIComponent(issue.identifier)}`}>
       <Card className="transition-colors hover:bg-muted/50">
         <CardContent className="space-y-1 p-3">
           <p className="font-mono text-xs text-muted-foreground">{issue.identifier}</p>

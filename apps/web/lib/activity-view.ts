@@ -213,8 +213,10 @@ export function shortId(id: string): string {
 
 export function hrefFor(kind: ActivityItemKind, id: string, lookup: ActivityLookup): string | null {
   switch (kind) {
-    case 'issue':
-      return lookup.issues.has(id) ? `/issue/${encodeURIComponent(id)}` : null;
+    case 'issue': {
+      const issue = lookup.issues.get(id);
+      return issue ? `/issue/${encodeURIComponent(issue.identifier)}` : null;
+    }
     case 'agent': {
       const agent = lookup.agents.get(id);
       return agent ? `/agent/${encodeURIComponent(agent.urlKey)}` : null;

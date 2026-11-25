@@ -137,7 +137,7 @@ export default async function ProjectDetailPage({
             {issues.map(({ issue, assignee }) => (
               <Link
                 key={issue.id}
-                href={`/issue/${issue.id}`}
+                href={`/issue/${encodeURIComponent(issue.identifier)}`}
                 className="flex items-start justify-between gap-4 p-4 hover:bg-muted/30 transition-colors"
               >
                 <div className="space-y-0.5 min-w-0">

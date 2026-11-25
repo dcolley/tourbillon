@@ -190,7 +190,7 @@ export function ApprovalQuestionCard({
             <ul className="mt-1 space-y-1">
               {linkedIssues.map((issue) => (
                 <li key={issue.id}>
-                  <Link href={`/issue/${issue.id}`} className="hover:underline">
+                  <Link href={`/issue/${encodeURIComponent(issue.identifier)}`} className="hover:underline">
                     <span className="font-mono text-xs">{issue.identifier}</span>
                     <span className="text-muted-foreground"> — {issue.title}</span>
                     {issue.boardApprovalId === approval.id ? <span className="ml-2 text-xs text-amber-700">halted</span> : null}

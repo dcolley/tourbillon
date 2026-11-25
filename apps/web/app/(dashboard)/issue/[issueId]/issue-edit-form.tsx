@@ -58,11 +58,11 @@ export function IssueEditForm({
   useEffect(() => {
     if (state?.success) {
       startTransition(() => {
-        router.replace(`/issue/${issue.id}?saved=1`);
+        router.replace(`/issue/${issue.identifier}?saved=1`);
         router.refresh();
       });
     }
-  }, [state?.success, issue.id, router]);
+  }, [state?.success, issue.identifier, router]);
 
   return (
     <div className="rounded-lg border">

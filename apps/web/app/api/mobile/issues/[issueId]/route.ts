@@ -11,7 +11,7 @@ export async function GET(
 
   try {
     const { issueId } = await params;
-    const detail = await getIssueDetail(issueId);
+    const detail = await getIssueDetail(issueId, { activeCompanyId: auth.company.id });
     if (!detail || detail.issue.companyId !== auth.company.id) {
       return NextResponse.json({ error: 'Not found' }, { status: 404 });
     }

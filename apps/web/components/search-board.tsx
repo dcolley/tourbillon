@@ -250,7 +250,7 @@ export function SearchBoard({ companyId }: SearchBoardProps) {
         <div className="max-h-[55vh] overflow-y-auto border-t">
           {results.length === 0 && !loading && query && !error && (
             <div className="px-6 py-8 text-center text-sm text-muted-foreground">
-              No results found for "{query}"
+              No results found for “{query}”
             </div>
           )}
           {results.length > 0 && (

@@ -24,10 +24,12 @@ function SaveDescriptionButton() {
 
 export function IssueDescriptionSection({
   issueId,
+  issueIdentifier,
   description,
   action,
 }: {
   issueId: string;
+  issueIdentifier: string;
   description: string | null;
   action: (
     _prev: UpdateIssueDescriptionState,
@@ -47,11 +49,11 @@ export function IssueDescriptionSection({
     if (state?.success) {
       startTransition(() => {
         setMode('view');
-        router.replace(`/issue/${issueId}?saved=1`);
+        router.replace(`/issue/${issueIdentifier}?saved=1`);
         router.refresh();
       });
     }
-  }, [state?.success, issueId, router]);
+  }, [state?.success, issueIdentifier, router]);
 
   function cancelEdit() {
     setDraft(description ?? '');

@@ -150,7 +150,7 @@ async function searchIssues(
       snippet,
       status: issue.status,
       updatedAt: issue.updatedAt.toISOString(),
-      href: `/issue/${issue.id}`,
+      href: `/issue/${encodeURIComponent(issue.identifier)}`,
       relevance,
       timestamp: issue.updatedAt,
     };
@@ -224,7 +224,7 @@ async function searchComments(
         snippet,
         status: parentIssue.status,
         updatedAt: comment.createdAt.toISOString(),
-        href: `/issue/${parentIssue.id}#comment-${comment.id}`,
+        href: `/issue/${encodeURIComponent(parentIssue.identifier)}#comment-${comment.id}`,
         relevance,
         timestamp: comment.createdAt,
       };
