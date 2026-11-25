@@ -316,7 +316,12 @@ export class AgentChatClient {
     try {
       return await start;
     } finally {
-      if (this.starting === start) this.starting = null;
+      if (this.starting === start) {
+        this.starting = null;
+        // TB-363 (A3d): a poke that arrived while this send was still starting (e.g. the run
+        // was aborted before its stream opened) must not sit pending forever.
+        this.drainPendingNotice();
+      }
     }
   }
 
