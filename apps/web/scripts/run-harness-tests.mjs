@@ -50,6 +50,9 @@ export const HARNESS_TEST_FILES = [
   'components/assistant/agent-chat-notice-render.test.ts',
   'components/chat/chat-stream-events.test.ts',
   'lib/assistant/task-progress-signals.test.ts',
+  // TB-363 (Test verdict 5c93eddd, HOLD M21b): the bridge deliver-refusal units
+  // (blocked/discard => false, persist => true) are the M21b killer and must be CI-run.
+  'lib/assistant/task-progress-bridge.test.ts',
 ];
 
 const HARNESS_DIR = 'lib/harness';

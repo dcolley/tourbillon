@@ -166,6 +166,9 @@ describe('S328-S4: CI runs the service-free shared + scheduler + harness unit te
         'components/assistant/agent-chat-notice-render.test.ts',
         'components/chat/chat-stream-events.test.ts',
         'lib/assistant/task-progress-signals.test.ts',
+        // TB-363 (Test verdict 5c93eddd, HOLD M21b): the bridge deliver-refusal units are the
+        // M21b killer — CI must actually run them (same rule as the MUST-3 pins above).
+        'lib/assistant/task-progress-bridge.test.ts',
       ]].sort(),
       'web harness suite is exactly these files — add/remove deliberately, in both places',
     );

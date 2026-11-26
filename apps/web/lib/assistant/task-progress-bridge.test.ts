@@ -138,9 +138,17 @@ function persistAgent(action: string): PersistSignalAgent & { calls: unknown[] }
 }
 
 // TB-363 MUST-6: a refused persist/wake is a FAILURE (claim must be releasable), never true.
-test('deliver (MUST-6): wake=false with accepted.action blocked -> false; persist -> true', async () => {
+test('deliver (MUST-6): accepted.action blocked -> deliver false (refusal, caller releases claim)', async () => {
   const blocked = deliverHarness({ existing: null, chatAgent: persistAgent('blocked') });
   assert.equal(await blocked.deliver(AGENT, 'thread-42', PAYLOAD, false), false, 'blocked persist is a refusal');
+});
+
+test('deliver (MUST-6): accepted.action discard -> deliver false (refusal, caller releases claim)', async () => {
+  const discarded = deliverHarness({ existing: null, chatAgent: persistAgent('discard') });
+  assert.equal(await discarded.deliver(AGENT, 'thread-42', PAYLOAD, false), false, 'discard persist is a refusal');
+});
+
+test('deliver (MUST-6): accepted.action persist -> deliver true (the notice landed)', async () => {
   const ok = deliverHarness({ existing: null, chatAgent: persistAgent('persist') });
   assert.equal(await ok.deliver(AGENT, 'thread-42', PAYLOAD, false), true, 'a real persist is a success');
 });
@@ -330,6 +338,10 @@ function bridgeOptions(
     getAgent: async () => AGENT,
     getTaskOrigin: async () => ({ threadId: 'thread-42' }),
     deliver: opts.deliver ?? idleDeliver,
+    // Every cell here asserts claim/queue/drain semantics, never the SSE broadcast. Inject a
+    // no-op notify so the DEFAULT publisher (real ioredis) never opens a socket against the
+    // CI Redis port, where its queued command would hang the awaited landed path forever.
+    notify: async () => {},
     log: { warn: () => {} },
   };
 }
@@ -793,6 +805,9 @@ test('redisClaimClient: redis down end-to-end — the event is still claimed AND
       delivered.push(threadId);
       return true;
     },
+    // This cell asserts claim fail-OPEN + delivery, not the SSE broadcast: inject notify so
+    // the default publisher (real ioredis) never opens a socket against the CI Redis port.
+    notify: async () => {},
     log: { warn: () => {} },
   });
   const { result: outcome, logged } = await captureWarns(() => handleTaskProgressEvent(deps, progressEvent()));
