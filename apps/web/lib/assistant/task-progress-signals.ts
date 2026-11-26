@@ -19,12 +19,19 @@
  * a duplicate is worse than nothing here, but a dropped notification is worse than a duplicate,
  * so a redis error delivers on every replica rather than dropping everywhere.
  *
- * Idle-wake cost (soft-pack S3, pinned by tests): every transition — INCLUDING `started` —
- * goes through queueSignal, so a transition on an IDLE thread wakes a full concierge LLM turn.
- * Mastra 1.78 `Session.queueSignal(signal, { tracingContext, tracingOptions, requestContext })`
- * exposes no queue-without-wake option, so `started` cannot be parked cheaply today.
- * TODO: revisit if the queue grows a non-waking enqueue, or product drops `started`
- * notifications (done / needs_review are the reactive states that justify a wake).
+ * Wake policy (TB-363 MUST-4, PM Q1 ruling 25 Nov): the notice itself must never cause a
+ * SECOND chat reply. Tool-sourced transitions (`event.source === 'tool'` — the concierge moved
+ * the task itself) and `started` are persisted as compact status LINES without waking the model
+ * (deliver receives wake=false → Agent-level `ifIdle.behavior:'persist'`, S4-lean); runner
+ * transitions in the reactive stages (done / waiting_on_user / needs_review / failed) keep the
+ * queueSignal wake — that wake is the feature (#339 go-between), and it is the ONE reply the
+ * transition may produce, not a second one after a tool notice.
+ *
+ * Idle-wake cost (soft-pack S3, pinned by tests): every WAKING transition goes through
+ * queueSignal, so a transition on an IDLE thread wakes a full concierge LLM turn. Mastra 1.78
+ * `Session.queueSignal(signal, { tracingContext, tracingOptions, requestContext })` exposes no
+ * queue-without-wake option (agent-controller-…js:5723 drops ifIdle), which is why the
+ * no-wake path above uses the Agent-level queueSignal with `ifIdle.behavior:'persist'`.
  */
 import {
   queueConciergeSignal,
@@ -81,6 +88,8 @@ export function parseTaskProgressMessage(raw: string): TaskProgressEvent | null 
   const title = str(e.title);
   if (!companyId || !agentId || !chatTaskId || !runId || !title) return null;
   const detail = str(e.detail);
+  // TB-363 (MUST-4, PM Q1): 'tool' marks a concierge-tool-sourced transition — the bridge
+  // persists its notice without waking a model turn. Anything else is runner-shaped (wake).
   return {
     companyId,
     agentId,
@@ -90,6 +99,7 @@ export function parseTaskProgressMessage(raw: string): TaskProgressEvent | null 
     status,
     title,
     ...(detail ? { detail } : {}),
+    ...(e.source === 'tool' ? { source: 'tool' as const } : {}),
   };
 }
 
@@ -135,8 +145,10 @@ export interface TaskProgressBridgeDeps<A extends TaskProgressAgentRecord> {
    * turn; Mastra wakes the thread when idle, queues behind the run when the ORIGIN itself is
    * busy). An unrelated busy thread must never drop or delay this delivery (v2 §1.3/§6).
    * Return false when the target session is unavailable.
+   * TB-363 (MUST-4): `wake=false` means PERSIST the notice without starting a model turn
+   * (tool-sourced transitions + `started`, PM Q1); `wake=true` keeps the reactive wake.
    */
-  deliver(agent: A, threadId: string, payload: TaskProgressSignalPayload): Promise<boolean>;
+  deliver(agent: A, threadId: string, payload: TaskProgressSignalPayload, wake: boolean): Promise<boolean>;
   /**
    * Single-consumer claim across web replicas (S2): true = first claimer, deliver; false =
    * another replica already claimed this transition, skip. Called before any db work.
@@ -221,7 +233,11 @@ export async function handleTaskProgressEvent<A extends TaskProgressAgentRecord>
     return `skipped:${origin.skip}`;
   }
   const payload = taskProgressSignalPayload(event);
-  const delivered = await deps.deliver(agent, origin.threadId, payload);
+  // TB-363 (MUST-4, PM Q1): the notice must never be a SECOND chat reply. Tool-sourced moves
+  // (concierge's own updateMyTask/completeMyTask) and `started` persist as a compact status
+  // LINE only; runner-origin reactive stages keep the wake (the #339 go-between turn).
+  const wake = event.source !== 'tool' && event.stage !== 'started';
+  const delivered = await deps.deliver(agent, origin.threadId, payload, wake);
   if (!delivered) return 'skipped:no-session';
   // TB-363 (R2): poke the open page AFTER the queue entry is in (never on a skip). A notify
   // error is surfaced (S3) but never turns a delivered notice into a failure.

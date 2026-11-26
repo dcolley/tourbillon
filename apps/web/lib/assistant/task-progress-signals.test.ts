@@ -97,7 +97,7 @@ test('parse: non-JSON, other types, bad stage/status and missing fields return n
 
 interface Harness {
   deps: TaskProgressBridgeDeps<TaskProgressAgentRecord>;
-  delivered: Array<{ agentId: string; threadId: string; payload: TaskProgressSignalPayload }>;
+  delivered: Array<{ agentId: string; threadId: string; payload: TaskProgressSignalPayload; wake?: boolean }>;
   claimed: string[];
   warnings: Array<{ msg: string; data?: Record<string, unknown> }>;
 }
@@ -128,8 +128,8 @@ function harness(opts: {
         if (opts.originError) throw opts.originError;
         return opts.origin ?? { threadId: 'thread-42' };
       },
-      deliver: async (agent, threadId, payload) => {
-        delivered.push({ agentId: agent.id, threadId, payload });
+      deliver: async (agent, threadId, payload, wake) => {
+        delivered.push({ agentId: agent.id, threadId, payload, wake });
         return opts.deliverOk !== false;
       },
       claimEvent: async (event) => {
@@ -315,6 +315,31 @@ test('deliver: handleTaskProgressEvent end-to-end onto the fake chat session', a
     session.delivered.map((s) => s.attributes!.stage),
     ['started', 'done'],
   );
+});
+
+// ─── MUST-4: wake policy (PM Q1) ─────────────────────────────────────────────
+
+test('wake policy: tool-sourced and started deliver WITHOUT wake; runner reactive stages wake', async () => {
+  const h = harness();
+  // Tool-sourced move: status line only, whatever the stage.
+  assert.equal(await handleTaskProgressEvent(h.deps, event({ stage: 'waiting_on_user', status: 'succeeded', source: 'tool' })), 'queued');
+  assert.equal(await handleTaskProgressEvent(h.deps, event({ stage: 'done', status: 'succeeded', runId: 'run-tool', source: 'tool' })), 'queued');
+  // Runner origin: started never wakes; reactive stages do.
+  assert.equal(await handleTaskProgressEvent(h.deps, event({ stage: 'started', status: 'running' })), 'queued');
+  assert.equal(await handleTaskProgressEvent(h.deps, event({ stage: 'done', status: 'succeeded' })), 'queued');
+  assert.equal(await handleTaskProgressEvent(h.deps, event({ stage: 'waiting_on_user', status: 'succeeded', runId: 'run-ask2' })), 'queued');
+  assert.deepEqual(
+    h.delivered.map((d) => (d as { wake?: boolean }).wake),
+    [false, false, false, true, true],
+    'tool-sourced + started => wake=false; runner done/waiting_on_user => wake=true',
+  );
+});
+
+test('parse: the tool-sourced marker round-trips and nothing else sets it', () => {
+  const tool = parseTaskProgressMessage(JSON.stringify({ type: 'chat_task_progress', ...event(), source: 'tool' }))!;
+  assert.equal(tool.source, 'tool', "source:'tool' survives the SSE round-trip (the persist path depends on it)");
+  const runner = parseTaskProgressMessage(JSON.stringify({ type: 'chat_task_progress', ...event(), source: 'runner' }))!;
+  assert.equal('source' in runner, false, 'unknown origins never set the marker (defaults to wake)');
 });
 
 // ─── S2: single-consumer claim across web replicas ──────────────────────────

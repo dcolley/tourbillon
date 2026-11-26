@@ -1168,6 +1168,46 @@ test('TN-TB363-A11-TOOL-ONCE', { timeout: 90_000 }, async (t) => {
   });
 });
 
+test('TN-TB363-A11-NO-WAKE', { timeout: 90_000 }, async (t) => {
+  if (await skipIfIncompatible(t, 'TN-TB363-A11-NO-WAKE')) return;
+  await tb363Cell('TN-TB363-A11-NO-WAKE', async (f) => {
+    // TB-363 MUST-4 (PM Q1): a tool-sourced transition is a compact status LINE — the row and
+    // the rendered item must land, but the notice itself must NOT wake a second reply: zero
+    // model calls, zero assistant items.
+    await publishProgress(
+      progressEvent(f, {
+        stage: 'waiting_on_user',
+        status: 'waiting_on_user',
+        detail: 'ask: pick a vendor',
+        source: 'tool',
+      }),
+    );
+    await waitFor(
+      'tool ask row',
+      async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'waiting_on_user') >= 1,
+    );
+    await waitFor('tool ask item', async () => tb363Notices(await tb363Items(f.t1)).length >= 1);
+    await new Promise((r) => setTimeout(r, 2500));
+    assert.equal(f.models.a.callLog.filter((c) => c.notice).length, 0, 'MUST-4: tool-sourced notice starts ZERO model calls');
+    assert.equal(
+      (await tb363Items(f.t1)).filter((i) => (i as { kind?: string }).kind === 'assistant').length,
+      0,
+      'MUST-4: tool-sourced notice leaves ZERO assistant items',
+    );
+    assert.equal(tb363Notices(await tb363Items(f.t1)).length, 1, 'the status LINE itself is persisted and rendered');
+
+    // `started` is line-only too (PM Q1): persisted, never a wake.
+    await publishProgress(progressEvent(f, { stage: 'started', status: 'running' }));
+    await waitFor('started row', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'started') >= 1);
+    await new Promise((r) => setTimeout(r, 2000));
+    assert.equal(f.models.a.callLog.filter((c) => c.notice).length, 0, 'MUST-4: started persists without a model wake');
+
+    // Control: the runner-origin reactive stage DOES wake (the #339 go-between turn is alive).
+    await publishProgress(progressEvent(f, { stage: 'done', status: 'succeeded' }));
+    await waitFor('runner-origin wake', async () => f.models.a.callLog.some((c) => c.notice), 20_000);
+  });
+});
+
 test('TN-TB363-R2-NOTICE-POKE', { timeout: 90_000 }, async (t) => {
   if (await skipIfIncompatible(t, 'TN-TB363-R2-NOTICE-POKE')) return;
   await bridgeReset();

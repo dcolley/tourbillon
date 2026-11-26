@@ -6,7 +6,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { taskProgressSignalPayload } from './concierge-signal';
+import { taskProgressSignalPayload, persistConciergeSignal } from './concierge-signal';
 
 const base = {
   companyId: 'company-1',
@@ -29,4 +29,30 @@ test('A2: no detail -> no invented ask (still says reply here)', () => {
   assert.match(payload.contents, /is waiting on the human\./);
   assert.match(payload.contents, /reply here/);
   assert.doesNotMatch(payload.contents, /Pick vendor/, 'nothing is invented');
+});
+
+test('MUST-4: persistConciergeSignal requests ifIdle.behavior=persist and resolves only after the memory write', async () => {
+  const calls: Array<{ signal: { id?: string }; target: Record<string, unknown> }> = [];
+  let persistedDone = false;
+  const persisted = new Promise<void>((resolve) =>
+    setTimeout(() => {
+      persistedDone = true;
+      resolve();
+    }, 5),
+  );
+  const agent = {
+    queueSignal(signal: { id?: string }, target: Record<string, unknown>) {
+      calls.push({ signal, target });
+      return { signal: { id: signal.id }, accepted: Promise.resolve({ action: 'persist' }), persisted };
+    },
+  };
+  const payload = taskProgressSignalPayload({ ...base, stage: 'started', status: 'running' });
+  const settled = await persistConciergeSignal(agent as never, { resourceId: 'r1', threadId: 't1' }, payload);
+  assert.equal(calls.length, 1, 'exactly one Agent-level queueSignal');
+  const t = calls[0]!.target as { resourceId?: string; threadId?: string; ifIdle?: { behavior?: string } };
+  assert.equal(t.resourceId, 'r1');
+  assert.equal(t.threadId, 't1');
+  assert.equal(t.ifIdle?.behavior, 'persist', 'no-wake policy rides as ifIdle.behavior=persist (Session drops it — the Agent-level call is the only seam)');
+  assert.ok(persistedDone, 'the call resolves only after Mastra persisted the row — callers treat "returned" as "notice row is in"');
+  assert.equal(settled.action, 'persist');
 });

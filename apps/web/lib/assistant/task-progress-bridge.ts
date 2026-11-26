@@ -29,7 +29,8 @@ import { aguiSessionScope } from '@/lib/agui/run-input';
 // Leaf module (no deps) — static import so the S332-S2 pin exercises the REAL keying helper.
 import { chatSessionId } from '@/lib/chat/session-id';
 import type { Agent } from '@tourbillon/db';
-import type { QueueSignalSession, TaskProgressSignalPayload } from '@tourbillon/mastra/concierge-signal';
+import type { PersistSignalAgent, QueueSignalSession, TaskProgressSignalPayload } from '@tourbillon/mastra/concierge-signal';
+import { persistConciergeSignal } from '@tourbillon/mastra/concierge-signal';
 import {
   handleTaskProgressEvent,
   parseTaskProgressMessage,
@@ -248,6 +249,13 @@ export interface DeliverDeps {
     agent: TaskProgressAgentRecord,
     opts: { resourceId: string; scope: string; threadId: string },
   ): Promise<DeliverSession>;
+  /**
+   * TB-363 (MUST-4, PM Q1): the chat Agent for the persist-without-wake path (deliver's
+   * wake=false). Mastra Session cannot express `ifIdle.behavior:'persist'`; the public
+   * Agent-level queueSignal can. Absent dep => a wake=false delivery FAILS (never silently
+   * wakes instead — a second reply is the bug this closes).
+   */
+  getChatAgent?(agent: TaskProgressAgentRecord): Promise<PersistSignalAgent | null>;
 }
 
 /**
@@ -282,8 +290,25 @@ export function createDeliver(deps: DeliverDeps) {
     agent: TaskProgressAgentRecord,
     threadId: string,
     payload: TaskProgressSignalPayload,
+    wake = true,
   ): Promise<boolean> {
     const resourceId = await deps.resourceId(agent);
+    if (!wake) {
+      // TB-363 (MUST-4, PM Q1): status LINE only — Agent-level queueSignal with
+      // ifIdle.behavior:'persist': idle thread => the row lands in memory, ZERO runs; busy
+      // origin => Mastra's default ifActive 'deliver' (queued behind that run). Never here:
+      // a model wake. No agent instance available => fail loud, never wake instead.
+      const chatAgent = await deps.getChatAgent?.(agent);
+      if (!chatAgent) {
+        console.warn('[concierge-signal] task progress notice persist skipped (no chat agent)', {
+          agentId: agent.id,
+          threadId,
+        });
+        return false;
+      }
+      await persistConciergeSignal(chatAgent, { resourceId, threadId }, payload);
+      return true;
+    }
     const scope = aguiSessionScope(agent);
     const controller = await deps.getOrCreateChatController(agent);
     const userSession = await controller.getSessionByResource(resourceId, scope);
@@ -366,6 +391,9 @@ export const realDeliver = createDeliver({
   getOrCreateChatController: realDeliverGetOrCreateChatController,
   getChatSession: async (controller, agent, opts) =>
     (await import('@/lib/chat')).getChatSession(controller as never, agent as ChatAgentSeam as Agent, opts),
+  // TB-363 (MUST-4): persist-without-wake path — the chat Agent through the same barrel seam.
+  getChatAgent: async (agent) =>
+    (await import('@/lib/chat')).getOrCreateChatAgent(agent as ChatAgentSeam as Agent),
 });
 
 // ─── redis single-consumer claim (S2) ──────────────────────────────────────────────────────

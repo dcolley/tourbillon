@@ -3,6 +3,7 @@ import { db, agents, companies, type Agent, type Company } from '@tourbillon/db'
 // main barrel (`index.ts`), which previously pulled harness-event-writer into the web graph.
 import {
   createChatController,
+  createChatAgentWithSkills,
   buildChatResourceId,
   buildChatControllerId,
   createHeartbeatRuntimeContext,
@@ -20,6 +21,7 @@ import type { ChatRequestUser } from './request-user';
 import { getActiveCompany } from '@/lib/company';
 import { buildChatScopedApiKey, validateChatToken } from '@/lib/auth/chat-token';
 import { chatSessionIdForAgent } from '@tourbillon/shared/agent-token';
+import type { PersistSignalAgent } from '../../../../packages/mastra/src/concierge-signal';
 import { ASSISTANT_THREAD_METADATA_KEYS } from '@/lib/assistant/sidebar';
 import { retireWidgetOwnersOfController } from '@/lib/agui/widget-owners';
 import { trackInFlightUserTurns } from '@/lib/chat/steer-preserving-turn';
@@ -35,6 +37,7 @@ export type TourbillonChatSession = Session<ChatControllerState>;
 
 const globalForChat = globalThis as unknown as {
   tourbillonChatControllers?: Map<string, Promise<TourbillonChatController>>;
+  tourbillonChatAgents?: Map<string, Promise<PersistSignalAgent>>;
   tourbillonChatApiKeys?: Map<string, string>;
 };
 
@@ -212,6 +215,47 @@ export async function getOrCreateChatController(
     return await pending;
   } catch (err) {
     cache.delete(cacheKey);
+    throw err;
+  }
+}
+
+/**
+ * TB-363 (MUST-4, PM Q1): cached chat Agent for the persist-without-wake notice path.
+ * Mastra's AgentController SESSION cannot express `ifIdle.behavior: 'persist'` (its
+ * queueSignal option bag drops ifIdle — agent-controller-…js:5723), but the PUBLIC
+ * Agent-level `Agent.queueSignal(signal, target)` does (agent/agent.d.ts:1460). This builds
+ * the SAME Agent the chat controller gets (createChatAgentWithSkills is the controller's own
+ * factory, chat-controller.ts:454) and caches it per agent id. The model wiring is irrelevant
+ * on the persist path (no run starts); memory/storage are the shared chat PostgresStore, so
+ * the signal row lands exactly where the transcript reads it.
+ */
+export async function getOrCreateChatAgent(agentRecord: Agent): Promise<PersistSignalAgent> {
+  let cache = globalForChat.tourbillonChatAgents;
+  if (!cache) {
+    cache = new Map();
+    globalForChat.tourbillonChatAgents = cache;
+  }
+  const key = String(agentRecord.id);
+  const existing = cache.get(key);
+  if (existing) return existing;
+  const pending = (async () => {
+    // The bridge hands us its minimal TaskProgressAgentRecord; assembly needs the FULL row
+    // (assignedSkills, runtimeConfig, ...). Re-resolve by id — same source as resolveChatAgent.
+    const agentRow = await db.query.agents.findFirst({ where: eq(agents.id, agentRecord.id) });
+    if (!agentRow) throw new Error(`chat agent row missing for persist path (agent ${agentRecord.id})`);
+    const companyRow = await db.query.companies.findFirst({
+      where: eq(companies.id, agentRow.companyId),
+    });
+    return (await createChatAgentWithSkills(
+      agentRow,
+      buildChatControllerOptions(companyRow ?? undefined, undefined),
+    )) as unknown as PersistSignalAgent;
+  })();
+  cache.set(key, pending);
+  try {
+    return await pending;
+  } catch (err) {
+    cache.delete(key);
     throw err;
   }
 }

@@ -54,6 +54,59 @@ export interface QueuedSignalCancelAgent {
   }): { cancelledSignalIds: string[] } | Promise<{ cancelledSignalIds: string[] }>;
 }
 
+/**
+ * TB-363 (MUST-4): the one Agent method the persist-without-wake path needs — Mastra's PUBLIC
+ * `Agent.queueSignal(signal, target)` (agent/agent.d.ts:1460), whose target accepts
+ * `ifIdle.behavior: 'persist'` (thread-stream runtime: agent-DtdQ6un6.js:43813/43868 — idle
+ * thread writes the signal row through Memory and starts NO run; a busy thread still gets the
+ * default ifActive 'deliver'). The AgentController Session's own queueSignal cannot express
+ * this: its option bag destructures only tracingContext/tracingOptions/requestContext
+ * (agent-controller-…js:5723) and drops ifIdle — hence the Agent-level call.
+ */
+export interface PersistSignalTarget {
+  resourceId: string;
+  threadId: string;
+}
+
+export interface PersistSignalAgent {
+  queueSignal(
+    signal: { type: 'reactive'; tagName?: string; attributes?: ConciergeSignalAttributes; contents: string; id?: string },
+    target: { resourceId: string; threadId: string; ifIdle?: { behavior: 'wake' | 'persist' | 'discard' } },
+  ): {
+    accepted: Promise<{ action: string; runId?: string }>;
+    signal?: { id?: string };
+    persisted?: Promise<void>;
+  };
+}
+
+/**
+ * TB-363 (MUST-4, PM Q1): persist one typed signal to the thread WITHOUT waking a model turn
+ * (idle thread → `ifIdle.behavior: 'persist'`: the signal row lands in memory, zero runs).
+ * Same payload normalization as queueConciergeSignal (tag name, sanitized attributes, clamped
+ * contents), same id convention. Resolves after Mastra's routing decision (and the memory
+ * write when present) so callers can treat "returned" as "the notice row is in".
+ */
+export async function persistConciergeSignal(
+  agent: PersistSignalAgent,
+  target: PersistSignalTarget,
+  input: ConciergeSignalInput,
+): Promise<{ signalId: string; action: string }> {
+  const id = input.id ?? `sig-${randomId()}`;
+  const result = agent.queueSignal(
+    {
+      type: 'reactive',
+      tagName: input.tagName ?? TASK_PROGRESS_TAG_NAME,
+      attributes: sanitizeSignalAttributes(input.attributes),
+      contents: clampContents(input.contents),
+      id,
+    },
+    { ...target, ifIdle: { behavior: 'persist' } },
+  );
+  const decision = await result.accepted;
+  if (result.persisted) await result.persisted;
+  return { signalId: result.signal?.id ?? id, action: decision.action };
+}
+
 function printableAttribute(value: unknown): string | number | boolean | null | undefined {
   if (value === null || value === undefined) return undefined;
   if (typeof value === 'string') {
@@ -144,6 +197,13 @@ export interface TaskProgressEventShape {
   /** #339: the precise ask/failure text when the scheduler carries one. */
   detail?: string;
   title: string;
+  /**
+   * TB-363 (MUST-4, PM Q1): who caused this transition. 'tool' = the concierge moved the task
+   * itself via updateMyTask/completeMyTask — per the Q1 ruling that notice is a compact status
+   * LINE, never a second chat reply, so the bridge persists it WITHOUT waking a model turn
+   * (runner events leave this unset and keep the reactive wake).
+   */
+  source?: 'tool';
 }
 
 export interface TaskProgressSignalPayload {
@@ -233,6 +293,8 @@ export interface ChatTaskProgressPublishEvent {
   title: string;
   /** Ask/failure text, clamped to the scheduler's 300-char event cap. */
   detail?: string;
+  /** TB-363 (MUST-4): 'tool' for concierge tool-driven moves — persisted, never a model wake. */
+  source?: 'tool';
 }
 
 export type ChatTaskProgressPublisher = (event: ChatTaskProgressPublishEvent) => void | Promise<void>;
