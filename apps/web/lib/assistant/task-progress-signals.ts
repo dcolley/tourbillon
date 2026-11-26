@@ -221,6 +221,13 @@ export type TaskProgressHandled =
   | 'skipped:no-session';
 
 /**
+ * TB-363 (B3-2): budget for the post-delivery open-page poke. The poke is best-effort (the
+ * notice is already delivered before it) and the publisher socket is deliberately unrefed,
+ * so an awaited publish must be bounded to keep the bridge's serial loop moving.
+ */
+export const NOTIFY_BUDGET_MS = 2_000;
+
+/**
  * Route one Run Task progress event to the task's ORIGINATING thread (TASK-1 audit column
  * `chat_tasks.source_thread_id`, resolved company+agent scoped). The active pin is never a
  * routing input (v2 §1.1/§14.3 R8): a task created on T1 delivers on T1 whatever thread the
@@ -295,8 +302,44 @@ export async function handleTaskProgressEvent<A extends TaskProgressAgentRecord>
   }
   // TB-363 (R2): poke the open page AFTER the queue entry is in (never on a skip). A notify
   // error is surfaced (S3) but never turns a delivered notice into a failure.
+  // TB-363 (B3-2): the poke is BOUNDED — a stalled Redis publish must never wedge the bridge's
+  // serial subscriber loop (the publisher's socket is deliberately unrefed, so an awaited
+  // publish could otherwise hang with nothing left to settle it). The notice itself is already
+  // delivered; exceeding the budget or rejecting is a warn, not a failure. Late rejections are
+  // absorbed by the settled chain (no unhandled rejection after a timeout won the race).
   try {
-    await deps.notify?.(event, origin.threadId);
+    const notifyPromise = deps.notify?.(event, origin.threadId);
+    if (notifyPromise) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let pokeError: unknown;
+      try {
+        const settled = Promise.resolve(notifyPromise).then(
+          () => 'done' as const,
+          (err: unknown) => {
+            pokeError = err;
+            return 'error' as const;
+          },
+        );
+        const outcome = await Promise.race([
+          settled,
+          new Promise<'timeout'>((resolve) => {
+            timer = setTimeout(() => resolve('timeout'), NOTIFY_BUDGET_MS);
+          }),
+        ]);
+        if (outcome !== 'done') {
+          deps.log?.warn('[concierge-signal] task progress notice poke did not settle in budget (delivered)', {
+            agentId: event.agentId,
+            chatTaskId: event.chatTaskId,
+            threadId: origin.threadId,
+            outcome,
+            budgetMs: NOTIFY_BUDGET_MS,
+            error: pokeError instanceof Error ? pokeError.message : pokeError === undefined ? undefined : String(pokeError),
+          });
+        }
+      } finally {
+        clearTimeout(timer);
+      }
+    }
   } catch (err) {
     deps.log?.warn('[concierge-signal] task progress notice poke failed (delivered)', {
       agentId: event.agentId,

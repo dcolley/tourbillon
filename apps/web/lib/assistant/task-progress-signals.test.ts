@@ -12,6 +12,7 @@ import {
   parseTaskProgressMessage,
   queueTaskProgressSignal,
   taskProgressClaimKey,
+  NOTIFY_BUDGET_MS,
   TASK_PROGRESS_SSE_TYPE,
   type TaskProgressAgentRecord,
   type TaskProgressBridgeDeps,
@@ -114,6 +115,8 @@ function harness(opts: {
   toolLineCovered?: boolean;
   /** Shared across harnesses to emulate several replicas seeing one event (S2). */
   claimStore?: Set<string>;
+  /** B3-2: the post-delivery poke. Default: absent (no poke attempted). */
+  notify?: (event: TaskProgressEvent, threadId: string) => Promise<void> | void;
 } = {}): Harness {
   const delivered: Harness['delivered'] = [];
   const claimed: string[] = [];
@@ -153,6 +156,7 @@ function harness(opts: {
       toolLineLanded: opts.toolLineCovered === undefined
         ? undefined
         : async () => opts.toolLineCovered === true,
+      notify: opts.notify,
       log: { warn: (msg, data) => warnings.push({ msg, data }) },
     },
   };
@@ -188,6 +192,33 @@ test('handle: status→contents — done, failed (another look), skipped (decisi
     assert.equal(await handleTaskProgressEvent(h.deps, event(over)), 'queued');
     assert.match(h.delivered[0]!.payload.contents, pattern);
   }
+});
+
+test('handle: a STALLED poke is bounded by the budget — still queued, loud warn, loop moves on (B3-2)', async () => {
+  // The publisher socket is deliberately unrefed, so an awaited publish that never settles
+  // must NOT wedge the bridge's serial subscriber loop: the race against the budget wins by
+  // timeout, the notice (already delivered) stays 'queued', and the stall is a warn.
+  const h = harness({ notify: () => new Promise<void>(() => {}) });
+  const started = Date.now();
+  const result = await handleTaskProgressEvent(h.deps, event());
+  const elapsed = Date.now() - started;
+  assert.equal(result, 'queued');
+  assert.equal(h.delivered.length, 1);
+  assert.ok(elapsed < NOTIFY_BUDGET_MS + 1_500, `bounded by the notify budget (took ${elapsed}ms)`);
+  const stalled = h.warnings.filter((w) => /poke did not settle in budget/.test(w.msg));
+  assert.equal(stalled.length, 1, 'the stalled poke is a loud warn, not silent');
+  assert.equal(stalled[0]!.data?.outcome, 'timeout');
+  assert.equal(stalled[0]!.data?.budgetMs, NOTIFY_BUDGET_MS);
+});
+
+test('handle: a REJECTING poke is a warn, never a failure (S3, late rejection absorbed)', async () => {
+  const h = harness({ notify: () => Promise.reject(new Error('publish down')) });
+  const result = await handleTaskProgressEvent(h.deps, event());
+  assert.equal(result, 'queued');
+  const warned = h.warnings.filter((w) => /poke did not settle in budget/.test(w.msg));
+  assert.equal(warned.length, 1);
+  assert.equal(warned[0]!.data?.outcome, 'error');
+  assert.equal(warned[0]!.data?.error, 'publish down');
 });
 
 test('handle: unknown agent is skipped (no signal anywhere)', async () => {

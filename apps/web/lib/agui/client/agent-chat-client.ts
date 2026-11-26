@@ -66,6 +66,7 @@ import {
   type AgentChatState,
 } from './chat-state';
 import { chatItemsFromStoredMessages, fetchThreadHistoryPage } from './thread-history';
+import { watchTaskNotices, type TaskNoticeSourceOptions } from './task-notice-source';
 import { ASSISTANT_TRANSCRIPT_PAGE_SIZE } from '@/lib/assistant/transcript-page';
 
 export type AguiAction = 'run' | 'steer' | 'followUp' | 'abort' | 'toolApproval' | 'pending' | 'attach';
@@ -118,6 +119,16 @@ export interface AgentChatClientOptions {
    * client can never pin a process.
    */
   noticePollMs?: number;
+  /**
+   * TB-363 (R2 / B2): active company. With it the client opens the page's EventSource on
+   * `/api/sse/[companyId]` and feeds every `chat_task_notice` poke straight into
+   * `handleTaskNotice` — the fast path that merges the notice row the moment the bridge
+   * publishes it (the idle `noticePollMs` poll remains the backstop while the poke channel is
+   * down). Absent (tests, company-less contexts): no poke channel, poll only.
+   */
+  companyId?: string;
+  /** Test seam for the poke EventSource (see task-notice-source.ts). */
+  newEventSource?: TaskNoticeSourceOptions['newEventSource'];
 }
 
 /** TB-363: retry plan for the notice-refresh merge (see AgentChatClientOptions.noticeRefresh). */
@@ -220,6 +231,8 @@ export class AgentChatClient {
   private noticeTimer: ReturnType<typeof setInterval> | undefined;
   /** S-3 (#363 softs): hidden-tab poll skip; bound handler kept for removal on dispose. */
   private visibilityHandler: (() => void) | undefined;
+  /** TB-363 (B2): disposer for the page poke channel (EventSource on /api/sse/[companyId]). */
+  private noticeSourceDispose: (() => void) | undefined;
 
   constructor(opts: AgentChatClientOptions) {
     this.opts = opts;
@@ -239,6 +252,17 @@ export class AgentChatClient {
         };
         document.addEventListener('visibilitychange', this.visibilityHandler);
       }
+    }
+    // TB-363 (B2): the poke fast path. The bridge publishes `chat_task_notice` on
+    // sse:{companyId} right after it queues the notice row; /api/sse/[companyId] fans it out
+    // here so an open, idle page merges the row immediately instead of waiting for the next
+    // poll tick. The poll above stays as the backstop (poke lost to a reconnect, tab asleep).
+    if (opts.companyId) {
+      this.noticeSourceDispose = watchTaskNotices({
+        companyId: opts.companyId,
+        onNotice: (poke) => this.handleTaskNotice(poke),
+        newEventSource: opts.newEventSource,
+      });
     }
   }
 
@@ -665,6 +689,8 @@ export class AgentChatClient {
       document.removeEventListener('visibilitychange', this.visibilityHandler);
       this.visibilityHandler = undefined;
     }
+    this.noticeSourceDispose?.();
+    this.noticeSourceDispose = undefined;
     this.pendingNotice = false;
     this.disposed = true;
     this.listeners.clear();

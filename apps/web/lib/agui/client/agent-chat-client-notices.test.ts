@@ -220,4 +220,81 @@ describe('TB-363 open-page notice delivery (agent-chat-client)', () => {
       delete (globalThis as Record<string, unknown>).document;
     }
   });
+
+  // ─── B2: the poke CHANNEL ───────────────────────────────────────────────────────────────
+  // The earlier cases call handleTaskNotice directly. These pin the missing browser half:
+  // a client given a companyId opens the page EventSource on /api/sse/[companyId] and a
+  // `chat_task_notice` frame on it drives the SAME merge as a direct poke. At base bdd1d970
+  // there was no EventSource anywhere — the poke path was dead code.
+
+  class FakeEventSource {
+    static opened: FakeEventSource[] = [];
+    onmessage: ((event: { data: string }) => void) | null = null;
+    onerror: ((event: unknown) => void) | null = null;
+    closed = false;
+    constructor(readonly url: string) {
+      FakeEventSource.opened.push(this);
+    }
+    close(): void {
+      this.closed = true;
+    }
+    emit(payload: unknown): void {
+      this.onmessage?.({ data: JSON.stringify(payload) });
+    }
+  }
+
+  const pokeFrame = (over: Record<string, unknown> = {}) => ({
+    type: 'chat_task_notice',
+    companyId: 'co-1',
+    agentId: 'alice',
+    chatTaskId: 'task-1',
+    runId: 'run-1',
+    stage: 'done',
+    threadId: THREAD,
+    ...over,
+  });
+
+  it('B2: a chat_task_notice frame on /api/sse/[companyId] merges the stored notice unprompted', async () => {
+    FakeEventSource.opened = [];
+    const { client, stored } = resumable(runAndControls(), {
+      companyId: 'co-1',
+      newEventSource: (url) => new FakeEventSource(url),
+    });
+    assert.equal(FakeEventSource.opened.length, 1, 'the client opens the company SSE stream');
+    assert.equal(FakeEventSource.opened[0]!.url, '/api/sse/co-1');
+    stored.push(signalRow('sig-chan-1', 'done'));
+    FakeEventSource.opened[0]!.emit(pokeFrame());
+    await until(() => notices(client.getState()).length === 1, 2000, 'the frame drives the merge');
+    assert.equal(notices(client.getState())[0]!.stage, 'done');
+    client.dispose();
+    assert.equal(FakeEventSource.opened[0]!.closed, true, 'dispose closes the poke channel');
+  });
+
+  it('B2: a frame for another thread, another company, or another type does not merge', async () => {
+    FakeEventSource.opened = [];
+    const { client, stored } = resumable(runAndControls(), {
+      companyId: 'co-1',
+      newEventSource: (url) => new FakeEventSource(url),
+    });
+    stored.push(signalRow('sig-chan-2', 'done'));
+    const s = FakeEventSource.opened[0]!;
+    s.emit(pokeFrame({ threadId: 'other-thread' }));
+    s.emit(pokeFrame({ companyId: 'other-co' }));
+    s.emit(pokeFrame({ type: 'chat_task_progress' }));
+    s.emit(pokeFrame({ type: 'connected' }));
+    await tick(60);
+    assert.equal(notices(client.getState()).length, 0, 'foreign pokes must not touch this thread');
+    s.emit(pokeFrame()); // the right frame still lands after the noise
+    await until(() => notices(client.getState()).length === 1, 2000, 'valid frame merges after rejects');
+    client.dispose();
+  });
+
+  it('B2: without a companyId no EventSource is opened (poll-only fallback)', async () => {
+    FakeEventSource.opened = [];
+    const { client } = resumable(runAndControls(), {
+      newEventSource: (url) => new FakeEventSource(url),
+    });
+    assert.equal(FakeEventSource.opened.length, 0);
+    client.dispose();
+  });
 });

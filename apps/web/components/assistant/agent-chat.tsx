@@ -700,7 +700,7 @@ export function AgentChat({
   const activeThreadId = clearedThreadId ?? threadId;
   // S302-S1 (Refs #302): called through this module's test seam (the real hooks, by default) so
   // the container-level render tests can stub them without require-cache interception.
-  const chat = __test__.useAgentChat({ agentId, threadId: activeThreadId, tools: CHAT_CARD_TOOLS, onThreadOpened });
+  const chat = __test__.useAgentChat({ agentId, threadId: activeThreadId, companyId, tools: CHAT_CARD_TOOLS, onThreadOpened });
   const feedback = useThreadFeedback(agentId, chat.thread?.threadId ?? null);
   // Slice B: OM mode for the ⋯ menu, from the thread open (GET …/threads) or the last Clear.
   const [clearedOm, setClearedOm] = React.useState<AssistantOmSummary | undefined>(undefined);

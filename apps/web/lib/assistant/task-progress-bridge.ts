@@ -578,25 +578,41 @@ export interface NoticePublishCommands {
   publish(channel: string, message: string): Promise<number> | number;
 }
 
+/**
+ * S18: narrow typed view of the ioredis internals the notice publisher uses to keep its
+ * socket off the event loop. ioredis 5 keeps `connector` private on the Redis type — the
+ * net.Socket lives at `connector.stream` at runtime (AbstractConnector.stream) and must be
+ * unrefed on EVERY connect (a reconnect produces a new, re-refed socket). Read via
+ * Reflect.get so the only cast stays single-step and typed.
+ */
+interface RefableSocket {
+  ref?(): void;
+  unref?(): void;
+}
+interface PublisherConnector {
+  stream?: RefableSocket | null;
+}
+
+/** The publisher's current net.Socket view (undefined before first connect / after quit). */
+function publisherSocket(client: IORedis): RefableSocket | undefined {
+  const connector = Reflect.get(client, 'connector') as PublisherConnector | undefined;
+  return connector?.stream ?? undefined;
+}
+
 /** Bridge-owned notice publisher connection (separate from the subscriber connection). */
 export function createOwnedNoticePublisher(
   url: string = process.env.REDIS_URL ?? 'redis://localhost:6379',
 ): { publish(channel: string, message: string): Promise<number>; quit(): Promise<void> } {
   const client = new IORedis(url, { maxRetriesPerRequest: null });
   // TB-363 (R2): this process-wide publisher must never hold the event loop open (the task-
-  // notification CI job exits on idle handles). ioredis 5 exposes NO unref() on the Redis
-  // instance — the net.Socket lives on `connector.stream` and must be unrefed on EVERY
-  // connect (a reconnect produces a new, re-refed socket). Publishes still complete: the
-  // loop is alive for the rest of the cell, and the poke is best-effort by contract.
-  const unrefSocket = () => {
-    const stream = (client as unknown as { connector?: { stream?: { ref?: () => void; unref?: () => void } | null } }).connector?.stream;
-    stream?.unref?.();
-  };
+  // notification CI job exits on idle handles). Publishes still complete: the loop is alive
+  // for the rest of the cell, and the poke is best-effort by contract.
+  const unrefSocket = () => publisherSocket(client)?.unref?.();
   client.on('connect', unrefSocket);
   unrefSocket();
   return {
     publish: async (channel, message) => {
-      const stream = (client as unknown as { connector?: { stream?: { ref?: () => void; unref?: () => void } | null } }).connector?.stream;
+      const stream = publisherSocket(client);
       stream?.ref?.();
       try {
         return await client.publish(channel, message);

@@ -213,11 +213,20 @@ test('deps: claimEvent uses the stable claim key with the bridge TTL', async () 
 test('deps: two replicas over ONE claim client — only the first gets deliver', async () => {
   const store = new Set<string>();
   const sharedClaim = { claim: async (key: string) => (store.has(key) ? false : (store.add(key), true)) };
+  // B3-2: fake `notify` like every other deps test — the real default publish needs a live
+  // Redis and its (deliberately unrefed) publisher socket cannot settle an awaited publish,
+  // which wedged this test with or without a server. Poking exactly once on delivery (and
+  // never on the duplicate) is part of the contract this test pins.
+  const pokes: Array<{ event: TaskProgressEvent; threadId: string }> = [];
+  const notify = async (event: TaskProgressEvent, threadId: string) => {
+    pokes.push({ event, threadId });
+  };
   const replicaA = buildTaskProgressBridgeDeps({
     claimClient: sharedClaim,
     getAgent: async () => AGENT,
     getTaskOrigin: async () => ({ threadId: 'thread-42' }),
     deliver: async () => true,
+    notify,
     log: { warn: () => {} },
   });
   const replicaB = buildTaskProgressBridgeDeps({
@@ -225,10 +234,13 @@ test('deps: two replicas over ONE claim client — only the first gets deliver',
     getAgent: async () => AGENT,
     getTaskOrigin: async () => ({ threadId: 'thread-42' }),
     deliver: async () => true,
+    notify,
     log: { warn: () => {} },
   });
   assert.equal(await handleTaskProgressEvent(replicaA, progressEvent()), 'queued');
   assert.equal(await handleTaskProgressEvent(replicaB, progressEvent()), 'skipped:duplicate');
+  assert.equal(pokes.length, 1, 'the winning replica poked exactly once; the duplicate never poked');
+  assert.equal(pokes[0]!.threadId, 'thread-42');
 });
 
 // ─── startTaskProgressSignalBridge: the subscriber loop (S1) ─────────────────────────────
@@ -292,6 +304,10 @@ function bridgeOptions(
     getAgent: async () => AGENT,
     getTaskOrigin: async () => ({ threadId: 'thread-42' }),
     deliver: opts.deliver ?? idleDeliver,
+    // B3-2: the loop tests pin channel filtering and routing, not the publisher — a fake
+    // notify keeps them independent of a live Redis (the real default is additionally
+    // bounded by NOTIFY_BUDGET_MS in handleTaskProgressEvent).
+    notify: async () => {},
     log: { warn: () => {} },
   };
 }
@@ -755,6 +771,8 @@ test('redisClaimClient: redis down end-to-end — the event is still claimed AND
       delivered.push(threadId);
       return true;
     },
+    // B3-2: fake the poke — this test pins the CLAIM fail-open, not the publisher.
+    notify: async () => {},
     log: { warn: () => {} },
   });
   const { result: outcome, logged } = await captureWarns(() => handleTaskProgressEvent(deps, progressEvent()));

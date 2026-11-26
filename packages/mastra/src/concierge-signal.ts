@@ -125,9 +125,17 @@ export async function persistConciergeSignal(
     { ...target, ifIdle: { behavior: 'persist' }, ifActive: { behavior: 'persist' } },
   );
   const decision = await result.accepted;
-  // TB-363 CONT3 root cause: never await `result.persisted` — see docstring. Swallow its
-  // rejection so the unhandled promise can't crash the bridge subscriber.
-  result.persisted?.catch(() => {});
+  // TB-363 CONT3 root cause: never await `result.persisted` — see docstring. Absorb its
+  // rejection so the unhandled promise can't crash the bridge subscriber, but LOUDLY (NB-4):
+  // a rejected persisted handle is the only observable signal that the memory write failed.
+  result.persisted?.catch((err: unknown) => {
+    console.warn('[concierge-signal] task progress notice persist write failed', {
+      signalId: result.signal?.id ?? id,
+      resourceId: target.resourceId,
+      threadId: target.threadId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
   return { signalId: result.signal?.id ?? id, action: decision.action };
 }
 

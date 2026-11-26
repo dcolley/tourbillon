@@ -45,6 +45,8 @@ export interface ConnectAgentChatOptions {
   key: string;
   agentId: string;
   threadId?: string;
+  /** TB-363 (B2): active company — enables the `chat_task_notice` poke channel on the client. */
+  companyId?: string;
   tools?: AgentChatClientOptions['tools'];
   onRunEvent?: AgentChatClientOptions['onRunEvent'];
   /** The thread is open and its messages up to now are shown in `client`. */
@@ -74,6 +76,7 @@ export function connectAgentChat(opts: ConnectAgentChatOptions): () => void {
       const client = create({
         agentId: opts.agentId,
         threadId: ref.threadId,
+        companyId: opts.companyId,
         tools: opts.tools,
         onRunEvent: opts.onRunEvent,
       });
@@ -96,6 +99,8 @@ export function connectAgentChat(opts: ConnectAgentChatOptions): () => void {
 export interface UseAgentChatOptions {
   agentId: string;
   threadId?: string;
+  /** TB-363 (B2): active company — the client's `chat_task_notice` poke channel. */
+  companyId?: string;
   /** WID-1 seam: passed through to the client. */
   tools?: AgentChatClientOptions['tools'];
   onRunEvent?: AgentChatClientOptions['onRunEvent'];
@@ -116,7 +121,7 @@ export function watchClientResume(
   return watchPageResume(() => void client.resume(), opts);
 }
 
-export function useAgentChat({ agentId, threadId, tools, onRunEvent, onThreadOpened }: UseAgentChatOptions) {
+export function useAgentChat({ agentId, threadId, companyId, tools, onRunEvent, onThreadOpened }: UseAgentChatOptions) {
   const key = `${agentId}\u0000${threadId ?? ''}`;
   /** Result of opening the thread for `key`; anything else (older key, not yet set) reads as connecting. */
   const [setup, setSetup] = useState<{
@@ -125,10 +130,10 @@ export function useAgentChat({ agentId, threadId, tools, onRunEvent, onThreadOpe
     thread: AguiThreadRef | null;
     error: string | null;
   } | null>(null);
-  const seam = useRef({ tools, onRunEvent, onThreadOpened });
+  const seam = useRef({ tools, onRunEvent, onThreadOpened, companyId });
   useEffect(() => {
-    seam.current = { tools, onRunEvent, onThreadOpened };
-  }, [tools, onRunEvent, onThreadOpened]);
+    seam.current = { tools, onRunEvent, onThreadOpened, companyId };
+  }, [tools, onRunEvent, onThreadOpened, companyId]);
 
   useEffect(
     () =>
@@ -136,6 +141,7 @@ export function useAgentChat({ agentId, threadId, tools, onRunEvent, onThreadOpe
         key,
         agentId,
         threadId,
+        companyId: seam.current.companyId,
         tools: seam.current.tools,
         onRunEvent: (event) => seam.current.onRunEvent?.(event),
         onReady: (client, ref) => {
