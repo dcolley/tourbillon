@@ -311,7 +311,7 @@ function makeModel(holdUser: boolean) {
   let gateOpen = !holdUser;
   let release: (() => void) | null = null;
   let userHolds = 0;
-  const callLog: Array<{ identity: string; notice: boolean; at: string }> = [];
+  const callLog: Array<{ identity: string; notice: boolean; at: string; blob: string }> = [];
   const model = {
     mock: null as unknown,
     callLog,
@@ -335,7 +335,7 @@ function makeModel(holdUser: boolean) {
       if (holdThis) userHolds += 1;
       const taskId = /"taskId"\s*:\s*"([^"]+)"/.exec(blob)?.[1] ?? 'unknown-task';
       const stage = /"stage"\s*:\s*"([^"]+)"/.exec(blob)?.[1] ?? 'done';
-      callLog.push({ identity: notice ? 'notice' : 'user', notice, at: new Date().toISOString() });
+      callLog.push({ identity: notice ? 'notice' : 'user', notice, at: new Date().toISOString(), blob: blob.slice(0, 20000) });
       entries += 1;
       if (holdThis) {
         while (!gateOpen) {

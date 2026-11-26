@@ -1208,6 +1208,111 @@ test('TN-TB363-A11-NO-WAKE', { timeout: 90_000 }, async (t) => {
   });
 });
 
+// TB-363 MUST-6: the main tool path — the concierge moves the task WHILE the origin thread
+// turn is held busy. With Agent.sendSignal defaulting to ifActive 'deliver' these persists
+// ride #queueForActiveRun (mid-turn injection) or come back 'blocked' and get swallowed;
+// with ifActive:'persist' they store immediately, never touch the held turn, never wake.
+test('TN-TB363-A11-NO-WAKE-BUSY', { timeout: 120_000 }, async (t) => {
+  if (await skipIfIncompatible(t, 'TN-TB363-A11-NO-WAKE-BUSY')) return;
+  await bridgeReset();
+  await bridgeStart();
+  const f = await buildFixture({ seedPin: 't2', holdUser: true });
+  let held: Promise<unknown> | undefined;
+  try {
+    f.userSession.thread.switch({ threadId: f.t1 });
+    held = f.userSession.sendMessage({ content: 'TN-HOLD-USER origin busy' });
+    await waitFor('origin hold entered', async () => f.models.a.callLog.some((c) => c.identity === 'user'), 15_000);
+    await waitFor('origin run id', async () => !!f.userSession.getCurrentRunId(), 15_000);
+    const toolRun = 'tn-busy-tool-run';
+    await publishProgress(
+      progressEvent(f, { stage: 'waiting_on_user', status: 'succeeded', detail: 'ask: pick a vendor', source: 'tool', runId: toolRun }),
+    );
+    await publishProgress(progressEvent(f, { stage: 'started', status: 'running', runId: `${toolRun}-b` }));
+    // Rows must land DURING the held turn (ifActive persist), not queue into it or vanish.
+    await waitFor('tool ask row during hold', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'waiting_on_user') >= 1, 15_000);
+    await waitFor('started row during hold', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'started') >= 1, 15_000);
+    const heldCall = f.models.a.callLog.find((c) => c.identity === 'user');
+    assert.ok(heldCall, 'held user turn entered the model');
+    assert.match(heldCall.blob, /TN-HOLD-USER/, 'the recorded call is the held user turn');
+    assert.ok(!heldCall.blob.includes('is waiting on the human'), 'MUST-6: no notice text injected into the held turn model input');
+    assert.ok(!heldCall.blob.includes('Background task started'), 'MUST-6: no started line injected into the held turn model input');
+    assert.equal(f.models.a.callLog.filter((c) => c.notice).length, 0, 'MUST-6: zero notice model entries during hold');
+    f.models.a.releaseChunks();
+    await held;
+    await new Promise((r) => setTimeout(r, 2000));
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'waiting_on_user'), 1, 'exactly one row for the ask transition');
+    assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'started'), 1, 'exactly one row for the started transition');
+    const notices = tb363Notices(await tb363Items(f.t1));
+    assert.equal(notices.length, 2, 'one rendered item per transition');
+    assert.deepEqual(notices.map((n) => n.stage).sort(), ['started', 'waiting_on_user']);
+    assert.equal(f.models.a.callLog.filter((c) => c.notice).length, 0, 'MUST-6: still zero notice model calls after release (never queued-then-woken)');
+    assert.equal(
+      (await tb363Items(f.t1)).filter((i) => (i as { kind?: string }).kind === 'assistant').length,
+      1,
+      'only the held user turn answered — zero extra assistant items during and after the hold',
+    );
+    recordVerdict('TN-TB363-A11-NO-WAKE-BUSY', 'GREEN');
+  } catch (err) {
+    recordVerdict('TN-TB363-A11-NO-WAKE-BUSY', 'RED', err instanceof Error ? err.message : String(err));
+    throw err;
+  } finally {
+    f.models.a.releaseChunks();
+    setChatTaskProgressPublisher(null);
+    await f.cleanup();
+  }
+});
+
+// TB-363 MUST-7 (PM N-3): when the concierge tool's status line already covers a transition,
+// a PURELY status runner reply collapses (A11b), but a reply carrying real content (a real
+// question) still reaches the human: one notice row + the go-between content item, never a
+// second notice row.
+test('TN-TB363-N3-SUBSTANTIVE-KEPT', { timeout: 90_000 }, async (t) => {
+  if (await skipIfIncompatible(t, 'TN-TB363-N3-SUBSTANTIVE-KEPT')) return;
+  await tb363Cell('TN-TB363-N3-SUBSTANTIVE-KEPT', async (f) => {
+    const runId = 'tn-n3-run';
+    // 1) The tool's status line lands first (persisted, no wake).
+    await publishProgress(
+      progressEvent(f, { stage: 'waiting_on_user', status: 'succeeded', detail: 'ask: confirm the vendor', source: 'tool', runId }),
+    );
+    await waitFor('N3 tool line', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'waiting_on_user') >= 1);
+    // 2) The runner settles the SAME transition with a real question: the go-between must
+    //    still fire — as a transient wake: notice rows stay at ONE, content item appears.
+    await publishProgress(
+      progressEvent(f, { stage: 'waiting_on_user', status: 'succeeded', detail: 'ask: vendor A or B? I need your pick before deploying.', runId }),
+    );
+    await waitFor('N3 go-between woke', async () => f.models.a.callLog.some((c) => c.notice), 20_000);
+    await new Promise((r) => setTimeout(r, 1500));
+    assert.equal(
+      countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'waiting_on_user'),
+      1,
+      'MUST-7: still exactly ONE stored notice row (the tool line) — the go-between is transient',
+    );
+    const n = tb363Notices(await tb363Items(f.t1));
+    assert.equal(n.length, 1, 'and exactly ONE rendered notice');
+    assert.equal(n[0]!.stage, 'waiting_on_user');
+    const assistant = (await tb363Items(f.t1)).filter((i) => (i as { kind?: string }).kind === 'assistant');
+    assert.ok(assistant.length >= 1, 'MUST-7: the runner go-between content item is present alongside the one notice');
+    // 3) Status-only control: tool line then runner settle of `done` with NO detail collapses
+    //    to one row and produces no extra wake (A11b unaffected by the MUST-7 rule).
+    const doneRun = 'tn-n3-done';
+    await publishProgress(progressEvent(f, { stage: 'done', status: 'succeeded', title: 'Ship the runbook', source: 'tool', runId: doneRun }));
+    await waitFor('N3 done line', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done') >= 1);
+    const noticesBefore = f.models.a.callLog.filter((c) => c.notice).length;
+    await publishProgress(progressEvent(f, { stage: 'done', status: 'succeeded', title: 'Ship the runbook', runId: doneRun }));
+    await new Promise((r) => setTimeout(r, 1500));
+    assert.equal(
+      countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'done'),
+      1,
+      'status-only runner reply collapses with the tool line (ONE row)',
+    );
+    assert.equal(
+      f.models.a.callLog.filter((c) => c.notice).length,
+      noticesBefore,
+      'status-only runner reply fires NO extra go-between turn',
+    );
+  });
+});
+
 test('TN-TB363-R2-NOTICE-POKE', { timeout: 90_000 }, async (t) => {
   if (await skipIfIncompatible(t, 'TN-TB363-R2-NOTICE-POKE')) return;
   await bridgeReset();

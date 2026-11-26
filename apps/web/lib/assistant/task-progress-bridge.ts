@@ -30,6 +30,9 @@ import { aguiSessionScope } from '@/lib/agui/run-input';
 import { chatSessionId } from '@/lib/chat/session-id';
 import type { Agent } from '@tourbillon/db';
 import type { PersistSignalAgent, QueueSignalSession, TaskProgressSignalPayload } from '@tourbillon/mastra/concierge-signal';
+// TB-363 MUST-6/7: the chat-Agent seam type is part of DeliverDeps' surface — re-export it so
+// tests/consumers build fakes without reaching into the mastra subpath.
+export type { PersistSignalAgent };
 import { persistConciergeSignal, queueTransientTaskProgressWake } from '@tourbillon/mastra/concierge-signal';
 import {
   handleTaskProgressEvent,
