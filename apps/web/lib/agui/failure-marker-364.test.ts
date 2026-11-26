@@ -47,7 +47,7 @@ function fakeSession(rows: MarkerWritableRow[] = []): MarkerSessionLike & { rows
       const next: MarkerWritableRow = {
         id: signal.id,
         content: {
-          parts: (signal.contents as { parts?: unknown })?.parts,
+          parts: Array.isArray(signal.contents) ? signal.contents : [],
           metadata: { signal: { tagName: signal.tagName, attributes: signal.attributes } },
         },
       };

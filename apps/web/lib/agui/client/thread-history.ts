@@ -386,6 +386,22 @@ export function chatItemsFromStoredMessages(messages: readonly StoredThreadMessa
   // never moves), the text comes from the row that has it, and a SERVER failure marker outlives a
   // later unkeyed-marker row that would otherwise render the same message delivered.
   {
+    // A28→A10: a queue row still marked waiting whose follow-up was since delivered (stored as an
+    // unkeyed delivered row with the same text) is stale — the delivered row wins, the waiting
+    // placeholder must not linger as a permanent "waiting" bubble.
+    const deliveredTexts = new Set(
+      items
+        .filter((it) => it.kind === 'user' && it.delivery === 'delivered' && !it.clientMessageId)
+        .map((it) => (it.kind === 'user' ? it.text.trim() : '')),
+    );
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i];
+      if (it.kind === 'user' && it.delivery === 'waiting' && it.clientMessageId && deliveredTexts.has(it.text.trim())) {
+        items.splice(i, 1);
+      }
+    }
+  }
+  {
     const byKey = new Map<string, number>();
     const collapsed: AgentChatItem[] = [];
     for (const it of items) {

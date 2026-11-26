@@ -289,7 +289,7 @@ export function createAguiEventMapper(options: AguiEventMapperOptions) {
   }
 
   /** Terminal events for the AG-UI run. Safe to call once; later calls return []. */
-  function finish(override?: { error?: string; reason?: AguiAgentEndReason }): BaseEvent[] {
+  function finish(override?: { error?: string; publicMessage?: string; reason?: AguiAgentEndReason }): BaseEvent[] {
     if (finished) return [];
     const out: BaseEvent[] = [];
     closeAll(out);
@@ -305,8 +305,9 @@ export function createAguiEventMapper(options: AguiEventMapperOptions) {
       });
       out.push({
         type: EventType.RUN_ERROR,
-        // An explicit public message (widget refusal) wins; otherwise friendly copy, never raw.
-        message: override?.error ?? runFailure.friendlyTitle,
+        // TB-364 (A19/A26): NEVER the raw engine text — an explicitly public message wins,
+        // otherwise friendly copy. (`error` is read ONLY for classification above.)
+        message: override?.publicMessage ?? runFailure.friendlyTitle,
         code: 'agent_error',
         category: runFailure.category,
         retryable: runFailure.retryable,

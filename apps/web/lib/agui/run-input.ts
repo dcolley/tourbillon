@@ -39,7 +39,12 @@ export const tourbillonPropsSchema = z
      * persisted into the thread's choice. Tenant-checked per request (PRV-1) by the route.
      */
     modelOverride: z
-      .object({ providerId: idSchema, modelId: idSchema })
+      .object({
+        providerId: idSchema,
+        // Model ids carry a slash ('other/model' — the provider/model convention), so the id
+        // charset is widened here; still bounded and path-safe.
+        modelId: z.string().regex(/^[A-Za-z0-9._:\/-]{1,200}$/),
+      })
       .strict()
       .optional(),
   })

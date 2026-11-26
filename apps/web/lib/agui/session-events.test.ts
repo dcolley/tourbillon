@@ -136,14 +136,21 @@ describe('AGUI-1 session event mapper', () => {
     assert.deepEqual(out[3].outcome, { type: 'cancelled' });
   });
 
-  it('error run ends with RUN_ERROR carrying the error message', () => {
+  it('error run ends with RUN_ERROR carrying friendly copy + machine fields, never the raw text (TB-364 A19)', () => {
     const out = run([
       { type: 'agent_start' },
       { type: 'error', error: new Error('model unavailable') },
       { type: 'agent_end', reason: 'error' },
     ]);
     assert.deepEqual(types(out), ['RUN_ERROR']);
-    assert.equal(out[0].message, 'model unavailable');
+    // TB-364 (A19/A24): message is friendly/neutral; the raw engine text leaves ONLY as the
+    // redacted, bounded `technical`; machine fields let the client classify without guessing.
+    assert.notEqual(out[0].message, 'model unavailable');
+    assert.equal(typeof out[0].message, 'string');
+    assert.equal(out[0].code, 'agent_error');
+    assert.equal(typeof out[0].category, 'string');
+    assert.equal(typeof out[0].retryable, 'boolean');
+    assert.equal(typeof out[0].technical, 'string');
   });
 
   it('a pending tool approval is surfaced as CUSTOM and as an interrupt outcome', () => {
