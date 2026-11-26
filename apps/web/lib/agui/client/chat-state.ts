@@ -540,7 +540,9 @@ export function applyRunEvent(state: AgentChatState, event: AguiClientEvent): Ag
       const message = str(event.message) ?? 'Agent run failed';
       const classified = classifySendError({
         kind: 'run',
-        message,
+        // A19/A26: the SSE message is friendly text; the REDACTED technical (when the server sent
+        // it) is what belongs in the details section.
+        message: str(event.technical) ?? message,
         code: str(event.code),
         ...(typeof event.category === 'string' ? { category: event.category } : {}),
         ...(typeof event.retryable === 'boolean' ? { retryable: event.retryable } : {}),

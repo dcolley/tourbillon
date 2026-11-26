@@ -166,37 +166,55 @@ interface StoredTb364Marker {
   retryAfterMs?: number;
   partial?: boolean;
   toolRan?: boolean;
+  /** Original text of a discarded row (whose stored text became the placeholder). */
+  text?: string;
 }
 
 function tb364Marker(message: StoredThreadMessage): StoredTb364Marker | null {
   const meta = (message.content as { metadata?: Record<string, unknown> } | null | undefined)?.metadata;
   if (!meta) return null;
-  const bag = (meta.tb364 && typeof meta.tb364 === 'object' ? meta.tb364 : meta) as Record<string, unknown>;
-  const clientMessageId = typeof bag.clientMessageId === 'string' && bag.clientMessageId ? bag.clientMessageId : undefined;
-  const rawState = typeof bag.tb364State === 'string' ? bag.tb364State : undefined;
-  const state =
-    rawState === 'failed' || rawState === 'discarded' || rawState === 'waiting' || rawState === 'running'
-      ? rawState
-      : undefined;
-  if (!clientMessageId && !state) return null;
-  const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
-  return {
-    ...(clientMessageId ? { clientMessageId } : {}),
-    ...(state ? { state } : {}),
-    ...(typeof bag.tb364Category === 'string' ? { category: bag.tb364Category } : {}),
-    ...(typeof bag.tb364Retryable === 'boolean' ? { retryable: bag.tb364Retryable } : {}),
-    ...(num(bag.tb364Attempts) !== undefined ? { attempts: num(bag.tb364Attempts) } : {}),
-    ...(typeof bag.tb364Detail === 'string' ? { technical: bag.tb364Detail } : {}),
-    ...(num(bag.tb364RetryAfterMs) !== undefined ? { retryAfterMs: num(bag.tb364RetryAfterMs) } : {}),
-    ...(bag.tb364Partial === true ? { partial: true } : {}),
-    ...(bag.tb364ToolRan === true ? { toolRan: true } : {}),
-  };
+  // Server-written marker bags live at content.metadata (flat `tb364*` attrs) or under the signal
+  // attributes bag; accept both placements and both key spellings (`clientMessageId` / `tb364Key`).
+  const signal = (meta.signal && typeof meta.signal === 'object' ? meta.signal : null) as { attributes?: unknown } | null;
+  const candidates: Record<string, unknown>[] = [];
+  if (meta.tb364 && typeof meta.tb364 === 'object') candidates.push(meta.tb364 as Record<string, unknown>);
+  if (signal?.attributes && typeof signal.attributes === 'object') candidates.push(signal.attributes as Record<string, unknown>);
+  candidates.push(meta);
+  for (const bag of candidates) {
+    const clientMessageId =
+      (typeof bag.clientMessageId === 'string' && bag.clientMessageId) ||
+      (typeof bag.tb364Key === 'string' && bag.tb364Key) ||
+      undefined;
+    const rawState = typeof bag.tb364State === 'string' ? bag.tb364State : undefined;
+    const state =
+      rawState === 'failed' || rawState === 'discarded' || rawState === 'waiting' || rawState === 'running'
+        ? rawState
+        : undefined;
+    if (!clientMessageId && !state) continue;
+    const technicalRaw = typeof bag.tb364Technical === 'string' ? bag.tb364Technical : typeof bag.tb364Detail === 'string' ? bag.tb364Detail : undefined;
+    const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+    return {
+      ...(clientMessageId ? { clientMessageId } : {}),
+      ...(state ? { state } : {}),
+      ...(typeof bag.tb364Category === 'string' ? { category: bag.tb364Category } : {}),
+      ...(typeof bag.tb364Retryable === 'boolean' ? { retryable: bag.tb364Retryable } : {}),
+      ...(num(bag.tb364Attempts) !== undefined ? { attempts: num(bag.tb364Attempts) } : {}),
+      ...(technicalRaw !== undefined ? { technical: technicalRaw } : {}),
+      ...(num(bag.tb364RetryAfterMs) !== undefined ? { retryAfterMs: num(bag.tb364RetryAfterMs) } : {}),
+      ...(bag.tb364Partial === true ? { partial: true } : {}),
+      ...(bag.tb364ToolRan === true ? { toolRan: true } : {}),
+      ...(typeof bag.tb364Text === 'string' ? { text: bag.tb364Text } : {}),
+    };
+  }
+  return null;
 }
 
 /** TB-364: stored user row (+ marker) → the user chat item, in its stored delivery state. */
 function tb364UserItem(message: StoredThreadMessage, id: string, text: string): AgentChatItem {
   const marker = tb364Marker(message);
-  const base = { kind: 'user' as const, id, text, mode: 'run' as const };
+  // A35: a discarded row's stored text is the placeholder — the marker carries the original text,
+  // which is what the greyed "Not sent" bubble shows.
+  const base = { kind: 'user' as const, id, text: marker?.text ?? text, mode: 'run' as const };
   if (!marker) return { ...base, delivery: 'delivered' };
   const keyed = marker.clientMessageId ? { clientMessageId: marker.clientMessageId } : {};
   switch (marker.state) {
@@ -351,9 +369,53 @@ export function chatItemsFromStoredMessages(messages: readonly StoredThreadMessa
       } else {
         const text = stripDashboardContext(userText(message));
         if (text.trim()) push(tb364UserItem(message, message.id, text), message.createdAt);
+        else {
+          // TB-364 (A28/A2): a tb364-queue / tb364-marker signal row carries its text only in the
+          // marker attrs — render the waiting/failed bubble from the marker (never as a notice).
+          const m = tb364Marker(message);
+          if (m?.clientMessageId && m.state && m.state !== 'running' && (m.text?.trim() || m.state !== 'waiting')) {
+            push(tb364UserItem(message, message.id, ''), message.createdAt);
+          }
+        }
       }
     } else if (message.role === 'assistant') {
       for (const item of assistantItems(message)) push(item, message.createdAt);
+    }
+  }
+  // TB-364 (A6/A16/A28/A35): one bubble per clientMessageId — the FIRST position wins (the bubble
+  // never moves), the text comes from the row that has it, and a SERVER failure marker outlives a
+  // later unkeyed-marker row that would otherwise render the same message delivered.
+  {
+    const byKey = new Map<string, number>();
+    const collapsed: AgentChatItem[] = [];
+    for (const it of items) {
+      const key = it.kind === 'user' ? it.clientMessageId : undefined;
+      if (!key) {
+        collapsed.push(it);
+        continue;
+      }
+      const at = byKey.get(key);
+      if (at === undefined) {
+        byKey.set(key, collapsed.length);
+        collapsed.push(it);
+        continue;
+      }
+      const prev = collapsed[at] as Extract<AgentChatItem, { kind: 'user' }>;
+      const next = it as Extract<AgentChatItem, { kind: 'user' }>;
+      const keepFailure = prev.failure?.fromServer === true && !next.failure;
+      collapsed[at] = {
+        ...next,
+        id: prev.id,
+        at: prev.at,
+        text: next.text.trim() ? next.text : prev.text,
+        ...(keepFailure
+          ? { delivery: prev.delivery, failure: prev.failure, attempts: next.attempts ?? prev.attempts }
+          : {}),
+      };
+    }
+    if (collapsed.length !== items.length) {
+      items.length = 0;
+      items.push(...collapsed);
     }
   }
   // TB-363 (S1 / contract M17): a needs-input ask stops being the CURRENT ask once the human

@@ -14,6 +14,8 @@
 import { EventType, type BaseEvent } from '@ag-ui/core';
 import { EventEncoder } from '@ag-ui/encoder';
 import { AGUI_CUSTOM, createAguiEventMapper, errorMessage, type AguiSourceEvent } from './session-events';
+import { redactErrorText } from './redact-error';
+import type { Tb364RunFailure } from './failure-marker';
 
 /** The parts of an AgentController session this module uses (Mastra `Session` satisfies it). */
 export interface AguiSession {
@@ -62,6 +64,11 @@ export interface AguiRunStreamOptions {
   continuationTimeoutMs?: number;
   /** SSE comment keep-alive interval. */
   heartbeatMs?: number;
+  /**
+   * TB-364 (A2/A19): called once when the AG-UI run ends, with the server-classified failure (null
+   * on success) — the route writes/clears the failed marker so state survives a reload (A2, A23).
+   */
+  onRunEnd?: (outcome: { ok: boolean; failure: Tb364RunFailure | null }) => void;
   /**
    * Called once when the AG-UI run ends (RUN_FINISHED / RUN_ERROR). STREAM-1: not on a client
    * disconnect; a detached run still ends (and calls this) when its session run ends.
@@ -262,11 +269,17 @@ export function aguiRunStream(opts: AguiRunStreamOptions): ReadableStream<Uint8A
   const finish = (override?: Parameters<typeof mapper.finish>[0]) => {
     if (closed) return;
     const events = mapper.finish(override);
+    if (mapper.runFailure || events.some((e) => e.type === EventType.RUN_ERROR)) {
+      opts.onRunEnd?.({ ok: false, failure: mapper.runFailure });
+    } else {
+      opts.onRunEnd?.({ ok: true, failure: null });
+    }
     if (opts.publicRunError) {
       for (const event of events) {
         if (event.type !== EventType.RUN_ERROR) continue;
         const raw = String((event as { message?: unknown }).message ?? '');
-        console.warn('[agui] run failed', { runId: opts.runId.slice(0, 100), error: raw.slice(0, 300) });
+        // TB-364 (A26): server logs keep the failure REDACTED — never raw engine text.
+        console.warn('[agui] run failed', { runId: opts.runId.slice(0, 100), error: redactErrorText(raw).slice(0, 300) });
         (event as { message?: string }).message = opts.publicRunError;
       }
     }
