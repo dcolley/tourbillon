@@ -42,6 +42,14 @@ export const HARNESS_TEST_FILES = [
   'lib/harness/callback-chat.test.ts',
   'lib/harness/callback-gate.test.ts',
   'lib/vault-oauth-state-clock.test.ts',
+  // TB-363 (Test verdict MUST-3): the notice tests that carry the A1/A2/A3/A5/A6/A8/A10/A12 and
+  // claim-key (M6/M7) mutant kills. Kill attributions must name tests CI actually runs, so these
+  // are pinned here (deepEqual-pinned in packages/scheduler/src/ci-coverage-s316-s4-s328-s4.test.ts).
+  'lib/agui/client/thread-history-notices.test.ts',
+  'lib/agui/client/agent-chat-client-notices.test.ts',
+  'components/assistant/agent-chat-notice-render.test.ts',
+  'components/chat/chat-stream-events.test.ts',
+  'lib/assistant/task-progress-signals.test.ts',
 ];
 
 const HARNESS_DIR = 'lib/harness';
