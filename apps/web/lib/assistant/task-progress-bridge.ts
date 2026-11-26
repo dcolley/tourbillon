@@ -30,11 +30,12 @@ import { aguiSessionScope } from '@/lib/agui/run-input';
 import { chatSessionId } from '@/lib/chat/session-id';
 import type { Agent } from '@tourbillon/db';
 import type { PersistSignalAgent, QueueSignalSession, TaskProgressSignalPayload } from '@tourbillon/mastra/concierge-signal';
-import { persistConciergeSignal } from '@tourbillon/mastra/concierge-signal';
+import { persistConciergeSignal, queueTransientTaskProgressWake } from '@tourbillon/mastra/concierge-signal';
 import {
   handleTaskProgressEvent,
   parseTaskProgressMessage,
   queueTaskProgressSignal,
+  taskProgressBareClaimKey,
   taskProgressClaimKey,
   type TaskProgressAgentRecord,
   type TaskProgressBridgeDeps,
@@ -310,8 +311,38 @@ export function createDeliver(deps: DeliverDeps) {
         return false;
       }
       const { action } = await persistConciergeSignal(chatAgent, { resourceId, threadId }, payload);
-      if (action !== 'persist' && action !== 'accepted' && action !== 'queued') {
+      // MUST-6: 'blocked' (cross-agent thread-blocked) or 'discard' mean NOTHING landed —
+      // fail loud so the claim is released for a redelivery retry. Anything else is an
+      // accepted persist.
+      if (action === 'blocked' || action === 'discard') {
         console.warn('[concierge-signal] task progress notice persist refused — claim released for retry', {
+          agentId: agent.id,
+          threadId,
+          action,
+        });
+        return false;
+      }
+      return true;
+    }
+    if (payload.transient) {
+      // TB-363 MUST-7 (PM N-3): the tool's status line already covers this transition — the
+      // runner's go-between reply rides a TRANSIENT signal (wake with no stored row,
+      // #persistSignal skips transient). One notice + the runner's content item, never two
+      // notice rows. A refusal means the content reply was lost: fail loud, release claim.
+      const chatAgent = await deps.getChatAgent?.(agent);
+      if (!chatAgent) {
+        console.warn('[concierge-signal] transient go-between skipped (no chat agent)', {
+          agentId: agent.id,
+          threadId,
+        });
+        return false;
+      }
+      const { action } = await queueTransientTaskProgressWake(chatAgent, { resourceId, threadId }, payload);
+      // MUST-6 rule at the wake seam: 'blocked' (thread-blocked) or 'discard' mean NOTHING
+      // will reach the human — fail loud so the claim is released. Any other action
+      // ('deliver', admission 'local'/'remote', ...) means the go-between turn was started.
+      if (action === 'blocked' || action === 'discard') {
+        console.warn('[concierge-signal] transient go-between refused — claim released for retry', {
           agentId: agent.id,
           threadId,
           action,
@@ -414,12 +445,15 @@ export interface ClaimClient {
   claim(key: string, ttlSeconds: number): Promise<boolean>;
   /** TB-363 MUST-6: release a claim (a persist-path delivery landed nothing). */
   unclaim?(key: string): Promise<void>;
+  /** TB-363 MUST-7: was a claim key already consumed (the tool line landed)? */
+  exists?(key: string): Promise<boolean>;
 }
 
 /** The ioredis slice the claim client drives (softs S11: fake-IORedis in tests). */
 export interface RedisClaimCommands {
   set(key: string, value: string, mode: 'EX', ttlSeconds: number, nx: 'NX'): Promise<string | null>;
   del?(key: string): Promise<number> | number;
+  exists?(key: string): Promise<number> | number;
 }
 
 export function redisClaimClient(client: RedisClaimCommands = new IORedis(process.env.REDIS_URL ?? 'redis://localhost:6379', {
@@ -451,6 +485,15 @@ export function redisClaimClient(client: RedisClaimCommands = new IORedis(proces
         });
       }
     },
+    async exists(key) {
+      try {
+        return (await client.exists?.(key)) === 1;
+      } catch {
+        // Fail CLOSED on the transient optimisation: unknown == treat as not covered,
+        // the runner reply then persists its own row (pre-MUST-7 behaviour, never a loss).
+        return false;
+      }
+    },
   };
 }
 
@@ -472,6 +515,7 @@ export function createOwnedRedisClaimClient(
   return {
     claim: (key, ttlSeconds) => claimClient.claim(key, ttlSeconds),
     unclaim: claimClient.unclaim ? (key) => claimClient.unclaim!(key) : undefined,
+    exists: claimClient.exists ? (key) => claimClient.exists!(key) : undefined,
     quit: async () => {
       await client.quit();
     },
@@ -519,6 +563,9 @@ export function buildTaskProgressBridgeDeps(wiring: TaskProgressBridgeWiring = {
       ? async (event) => {
           await claimClient.unclaim!(taskProgressClaimKey(event));
         }
+      : undefined,
+    toolLineLanded: claimClient.exists
+      ? async (event) => claimClient.exists!(taskProgressBareClaimKey(event))
       : undefined,
     log: wiring.log ?? { warn: (msg, data) => console.warn(msg, data ?? '') },
   };

@@ -75,7 +75,7 @@ export interface PersistSignalAgent {
    * persist-without-wake; `sendSignal` honours `ifIdle.behavior` (agent/agent.d.ts:1474).
    */
   sendSignal(
-    signal: { type: 'reactive'; tagName?: string; attributes?: ConciergeSignalAttributes; contents: string; id?: string },
+    signal: { type: 'reactive'; tagName?: string; attributes?: ConciergeSignalAttributes; contents: string; id?: string; transient?: boolean },
     target: {
       resourceId: string;
       threadId: string;
@@ -234,6 +234,39 @@ export interface TaskProgressSignalPayload {
   tagName: string;
   attributes: ConciergeSignalAttributes;
   contents: string;
+  /**
+   * TB-363 MUST-7 (PM N-3): delivery-only signal — the runner's go-between reply rides on it,
+   * but Mastra must NOT store a second notice row (`#persistSignal` skips transient signals).
+   */
+  transient?: boolean;
+}
+
+/**
+ * TB-363 MUST-7: deliver the runner's go-between WAKE as a transient signal when the
+ * concierge tool's status line already covers this transition — the human gets the ONE
+ * notice row plus the runner's content item, never two notice rows.
+ * `Agent.sendSignal` with ifIdle wake; `#persistSignal` (agent-DtdQ6un6.js:41672) returns
+ * early for transient signals, so nothing is stored from this call.
+ */
+export async function queueTransientTaskProgressWake(
+  agent: PersistSignalAgent,
+  target: PersistSignalTarget,
+  payload: TaskProgressSignalPayload,
+): Promise<{ signalId: string; action: string }> {
+  const id = `sig-${randomId()}`;
+  const result = agent.sendSignal(
+    {
+      type: 'reactive',
+      tagName: payload.tagName,
+      attributes: sanitizeSignalAttributes(payload.attributes),
+      contents: clampContents(payload.contents),
+      id,
+      transient: true,
+    },
+    { ...target, ifIdle: { behavior: 'wake' } },
+  );
+  const decision = await result.accepted;
+  return { signalId: result.signal?.id ?? id, action: decision.action };
 }
 
 /**

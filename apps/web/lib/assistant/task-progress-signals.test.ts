@@ -110,6 +110,8 @@ function harness(opts: {
   /** When set, the origin lookup THROWS (DB error must surface, C3). */
   originError?: Error;
   deliverOk?: boolean;
+  /** MUST-7 (N-3): when true, toolLineLanded reports the tool's status line as already stored. */
+  toolLineCovered?: boolean;
   /** Shared across harnesses to emulate several replicas seeing one event (S2). */
   claimStore?: Set<string>;
 } = {}): Harness {
@@ -148,6 +150,9 @@ function harness(opts: {
         unclaimed.push(key);
         opts.claimStore?.delete(key);
       },
+      toolLineLanded: opts.toolLineCovered === undefined
+        ? undefined
+        : async () => opts.toolLineCovered === true,
       log: { warn: (msg, data) => warnings.push({ msg, data }) },
     },
   };
@@ -432,6 +437,28 @@ test('MUST-6: a failed persist-path deliver releases the claim for retry; a wake
   assert.equal(await handleTaskProgressEvent(hB.deps, wakeEvent), 'skipped:no-session');
   assert.deepEqual(hB.unclaimed, [], 'wake-path semantics unchanged: claim stays consumed');
   assert.equal(storeB.size, 1);
+});
+
+// TB-363 MUST-7 (PM N-3): the covered substantive runner go-between rides a transient
+// signal (content item, NO second stored notice row); uncovered / non-substantive do not.
+test('MUST-7: a substantive runner reply covered by the tool line delivers transient; uncovered does not; status-only never', async () => {
+  const covered = harness({ toolLineCovered: true });
+  await handleTaskProgressEvent(covered.deps, event({ stage: 'waiting_on_user', status: 'succeeded', detail: 'ask: prod or staging?' }));
+  assert.equal(covered.delivered[0]!.wake, true, 'the go-between still wakes');
+  assert.equal(covered.delivered[0]!.payload.transient, true, 'covered substantive reply is delivery-only (no second row)');
+
+  const uncovered = harness({ toolLineCovered: false });
+  await handleTaskProgressEvent(uncovered.deps, event({ stage: 'waiting_on_user', status: 'succeeded', detail: 'ask: prod or staging?' }));
+  assert.ok(!uncovered.delivered[0]!.payload.transient, 'no tool line yet -> the wake persists its own notice (never lost)');
+
+  const statusOnly = harness({ toolLineCovered: true });
+  await handleTaskProgressEvent(statusOnly.deps, event({ stage: 'done', status: 'succeeded' }));
+  assert.ok(!statusOnly.delivered[0]!.payload.transient, 'status-only is not a reply; claim-collapse (not transient) owns it');
+
+  const toolLine = harness({ toolLineCovered: true });
+  await handleTaskProgressEvent(toolLine.deps, event({ stage: 'waiting_on_user', status: 'succeeded', detail: 'ask: prod or staging?', source: 'tool' as never }));
+  assert.ok(!toolLine.delivered[0]!.payload.transient, 'the tool line itself is the persisted notice, never transient');
+  assert.equal(toolLine.delivered[0]!.wake, false);
 });
 
 test('claim: claimed before any db work (getAgent untouched on duplicate)', async () => {

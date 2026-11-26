@@ -6,7 +6,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { taskProgressSignalPayload, persistConciergeSignal } from './concierge-signal';
+import { taskProgressSignalPayload, persistConciergeSignal, queueTransientTaskProgressWake } from './concierge-signal';
 
 const base = {
   companyId: 'company-1',
@@ -58,6 +58,46 @@ test('MUST-4: persistConciergeSignal requests ifIdle.behavior=persist and resolv
     'busy-origin no-wake policy rides as ifActive.behavior=persist (default deliver would drain mid-turn / block cross-agent)',
   );
   assert.equal(settled.action, 'persist');
+});
+
+// TB-363 MUST-7 (PM N-3): the covered go-between is a TRANSIENT wake — Mastra's
+// #persistSignal returns early for transient signals (agent-DtdQ6un6.js:41672), so the
+// runner's reply renders as a content item with NO second stored notice row.
+test('queueTransientTaskProgressWake wakes without a stored row (transient + ifIdle wake)', async () => {
+  const seen: Array<{ signal: unknown; target: unknown }> = [];
+  const agent = {
+    sendSignal: (signal: unknown, target: unknown) => {
+      seen.push({ signal, target });
+      return {
+        signal: { id: 'sig-trans-1' },
+        accepted: Promise.resolve({ action: 'deliver' }),
+      };
+    },
+  };
+  const payload = taskProgressSignalPayload({
+    companyId: 'c1',
+    agentId: 'a1',
+    chatTaskId: 't1',
+    runId: 'r1',
+    stage: 'waiting_on_user',
+    status: 'succeeded',
+    title: 'Deploy staging',
+    detail: 'ask: prod or staging?',
+  });
+  const { signalId, action } = await queueTransientTaskProgressWake(
+    agent as never,
+    { resourceId: 'c1:u1', threadId: 'th_1' },
+    payload,
+  );
+  assert.equal(signalId, 'sig-trans-1');
+  assert.equal(action, 'deliver');
+  assert.equal(seen.length, 1);
+  const sig = seen[0]!.signal as Record<string, unknown>;
+  assert.equal(sig.transient, true, 'the go-between signal must be transient (no stored row)');
+  assert.equal(sig.tagName, 'task-progress', 'delivered to the chat Agent, same tag/shape');
+  const target = seen[0]!.target as Record<string, Record<string, string>>;
+  assert.equal(target.threadId, 'th_1');
+  assert.equal(target.ifIdle?.behavior, 'wake', 'the go-between reply still runs the model turn');
 });
 
 test('MUST-4: a rejected persisted handle never rejects the persist call (no unhandled crash)', async () => {

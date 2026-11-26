@@ -108,6 +108,10 @@ export function parseTaskProgressMessage(raw: string): TaskProgressEvent | null 
  * emits each stage at most once per runId (a retry re-queues with a NEW runId), so
  * (companyId, chatTaskId, runId, stage) identifies exactly one notification.
  */
+export function taskProgressBareClaimKey(event: TaskProgressEvent): string {
+  return `concierge-signal:seen:${event.companyId}:${event.chatTaskId}:${event.runId}:${event.stage}`;
+}
+
 export function taskProgressClaimKey(event: TaskProgressEvent): string {
   // TB-363 MUST-7 (PM N-3): a runner-origin settle that carries SUBSTANTIVE detail (a real
   // ask, an error reason, a result summary) is the runner's go-between REPLY content, not a
@@ -117,8 +121,17 @@ export function taskProgressClaimKey(event: TaskProgressEvent): string {
   const substantive =
     event.source !== 'tool' && typeof event.detail === 'string' && event.detail.trim().length > 0;
   return (
-    `concierge-signal:seen:${event.companyId}:${event.chatTaskId}:${event.runId}:${event.stage}` +
+    taskProgressBareClaimKey(event) +
     (substantive ? `:reply:${event.detail!.trim().slice(0, 120)}` : '')
+  );
+}
+
+/** TB-363 MUST-7: the runner settle whose go-between reply carries real content. */
+export function isSubstantiveRunnerReply(event: TaskProgressEvent): boolean {
+  return (
+    event.source !== 'tool'
+    && typeof event.detail === 'string'
+    && event.detail.trim().length > 0
   );
 }
 
@@ -169,6 +182,12 @@ export interface TaskProgressBridgeDeps<A extends TaskProgressAgentRecord> {
    * redelivery can retry instead of being swallowed as 'skipped:duplicate'.
    */
   unclaim?(event: TaskProgressEvent): Promise<void>;
+  /**
+   * TB-363 MUST-7 (PM N-3): true when the concierge tool's status line already landed for
+   * this (companyId, chatTaskId, runId, stage) — the runner's substantive go-between reply
+   * then rides a TRANSIENT signal (content item, no second stored notice row).
+   */
+  toolLineLanded?(event: TaskProgressEvent): Promise<boolean>;
   /**
    * TB-363 (R2): called after a SUCCESSFUL delivery ('queued') with the resolved origin
    * threadId — the bridge publishes a `chat_task_notice` poke on `sse:{companyId}` so an open
@@ -247,11 +266,17 @@ export async function handleTaskProgressEvent<A extends TaskProgressAgentRecord>
     });
     return `skipped:${origin.skip}`;
   }
-  const payload = taskProgressSignalPayload(event);
   // TB-363 (MUST-4, PM Q1): the notice must never be a SECOND chat reply. Tool-sourced moves
   // (concierge's own updateMyTask/completeMyTask) and `started` persist as a compact status
   // LINE only; runner-origin reactive stages keep the wake (the #339 go-between turn).
   const wake = event.source !== 'tool' && event.stage !== 'started';
+  // TB-363 MUST-7 (PM N-3): a substantive runner go-between for a transition the concierge
+  // tool's status line ALREADY covers delivers as a transient signal — the reply's content
+  // item still appears, but no second notice row is stored (the one notice stays the line).
+  let payload = taskProgressSignalPayload(event);
+  if (wake && isSubstantiveRunnerReply(event) && (await deps.toolLineLanded?.(event))) {
+    payload = { ...payload, transient: true };
+  }
   const delivered = await deps.deliver(agent, origin.threadId, payload, wake);
   if (!delivered) {
     // TB-363 MUST-6: on the persist (no-wake) path a false deliver means NOTHING landed
