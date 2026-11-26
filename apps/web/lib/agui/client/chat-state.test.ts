@@ -115,15 +115,19 @@ describe('AGUI-1b chat state', () => {
     assert.deepEqual(deliveries(s), ['queued', 'dropped', 'dropped']);
   });
 
-  it('endRun: success delivers queued follow-ups; cancelled / error / disconnected drop them; sending is left alone', () => {
+  it('endRun: success delivers queued follow-ups; error/lost/unrequested-cancel make them WAIT (TB-364 A11); user Stop drops them; sending is left alone', () => {
     const items = [user('q', 'followUp', 'queued'), user('s', 'followUp', 'sending'), { kind: 'assistant', id: 'm', text: 'x', streaming: true } as AgentChatItem];
     assert.deepEqual(deliveries(endRun(withItems(items), 'success')), ['delivered', 'sending']);
     for (const outcome of ['cancelled', 'error', 'disconnected'] as const) {
       const s = endRun(withItems(items), outcome);
-      assert.deepEqual(deliveries(s), ['dropped', 'sending'], outcome);
+      // A11: a queued follow-up of a FAILED run was never sent — it waits behind the failure,
+      // it is not silently dropped (only an explicit Stop drops).
+      assert.deepEqual(deliveries(s), ['waiting', 'sending'], outcome);
       assert.equal(s.status, 'idle');
       assert.equal((s.items[2] as { streaming: boolean }).streaming, false);
     }
+    const stopped = endRun({ ...withItems(items), status: 'stopping' }, 'cancelled');
+    assert.deepEqual(deliveries(stopped), ['dropped', 'sending'], 'user-requested Stop still drops queued');
   });
 
   it('endRun keeps pending tools only on interrupt', () => {
@@ -136,7 +140,11 @@ describe('AGUI-1b chat state', () => {
     assert.equal(apply(withItems([]), { type: 'RUN_FINISHED', outcome: { type: 'cancelled' } }).lastOutcome, 'cancelled');
     assert.equal(apply(withItems([]), { type: 'RUN_FINISHED' }).lastOutcome, 'success');
     const e = apply(withItems([]), { type: 'RUN_ERROR', message: 'bad' });
-    assert.deepEqual([e.lastOutcome, e.error], ['error', { kind: 'run', message: 'bad' }]);
+    assert.equal(e.lastOutcome, 'error');
+    assert.equal(e.error?.kind, 'run');
+    // TB-364 (A24/A19): the banner carries the FRIENDLY copy only — the raw server text never
+    // reaches state.error (it goes, redacted, into the failure block's technical section).
+    assert.ok(e.error && !e.error.message.includes('bad'), 'raw error text must not surface');
   });
 
   it('endRun on interrupt delivers queued follow-ups (they ran inside the run)', () => {
@@ -223,18 +231,28 @@ describe('STREAM-1 mergeHistory / settleAfterResume / START on a shown item', ()
     assert.equal((merged.items[0] as { status: string }).status, 'awaiting_approval');
   });
 
-  it('settleAfterResume: idle, streaming closed, queued follow-ups dropped, disconnected error cleared', () => {
+  it('settleAfterResume: idle, streaming closed, queued follow-ups WAIT (TB-364 A11), disconnected error cleared', () => {
     const st = settleAfterResume(
       withItems([u('q', 'later', 'queued'), a('m', 'x', true)], { error: { kind: 'disconnected', message: 'lost' } }),
     );
     assert.equal(st.status, 'idle');
     assert.equal(st.error, null);
-    assert.deepEqual(deliveries(st), ['dropped']);
+    // A11: the stream was lost, the queued follow-up was never sent — it waits, not dropped.
+    assert.deepEqual(deliveries(st), ['waiting']);
     assert.equal((st.items[1] as { streaming: boolean }).streaming, false);
     const idle = withItems([a('m', 'x')], { status: 'idle' });
     assert.equal(settleAfterResume(idle), idle);
     const other = settleAfterResume(withItems([], { status: 'idle', error: { kind: 'http', message: 'boom', status: 500 } }));
     assert.equal(other.error?.kind, 'http');
+    // A10/A23: a retry attempt whose stream never settled comes back to failed, attempt counted,
+    // and is NOT auto-scheduled by the settle (nextRetryAt cleared).
+    const settling = settleAfterResume(
+      withItems([{ kind: 'user', id: 'r', text: 'x', mode: 'run', delivery: 'retrying', clientMessageId: 'key-12345678', attempts: 2 } as AgentChatItem], { status: 'running' }),
+    );
+    const r = settling.items[0] as { delivery: string; attempts?: number; nextRetryAt?: number };
+    assert.equal(r.delivery, 'failed');
+    assert.equal(r.attempts, 2, 'settle does not invent an extra attempt');
+    assert.equal(r.nextRetryAt, undefined);
   });
 
   it('a START for a shown message / tool call restarts it in place (re-attached replay)', () => {

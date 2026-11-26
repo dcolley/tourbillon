@@ -32,6 +32,7 @@ async function runTurn(
     send: () => Promise<void>;
     onEvent?: (event: Ev, agent: HttpAgent) => void;
     heartbeatMs?: number;
+    publicRunError?: string;
   },
 ) {
   const threadId = session.thread.getId() ?? 'thread';
@@ -51,6 +52,7 @@ async function runTurn(
           signal: init.signal ?? undefined,
           start: opts.send,
           heartbeatMs: opts.heartbeatMs,
+          ...(opts.publicRunError ? { publicRunError: opts.publicRunError } : {}),
         }),
         { headers: AGUI_SSE_HEADERS },
       ),
@@ -258,12 +260,39 @@ describe('AGUI-1 run stream on a real session (stub model)', () => {
     assert.equal(text(events), 'abc');
   });
 
-  it('a failed start ends the run with RUN_ERROR', async () => {
+  it('a failed start ends the run with RUN_ERROR (friendly, never raw — TB-364 A19/A26)', async () => {
     const stub = await createStubAgentController({ script: () => stubText('t1', ['x']) });
     const session = await stub.createSession(RESOURCE, 'agui');
+    // Read the RAW SSE: the AG-UI client SDK strips non-schema keys, and the machine fields
+    // (category/retryable/technical) are exactly the TB-364 wire contract, so assert on the bytes.
+    const raw = await new Response(
+      aguiRunStream({
+        session: session as unknown as AguiSession,
+        threadId: 'thread',
+        runId: 'run-1',
+        mastraThreadId: 'thread',
+        resourceId: RESOURCE,
+        start: () => Promise.reject(new Error('could not start sk-live-SUPERSECRET123456')),
+      }),
+    ).text();
+    assert.match(raw, /RUN_ERROR/);
+    assert.ok(!raw.includes('SUPERSECRET123456'), 'no unredacted secret on the wire (A26)');
+    // A19: message is friendly/neutral; the engine text appears ONLY redacted in `technical`.
+    const runErrorLine = raw.split('\n').find((l) => l.includes('RUN_ERROR')) ?? '';
+    assert.ok(!runErrorLine.includes('could not start') || !/"message":"could not start/.test(runErrorLine), 'message is not the raw engine text');
+    assert.match(raw, /"code":"agent_error"/);
+    assert.match(raw, /"category":/);
+    assert.match(raw, /"retryable":(true|false)/);
+    assert.match(raw, /"technical":/);
     const { events } = await runTurn(session, { send: () => Promise.reject(new Error('could not start')) });
     assert.deepEqual(types(events), ['RUN_STARTED', 'RUN_ERROR']);
-    assert.equal(events[1].message, 'could not start');
+    // An explicitly public message still wins when the caller supplies one (A19).
+    const session2 = await stub.createSession(RESOURCE, 'agui-public');
+    const r2 = await runTurn(session2, {
+      send: () => Promise.reject(new Error('could not start')),
+      publicRunError: 'Try again later',
+    });
+    assert.equal(r2.events[1].message, 'Try again later');
   });
 
   it('control stream is a complete, valid AG-UI run', async () => {

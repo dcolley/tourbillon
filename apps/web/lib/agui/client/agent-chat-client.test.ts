@@ -175,7 +175,7 @@ describe('AGUI-1b AgentChatClient', () => {
       assert.equal(client.getState().lastOutcome, 'success');
     });
 
-    it('RUN_ERROR ends the run with a run error', async () => {
+    it('RUN_ERROR ends the run with a run error; the message FAILS with friendly copy (TB-364 A1/A24)', async () => {
       const { server, client } = setup(runAndControls());
       void client.send('hi');
       await until(() => server.streams.length === 1);
@@ -183,8 +183,15 @@ describe('AGUI-1b AgentChatClient', () => {
       server.streams[0].close();
       await client.whenIdle();
       assert.equal(client.getState().status, 'idle');
-      assert.deepEqual(client.getState().error, { kind: 'run', message: 'model failed' });
-      assert.equal(client.getState().lastOutcome, 'error');
+      const st = client.getState();
+      assert.equal(st.lastOutcome, 'error');
+      assert.equal(st.error?.kind, 'run');
+      // A24: the banner never carries the raw server text — friendly copy only.
+      assert.ok(st.error && !st.error.message.includes('model failed'), 'raw text must not reach the banner');
+      // A1: the message that started the failed run is failed IN PLACE (still in the thread).
+      assert.deepEqual(users(st).map((u) => u.delivery), ['failed']);
+      const failure = (users(st)[0] as { failure?: { technical: string } }).failure!;
+      assert.ok(failure.technical.includes('model failed'), 'redacted technical keeps the cause');
     });
 
     it('events after RUN_FINISHED are ignored', async () => {
@@ -436,9 +443,13 @@ describe('AGUI-1b AgentChatClient', () => {
       assert.equal(st.status, 'idle');
       assert.equal(st.error?.kind, 'conflict');
       assert.equal(st.error?.status, 409);
-      assert.match(st.error!.message, /already in progress/);
+      // TB-364 (A24): friendly copy in the banner; the raw server text stays out of state.error.
+      assert.ok(!st.error!.message.includes('already in progress'), 'raw refusal text must not surface');
       assert.deepEqual(users(st).map((u) => u.delivery), ['failed']);
       assert.equal(client.isRunOpen, false);
+      // A18: conflict is permanent — no automatic attempt re-posts the run after the backoff windows.
+      await tick(60);
+      assert.equal(server.requests.length, 1, 'a 409 never auto-retries');
     });
 
     it('control 409 "retry shortly" (run still being claimed) is retried, then succeeds', async () => {
@@ -481,10 +492,13 @@ describe('AGUI-1b AgentChatClient', () => {
       await client.whenIdle();
     });
 
-    it('other HTTP errors are reported with their status', async () => {
+    it('other HTTP errors are reported with their status (friendly copy, raw text redacted-away) (TB-364 A24)', async () => {
       const { client } = setup(() => jsonError(404, 'Thread not found'));
       await client.send('hello');
-      assert.deepEqual(client.getState().error, { kind: 'http', status: 404, message: 'Thread not found' });
+      const st = client.getState();
+      assert.equal(st.error?.kind, 'http');
+      assert.equal(st.error?.status, 404);
+      assert.ok(!st.error!.message.includes('Thread not found'), 'friendly copy only in the banner');
     });
 
     it('fetch failure → network error', async () => {
@@ -492,8 +506,10 @@ describe('AGUI-1b AgentChatClient', () => {
         throw new TypeError('Failed to fetch');
       });
       await client.send('hello');
-      assert.deepEqual(client.getState().error, { kind: 'network', message: 'Failed to fetch' });
-      assert.equal(client.getState().status, 'idle');
+      const st = client.getState();
+      assert.equal(st.error?.kind, 'network');
+      assert.ok(!st.error!.message.includes('Failed to fetch'), 'friendly copy only in the banner');
+      assert.equal(st.status, 'idle');
     });
   });
 
@@ -593,7 +609,7 @@ describe('AGUI-1b AgentChatClient', () => {
   });
 
   describe('disconnect and dispose', () => {
-    it('stream ends without RUN_FINISHED → disconnected; queued follow-ups dropped', async () => {
+    it('stream ends without RUN_FINISHED → disconnected; queued follow-ups WAIT (TB-364 A11/A17)', async () => {
       const { server, client } = setup(runAndControls({ followUp: (req) => controlResponse(req.body, { accepted: true, queued: 1 }) }));
       void client.send('first');
       await until(() => server.streams.length === 1);
@@ -606,7 +622,11 @@ describe('AGUI-1b AgentChatClient', () => {
       assert.equal(st.status, 'idle');
       assert.equal(st.lastOutcome, 'disconnected');
       assert.equal(st.error?.kind, 'disconnected');
-      assert.equal(users(st)[1].delivery, 'dropped');
+      // A17: the owned run's message failed (network class) with what streamed marked partial.
+      assert.equal(users(st)[0].delivery, 'failed');
+      assert.equal((users(st)[0] as { failure?: { partial?: boolean } }).failure?.partial, true);
+      // A11: the queued follow-up was never sent — it waits behind the failed head, not dropped.
+      assert.equal(users(st)[1].delivery, 'waiting');
       assert.equal((st.items.find((i) => i.kind === 'assistant') as { streaming: boolean }).streaming, false);
       assert.equal(client.isRunOpen, false);
     });
@@ -623,17 +643,24 @@ describe('AGUI-1b AgentChatClient', () => {
       assert.equal(client.getState().status, 'idle');
     });
 
-    it('after a disconnect the next message starts a new run', async () => {
-      const { server, client } = setup(runAndControls());
+    it('after a disconnect the failed message waits; Retry starts the run again (TB-364 A12/A17)', async () => {
+      const { server, client } = setup(runAndControls({ followUp: (req) => controlResponse(req.body, { accepted: true, queued: 1 }) }));
       void client.send('first');
       await until(() => server.streams.length === 1);
       server.streams[0].close();
       await client.whenIdle();
+      const failed = users(client.getState())[0]!;
+      assert.equal(failed.delivery, 'failed', 'A17: lost stream fails the message');
       await client.send('again');
-      assert.equal(server.requests[1].action, 'run');
-      server.streams[1].send(started(server.requests[1]));
+      assert.equal(server.requests[1].action, 'followUp', 'A12f: a later send waits behind the failed head, it does not start a run');
+      assert.equal(users(client.getState())[1].delivery, 'waiting');
+      void client.retry(failed.id);
+      await until(() => server.requests.some((r) => r.action === 'run'));
+      const runReq = server.requests.find((r) => r.action === 'run')!;
+      server.streams[1].send(started(runReq));
       await until(() => client.getState().status === 'running');
       assert.equal(client.getState().error, null, 'a new run clears the old error');
+      assert.equal(users(client.getState())[0].delivery, 'retrying', 'the retried item shows the attempt');
       server.streams[1].close();
       await client.whenIdle();
     });

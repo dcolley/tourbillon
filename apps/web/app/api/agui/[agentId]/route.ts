@@ -71,6 +71,7 @@
  * provider and model, `modelSource=thread` and the effort when one is set.
  */
 import { NextRequest, NextResponse } from 'next/server';
+import { randomUUID } from 'crypto';
 import { resolveChatRequestUser } from '@/lib/chat/request-user';
 import { isAssistantAvailable } from '@/lib/feature-flags';
 import { EventType, type BaseEvent } from '@ag-ui/core';
@@ -90,6 +91,13 @@ import { chatModelIdFromSearch } from '@/lib/chat/model-query';
 import { resolveThreadRunModel, threadProviderRefusedBody, type ThreadRunModel } from '@/lib/chat/thread-model';
 import { threadModelChoiceFromMetadata } from '@/lib/assistant/thread-model';
 import { AguiInputError, aguiSessionScope, parseAguiRequest } from '@/lib/agui/run-input';
+import {
+  isKeyDiscarded,
+  persistQueueMarkerRow,
+  persistRunOutcomeMarker,
+  type MarkerSessionLike,
+  type Tb364RunFailure,
+} from '@/lib/agui/failure-marker';
 import { AGUI_CUSTOM } from '@/lib/agui/session-events';
 import {
   activeAguiRun,
@@ -273,6 +281,27 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
         scope: sessionScope,
         createInitialThread: false,
       });
+    }
+    // TB-364 (A4/A34): "Retry on another model" — a per-request model override, NEVER persisted to
+    // the thread's choice; tenant enablement is re-checked per request exactly like a thread choice.
+    if (props.modelOverride && action !== 'abort') {
+      const overrideModel = await resolveThreadRunModel(agent.companyId, {
+        providerId: props.modelOverride.providerId,
+        modelId: props.modelOverride.modelId,
+      });
+      if (overrideModel.source === 'thread') {
+        if (!overrideModel.allowed) return NextResponse.json(threadProviderRefusedBody(), { status: 409 });
+        controller = await getOrCreateChatController(agent, overrideModel.opts);
+        session = await getChatSession(controller, agent, { resourceId, scope: sessionScope, createInitialThread: false });
+      }
+    }
+
+    // TB-364 (A32e/A35): a discarded message can never be replayed into a run — reject the key
+    // before anything is claimed, for run and followUp alike.
+    if (props.clientMessageId && (action === 'run' || action === 'followUp')) {
+      if (await isKeyDiscarded(session as unknown as MarkerSessionLike, input.threadId, props.clientMessageId)) {
+        return NextResponse.json({ error: 'message_discarded', detail: 'Discarded messages are never sent.' }, { status: 400 });
+      }
     }
 
     // ---- No await from here until the run is claimed (or the control action is decided). ----
@@ -488,9 +517,30 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
             }),
           );
         });
+        // TB-364 (A28): the queued follow-up is persisted as a waiting row before the accept.
+        if (props.clientMessageId) {
+          void persistQueueMarkerRow(session as unknown as MarkerSessionLike, {
+            resourceId,
+            threadId: input.threadId,
+            clientMessageId: props.clientMessageId,
+            text: request.message,
+            newId: () => `tb364-${randomUUID()}`,
+          }).catch(() => undefined);
+        }
         return controlResponse(input.threadId, input.runId, action, { accepted: true, queued });
       } else {
         void session.followUp({ content, requestContext: requestContext as never });
+      }
+      // TB-364 (A28): an accepted follow-up gets its append-only waiting row so the queue is a
+      // fact of the thread (visible on reload / another device), never client memory alone.
+      if (props.clientMessageId) {
+        void persistQueueMarkerRow(session as unknown as MarkerSessionLike, {
+          resourceId,
+          threadId: input.threadId,
+          clientMessageId: props.clientMessageId,
+          text: request.message,
+          newId: () => `tb364-${randomUUID()}`,
+        }).catch(() => undefined);
       }
       return controlResponse(input.threadId, input.runId, action, { accepted: true });
     }
@@ -536,6 +586,24 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ age
       },
       takeQueuedTurn: claim.takeQueuedTurn,
       droppedQueuedTurns: () => claim.droppedTurns() + claim.queuedTurns(),
+      // TB-364 (A2/A23): the run's outcome is a fact of the thread — the failed marker (with the
+      // classified category and the persisted attempts count) survives a reload with cleared
+      // browser storage; a successful retry clears it.
+      ...(props.clientMessageId
+        ? {
+            onRunEnd: (outcome: { ok: boolean; failure: Tb364RunFailure | null }) => {
+              void persistRunOutcomeMarker(session as unknown as MarkerSessionLike, {
+                resourceId,
+                threadId: input.threadId,
+                clientMessageId: props.clientMessageId!,
+                text: request.message,
+                ok: outcome.ok,
+                failure: outcome.failure,
+                newId: () => `tb364-${randomUUID()}`,
+              }).catch(() => undefined);
+            },
+          }
+        : {}),
       ...(tracingOptions
         ? {
             trace: {

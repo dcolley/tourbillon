@@ -22,6 +22,7 @@ import {
   type StubAgentController,
 } from '../../../lib/agui/testing/stub-agent-controller';
 import { setThreadProviderDepsForTests } from '../../../lib/chat/thread-model';
+import { readTb364Attrs } from '../../../lib/agui/failure-marker';
 
 type Ev = BaseEvent & Record<string, any>;
 type Handler = (req: NextRequest, ctx: { params: Promise<{ agentId: string }> }) => Promise<Response>;
@@ -1146,6 +1147,117 @@ describe('AGUI-1 POST /api/agui/[agentId]', () => {
       assert.equal(failure, undefined);
       assert.equal(controllerCalls.length, 1);
       assert.equal(providerChecks.length, 0);
+    });
+  });
+
+  describe('TB-364 failed-message retry queue (server contract)', () => {
+    let availability: Record<string, boolean>;
+    beforeEach(() => {
+      availability = { 'provider-b': true };
+      setThreadProviderDepsForTests({
+        isProviderAvailable: async (_companyId: string, providerId: string) => availability[providerId] ?? false,
+      });
+    });
+    afterEach(() => setThreadProviderDepsForTests(null));
+
+    it('A4/A34: forwardedProps.tourbillon.modelOverride applies per-request and is NEVER persisted', async () => {
+      await seedThread('tb364-thread-1');
+      const { events, failure } = await clientRun('tb364-thread-1', {
+        forwardedProps: {
+          tourbillon: { action: 'run', clientMessageId: 'cmid-364-route-a', modelOverride: { providerId: 'provider-b', modelId: 'other/model' } },
+        },
+      });
+      assert.equal(failure, undefined, JSON.stringify(events.find((e) => e.type === 'RUN_ERROR')));
+      assert.equal(events.at(-1)!.type, 'RUN_FINISHED');
+      const runOpts = controllerCalls.at(-1)!.opts as Record<string, unknown>;
+      assert.equal(runOpts.modelIdOverride, 'other/model', 'the wire override reaches the controller');
+      assert.equal(runOpts.providerIdOverride, 'provider-b');
+      // A34: per-request only — the thread keeps NO stored choice; a later run without the
+      // override is back on the agent default.
+      const { failure: f2 } = await clientRun('tb364-thread-1', { message: 'again', noSeed: true });
+      assert.equal(f2, undefined);
+      assert.deepEqual(controllerCalls.at(-1)!.opts, { modelIdOverride: undefined });
+    });
+
+    it('A34: a provider disabled for the company → 409, never runs on it', async () => {
+      availability = { 'provider-b': false };
+      await seedThread('tb364-thread-1b');
+      const res = await request(
+        'alice',
+        input('tb364-thread-1b', {
+          forwardedProps: { tourbillon: { action: 'run', clientMessageId: 'cmid-364-route-b', modelOverride: { providerId: 'provider-b', modelId: 'other/model' } } },
+        }),
+      );
+      assert.equal(res.status, 409);
+      assert.equal((await res.json()).code, 'provider_disabled_for_company');
+      assert.equal(stub.modelCalls, 0);
+    });
+
+    it('A32e: a run POST with a discarded key → 400 message_discarded, no model call', async () => {
+      await seedThread('tb364-thread-2');
+      const seeder = await stub.createSession(DEFAULT_RESOURCE, 'seed-tb364-2');
+      await seeder.thread.switch({ threadId: 'tb364-thread-2' });
+      await seeder
+        .sendSignalToThread(
+          {
+            id: 'tb364-sig-d',
+            type: 'notification',
+            tagName: 'tb364-marker',
+            contents: [{ type: 'text', text: '' }],
+            attributes: { tb364Key: 'cmid-364-dead', tb364State: 'discarded' },
+          },
+          { resourceId: DEFAULT_RESOURCE, threadId: 'tb364-thread-2' },
+        )
+        .accepted;
+      const res = await request('alice', input('tb364-thread-2', { forwardedProps: { tourbillon: { action: 'run', clientMessageId: 'cmid-364-dead' } } }));
+      assert.equal(res.status, 400);
+      assert.equal((await res.json()).error, 'message_discarded');
+      assert.equal(stub.modelCalls, 0);
+    });
+
+    it('A28: an accepted followUp with a clientMessageId persists an append-only waiting row (no parts text)', async () => {
+      await seedThread('tb364-thread-3');
+      let holdPending = false;
+      let releaseHold!: () => void;
+      const hold = new Promise<void>((r) => (releaseHold = r));
+      let heldOnce = false;
+      chunkGate = async ({ index }) => {
+        if (!heldOnce && index >= 3) {
+          heldOnce = true;
+          holdPending = true;
+          await hold;
+          holdPending = false;
+        }
+      };
+      const done = clientRun('tb364-thread-3', { message: 'first, still streaming' });
+      await waitUntil('the run to stream and park on the hold', () => holdPending);
+      const res = await request(
+        'alice',
+        input('tb364-thread-3', { forwardedProps: { tourbillon: { action: 'followUp', clientMessageId: 'cmid-364-queue' } } }, 'queued second message'),
+      );
+      assert.equal(res.status, 200);
+      const ctl = await readSse(res);
+      assert.ok(ctl.some((e) => e.value?.accepted === true), JSON.stringify(ctl));
+      const routeSession = sessions.get(SESSION_KEY)!;
+      let queueRow: { content?: { parts?: unknown; metadata?: any } } | undefined;
+      for (let i = 0; i < 400 && !queueRow; i++) {
+        const rows = (await routeSession.thread.listMessages({ threadId: 'tb364-thread-3' })) as Array<{
+          content?: { parts?: unknown; metadata?: any };
+        }>;
+        queueRow = rows.find((r) => r.content?.metadata?.signal?.tagName === 'tb364-queue');
+        if (!queueRow) await sleep(10);
+      }
+      assert.ok(queueRow, 'tb364-queue row stored');
+      const marker = readTb364Attrs(queueRow.content!.metadata.signal.attributes)!;
+      assert.equal(marker.state, 'waiting');
+      assert.equal(marker.clientMessageId, 'cmid-364-queue');
+      assert.equal(marker.text, 'queued second message');
+      const parts = queueRow.content!.parts as { type: string; text: string }[];
+      assert.equal(parts[0].text, '', 'A12b/M16: waiting text lives ONLY in attributes, never model context');
+      chunkDelayMs = 0;
+      releaseHold();
+      await done;
+      await waitIdle('tb364-thread-3');
     });
   });
 });

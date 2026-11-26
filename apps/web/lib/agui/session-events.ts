@@ -3,6 +3,7 @@
  * AG-UI protocol events. Pure and stateful per run: one mapper per AG-UI run.
  */
 import { EventType, type BaseEvent } from '@ag-ui/core';
+import { classifyRunFailure, type Tb364RunFailure } from './failure-marker';
 
 /** Structural view of an AgentController event; only the fields read here are typed. */
 export interface AguiSourceEvent {
@@ -86,6 +87,9 @@ export function createAguiEventMapper(options: AguiEventMapperOptions) {
   let lastError: string | undefined;
   let endReason: AguiAgentEndReason | undefined;
   let finished = false;
+  // TB-364 (A19/A20): what the run streamed before failing — decides partial/toolRan on the marker.
+  let streamedText = false;
+  let runFailure: Tb364RunFailure | null = null;
 
   const segmentId = (messageId: string, kind: 'text' | 'reasoning'): string => {
     const n = segments.get(messageId) ?? 0;
@@ -171,6 +175,7 @@ export function createAguiEventMapper(options: AguiEventMapperOptions) {
             openText.set(id, textId);
             out.push({ type: EventType.TEXT_MESSAGE_START, messageId: textId, role: 'assistant' } as BaseEvent);
           }
+          streamedText = true; // TB-364 (A20): text streamed — the failure (if any) is partial.
           out.push({ type: EventType.TEXT_MESSAGE_CONTENT, messageId: textId, delta } as BaseEvent);
         } else if (update.type === 'reasoning-delta') {
           closeText(id, out);
@@ -284,17 +289,30 @@ export function createAguiEventMapper(options: AguiEventMapperOptions) {
   }
 
   /** Terminal events for the AG-UI run. Safe to call once; later calls return []. */
-  function finish(override?: { error?: string; reason?: AguiAgentEndReason }): BaseEvent[] {
+  function finish(override?: { error?: string; publicMessage?: string; reason?: AguiAgentEndReason }): BaseEvent[] {
     if (finished) return [];
     const out: BaseEvent[] = [];
     closeAll(out);
     finished = true;
     const reason = override?.reason ?? (override?.error ? 'error' : endReason ?? 'complete');
     if (reason === 'error') {
+      // TB-364 (A19): the server classifies. The event carries machine fields and the message is
+      // FRIENDLY text — the raw engine text only ever leaves as the redacted, bounded `technical`.
+      runFailure = classifyRunFailure({
+        engineText: lastError ?? override?.error,
+        streamedText,
+        toolStarted: startedTools.size > 0,
+      });
       out.push({
         type: EventType.RUN_ERROR,
-        message: override?.error ?? lastError ?? 'Agent run failed',
+        // TB-364 (A19/A26): NEVER the raw engine text — an explicitly public message wins,
+        // otherwise friendly copy. (`error` is read ONLY for classification above.)
+        message: override?.publicMessage ?? runFailure.friendlyTitle,
         code: 'agent_error',
+        category: runFailure.category,
+        retryable: runFailure.retryable,
+        ...(runFailure.retryAfterMs !== undefined ? { retryAfterMs: runFailure.retryAfterMs } : {}),
+        technical: runFailure.technical,
       } as BaseEvent);
       return out;
     }
@@ -321,6 +339,10 @@ export function createAguiEventMapper(options: AguiEventMapperOptions) {
   return {
     map,
     finish,
+    /** TB-364 (A2/A19): the classified failure of this run, once it ended in error; else null. */
+    get runFailure() {
+      return runFailure;
+    },
     get endReason() {
       return endReason;
     },

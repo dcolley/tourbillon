@@ -47,6 +47,8 @@ describe('S297-S6 chat-header avatar renders through the AgentChat container', (
       state: initialAgentChatState,
       send: () => undefined,
       steer: () => undefined,
+      retry: () => undefined,
+      discard: () => undefined,
       abort: () => undefined,
       respondToTool: () => undefined,
       answerWidget: () => undefined,
