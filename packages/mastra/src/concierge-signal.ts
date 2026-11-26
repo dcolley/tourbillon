@@ -35,12 +35,14 @@ export interface ConciergeSignalInput {
   tagName?: string;
   attributes?: ConciergeSignalAttributes;
   contents: string;
+  /** TB-363 MUST-7: delivery-only signal (wake runs, no stored row — persistence filters skip transient). */
+  transient?: boolean;
 }
 
 /** The one Session method this helper needs (Mastra Session.queueSignal). */
 export interface QueueSignalSession {
   queueSignal(
-    signal: { type: 'reactive'; tagName?: string; attributes?: ConciergeSignalAttributes; contents: string; id?: string },
+    signal: { type: 'reactive'; tagName?: string; attributes?: ConciergeSignalAttributes; contents: string; id?: string; transient?: boolean },
     opts?: Record<string, unknown>,
   ): Promise<void> | void;
 }
@@ -177,6 +179,10 @@ export async function queueConciergeSignal(
     attributes: sanitizeSignalAttributes(input.attributes),
     contents: clampContents(input.contents),
     id,
+    // TB-363 MUST-7 (PM N-3): a covered go-between reply is delivery-only — Mastra's
+    // persistence filters drop transient signals, so the wake turn runs WITHOUT storing a
+    // second notice row (filter-messages-for-persistence:22274, agent-DtdQ6un6.js).
+    ...(input.transient ? { transient: true } : {}),
   });
   return { signalId: id };
 }
@@ -239,34 +245,6 @@ export interface TaskProgressSignalPayload {
    * but Mastra must NOT store a second notice row (`#persistSignal` skips transient signals).
    */
   transient?: boolean;
-}
-
-/**
- * TB-363 MUST-7: deliver the runner's go-between WAKE as a transient signal when the
- * concierge tool's status line already covers this transition — the human gets the ONE
- * notice row plus the runner's content item, never two notice rows.
- * `Agent.sendSignal` with ifIdle wake; `#persistSignal` (agent-DtdQ6un6.js:41672) returns
- * early for transient signals, so nothing is stored from this call.
- */
-export async function queueTransientTaskProgressWake(
-  agent: PersistSignalAgent,
-  target: PersistSignalTarget,
-  payload: TaskProgressSignalPayload,
-): Promise<{ signalId: string; action: string }> {
-  const id = `sig-${randomId()}`;
-  const result = agent.sendSignal(
-    {
-      type: 'reactive',
-      tagName: payload.tagName,
-      attributes: sanitizeSignalAttributes(payload.attributes),
-      contents: clampContents(payload.contents),
-      id,
-      transient: true,
-    },
-    { ...target, ifIdle: { behavior: 'wake' } },
-  );
-  const decision = await result.accepted;
-  return { signalId: result.signal?.id ?? id, action: decision.action };
 }
 
 /**

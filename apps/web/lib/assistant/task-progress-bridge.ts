@@ -33,7 +33,7 @@ import type { PersistSignalAgent, QueueSignalSession, TaskProgressSignalPayload 
 // TB-363 MUST-6/7: the chat-Agent seam type is part of DeliverDeps' surface — re-export it so
 // tests/consumers build fakes without reaching into the mastra subpath.
 export type { PersistSignalAgent };
-import { persistConciergeSignal, queueTransientTaskProgressWake } from '@tourbillon/mastra/concierge-signal';
+import { persistConciergeSignal } from '@tourbillon/mastra/concierge-signal';
 import {
   handleTaskProgressEvent,
   parseTaskProgressMessage,
@@ -319,33 +319,6 @@ export function createDeliver(deps: DeliverDeps) {
       // accepted persist.
       if (action === 'blocked' || action === 'discard') {
         console.warn('[concierge-signal] task progress notice persist refused — claim released for retry', {
-          agentId: agent.id,
-          threadId,
-          action,
-        });
-        return false;
-      }
-      return true;
-    }
-    if (payload.transient) {
-      // TB-363 MUST-7 (PM N-3): the tool's status line already covers this transition — the
-      // runner's go-between reply rides a TRANSIENT signal (wake with no stored row,
-      // #persistSignal skips transient). One notice + the runner's content item, never two
-      // notice rows. A refusal means the content reply was lost: fail loud, release claim.
-      const chatAgent = await deps.getChatAgent?.(agent);
-      if (!chatAgent) {
-        console.warn('[concierge-signal] transient go-between skipped (no chat agent)', {
-          agentId: agent.id,
-          threadId,
-        });
-        return false;
-      }
-      const { action } = await queueTransientTaskProgressWake(chatAgent, { resourceId, threadId }, payload);
-      // MUST-6 rule at the wake seam: 'blocked' (thread-blocked) or 'discard' mean NOTHING
-      // will reach the human — fail loud so the claim is released. Any other action
-      // ('deliver', admission 'local'/'remote', ...) means the go-between turn was started.
-      if (action === 'blocked' || action === 'discard') {
-        console.warn('[concierge-signal] transient go-between refused — claim released for retry', {
           agentId: agent.id,
           threadId,
           action,

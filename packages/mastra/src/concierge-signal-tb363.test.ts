@@ -6,7 +6,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { taskProgressSignalPayload, persistConciergeSignal, queueTransientTaskProgressWake } from './concierge-signal';
+import { taskProgressSignalPayload, persistConciergeSignal, queueConciergeSignal } from './concierge-signal';
 
 const base = {
   companyId: 'company-1',
@@ -60,18 +60,15 @@ test('MUST-4: persistConciergeSignal requests ifIdle.behavior=persist and resolv
   assert.equal(settled.action, 'persist');
 });
 
-// TB-363 MUST-7 (PM N-3): the covered go-between is a TRANSIENT wake — Mastra's
-// #persistSignal returns early for transient signals (agent-DtdQ6un6.js:41672), so the
-// runner's reply renders as a content item with NO second stored notice row.
-test('queueTransientTaskProgressWake wakes without a stored row (transient + ifIdle wake)', async () => {
-  const seen: Array<{ signal: unknown; target: unknown }> = [];
-  const agent = {
-    sendSignal: (signal: unknown, target: unknown) => {
-      seen.push({ signal, target });
-      return {
-        signal: { id: 'sig-trans-1' },
-        accepted: Promise.resolve({ action: 'deliver' }),
-      };
+// TB-363 MUST-7 (PM N-3): the covered go-between is a TRANSIENT wake — the session queue
+// carries the flag so Mastra's persistence filters (filter-messages-for-persistence) skip
+// storing it: the reply's content item renders from the run, no second notice row.
+test('queueConciergeSignal passes transient:true through to Session.queueSignal (MUST-7)', async () => {
+  const seen: Array<Record<string, unknown>> = [];
+  const session = {
+    queueSignal: (signal: Record<string, unknown>) => {
+      seen.push(signal);
+      return Promise.resolve();
     },
   };
   const payload = taskProgressSignalPayload({
@@ -84,20 +81,22 @@ test('queueTransientTaskProgressWake wakes without a stored row (transient + ifI
     title: 'Deploy staging',
     detail: 'ask: prod or staging?',
   });
-  const { signalId, action } = await queueTransientTaskProgressWake(
-    agent as never,
-    { resourceId: 'c1:u1', threadId: 'th_1' },
-    payload,
-  );
-  assert.equal(signalId, 'sig-trans-1');
-  assert.equal(action, 'deliver');
+  await queueConciergeSignal(session as never, {
+    tagName: payload.tagName,
+    attributes: payload.attributes,
+    contents: payload.contents,
+    transient: true,
+  });
   assert.equal(seen.length, 1);
-  const sig = seen[0]!.signal as Record<string, unknown>;
-  assert.equal(sig.transient, true, 'the go-between signal must be transient (no stored row)');
-  assert.equal(sig.tagName, 'task-progress', 'delivered to the chat Agent, same tag/shape');
-  const target = seen[0]!.target as Record<string, Record<string, string>>;
-  assert.equal(target.threadId, 'th_1');
-  assert.equal(target.ifIdle?.behavior, 'wake', 'the go-between reply still runs the model turn');
+  assert.equal(seen[0]!.transient, true, 'the go-between signal must be transient (no stored row)');
+  assert.equal(seen[0]!.tagName, 'task-progress', 'delivered with the task-progress tag/shape');
+  // A plain (non-transient) queue never sets the flag — normal wakes keep storing their row.
+  await queueConciergeSignal(session as never, {
+    tagName: payload.tagName,
+    attributes: payload.attributes,
+    contents: payload.contents,
+  });
+  assert.ok(!('transient' in seen[1]!) || seen[1]!.transient !== true, 'default wakes stay persistent');
 });
 
 test('MUST-4: a rejected persisted handle never rejects the persist call (no unhandled crash)', async () => {

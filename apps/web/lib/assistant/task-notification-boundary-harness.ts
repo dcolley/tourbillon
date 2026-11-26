@@ -1260,6 +1260,11 @@ export async function bridgeStart(opts: Record<string, unknown> = {}): Promise<v
           claimOutcomeLog.push({ key, outcome, at: new Date().toISOString() });
           return outcome;
         },
+        // TB-363 FIX2: forward the MUST-6/MUST-7 seams (claim release + tool-line EXISTS)
+        // through the accounting wrapper — dropping them silently disabled the transient
+        // go-between path (toolLineLanded undefined => the reply stored its own row).
+        unclaim: owned.unclaim ? (key: string) => owned.unclaim!(key) : undefined,
+        exists: owned.exists ? (key: string) => owned.exists!(key) : undefined,
         quit: () => owned.quit(),
       };
       // Injected, so stop() will treat it as borrowed unless we quit in teardown.

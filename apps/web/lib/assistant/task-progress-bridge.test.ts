@@ -145,13 +145,17 @@ test('deliver (MUST-6): wake=false with accepted.action blocked -> false; persis
   assert.equal(await ok.deliver(AGENT, 'thread-42', PAYLOAD, false), true, 'a real persist is a success');
 });
 
-test('deliver (MUST-6/MUST-7): transient go-between refused on blocked, succeeds on deliver', async () => {
+test('deliver (MUST-7): transient go-between rides the session wake queue with transient:true', async () => {
   const transientPayload = { ...PAYLOAD, transient: true };
-  const blocked = deliverHarness({ existing: null, chatAgent: persistAgent('blocked') });
-  assert.equal(await blocked.deliver(AGENT, 'thread-42', transientPayload, true), false, 'refused go-between is a failure');
-  assert.equal(blocked.created.length, 0, 'the transient path never creates the origin session');
-  const ok = deliverHarness({ existing: null, chatAgent: persistAgent('deliver') });
-  assert.equal(await ok.deliver(AGENT, 'thread-42', transientPayload, true), true, 'a started go-between is a success');
+  const existing = new FakeSession('thread-42');
+  const h = deliverHarness({ existing });
+  assert.equal(await h.deliver(AGENT, 'thread-42', transientPayload, true), true, 'the go-between turn was queued');
+  assert.equal(existing.signals.length, 1, 'queued on the shared same-thread session');
+  assert.equal((existing.signals[0] as Record<string, unknown>).transient, true, 'the queued signal is transient (no stored row)');
+  const plain = new FakeSession('thread-42');
+  const h2 = deliverHarness({ existing: plain });
+  assert.equal(await h2.deliver(AGENT, 'thread-42', PAYLOAD, true), true);
+  assert.ok(!('transient' in plain.signals[0]!) || (plain.signals[0] as Record<string, unknown>).transient !== true, 'normal wakes keep storing their row');
 });
 
 test('deliver: no session on the resource → origin-bound session created and queued (H3)', async () => {
