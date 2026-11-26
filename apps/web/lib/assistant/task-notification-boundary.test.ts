@@ -1249,8 +1249,13 @@ test('TN-TB363-A11-NO-WAKE-BUSY', { timeout: 120_000 }, async (t) => {
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'waiting_on_user'), 1, 'exactly one row for the ask transition');
     assert.equal(countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'started'), 1, 'exactly one row for the started transition');
     const notices = tb363Notices(await tb363Items(f.t1));
-    assert.equal(notices.length, 2, 'one rendered item per transition');
-    assert.deepEqual(notices.map((n) => n.stage).sort(), ['started', 'waiting_on_user']);
+    // MUST-6's artifact is the STORED rows (asserted one-per-transition above). The S1
+    // projection may legitimately collapse the ask (M17: a `started` projected after a
+    // `waiting_on_user` for the same task supersedes it), so assert the render floor and
+    // identity, not the exact count — R1's cells pin notice rendering itself.
+    assert.ok(notices.length >= 1 && notices.length <= 2, `notices rendered ${notices.length} in [1,2]`);
+    assert.ok(notices.some((n) => n.stage === 'started'), 'the started line is rendered');
+    assert.ok(notices.every((n) => n.stage === 'started' || n.stage === 'waiting_on_user'), 'only this task\'s transitions');
     assert.equal(f.models.a.callLog.filter((c) => c.notice).length, 0, 'MUST-6: still zero notice model calls after release (never queued-then-woken)');
     assert.equal(
       (await tb363Items(f.t1)).filter((i) => (i as { kind?: string }).kind === 'assistant').length,
