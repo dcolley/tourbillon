@@ -79,6 +79,11 @@ export function invalidateChatControllerForAgent(agentId: string): void {
     cache.delete(key);
     if (pending) retireDroppedController(pending);
   }
+  // TB-363 FIX2 (N-1): the persist-path Agent pool is the SAME agent identity — a cached
+  // PersistSignalAgent freezes the row (assignedSkills/runtimeConfig) and the company
+  // options at build time. Archiving an agent or changing its model/provider config must
+  // drop it too, or the notice persist path keeps using the stale build.
+  globalForChat.tourbillonChatAgents?.delete(String(agentId));
 }
 
 /**

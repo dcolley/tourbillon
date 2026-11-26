@@ -113,3 +113,17 @@ describe('S332-S1: real registry.getChatSession ids sessions as chatSessionId(re
     assert.equal(await controller.getSession(EXPECTED_RESOURCE), session);
   });
 });
+
+// TB-363 FIX2 soft N-1: the persist-path Agent pool shares the controller's invalidation
+// trigger — archiving an agent or changing its model/provider config must drop the cached
+// PersistSignalAgent as well, or the notice persist path keeps a stale build.
+describe('FIX2 N-1: invalidateChatControllerForAgent drops the cached persist-path Agent', () => {
+  it('removes the agent id from the tourbillonChatAgents pool', async () => {
+    const { invalidateChatControllerForAgent } = await import('./registry');
+    const g = globalThis as unknown as { tourbillonChatAgents?: Map<string, Promise<unknown>> };
+    g.tourbillonChatAgents ??= new Map();
+    g.tourbillonChatAgents.set('agent-n1', Promise.resolve({} as unknown));
+    invalidateChatControllerForAgent('agent-n1');
+    assert.equal(g.tourbillonChatAgents.has('agent-n1'), false, 'stale persist-path build dropped on invalidation');
+  });
+});
