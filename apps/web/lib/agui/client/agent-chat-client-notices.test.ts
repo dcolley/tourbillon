@@ -195,4 +195,29 @@ describe('TB-363 open-page notice delivery (agent-chat-client)', () => {
     assert.equal(notices(client.getState()).length, 0);
     client.dispose();
   });
+
+  it('S-3: a hidden tab does not idle-poll; becoming visible refreshes at once and dispose unsubscribes', async () => {
+    const listeners: Array<() => void> = [];
+    let removed = 0;
+    const fakeDoc = {
+      hidden: true,
+      addEventListener: (_ev: string, h: () => void) => { listeners.push(h); },
+      removeEventListener: (_ev: string, _h: () => void) => { removed++; },
+    };
+    (globalThis as Record<string, unknown>).document = fakeDoc;
+    try {
+      const { client, stored } = resumable(runAndControls(), { noticePollMs: 15 });
+      stored.push(userMsg('u0', 'earlier'), assistantMsg('a0', 'sure.'), signalRow('sig-hidden-1', 'done'));
+      await tick(80); // several poll windows elapse while hidden
+      assert.equal(notices(client.getState()).length, 0, 'hidden tabs must not poll notices in');
+      assert.equal(listeners.length, 1, 'visibilitychange subscribed once');
+      fakeDoc.hidden = false;
+      listeners[0]!(); // the tab becomes visible: refresh runs immediately, not after an interval
+      await until(() => notices(client.getState()).length === 1, 2000, 'visible refresh shows the notice');
+      client.dispose();
+      assert.equal(removed, 1, 'dispose removes the visibilitychange listener');
+    } finally {
+      delete (globalThis as Record<string, unknown>).document;
+    }
+  });
 });

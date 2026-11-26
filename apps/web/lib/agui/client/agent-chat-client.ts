@@ -218,6 +218,8 @@ export class AgentChatClient {
   private noticeMerging = false;
   /** TB-363: idle open-page notice poll (see noticePollMs). */
   private noticeTimer: ReturnType<typeof setInterval> | undefined;
+  /** S-3 (#363 softs): hidden-tab poll skip; bound handler kept for removal on dispose. */
+  private visibilityHandler: (() => void) | undefined;
 
   constructor(opts: AgentChatClientOptions) {
     this.opts = opts;
@@ -229,12 +231,21 @@ export class AgentChatClient {
       this.noticeTimer = setInterval(() => this.noticePollTick(), pollMs);
       // Node returns a Timeout; unref so a leaked client cannot hold the process open.
       (this.noticeTimer as unknown as { unref?: () => void })?.unref?.();
+      // S-3 (#363 softs): a hidden tab does not poll at all (cost backs off to zero);
+      // becoming visible refreshes immediately so notices missed while hidden land at once.
+      if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+        this.visibilityHandler = () => {
+          if (!document.hidden) this.noticePollTick();
+        };
+        document.addEventListener('visibilitychange', this.visibilityHandler);
+      }
     }
   }
 
   /** TB-363: one idle-notice poll tick (extracted so tests can drive it directly). */
   private noticePollTick(): void {
     if (this.disposed || this.active || this.starting || this.noticeMerging) return;
+    if (typeof document !== 'undefined' && document.hidden) return; // S-3: hidden tabs skip.
     void this.loadHistory('merge');
   }
 
@@ -650,6 +661,10 @@ export class AgentChatClient {
     this.reconnectTimer = undefined;
     if (this.noticeTimer) clearInterval(this.noticeTimer);
     this.noticeTimer = undefined;
+    if (this.visibilityHandler && typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.visibilityHandler);
+      this.visibilityHandler = undefined;
+    }
     this.pendingNotice = false;
     this.disposed = true;
     this.listeners.clear();
