@@ -64,6 +64,9 @@ jobs:
       - run: pnpm --filter @tourbillon/shared test:unit
       - run: pnpm --filter @tourbillon/scheduler test:unit
       - run: pnpm --filter web test:harness
+      # TB-363 (Test verdict MUST-3): the mastra notice tests that carry the A2/A11a/S3/A10-R3
+      # mutant kills must run in CI too — explicit pinned list (run-tb363-tests.mjs + scheduler pin).
+      - run: pnpm --filter @tourbillon/mastra test:tb363
 
   # #114: real-Postgres evidence for the run-id header fix. Disposable service container only
   # (no live DB, no credentials, no deploy); schema applied with the repo's normal migration

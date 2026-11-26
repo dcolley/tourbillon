@@ -148,6 +148,94 @@ function assistantItems(message: StoredThreadMessage): AgentChatItem[] {
 const isUserTurn = (m: StoredThreadMessage) => m.role === 'user' || m.role === 'signal';
 
 /**
+ * TB-363 (R1): a persisted task-progress signal (role 'signal') is the runner/tool fan-out's
+ * notice row — Mastra stores it as a `data-signal` part (or, in raw memory rows, under
+ * `content.metadata.signal`) with tagName 'task-progress' and attributes {taskId, runId,
+ * stage, status}. Base rendered these as NOTHING (userText reads only text /
+ * data-user-message, so the row's text is '' and the user-turn branch dropped it). Surface it
+ * as its own notice item; the model may say nothing, the notice still shows.
+ */
+function signalBag(message: StoredThreadMessage): { contents?: unknown; tagName?: unknown; type?: unknown; attributes?: unknown } | null {
+  const parts = partsOf(message.content);
+  const signalPart = parts?.find(
+    (p) => p.type === 'data-signal' && ((p.data as Record<string, unknown> | undefined)?.tagName ?? (p as Record<string, unknown>).tagName) === 'task-progress',
+  );
+  if (signalPart) return (signalPart.data ?? signalPart) as Record<string, unknown>;
+  const meta = (message.content as { metadata?: { signal?: Record<string, unknown> } } | null | undefined)?.metadata?.signal;
+  if (meta && (meta.tagName ?? meta.type) === 'task-progress') {
+    // Mastra 1.81 stores an accepted signal as role 'signal' with a plain TEXT part plus
+    // content.metadata.signal ({id,type,tagName,createdAt,acceptedAt,attributes}) — the human
+    // line is the text part (verified against real PG rows in the TN cells), and the row also
+    // carries top-level `type: 'task-progress'`.
+    const text = parts?.find((p) => p.type === 'text') as { text?: unknown } | undefined;
+    return { ...meta, ...(typeof text?.text === 'string' && text.text ? { contents: text.text } : {}) };
+  }
+  if ((message as { type?: unknown }).type === 'task-progress') {
+    const text = parts?.find((p) => p.type === 'text') as { text?: unknown } | undefined;
+    const attrs = (message as { attributes?: unknown }).attributes;
+    return { tagName: 'task-progress', type: 'task-progress', ...(typeof text?.text === 'string' ? { contents: text.text } : {}), ...(attrs ? { attributes: attrs } : {}) };
+  }
+  return null;
+}
+
+/**
+ * TB-363 (MUST-2): true when a stored row IS a task-progress signal row (real Mastra 1.81
+ * shape: role 'signal' + a plain TEXT part + content.metadata.signal.tagName 'task-progress';
+ * older rows may carry a data-signal part instead). Such a row is the runner/tool fan-out's
+ * NOTICE — never a fake user turn. Shared by the history renderer and the live SSE path.
+ */
+export function isTaskProgressSignalRow(message: { role?: unknown; content?: unknown; type?: unknown }): boolean {
+  if (message.role !== 'signal') return false;
+  if ((message as { type?: unknown }).type === 'task-progress') return true;
+  const parts = partsOf(message.content);
+  if (
+    parts?.some(
+      (p) =>
+        p.type === 'data-signal' &&
+        ((p.data as Record<string, unknown> | undefined)?.tagName ?? (p as Record<string, unknown>).tagName) === 'task-progress',
+    )
+  ) {
+    return true;
+  }
+  const meta = (message.content as { metadata?: { signal?: Record<string, unknown> } } | null | undefined)?.metadata?.signal;
+  return Boolean(meta && (meta.tagName ?? meta.type) === 'task-progress');
+}
+
+function taskProgressNoticeItem(message: StoredThreadMessage): AgentChatItem | null {
+  if (message.role !== 'signal') return null;
+  const bag = signalBag(message);
+  if (!bag) return null;
+  const attrs = (bag.attributes && typeof bag.attributes === 'object' ? bag.attributes : {}) as Record<string, unknown>;
+  const stage = typeof attrs.stage === 'string' && attrs.stage ? attrs.stage : typeof bag.type === 'string' ? bag.type : 'update';
+  const title = typeof attrs.title === 'string' && attrs.title ? attrs.title : undefined;
+  const rawContents = typeof bag.contents === 'string' ? bag.contents : '';
+  const label =
+    stage === 'waiting_on_user'
+      ? 'Waiting on you'
+      : stage === 'failed'
+        ? 'Failed'
+        : stage === 'done'
+          ? 'Done'
+          : stage === 'started'
+            ? 'Started'
+            : stage === 'needs_review'
+              ? 'Needs another look'
+              : stage;
+  const text = rawContents.trim() || `Task ${label}${title ? `: "${title}"` : ''}.`;
+  const taskId = typeof attrs.taskId === 'string' ? attrs.taskId : undefined;
+  const runId = typeof attrs.runId === 'string' ? attrs.runId : undefined;
+  return {
+    kind: 'notice',
+    id: `${message.id}:notice`,
+    noticeKind: 'task-progress',
+    stage,
+    text,
+    ...(taskId ? { taskId } : {}),
+    ...(runId ? { runId } : {}),
+  };
+}
+
+/**
  * Persisted thread messages (oldest first) → assistant chat items: user turns (dashboard context block
  * removed), assistant text, reasoning and tool calls. System / tool-role messages are not shown.
  * A tool call stored twice (call, then result) keeps one item with the latest state.
@@ -173,13 +261,38 @@ export function chatItemsFromStoredMessages(messages: readonly StoredThreadMessa
   for (const message of messages) {
     if (!message || typeof message.id !== 'string') continue;
     if (isUserTurn(message)) {
-      const text = stripDashboardContext(userText(message));
-      if (text.trim()) push({ kind: 'user', id: message.id, text, mode: 'run', delivery: 'delivered' }, message.createdAt);
+      // TB-363 (MUST-2): a task-progress signal row is the fan-out's NOTICE — it carries the
+      // human line in a plain TEXT part, so the user-turn branch below would draw a fake
+      // right-aligned user bubble for it and the notice would show TWICE (bubble + notice).
+      // Such rows render ONLY as the notice item.
+      const notice = taskProgressNoticeItem(message);
+      if (notice) {
+        push(notice, message.createdAt);
+      } else {
+        const text = stripDashboardContext(userText(message));
+        if (text.trim()) push({ kind: 'user', id: message.id, text, mode: 'run', delivery: 'delivered' }, message.createdAt);
+      }
     } else if (message.role === 'assistant') {
       for (const item of assistantItems(message)) push(item, message.createdAt);
     }
   }
-  return items;
+  // TB-363 (S1 / contract M17): a needs-input ask stops being the CURRENT ask once the human
+  // answered and the task RESUMED — a later `started` (pending→running) notice for the same
+  // taskId. The superseded waiting_on_user notice is not presented. A done/failed without an
+  // intervening resume does NOT resolve the ask (the contract scopes resolution to the resume).
+  const progressedAt = new Map<string, number>();
+  items.forEach((it, i) => {
+    const n = it as { kind?: string; noticeKind?: string; stage?: string; taskId?: string };
+    if (n.kind === 'notice' && n.noticeKind === 'task-progress' && n.taskId && n.stage === 'started') {
+      progressedAt.set(n.taskId, i);
+    }
+  });
+  const resolved = items.filter((it, i) => {
+    const n = it as { kind?: string; noticeKind?: string; stage?: string; taskId?: string };
+    return !(n.kind === 'notice' && n.noticeKind === 'task-progress' && n.stage === 'waiting_on_user'
+      && n.taskId && (progressedAt.get(n.taskId) ?? -1) > i);
+  });
+  return resolved;
 }
 
 export interface ThreadHistoryPage {

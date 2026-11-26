@@ -109,6 +109,8 @@ describe('S328-S4: CI runs the service-free shared + scheduler + harness unit te
       'pnpm --filter @tourbillon/shared test:unit',
       'pnpm --filter @tourbillon/scheduler test:unit',
       'pnpm --filter web test:harness',
+      // TB-363 (Test verdict MUST-3): the mastra notice suite runs in the same job.
+      'pnpm --filter @tourbillon/mastra test:tb363',
     ]) {
       assert.ok(jobRuns.includes(cmd), `unit-tests job must run \`${cmd}\`, got: ${jobRuns.join(' | ')}`);
     }
@@ -130,6 +132,12 @@ describe('S328-S4: CI runs the service-free shared + scheduler + harness unit te
       'node scripts/run-harness-tests.mjs',
       'web test:harness must be exactly the pinned runner invocation (S330-S1)',
     );
+    // TB-363 (Test verdict MUST-3): the mastra tb363 suite is likewise an exact pinned runner.
+    assert.equal(
+      scripts(join(repoRoot, 'packages', 'mastra'))['test:tb363'],
+      'node scripts/run-tb363-tests.mjs',
+      'mastra test:tb363 must be exactly the pinned runner invocation (TB-363 MUST-3)',
+    );
   });
 
   it('web test:harness runs an explicit, pinned file list — not a text-regex on package.json (S330-S1)', async () => {
@@ -145,13 +153,25 @@ describe('S328-S4: CI runs the service-free shared + scheduler + harness unit te
     // the old text pin let CI skip.
     assert.deepEqual(
       [...webRunner.HARNESS_TEST_FILES].sort(),
-      [
+      [...[
         'lib/auth/run-id-header-114.test.ts',
         'lib/chat-send-key.test.ts',
         'lib/harness/callback-chat.test.ts',
         'lib/harness/callback-gate.test.ts',
         'lib/vault-oauth-state-clock.test.ts',
-      ],
+        // TB-363 (Test verdict MUST-3): notice tests carrying the A1/A2/A3/A5/A6/A8/A10/A12 and
+        // M6/M7 claim-key kills — CI must actually run them for the kills to count.
+        'lib/agui/client/thread-history-notices.test.ts',
+        'lib/agui/client/agent-chat-client-notices.test.ts',
+        'components/assistant/agent-chat-notice-render.test.ts',
+        'components/chat/chat-stream-events.test.ts',
+        'lib/assistant/task-progress-signals.test.ts',
+        // TB-363 (Test verdict 5c93eddd, HOLD M21b): the bridge deliver-refusal units are the
+        // M21b killer — CI must actually run them (same rule as the MUST-3 pins above).
+        'lib/assistant/task-progress-bridge.test.ts',
+        // TB-363 (verdict 5c93eddd soft N-1): persist-path agent-pool eviction killer.
+        'lib/chat/registry-chat-session-id-332-s1.test.ts',
+      ]].sort(),
       'web harness suite is exactly these files — add/remove deliberately, in both places',
     );
     for (const f of webRunner.HARNESS_TEST_FILES) {
@@ -166,6 +186,18 @@ describe('S328-S4: CI runs the service-free shared + scheduler + harness unit te
     }
     assert.ok(dirFiles.length >= 2, `only ${dirFiles.length} harness test files on disk — folder moved?`);
     assert.deepEqual(webRunner.listHarnessTestFiles().sort(), [...webRunner.HARNESS_TEST_FILES].sort());
+
+    // TB-363 (Test verdict MUST-3): the mastra tb363 runner's explicit list is pinned the same
+    // way — dropping a file from it (or deleting one) goes RED here, in a test CI itself runs.
+    const mastraRunner = (await import(
+      pathToFileURL(join(repoRoot, 'packages', 'mastra', 'scripts', 'run-tb363-tests.mjs')).href
+    )) as { TB363_TEST_FILES: string[]; listTb363TestFiles: () => string[] };
+    assert.deepEqual(
+      [...mastraRunner.TB363_TEST_FILES].sort(),
+      ['src/concierge-signal-tb363.test.ts', 'src/tools/chat-task-tools-tb363.test.ts'],
+      'mastra tb363 suite is exactly these files — add/remove deliberately, in both places',
+    );
+    assert.deepEqual(mastraRunner.listTb363TestFiles().sort(), [...mastraRunner.TB363_TEST_FILES].sort());
   });
 
   it('no --test-force-exit / --test-name-pattern in the CI unit scripts (they shrink the run and still exit 0)', () => {

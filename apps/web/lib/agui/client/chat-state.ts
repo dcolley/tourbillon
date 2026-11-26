@@ -50,8 +50,27 @@ export type ToolCallStatus =
  * DM-2: `at` is a client-side display timestamp (a reloaded message's stored `createdAt`). It only
  * positions DM chips in the transcript; it never joins a message sent to the model.
  */
+/**
+ * TB-363: a task-progress notice (Run Task transition surfaced by the runner/tool fan-out).
+ * Its OWN kind — never `tool`, never `reasoning`, never folded into an assistant text bubble —
+ * so a chat-detail filter that hides tool/reasoning can never hide a status notice (#344 A6).
+ * `stage` is the transition word (started / done / waiting_on_user / needs_review / failed);
+ * `text` is the notice line (title + stage, ask/reason when the event carries one).
+ */
+export interface TaskNoticeItem {
+  kind: 'notice';
+  id: string;
+  noticeKind: 'task-progress';
+  stage: string;
+  text: string;
+  taskId?: string;
+  runId?: string;
+  at?: string;
+}
+
 export type AgentChatItem =
   | { kind: 'user'; id: string; text: string; mode: 'run' | 'followUp' | 'steer'; delivery: UserMessageDelivery; at?: string }
+  | TaskNoticeItem
   | { kind: 'assistant'; id: string; text: string; streaming: boolean; at?: string }
   | { kind: 'reasoning'; id: string; text: string; streaming: boolean; at?: string }
   | {

@@ -104,6 +104,27 @@ export interface AgentChatClientOptions {
    * `attach` ends without RUN_FINISHED / RUN_ERROR (a dropped reconnect after a backgrounded tab).
    */
   reconnect?: { attempts: number; delayMs: number };
+  /**
+   * TB-363 (R2): bounded retry plan for the history merge triggered by a `chat_task_notice`
+   * poke (the persisted signal row lands just after the poke). `delaysMs` (per attempt) wins
+   * over `delayMs`; tests inject zeros for determinism.
+   */
+  noticeRefresh?: NoticeRefreshPlan;
+  /**
+   * TB-363 (R2 / A1 open-page): while the thread is idle the client re-merges the stored
+   * transcript every N ms, so a notice persisted by the bridge (or a tool move) shows in the
+   * OPEN page with no user prompt and no reload. Keyed upsert by stored message id makes the
+   * poll idempotent (A4.3). 0 disables (tests); Node timers are unref'd so a never-disposed
+   * client can never pin a process.
+   */
+  noticePollMs?: number;
+}
+
+/** TB-363: retry plan for the notice-refresh merge (see AgentChatClientOptions.noticeRefresh). */
+export interface NoticeRefreshPlan {
+  attempts: number;
+  delayMs?: number;
+  delaysMs?: number[];
 }
 
 /** Per-message options for send / steer. */
@@ -148,6 +169,10 @@ type Decision = { mode: 'control'; value: Record<string, unknown> } | { mode: 'r
 const RETRY_SHORTLY = /retry shortly/i;
 /** CHAT-RECONNECT: default re-attach budget for a dropped attached stream. */
 const DEFAULT_RECONNECT = { attempts: 3, delayMs: 500 };
+/** TB-363: poke → merge now, then again as the row lands (bridge wake + persist is async). */
+const DEFAULT_NOTICE_REFRESH: NoticeRefreshPlan = { attempts: 4, delaysMs: [0, 250, 750, 1500] };
+/** TB-363: idle open-page refresh interval for bridge-persisted notices. */
+const DEFAULT_NOTICE_POLL_MS = 4000;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function defaultId(): string {
@@ -187,11 +212,41 @@ export class AgentChatClient {
   /** CHAT-RECONNECT: consecutive adopted-attach streams lost so far (reset by resume / a finished run). */
   private attachLosses = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  /** TB-363: a notice poke arrived while a run was open — merge when the run settles. */
+  private pendingNotice = false;
+  /** TB-363: a notice-refresh merge is in flight (one at a time). */
+  private noticeMerging = false;
+  /** TB-363: idle open-page notice poll (see noticePollMs). */
+  private noticeTimer: ReturnType<typeof setInterval> | undefined;
+  /** S-3 (#363 softs): hidden-tab poll skip; bound handler kept for removal on dispose. */
+  private visibilityHandler: (() => void) | undefined;
 
   constructor(opts: AgentChatClientOptions) {
     this.opts = opts;
     this.fetchImpl = opts.fetch ?? ((...args) => fetch(...args));
     this.newId = opts.newId ?? defaultId;
+    // TB-363 (A1 open page): idle refresh so bridge-persisted notices land without a prompt.
+    const pollMs = opts.noticePollMs ?? DEFAULT_NOTICE_POLL_MS;
+    if (pollMs > 0) {
+      this.noticeTimer = setInterval(() => this.noticePollTick(), pollMs);
+      // Node returns a Timeout; unref so a leaked client cannot hold the process open.
+      (this.noticeTimer as unknown as { unref?: () => void })?.unref?.();
+      // S-3 (#363 softs): a hidden tab does not poll at all (cost backs off to zero);
+      // becoming visible refreshes immediately so notices missed while hidden land at once.
+      if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+        this.visibilityHandler = () => {
+          if (!document.hidden) this.noticePollTick();
+        };
+        document.addEventListener('visibilitychange', this.visibilityHandler);
+      }
+    }
+  }
+
+  /** TB-363: one idle-notice poll tick (extracted so tests can drive it directly). */
+  private noticePollTick(): void {
+    if (this.disposed || this.active || this.starting || this.noticeMerging) return;
+    if (typeof document !== 'undefined' && document.hidden) return; // S-3: hidden tabs skip.
+    void this.loadHistory('merge');
   }
 
   // ---- store ----
@@ -272,7 +327,12 @@ export class AgentChatClient {
     try {
       return await start;
     } finally {
-      if (this.starting === start) this.starting = null;
+      if (this.starting === start) {
+        this.starting = null;
+        // TB-363 (A3d): a poke that arrived while this send was still starting (e.g. the run
+        // was aborted before its stream opened) must not sit pending forever.
+        this.drainPendingNotice();
+      }
     }
   }
 
@@ -599,6 +659,13 @@ export class AgentChatClient {
     this.active = null;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
+    if (this.noticeTimer) clearInterval(this.noticeTimer);
+    this.noticeTimer = undefined;
+    if (this.visibilityHandler && typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.visibilityHandler);
+      this.visibilityHandler = undefined;
+    }
+    this.pendingNotice = false;
     this.disposed = true;
     this.listeners.clear();
   }
@@ -811,7 +878,11 @@ export class AgentChatClient {
       } catch {
         /* a listener must not break the stream */
       }
-      if (terminal) this.active = null;
+      if (terminal) {
+        this.active = null;
+        // TB-363 (A3): the run settled — deliver any notice that arrived mid-turn.
+        this.drainPendingNotice();
+      }
     };
     run.done = reading.then(
       () => this.finishRun(run, terminal),
@@ -853,6 +924,8 @@ export class AgentChatClient {
       // while reconnecting, so a left-over flag would swallow the lost-connection report.
       reconnecting: false,
     }));
+    // TB-363 (A3d): the run is over by any path — deferred notices still land.
+    this.drainPendingNotice();
   }
 
   /** Stops listening to the open run stream from this side (STREAM-1: the endpoint run goes on). */
@@ -862,6 +935,68 @@ export class AgentChatClient {
     if (this.active === run) this.active = null;
     run.ac.abort();
     this.update((s) => endRun(s, 'cancelled'));
+    // TB-363 (A3d): an aborted turn must not swallow a notice that arrived during it.
+    this.drainPendingNotice();
+  }
+
+  // ─── TB-363 (R2 / A1 / A3): open-page task-progress notice delivery ─────────────────────
+  //
+  // The server-side bridge queues the notice as a persisted signal row on the ORIGIN thread
+  // (Mastra serializes it behind this session's run when busy) and then pokes
+  // `chat_task_notice` on sse:{companyId}. The browser layer calls `handleTaskNotice` with
+  // that poke; the notice itself always arrives THROUGH THE STORE (loadHistory merge, keyed
+  // upsert by stored message id) — never as a client-invented item — so reload, reconnect and
+  // live poke all collapse to exactly one item per signal row (A4.3), and mid-stream delivery
+  // is structurally impossible: while this client's run is open the poke only sets a flag,
+  // consumed when the run ends (success, error or abort).
+
+  /**
+   * A `chat_task_notice` poke for this chat's thread (from the page's EventSource on
+   * /api/sse/[companyId]). Idempotent; safe to call repeatedly. While a run is open the merge
+   * is deferred to the run's end (never mid-turn); when idle it merges the thread's stored
+   * messages now, retrying briefly because the signal row is persisted asynchronously right
+   * after the poke.
+   */
+  handleTaskNotice(target: { threadId?: string; agentId?: string }): void {
+    if (this.disposed) return;
+    if (target.threadId && target.threadId !== this.opts.threadId) return;
+    if (this.active || this.starting) {
+      this.pendingNotice = true;
+      return;
+    }
+    void this.mergeNoticesWithRetry();
+  }
+
+  /** Called when a run ends (finished / errored / aborted / lost): deliver deferred notices. */
+  private drainPendingNotice(): void {
+    if (!this.pendingNotice) return;
+    this.pendingNotice = false;
+    if (this.disposed || this.active || this.starting) return;
+    void this.mergeNoticesWithRetry();
+  }
+
+  /** Bounded, injectable retry merge of the stored transcript (the notice row lands just after the poke). */
+  private async mergeNoticesWithRetry(): Promise<void> {
+    if (this.noticeMerging || this.disposed) return;
+    this.noticeMerging = true;
+    try {
+      const plan = this.opts.noticeRefresh ?? DEFAULT_NOTICE_REFRESH;
+      const attempts = Math.max(1, plan.attempts);
+      for (let i = 0; i < attempts; i++) {
+        if (this.disposed || this.active || this.starting) return;
+        await this.loadHistory('merge');
+        if (this.disposed) return;
+        const delay = plan.delaysMs?.[i] ?? plan.delayMs ?? 0;
+        if (i < attempts - 1 && delay > 0) await sleep(delay);
+      }
+    } finally {
+      this.noticeMerging = false;
+      // A poke that arrived during the merge: one more pass keeps "never lost" honest.
+      if (this.pendingNotice && !this.disposed) {
+        this.pendingNotice = false;
+        void this.mergeNoticesWithRetry();
+      }
+    }
   }
 }
 

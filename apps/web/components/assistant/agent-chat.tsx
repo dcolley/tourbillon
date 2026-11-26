@@ -146,6 +146,20 @@ function ItemView({ item, widgets }: { item: AgentChatItem; widgets: WidgetHandl
           <div className="whitespace-pre-wrap">{item.text}</div>
         </details>
       );
+    case 'notice':
+      // TB-363 (A12): a task-progress notice is drawn from the item itself — never inside a tool
+      // or reasoning card, never dependent on the model replying. The stage label, the full text
+      // (ask for waiting_on_user, reason for failed) and the "reply here" line must be visible.
+      return (
+        <div
+          className="rounded-md border border-border/70 bg-muted/40 px-3 py-2 text-sm text-muted-foreground"
+          data-item="notice"
+          data-notice-kind={item.noticeKind}
+          data-stage={item.stage}
+        >
+          {item.text}
+        </div>
+      );
     case 'tool': {
       const outcome = widgetOutcome(item);
       const send = item.widgetSend;

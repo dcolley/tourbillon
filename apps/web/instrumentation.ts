@@ -20,4 +20,10 @@ export async function register() {
   bridge.ready.catch((err) => {
     console.warn('[concierge-signal] bridge subscribe failed', err);
   });
+  // TB-363 (A11/R3): tool-driven chat-task moves (updateMyTask / completeMyTask in a live chat
+  // turn run IN THIS PROCESS) publish their transition onto the same sse:{companyId} channel
+  // the scheduler uses, so one bridge delivers runner AND tool notices.
+  const { setChatTaskProgressPublisher } = await import('@tourbillon/mastra/concierge-signal');
+  const { publishChatTaskProgressToSse } = await import('./lib/assistant/task-progress-bridge');
+  setChatTaskProgressPublisher((event) => publishChatTaskProgressToSse(event));
 }

@@ -47,6 +47,7 @@ import { resolveTaskRunnerSettings, createTraceLogger, type CompanySettings } fr
 import { z } from 'zod';
 import { extractToolRuntimeContext } from './api-client';
 import { getCurrentHeartbeatContext } from '../heartbeat-context';
+import { publishChatTaskProgress } from '../concierge-signal';
 import { toolDb } from './tool-db';
 
 /** Ids of the seven chat-task tools — used to keep them out of heartbeat/issue tool sets. */
@@ -154,6 +155,49 @@ function missingAsk(): { error: string; message: string } {
  * through the scheduler-style trace logger, same "…activity log failed" shape as the runner path.
  */
 const auditTracer = createTraceLogger('chat-task-tools', {});
+
+/**
+ * TB-363 (A11): fan a REAL tool-driven status move out as one `chat_task_progress` event —
+ * same wire shape and same identity scheme (companyId:chatTaskId:runId:stage) the runner uses,
+ * so the web bridge's claim collapses a tool move and the runner settle of the SAME transition
+ * into one notice. runId rides from the tool runtime context: the Run Task wake's context
+ * carries the runner's runId (→ collapse), a live-chat turn carries the chat session runId
+ * (`chat-<agentId>`). Only the product-visible moves get a notice: done and waiting_on_user
+ * (with the ask); pending/in_progress flips are runner territory (the runner emits `started`
+ * on claim) and cancelled is intentionally silent (S2 — never "done"/"failed" news).
+ */
+function publishToolTransition(
+  scope: ChatTaskScope,
+  task: ChatTask,
+  requestContext: unknown,
+): void {
+  if (task.status !== 'done' && task.status !== 'waiting_on_user') return;
+  const run = extractToolRuntimeContext(requestContext).runId ?? null;
+  // S-1 (#363 fix round): a live-chat turn carries the CONSTANT session runId
+  // `chat-<agentId>` (registry.ts:294), so under the bare identity two real moves of the same
+  // task (e.g. a second waiting_on_user within the 900 s claim TTL) collapse to one claim and
+  // the second notice is swallowed. A Run Task wake carries the RUNNER's runId — there the
+  // identity must stay EXACT so the tool emit collapses with the runner settle (A11b). So the
+  // per-transition id rides only on the live-chat path, keyed on the row's updatedAt (stable
+  // under tool retry, distinct across transitions).
+  const runnerRun = run != null && !run.startsWith('chat-') ? run : null;
+  const transitionId = task.updatedAt instanceof Date ? String(task.updatedAt.getTime()) : String(task.updatedAt ?? '');
+  const runId = runnerRun ?? (transitionId ? `tool:${transitionId}` : 'tool');
+  publishChatTaskProgress({
+    companyId: scope.companyId,
+    agentId: scope.agentId,
+    chatTaskId: task.id,
+    runId,
+    stage: task.status === 'done' ? 'done' : 'waiting_on_user',
+    status: 'succeeded',
+    title: task.title,
+    // MUST-4 (PM Q1): tool-sourced notices persist as a status line, never a model wake.
+    source: 'tool',
+    ...(task.status === 'waiting_on_user'
+      ? { detail: extractChatTaskNoteLine(task.notes, CHAT_TASK_ASK_PREFIX) ?? undefined }
+      : {}),
+  });
+}
 
 async function logToolActivity(
   scope: ChatTaskScope & { threadId?: string },
@@ -581,6 +625,9 @@ export const updateMyTaskTool = createTool({
             }
           : {}),
       });
+      // TB-363 (A11a): the same real-move condition fans out the notice (done / waiting_on_user
+      // only; the audit stays the record for every other move).
+      publishToolTransition(scope, updated, requestContext);
     }
     return { ok: true, message: `Task ${updated.id} → ${updated.status}.`, task: row(updated) };
   },
@@ -618,6 +665,8 @@ export const completeMyTaskTool = createTool({
           : {}),
         ...(inputData.note ? { note: inputData.note } : {}),
       });
+      // TB-363 (A11a): a tool-driven completion announces itself exactly once.
+      publishToolTransition(scope, updated, requestContext);
     }
     return { ok: true, message: `Task ${updated.id} → done.`, task: row(updated) };
   },

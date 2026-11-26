@@ -35,12 +35,14 @@ export interface ConciergeSignalInput {
   tagName?: string;
   attributes?: ConciergeSignalAttributes;
   contents: string;
+  /** TB-363 MUST-7: delivery-only signal (wake runs, no stored row — persistence filters skip transient). */
+  transient?: boolean;
 }
 
 /** The one Session method this helper needs (Mastra Session.queueSignal). */
 export interface QueueSignalSession {
   queueSignal(
-    signal: { type: 'reactive'; tagName?: string; attributes?: ConciergeSignalAttributes; contents: string; id?: string },
+    signal: { type: 'reactive'; tagName?: string; attributes?: ConciergeSignalAttributes; contents: string; id?: string; transient?: boolean },
     opts?: Record<string, unknown>,
   ): Promise<void> | void;
 }
@@ -52,6 +54,83 @@ export interface QueuedSignalCancelAgent {
     signalIds: string[];
     resourceId?: string;
   }): { cancelledSignalIds: string[] } | Promise<{ cancelledSignalIds: string[] }>;
+}
+
+/**
+ * TB-363 (MUST-4): the one Agent method the persist-without-wake path needs — Mastra's PUBLIC
+ * `Agent.queueSignal(signal, target)` (agent/agent.d.ts:1460), whose target accepts
+ * `ifIdle.behavior: 'persist'` (thread-stream runtime: agent-DtdQ6un6.js:43813/43868 — idle
+ * thread writes the signal row through Memory and starts NO run; a busy thread still gets the
+ * default ifActive 'deliver'). The AgentController Session's own queueSignal cannot express
+ * this: its option bag destructures only tracingContext/tracingOptions/requestContext
+ * (agent-controller-…js:5723) and drops ifIdle — hence the Agent-level call.
+ */
+export interface PersistSignalTarget {
+  resourceId: string;
+  threadId: string;
+}
+
+export interface PersistSignalAgent {
+  /**
+   * TB-363 CONT4: `Agent.sendSignal`, NOT `queueSignal`. `queueSignal` hard-codes
+   * `ifIdle.behavior:'wake'` on the idle path (agent-DtdQ6un6.js:43747), so it can never
+   * persist-without-wake; `sendSignal` honours `ifIdle.behavior` (agent/agent.d.ts:1474).
+   */
+  sendSignal(
+    signal: { type: 'reactive'; tagName?: string; attributes?: ConciergeSignalAttributes; contents: string; id?: string; transient?: boolean },
+    target: {
+      resourceId: string;
+      threadId: string;
+      ifIdle?: { behavior: 'wake' | 'persist' | 'discard' };
+      ifActive?: { behavior: 'wake' | 'persist' | 'discard' };
+    },
+  ): {
+    accepted: Promise<{ action: string; runId?: string }>;
+    signal?: { id?: string };
+    persisted?: Promise<void>;
+  };
+}
+
+/**
+ * TB-363 (MUST-4, PM Q1): persist one typed signal to the thread WITHOUT waking a model turn
+ * (idle thread → `ifIdle.behavior: 'persist'`: the signal row lands in memory, zero runs).
+ * Same payload normalization as queueConciergeSignal (tag name, sanitized attributes, clamped
+ * contents), same id convention. Resolves after Mastra's ROUTING DECISION (`accepted`) only.
+ * It deliberately does NOT await the `persisted` handle: for the idle-persist path Mastra
+ * settles that promise only when the broadcast stream is consumed (agent-DtdQ6un6.js
+ * #broadcastPersistedSignal — its ReadableStream start() runs on first read), so awaiting it
+ * hangs forever with nobody reading; the runtime itself never awaits it either. The memory
+ * write is issued synchronously by #persistAndBroadcastIdleSignal before the broadcast, so a
+ * resolved `accepted` on the persist path already means the write has been dispatched.
+ */
+export async function persistConciergeSignal(
+  agent: PersistSignalAgent,
+  target: PersistSignalTarget,
+  input: ConciergeSignalInput,
+): Promise<{ signalId: string; action: string }> {
+  const id = input.id ?? `sig-${randomId()}`;
+  // TB-363 MUST-6: ifActive must be 'persist' too. Mastra's sendSignal defaults ifActive to
+  // 'deliver' (agent-DtdQ6un6.js, #sendSignal: `activeBehavior = target.ifActive?.behavior ?? "deliver"`),
+  // which routes a same-agent busy thread through #queueForActiveRun — the notice would drain
+  // INTO the in-flight turn (a second reply mid-turn), and a cross-agent busy run returns
+  // accepted.action 'blocked' (thread-blocked) with nothing persisted. Tool moves always land
+  // while the origin thread is busy, so 'persist' on both sides of the idle policy is the
+  // no-wake path: the row lands, zero runs start.
+  const result = agent.sendSignal(
+    {
+      type: 'reactive',
+      tagName: input.tagName ?? TASK_PROGRESS_TAG_NAME,
+      attributes: sanitizeSignalAttributes(input.attributes),
+      contents: clampContents(input.contents),
+      id,
+    },
+    { ...target, ifIdle: { behavior: 'persist' }, ifActive: { behavior: 'persist' } },
+  );
+  const decision = await result.accepted;
+  // TB-363 CONT3 root cause: never await `result.persisted` — see docstring. Swallow its
+  // rejection so the unhandled promise can't crash the bridge subscriber.
+  result.persisted?.catch(() => {});
+  return { signalId: result.signal?.id ?? id, action: decision.action };
 }
 
 function printableAttribute(value: unknown): string | number | boolean | null | undefined {
@@ -100,6 +179,10 @@ export async function queueConciergeSignal(
     attributes: sanitizeSignalAttributes(input.attributes),
     contents: clampContents(input.contents),
     id,
+    // TB-363 MUST-7 (PM N-3): a covered go-between reply is delivery-only — Mastra's
+    // persistence filters drop transient signals, so the wake turn runs WITHOUT storing a
+    // second notice row (filter-messages-for-persistence:22274, agent-DtdQ6un6.js).
+    ...(input.transient ? { transient: true } : {}),
   });
   return { signalId: id };
 }
@@ -144,12 +227,24 @@ export interface TaskProgressEventShape {
   /** #339: the precise ask/failure text when the scheduler carries one. */
   detail?: string;
   title: string;
+  /**
+   * TB-363 (MUST-4, PM Q1): who caused this transition. 'tool' = the concierge moved the task
+   * itself via updateMyTask/completeMyTask — per the Q1 ruling that notice is a compact status
+   * LINE, never a second chat reply, so the bridge persists it WITHOUT waking a model turn
+   * (runner events leave this unset and keep the reactive wake).
+   */
+  source?: 'tool';
 }
 
 export interface TaskProgressSignalPayload {
   tagName: string;
   attributes: ConciergeSignalAttributes;
   contents: string;
+  /**
+   * TB-363 MUST-7 (PM N-3): delivery-only signal — the runner's go-between reply rides on it,
+   * but Mastra must NOT store a second notice row (`#persistSignal` skips transient signals).
+   */
+  transient?: boolean;
 }
 
 /**
@@ -178,9 +273,11 @@ export function taskProgressSignalPayload(event: TaskProgressEventShape): TaskPr
       break;
     case 'waiting_on_user':
       // #339: the go-between wake — relay the STATED ask (#340 contract), never invent one.
+      // TB-363 A2: the stored notice text is what the human sees, so it must also say HOW to
+      // answer — a reply in this thread resumes the task (status pending, #340 contract).
       contents = `Background task "${title}" is waiting on the human${
         event.detail ? `: ${event.detail}` : ''
-      }. Ask them for exactly that, and resume the task (status pending) when they answer.`;
+      }. Ask them for exactly that; they can reply here; resume the task (status pending) when they answer.`;
       break;
     case 'failed':
       // #340 honesty: a runner failure is a FAILURE, not a question for the human.
@@ -206,4 +303,80 @@ export function taskProgressSignalPayload(event: TaskProgressEventShape): TaskPr
 function randomId(): string {
   // crypto.randomUUID is available on every Node we support; tiny indirection for stubs.
   return globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2);
+}
+
+// ─── TB-363 (A11 / R3): the TOOL-PATH progress publish seam ──────────────────
+//
+// Before this, ONLY the scheduler published `chat_task_progress` — a status move the
+// concierge made itself with updateMyTask / completeMyTask (Derek's #363 repro) produced an
+// audit row and NO event, so the human never saw a notice. These moves now publish exactly
+// one event per real transition through this host-injected seam, using the SAME wire shape
+// and the SAME event identity (companyId:chatTaskId:runId:stage = taskProgressClaimKey) as
+// the runner, so the web bridge's claim collapses a tool move and the runner settle of the
+// same transition into ONE notice (A11b). Hosts (apps/web instrumentation, scheduler-main /
+// wake boot) inject the redis publisher; without one the transition is lost but NEVER silent
+// (S3): a warn names the gap.
+
+/** One `chat_task_progress` publish (structurally the scheduler's ChatTaskProgressEvent). */
+export interface ChatTaskProgressPublishEvent {
+  companyId: string;
+  agentId: string;
+  chatTaskId: string;
+  runId: string;
+  stage: TaskProgressStage;
+  status: TaskProgressStatus;
+  title: string;
+  /** Ask/failure text, clamped to the scheduler's 300-char event cap. */
+  detail?: string;
+  /** TB-363 (MUST-4): 'tool' for concierge tool-driven moves — persisted, never a model wake. */
+  source?: 'tool';
+}
+
+export type ChatTaskProgressPublisher = (event: ChatTaskProgressPublishEvent) => void | Promise<void>;
+
+let chatTaskProgressPublisher: ChatTaskProgressPublisher | null = null;
+
+/** Host wiring: called once per process (web instrumentation / scheduler boot). null = unset. */
+export function setChatTaskProgressPublisher(publisher: ChatTaskProgressPublisher | null): void {
+  chatTaskProgressPublisher = publisher;
+}
+
+/** Test seam: is a publisher wired? (No production caller.) */
+export function getChatTaskProgressPublisher(): ChatTaskProgressPublisher | null {
+  return chatTaskProgressPublisher;
+}
+
+/**
+ * Publish one tool-path transition. Fire-and-forget like the scheduler publisher; a missing
+ * publisher or a throwing publisher is SURFACED via console.warn (S3), never silent, and must
+ * never fail the tool call that asked for it.
+ */
+export function publishChatTaskProgress(event: ChatTaskProgressPublishEvent): boolean {
+  const clamped: ChatTaskProgressPublishEvent = event.detail
+    ? { ...event, detail: event.detail.slice(0, 300) }
+    : event;
+  if (!chatTaskProgressPublisher) {
+    console.warn('[chat-task-progress] no progress publisher wired — transition not announced', {
+      chatTaskId: clamped.chatTaskId,
+      stage: clamped.stage,
+    });
+    return false;
+  }
+  try {
+    void Promise.resolve(chatTaskProgressPublisher(clamped)).catch((err) => {
+      console.warn('[chat-task-progress] progress publish failed', {
+        chatTaskId: clamped.chatTaskId,
+        stage: clamped.stage,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+    return true;
+  } catch (err) {
+    console.warn('[chat-task-progress] progress publish threw', {
+      chatTaskId: clamped.chatTaskId,
+      stage: clamped.stage,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
 }

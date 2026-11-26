@@ -29,11 +29,16 @@ import { aguiSessionScope } from '@/lib/agui/run-input';
 // Leaf module (no deps) — static import so the S332-S2 pin exercises the REAL keying helper.
 import { chatSessionId } from '@/lib/chat/session-id';
 import type { Agent } from '@tourbillon/db';
-import type { QueueSignalSession, TaskProgressSignalPayload } from '@tourbillon/mastra/concierge-signal';
+import type { PersistSignalAgent, QueueSignalSession, TaskProgressSignalPayload } from '@tourbillon/mastra/concierge-signal';
+// TB-363 MUST-6/7: the chat-Agent seam type is part of DeliverDeps' surface — re-export it so
+// tests/consumers build fakes without reaching into the mastra subpath.
+export type { PersistSignalAgent };
+import { persistConciergeSignal } from '@tourbillon/mastra/concierge-signal';
 import {
   handleTaskProgressEvent,
   parseTaskProgressMessage,
   queueTaskProgressSignal,
+  taskProgressBareClaimKey,
   taskProgressClaimKey,
   type TaskProgressAgentRecord,
   type TaskProgressBridgeDeps,
@@ -248,6 +253,13 @@ export interface DeliverDeps {
     agent: TaskProgressAgentRecord,
     opts: { resourceId: string; scope: string; threadId: string },
   ): Promise<DeliverSession>;
+  /**
+   * TB-363 (MUST-4, PM Q1): the chat Agent for the persist-without-wake path (deliver's
+   * wake=false). Mastra Session cannot express `ifIdle.behavior:'persist'`; the public
+   * Agent-level queueSignal can. Absent dep => a wake=false delivery FAILS (never silently
+   * wakes instead — a second reply is the bug this closes).
+   */
+  getChatAgent?(agent: TaskProgressAgentRecord): Promise<PersistSignalAgent | null>;
 }
 
 /**
@@ -282,8 +294,39 @@ export function createDeliver(deps: DeliverDeps) {
     agent: TaskProgressAgentRecord,
     threadId: string,
     payload: TaskProgressSignalPayload,
+    wake = true,
   ): Promise<boolean> {
     const resourceId = await deps.resourceId(agent);
+    if (!wake) {
+      // TB-363 (MUST-4, PM Q1; MUST-6): status LINE only — Agent-level sendSignal with BOTH
+      // ifIdle.behavior:'persist' AND ifActive.behavior:'persist'. Idle thread => the row
+      // lands, ZERO runs. Busy origin (the main tool path) => persisted the same way; with
+      // Mastra's default ifActive 'deliver' the signal would instead be queued into the
+      // in-flight turn (a second reply) or come back 'blocked' on a cross-agent run.
+      // A non-persist decision ('blocked'/'discard') means NOTHING landed: return false so
+      // the claim is released and a redelivery can retry — never silently true.
+      const chatAgent = await deps.getChatAgent?.(agent);
+      if (!chatAgent) {
+        console.warn('[concierge-signal] task progress notice persist skipped (no chat agent)', {
+          agentId: agent.id,
+          threadId,
+        });
+        return false;
+      }
+      const { action } = await persistConciergeSignal(chatAgent, { resourceId, threadId }, payload);
+      // MUST-6: 'blocked' (cross-agent thread-blocked) or 'discard' mean NOTHING landed —
+      // fail loud so the claim is released for a redelivery retry. Anything else is an
+      // accepted persist.
+      if (action === 'blocked' || action === 'discard') {
+        console.warn('[concierge-signal] task progress notice persist refused — claim released for retry', {
+          agentId: agent.id,
+          threadId,
+          action,
+        });
+        return false;
+      }
+      return true;
+    }
     const scope = aguiSessionScope(agent);
     const controller = await deps.getOrCreateChatController(agent);
     const userSession = await controller.getSessionByResource(resourceId, scope);
@@ -366,6 +409,9 @@ export const realDeliver = createDeliver({
   getOrCreateChatController: realDeliverGetOrCreateChatController,
   getChatSession: async (controller, agent, opts) =>
     (await import('@/lib/chat')).getChatSession(controller as never, agent as ChatAgentSeam as Agent, opts),
+  // TB-363 (MUST-4): persist-without-wake path — the chat Agent through the same barrel seam.
+  getChatAgent: async (agent) =>
+    (await import('@/lib/chat')).getOrCreateChatAgent(agent as ChatAgentSeam as Agent),
 });
 
 // ─── redis single-consumer claim (S2) ──────────────────────────────────────────────────────
@@ -373,11 +419,17 @@ export const realDeliver = createDeliver({
 export interface ClaimClient {
   /** true = first claimer (deliver); false = already claimed by another replica (skip). */
   claim(key: string, ttlSeconds: number): Promise<boolean>;
+  /** TB-363 MUST-6: release a claim (a persist-path delivery landed nothing). */
+  unclaim?(key: string): Promise<void>;
+  /** TB-363 MUST-7: was a claim key already consumed (the tool line landed)? */
+  exists?(key: string): Promise<boolean>;
 }
 
 /** The ioredis slice the claim client drives (softs S11: fake-IORedis in tests). */
 export interface RedisClaimCommands {
   set(key: string, value: string, mode: 'EX', ttlSeconds: number, nx: 'NX'): Promise<string | null>;
+  del?(key: string): Promise<number> | number;
+  exists?(key: string): Promise<number> | number;
 }
 
 export function redisClaimClient(client: RedisClaimCommands = new IORedis(process.env.REDIS_URL ?? 'redis://localhost:6379', {
@@ -396,6 +448,26 @@ export function redisClaimClient(client: RedisClaimCommands = new IORedis(proces
           error: err instanceof Error ? err.message : String(err),
         });
         return true;
+      }
+    },
+    async unclaim(key) {
+      try {
+        await client.del?.(key);
+      } catch (err) {
+        // Best-effort: the TTL still bounds the leaked claim; log, never throw.
+        console.warn('[concierge-signal] claim release failed (TTL will bound it)', {
+          key,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+    async exists(key) {
+      try {
+        return (await client.exists?.(key)) === 1;
+      } catch {
+        // Fail CLOSED on the transient optimisation: unknown == treat as not covered,
+        // the runner reply then persists its own row (pre-MUST-7 behaviour, never a loss).
+        return false;
       }
     },
   };
@@ -418,6 +490,8 @@ export function createOwnedRedisClaimClient(
   const claimClient = redisClaimClient(client);
   return {
     claim: (key, ttlSeconds) => claimClient.claim(key, ttlSeconds),
+    unclaim: claimClient.unclaim ? (key) => claimClient.unclaim!(key) : undefined,
+    exists: claimClient.exists ? (key) => claimClient.exists!(key) : undefined,
     quit: async () => {
       await client.quit();
     },
@@ -428,6 +502,13 @@ export function createOwnedRedisClaimClient(
 
 export interface TaskProgressBridgeWiring {
   getAgent?: (agentId: string) => Promise<TaskProgressAgentRecord | null>;
+  /**
+   * TB-363 (R2): post-delivery open-page poke. Default = publishTaskProgressNoticeOnSse (one
+   * `chat_task_notice` JSON on `sse:{companyId}` via the bridge-owned publisher connection).
+   * Injectable so a test pins that a delivered event pokes exactly once with the origin
+   * threadId and a skipped event never pokes.
+   */
+  notify?: (event: TaskProgressEvent, threadId: string) => Promise<void> | void;
   /**
    * TN-ORIGIN (H2): scoped origin resolution. Default = getTaskOriginFromDb (real scoped
    * getChatTask). The active pin (assistant_active_threads) is NOT part of routing any more.
@@ -452,9 +533,89 @@ export function buildTaskProgressBridgeDeps(wiring: TaskProgressBridgeWiring = {
     getAgent: wiring.getAgent ?? getAgent,
     getTaskOrigin: wiring.getTaskOrigin ?? ((event) => getTaskOriginFromDb(event)),
     deliver: wiring.deliver ?? realDeliver,
+    notify: wiring.notify ?? ((event, threadId) => publishTaskProgressNoticeOnSse(event, threadId)),
     claimEvent: (event) => claimClient.claim(taskProgressClaimKey(event), TASK_PROGRESS_CLAIM_TTL_SECONDS),
+    unclaim: claimClient.unclaim
+      ? async (event) => {
+          await claimClient.unclaim!(taskProgressClaimKey(event));
+        }
+      : undefined,
+    toolLineLanded: claimClient.exists
+      ? async (event) => claimClient.exists!(taskProgressBareClaimKey(event))
+      : undefined,
     log: wiring.log ?? { warn: (msg, data) => console.warn(msg, data ?? '') },
   };
+}
+
+// ─── TB-363 (R2): post-delivery open-page poke on the company SSE channel ──────────────────
+
+/** The redis slice the notice publisher drives. */
+export interface NoticePublishCommands {
+  publish(channel: string, message: string): Promise<number> | number;
+}
+
+/** Bridge-owned notice publisher connection (separate from the subscriber connection). */
+export function createOwnedNoticePublisher(
+  url: string = process.env.REDIS_URL ?? 'redis://localhost:6379',
+): { publish(channel: string, message: string): Promise<number>; quit(): Promise<void> } {
+  const client = new IORedis(url, { maxRetriesPerRequest: null });
+  // TB-363 (R2): this process-wide publisher must never hold the event loop open (the task-
+  // notification CI job exits on idle handles). ioredis 5 exposes NO unref() on the Redis
+  // instance — the net.Socket lives on `connector.stream` and must be unrefed on EVERY
+  // connect (a reconnect produces a new, re-refed socket). Publishes still complete: the
+  // loop is alive for the rest of the cell, and the poke is best-effort by contract.
+  const unrefSocket = () => {
+    const stream = (client as unknown as { connector?: { stream?: { ref?: () => void; unref?: () => void } | null } }).connector?.stream;
+    stream?.unref?.();
+  };
+  client.on('connect', unrefSocket);
+  unrefSocket();
+  return {
+    publish: async (channel, message) => {
+      const stream = (client as unknown as { connector?: { stream?: { ref?: () => void; unref?: () => void } | null } }).connector?.stream;
+      stream?.ref?.();
+      try {
+        return await client.publish(channel, message);
+      } finally {
+        stream?.unref?.();
+      }
+    },
+    quit: async () => {
+      await client.quit();
+    },
+  };
+}
+
+/** Lazily-created process-wide notice publisher (production path; tests inject `notify`). */
+let defaultNoticeClient: { publish(channel: string, message: string): Promise<number>; quit(): Promise<void> } | null = null;
+
+export async function publishTaskProgressNoticeOnSse(event: TaskProgressEvent, threadId: string): Promise<void> {
+  const { TASK_PROGRESS_NOTICE_SSE_TYPE } = await import('@tourbillon/shared/types');
+  defaultNoticeClient ??= createOwnedNoticePublisher();
+  const payload = JSON.stringify({
+    type: TASK_PROGRESS_NOTICE_SSE_TYPE,
+    companyId: event.companyId,
+    agentId: event.agentId,
+    chatTaskId: event.chatTaskId,
+    runId: event.runId,
+    stage: event.stage,
+    threadId,
+  });
+  await defaultNoticeClient.publish(`sse:${event.companyId}`, payload);
+}
+
+/**
+ * TB-363 (A11/R3): the WEB-host tool-path publisher — publishes a tool-driven transition onto
+ * the SAME `sse:{companyId}` channel + wire type the scheduler uses, so the existing bridge
+ * (claim → origin → queueSignal) is the single delivery path for runner AND tool events. Wired
+ * from instrumentation via setChatTaskProgressPublisher.
+ */
+export async function publishChatTaskProgressToSse(
+  event: import('@tourbillon/mastra/concierge-signal').ChatTaskProgressPublishEvent,
+): Promise<void> {
+  const { TASK_PROGRESS_SSE_TYPE } = await import('@tourbillon/shared/types');
+  defaultNoticeClient ??= createOwnedNoticePublisher();
+  await defaultNoticeClient.publish(`sse:${event.companyId}`, JSON.stringify({ type: TASK_PROGRESS_SSE_TYPE, ...event }));
 }
 
 // ─── lifecycle: owned handle with ACK, bounded drain, idempotent stop (H4) ────────────────

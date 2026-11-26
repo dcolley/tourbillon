@@ -30,6 +30,7 @@ import {
   type BridgeSubscriber,
   type ChatAgentSeam,
   type DeliverDeps,
+  type PersistSignalAgent,
   type DeliverSession,
   type RedisClaimCommands,
   type TaskProgressDbQuery,
@@ -102,7 +103,7 @@ class FakeSession implements DeliverSession {
   }
 }
 
-function deliverHarness(opts: { existing?: FakeSession | null } = {}) {
+function deliverHarness(opts: { existing?: FakeSession | null; chatAgent?: PersistSignalAgent | null } = {}) {
   const created: Array<{ resourceId: string; scope: string; threadId: string }> = [];
   const createdSessions: FakeSession[] = [];
   const lookups: Array<{ resourceId: string; scope: string }> = [];
@@ -120,9 +121,50 @@ function deliverHarness(opts: { existing?: FakeSession | null } = {}) {
       createdSessions.push(session);
       return session;
     },
+    getChatAgent: opts.chatAgent === undefined ? undefined : (() => { const ca = opts.chatAgent as PersistSignalAgent | null; return async () => ca; })(),
   };
   return { deliver: createDeliver(deps), created, createdSessions, lookups };
 }
+
+function persistAgent(action: string): PersistSignalAgent & { calls: unknown[] } {
+  const calls: unknown[] = [];
+  return {
+    calls,
+    sendSignal(signal: unknown, target: unknown) {
+      calls.push({ signal, target });
+      return { signal: { id: 'sig-1' }, accepted: Promise.resolve({ action }) };
+    },
+  };
+}
+
+// TB-363 MUST-6: a refused persist/wake is a FAILURE (claim must be releasable), never true.
+test('deliver (MUST-6): accepted.action blocked -> deliver false (refusal, caller releases claim)', async () => {
+  const blocked = deliverHarness({ existing: null, chatAgent: persistAgent('blocked') });
+  assert.equal(await blocked.deliver(AGENT, 'thread-42', PAYLOAD, false), false, 'blocked persist is a refusal');
+});
+
+test('deliver (MUST-6): accepted.action discard -> deliver false (refusal, caller releases claim)', async () => {
+  const discarded = deliverHarness({ existing: null, chatAgent: persistAgent('discard') });
+  assert.equal(await discarded.deliver(AGENT, 'thread-42', PAYLOAD, false), false, 'discard persist is a refusal');
+});
+
+test('deliver (MUST-6): accepted.action persist -> deliver true (the notice landed)', async () => {
+  const ok = deliverHarness({ existing: null, chatAgent: persistAgent('persist') });
+  assert.equal(await ok.deliver(AGENT, 'thread-42', PAYLOAD, false), true, 'a real persist is a success');
+});
+
+test('deliver (MUST-7): transient go-between rides the session wake queue with transient:true', async () => {
+  const transientPayload = { ...PAYLOAD, transient: true };
+  const existing = new FakeSession('thread-42');
+  const h = deliverHarness({ existing });
+  assert.equal(await h.deliver(AGENT, 'thread-42', transientPayload, true), true, 'the go-between turn was queued');
+  assert.equal(existing.signals.length, 1, 'queued on the shared same-thread session');
+  assert.equal((existing.signals[0] as Record<string, unknown>).transient, true, 'the queued signal is transient (no stored row)');
+  const plain = new FakeSession('thread-42');
+  const h2 = deliverHarness({ existing: plain });
+  assert.equal(await h2.deliver(AGENT, 'thread-42', PAYLOAD, true), true);
+  assert.ok(!('transient' in plain.signals[0]!) || (plain.signals[0] as Record<string, unknown>).transient !== true, 'normal wakes keep storing their row');
+});
 
 test('deliver: no session on the resource → origin-bound session created and queued (H3)', async () => {
   const h = deliverHarness({ existing: null });
@@ -218,6 +260,9 @@ test('deps: two replicas over ONE claim client — only the first gets deliver',
     getAgent: async () => AGENT,
     getTaskOrigin: async () => ({ threadId: 'thread-42' }),
     deliver: async () => true,
+    // TB-363 FIX2: claim-semantics cell — inject notify so the real (unrefed, lazy-socket)
+    // publisher can never gate the await when a bare tsx --test loop has no other handles.
+    notify: async () => {},
     log: { warn: () => {} },
   });
   const replicaB = buildTaskProgressBridgeDeps({
@@ -225,6 +270,7 @@ test('deps: two replicas over ONE claim client — only the first gets deliver',
     getAgent: async () => AGENT,
     getTaskOrigin: async () => ({ threadId: 'thread-42' }),
     deliver: async () => true,
+    notify: async () => {},
     log: { warn: () => {} },
   });
   assert.equal(await handleTaskProgressEvent(replicaA, progressEvent()), 'queued');
@@ -292,6 +338,10 @@ function bridgeOptions(
     getAgent: async () => AGENT,
     getTaskOrigin: async () => ({ threadId: 'thread-42' }),
     deliver: opts.deliver ?? idleDeliver,
+    // Every cell here asserts claim/queue/drain semantics, never the SSE broadcast. Inject a
+    // no-op notify so the DEFAULT publisher (real ioredis) never opens a socket against the
+    // CI Redis port, where its queued command would hang the awaited landed path forever.
+    notify: async () => {},
     log: { warn: () => {} },
   };
 }
@@ -755,6 +805,9 @@ test('redisClaimClient: redis down end-to-end — the event is still claimed AND
       delivered.push(threadId);
       return true;
     },
+    // This cell asserts claim fail-OPEN + delivery, not the SSE broadcast: inject notify so
+    // the default publisher (real ioredis) never opens a socket against the CI Redis port.
+    notify: async () => {},
     log: { warn: () => {} },
   });
   const { result: outcome, logged } = await captureWarns(() => handleTaskProgressEvent(deps, progressEvent()));

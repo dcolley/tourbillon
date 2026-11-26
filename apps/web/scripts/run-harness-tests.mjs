@@ -42,6 +42,19 @@ export const HARNESS_TEST_FILES = [
   'lib/harness/callback-chat.test.ts',
   'lib/harness/callback-gate.test.ts',
   'lib/vault-oauth-state-clock.test.ts',
+  // TB-363 (Test verdict MUST-3): the notice tests that carry the A1/A2/A3/A5/A6/A8/A10/A12 and
+  // claim-key (M6/M7) mutant kills. Kill attributions must name tests CI actually runs, so these
+  // are pinned here (deepEqual-pinned in packages/scheduler/src/ci-coverage-s316-s4-s328-s4.test.ts).
+  'lib/agui/client/thread-history-notices.test.ts',
+  'lib/agui/client/agent-chat-client-notices.test.ts',
+  'components/assistant/agent-chat-notice-render.test.ts',
+  'components/chat/chat-stream-events.test.ts',
+  'lib/assistant/task-progress-signals.test.ts',
+  // TB-363 (Test verdict 5c93eddd, HOLD M21b): the bridge deliver-refusal units
+  // (blocked/discard => false, persist => true) are the M21b killer and must be CI-run.
+  'lib/assistant/task-progress-bridge.test.ts',
+  // TB-363 (verdict 5c93eddd soft N-1): the persist-path agent-pool eviction killer.
+  'lib/chat/registry-chat-session-id-332-s1.test.ts',
 ];
 
 const HARNESS_DIR = 'lib/harness';

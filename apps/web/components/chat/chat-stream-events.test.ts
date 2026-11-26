@@ -96,6 +96,40 @@ describe('agent chat stream renders the reply in the open session', () => {
     assert.equal(users[0]?.id, USER_ID);
   });
 
+  it('A3-live (TB-363 MUST-2): a live task-progress signal frame is NOT a user message and does not dedup the optimistic bubble', () => {
+    // Real Mastra 1.81 accepted-signal shape on the live SSE path: role 'signal', plain TEXT
+    // part + content.metadata.signal + top-level type. isChatUserMessage must say NO (it is
+    // the fan-out notice), so the pane never draws a fake user bubble for it and mergeChatMessage
+    // never drops the user's optimistic bubble by matching the notice text.
+    const noticeRow = {
+      id: 'sig-live-1',
+      role: 'signal',
+      content: {
+        format: 2,
+        parts: [{ type: 'text', text: 'Background task done: "Ship the runbook".' }],
+        metadata: {
+          signal: {
+            id: 'sig-live-1',
+            type: 'reactive',
+            tagName: 'task-progress',
+            attributes: { taskId: 'task-1', runId: 'run-1', stage: 'done', status: 'succeeded' },
+          },
+        },
+      },
+      createdAt: '2026-11-25T14:31:20.021Z',
+    } as ChatMessage;
+    assert.equal(isChatUserMessage(noticeRow), false, 'a task-progress signal row is never a user message');
+    const withUser = mergeChatMessage(sendOptimistic('Background task done: "Ship the runbook".'), noticeRow);
+    assert.equal(withUser.filter((m) => m.id.startsWith('local-')).length, 1, 'the notice must not swallow the optimistic user bubble');
+    // A genuine signal user turn (data-user-message) still counts.
+    assert.equal(isChatUserMessage(userSignal as unknown as ChatMessage), true);
+    // A signal row with a text part but NO task-progress metadata stays a user message (unchanged behaviour).
+    assert.equal(
+      isChatUserMessage({ id: 'sig-plain', role: 'signal', content: { format: 2, parts: [{ type: 'text', text: 'queued user input' }] } } as unknown as ChatMessage),
+      true,
+    );
+  });
+
   it('applies text deltas even without display-state snapshots', () => {
     const deltasOnly = MASTRA_1_75_TURN.filter((e) => e.type !== 'display_state_changed');
     const { messages, running } = playOverWire(sendOptimistic('hi'), deltasOnly);
