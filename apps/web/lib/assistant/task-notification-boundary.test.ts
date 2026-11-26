@@ -1227,15 +1227,16 @@ test('TN-TB363-A11-NO-WAKE-BUSY', { timeout: 120_000 }, async (t) => {
     // Chronological order: the run starts, THEN the task asks the human. (Publishing the ask
     // before `started` would let the S1 resume-supersede rule hide the ask line by design.)
     await publishProgress(progressEvent(f, { stage: 'started', status: 'running', runId: `${toolRun}-b` }));
+    await waitFor('started row during hold', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'started') >= 1, 15_000);
+    // Distinct createdAt ms: S1's resume-supersede compares stored-row order, and same-ms
+    // rows have no stable order — without the gap the ask can sort after `started` and be
+    // (correctly, by that rule) hidden. The gap sits BETWEEN the stores so the two rows'
+    // createdAt values are actually spaced (verdict 5c93eddd N-7).
+    await new Promise((r) => setTimeout(r, 1100));
     await publishProgress(
       progressEvent(f, { stage: 'waiting_on_user', status: 'succeeded', detail: 'ask: pick a vendor', source: 'tool', runId: toolRun }),
     );
     // Rows must land DURING the held turn (ifActive persist), not queue into it or vanish.
-    await waitFor('started row during hold', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'started') >= 1, 15_000);
-    // Distinct createdAt ms: S1's resume-supersede compares stored-row order, and same-ms
-    // rows have no stable order — without the gap the ask can sort after `started` and be
-    // (correctly, by that rule) hidden.
-    await new Promise((r) => setTimeout(r, 1100));
     await waitFor('tool ask row during hold', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'waiting_on_user') >= 1, 15_000);
     const heldCall = f.models.a.callLog.find((c) => c.identity === 'user');
     assert.ok(heldCall, 'held user turn entered the model');

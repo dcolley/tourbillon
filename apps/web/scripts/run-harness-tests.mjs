@@ -53,6 +53,8 @@ export const HARNESS_TEST_FILES = [
   // TB-363 (Test verdict 5c93eddd, HOLD M21b): the bridge deliver-refusal units
   // (blocked/discard => false, persist => true) are the M21b killer and must be CI-run.
   'lib/assistant/task-progress-bridge.test.ts',
+  // TB-363 (verdict 5c93eddd soft N-1): the persist-path agent-pool eviction killer.
+  'lib/chat/registry-chat-session-id-332-s1.test.ts',
 ];
 
 const HARNESS_DIR = 'lib/harness';

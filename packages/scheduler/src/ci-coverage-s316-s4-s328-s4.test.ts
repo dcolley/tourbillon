@@ -169,6 +169,8 @@ describe('S328-S4: CI runs the service-free shared + scheduler + harness unit te
         // TB-363 (Test verdict 5c93eddd, HOLD M21b): the bridge deliver-refusal units are the
         // M21b killer — CI must actually run them (same rule as the MUST-3 pins above).
         'lib/assistant/task-progress-bridge.test.ts',
+        // TB-363 (verdict 5c93eddd soft N-1): persist-path agent-pool eviction killer.
+        'lib/chat/registry-chat-session-id-332-s1.test.ts',
       ]].sort(),
       'web harness suite is exactly these files — add/remove deliberately, in both places',
     );
