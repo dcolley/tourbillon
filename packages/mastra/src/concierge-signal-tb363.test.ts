@@ -31,19 +31,16 @@ test('A2: no detail -> no invented ask (still says reply here)', () => {
   assert.doesNotMatch(payload.contents, /Pick vendor/, 'nothing is invented');
 });
 
-test('MUST-4: persistConciergeSignal requests ifIdle.behavior=persist and resolves only after the memory write', async () => {
+test('MUST-4: persistConciergeSignal requests ifIdle.behavior=persist and resolves even when persisted never settles', async () => {
+  // CONT3 root cause pinned: Mastra settles the idle-persist `persisted` handle only when
+  // its broadcast stream is consumed — awaiting it hangs the bridge forever. The call must
+  // resolve on `accepted` alone. (This test TIMES OUT if anyone re-adds an await.)
   const calls: Array<{ signal: { id?: string }; target: Record<string, unknown> }> = [];
-  let persistedDone = false;
-  const persisted = new Promise<void>((resolve) =>
-    setTimeout(() => {
-      persistedDone = true;
-      resolve();
-    }, 5),
-  );
+  const neverSettled = new Promise<void>(() => {});
   const agent = {
     queueSignal(signal: { id?: string }, target: Record<string, unknown>) {
       calls.push({ signal, target });
-      return { signal: { id: signal.id }, accepted: Promise.resolve({ action: 'persist' }), persisted };
+      return { signal: { id: signal.id }, accepted: Promise.resolve({ action: 'persist' }), persisted: neverSettled };
     },
   };
   const payload = taskProgressSignalPayload({ ...base, stage: 'started', status: 'running' });
@@ -53,6 +50,20 @@ test('MUST-4: persistConciergeSignal requests ifIdle.behavior=persist and resolv
   assert.equal(t.resourceId, 'r1');
   assert.equal(t.threadId, 't1');
   assert.equal(t.ifIdle?.behavior, 'persist', 'no-wake policy rides as ifIdle.behavior=persist (Session drops it — the Agent-level call is the only seam)');
-  assert.ok(persistedDone, 'the call resolves only after Mastra persisted the row — callers treat "returned" as "notice row is in"');
+  assert.equal(settled.action, 'persist');
+});
+
+test('MUST-4: a rejected persisted handle never rejects the persist call (no unhandled crash)', async () => {
+  const agent = {
+    queueSignal(signal: { id?: string }, _target: Record<string, unknown>) {
+      return {
+        signal: { id: signal.id },
+        accepted: Promise.resolve({ action: 'persist' }),
+        persisted: Promise.reject(new Error('memory write failed')),
+      };
+    },
+  };
+  const payload = taskProgressSignalPayload({ ...base, stage: 'done', status: 'succeeded' });
+  const settled = await persistConciergeSignal(agent as never, { resourceId: 'r1', threadId: 't1' }, payload);
   assert.equal(settled.action, 'persist');
 });

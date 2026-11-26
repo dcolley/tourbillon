@@ -83,8 +83,13 @@ export interface PersistSignalAgent {
  * TB-363 (MUST-4, PM Q1): persist one typed signal to the thread WITHOUT waking a model turn
  * (idle thread → `ifIdle.behavior: 'persist'`: the signal row lands in memory, zero runs).
  * Same payload normalization as queueConciergeSignal (tag name, sanitized attributes, clamped
- * contents), same id convention. Resolves after Mastra's routing decision (and the memory
- * write when present) so callers can treat "returned" as "the notice row is in".
+ * contents), same id convention. Resolves after Mastra's ROUTING DECISION (`accepted`) only.
+ * It deliberately does NOT await the `persisted` handle: for the idle-persist path Mastra
+ * settles that promise only when the broadcast stream is consumed (agent-DtdQ6un6.js
+ * #broadcastPersistedSignal — its ReadableStream start() runs on first read), so awaiting it
+ * hangs forever with nobody reading; the runtime itself never awaits it either. The memory
+ * write is issued synchronously by #persistAndBroadcastIdleSignal before the broadcast, so a
+ * resolved `accepted` on the persist path already means the write has been dispatched.
  */
 export async function persistConciergeSignal(
   agent: PersistSignalAgent,
@@ -103,7 +108,9 @@ export async function persistConciergeSignal(
     { ...target, ifIdle: { behavior: 'persist' } },
   );
   const decision = await result.accepted;
-  if (result.persisted) await result.persisted;
+  // TB-363 CONT3 root cause: never await `result.persisted` — see docstring. Swallow its
+  // rejection so the unhandled promise can't crash the bridge subscriber.
+  result.persisted?.catch(() => {});
   return { signalId: result.signal?.id ?? id, action: decision.action };
 }
 
