@@ -39,6 +39,12 @@ export type ComposerRunStatus = 'idle' | 'starting' | 'running' | 'stopping';
 export interface ComposerSendResult {
   ok: boolean;
   error?: string;
+  /**
+   * TB-364 (A9): the client kept the failed message in the thread (greyed bubble + Retry), so the
+   * composer must NOT also restore the text — otherwise the user could send it twice. The toast
+   * then uses the friendly copy carried in `error`.
+   */
+  inThread?: boolean;
 }
 
 type MaybeResult = Promise<ComposerSendResult | void | undefined> | ComposerSendResult | void | undefined;
@@ -208,6 +214,13 @@ export function createComposerController(options: ComposerControllerOptions) {
       result = { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
     if (failed(result)) {
+      if (result.inThread) {
+        // TB-364 (A9): the client kept this message in the thread (greyed bubble + Retry) — the
+        // composer must not also restore it (double source). Toast shows the friendly copy only.
+        set({ submitting: false });
+        notify([{ kind: 'error', message: result.error ?? `Not sent (${mode}).` }]);
+        return false;
+      }
       // Keep anything typed meanwhile in front of what is restored.
       set(
         {

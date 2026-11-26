@@ -52,6 +52,7 @@ import {
   initialAgentChatState,
   liveItemAt,
   markDroppedFollowUps,
+  markRunItemFailed,
   mergeHistoryPage,
   parkedWidgetFromBody,
   releaseParkedWidgets,
@@ -66,6 +67,8 @@ import {
   type AgentChatState,
 } from './chat-state';
 import { chatItemsFromStoredMessages, fetchThreadHistoryPage } from './thread-history';
+import { classifyAgentError, classifySendError } from './send-error';
+import { MAX_QUEUED } from '@/components/assistant/composer/queue';
 import { ASSISTANT_TRANSCRIPT_PAGE_SIZE } from '@/lib/assistant/transcript-page';
 
 export type AguiAction = 'run' | 'steer' | 'followUp' | 'abort' | 'toolApproval' | 'pending' | 'attach';
@@ -118,6 +121,19 @@ export interface AgentChatClientOptions {
    * client can never pin a process.
    */
   noticePollMs?: number;
+  /**
+   * TB-364 (A21/A22/S1/S4): automatic-retry backoff. `delaysMs` replaces the ruled 2 s/5 s/12 s
+   * schedule; `schedule` is the fake clock (tests NEVER sleep for real — it returns a cancel fn);
+   * `random` is the jitter source (default jitter additive ≤ 20 %, never below `Retry-After`);
+   * `log` receives one structured line per AUTOMATIC attempt (attempt n of cap + category, never
+   * message text, never the key).
+   */
+  backoff?: {
+    delaysMs?: number[];
+    schedule?: (fn: () => void, ms: number) => () => void;
+    random?: () => number;
+    log?: (line: string) => void;
+  };
 }
 
 /** TB-363: retry plan for the notice-refresh merge (see AgentChatClientOptions.noticeRefresh). */
@@ -162,7 +178,17 @@ interface OpenRun {
   closedLocally?: 'abort' | 'dispose' | 'superseded';
   /** True when this run was adopted from an `attach` response (CHAT-RECONNECT: a drop re-attaches). */
   attached?: boolean;
+  /** TB-364: the user item this client's send/retry started this run for (failure marking + flush). */
+  ownedItemId?: string;
 }
+
+/** TB-364 (A21, PM Q3 ruled): capped automatic backoff — 2 s / 5 s / 12 s, at most 3 automatic attempts. */
+const DEFAULT_BACKOFF_DELAYS_MS = [2000, 5000, 12000];
+const AUTO_RETRY_CAP = 3;
+/** TB-364 (A21): a `Retry-After` longer than this is stated in the copy instead of scheduled. */
+const MAX_AUTO_RETRY_AFTER_MS = 60_000;
+/** TB-364 (S1): default jitter is additive and ≤ 20 % of the base delay. */
+const DEFAULT_JITTER_FRACTION = 0.2;
 
 type Decision = { mode: 'control'; value: Record<string, unknown> } | { mode: 'run' } | { mode: 'empty' };
 
@@ -220,6 +246,14 @@ export class AgentChatClient {
   private noticeTimer: ReturnType<typeof setInterval> | undefined;
   /** S-3 (#363 softs): hidden-tab poll skip; bound handler kept for removal on dispose. */
   private visibilityHandler: (() => void) | undefined;
+  /** TB-364 (A8): one in-flight Retry attempt per item (concurrent clicks share it). */
+  private readonly retryInFlight = new Map<string, Promise<AgentChatResult>>();
+  /** TB-364 (A31): Retries pressed while a run is open; drained once, in order, when it ends. */
+  private readonly deferredRetries = new Map<string, { providerId: string; modelId: string } | null>();
+  /** TB-364 (A10/A14/A21): items with an automatic attempt already scheduled / refused this session. */
+  private readonly autoScheduled = new Set<string>();
+  /** TB-364 (A22): pending backoff timers, cancelable, all cleared on dispose. */
+  private readonly autoTimers = new Map<string, () => void>();
 
   constructor(opts: AgentChatClientOptions) {
     this.opts = opts;
@@ -292,7 +326,11 @@ export class AgentChatClient {
 
   // ---- actions ----
 
-  /** Starts a run when idle; sends a follow-up while a run is open. */
+  /** Starts a run when idle; sends a follow-up while a run is open.
+   * TB-364: every message carries `forwardedProps.tourbillon.clientMessageId` (generated ONCE here,
+   * stored on the item, reused by every attempt/retry/backoff/reload — never regenerated); a message
+   * sent while an earlier message is failed/retrying is accepted as a WAITING queue entry server-side
+   * and NEVER posted as a run (head-of-line, PM Q1). */
   async send(text: string, opts: AgentChatSendOptions = {}): Promise<AgentChatResult> {
     const message = text.trim();
     if (!message) return this.fail({ kind: 'rejected', message: 'Message is empty' });
@@ -302,25 +340,87 @@ export class AgentChatClient {
     if (this.active) return this.control('followUp', message, extra);
 
     const itemId = this.newId();
+    // A4/A5: the idempotency key belongs to the MESSAGE: generated once here, read back from the
+    // item for every attempt (retry reuses it; a new message gets a different key).
+    const clientMessageId = this.newId();
+    // A12/A13 (PM Q1): a failed or discarded-pending head blocks this message: it joins the queue
+    // as `waiting` via the followUp control (which the endpoint persists and never runs as a turn).
+    const blockingHead = this.state.items.find(
+      (it) => it.kind === 'user' && (it.delivery === 'failed' || it.delivery === 'retrying'),
+    );
+    if (blockingHead) {
+      // A15: the queue holds at most MAX_QUEUED waiting items (server-persisted ones included —
+      // they arrive through history as waiting items); the refusal restores the composer text.
+      const waitingCount = this.state.items.filter(
+        (it) => it.kind === 'user' && (it.delivery === 'waiting' || it.delivery === 'queued'),
+      ).length;
+      if (waitingCount >= MAX_QUEUED) {
+        return this.fail({
+          kind: 'rejected',
+          message: `The queue is full (${MAX_QUEUED} waiting messages). Wait for the current reply or Discard the blocked message.`,
+        });
+      }
+      this.update((s) => ({
+        ...s,
+        items: [
+          ...s.items,
+          {
+            kind: 'user',
+            id: itemId,
+            text: message,
+            mode: 'run',
+            delivery: 'waiting',
+            at: liveItemAt(),
+            clientMessageId,
+          },
+        ],
+      }));
+      const result = await this.control('followUp', message, { ...extra, clientMessageId }, undefined, itemId);
+      if (!result.ok) this.setItem(itemId, { delivery: 'dropped' });
+      else if (result.value?.startedRun === true) this.setItem(itemId, { delivery: 'delivered', mode: 'run' });
+      else this.setItem(itemId, { delivery: 'waiting' });
+      return result;
+    }
+
     // CHAT-RECONNECT: a user-initiated send takes the thread over; drop any re-attach budget.
     this.attachLosses = 0;
     this.update((s) => ({
       ...s,
       status: 'starting',
       error: null,
-      items: [...s.items, { kind: 'user', id: itemId, text: message, mode: 'run', delivery: 'sending', at: liveItemAt() }],
+      currentRunItemId: itemId,
+      items: [
+        ...s.items,
+        { kind: 'user', id: itemId, text: message, mode: 'run', delivery: 'sending', at: liveItemAt(), clientMessageId },
+      ],
     }));
     const start = (async (): Promise<AgentChatResult> => {
       try {
-        const { res, ac, runId } = await this.post('run', message, extra);
-        this.openRun(res, ac, runId, []);
+        const { res, ac, runId } = await this.post('run', message, { ...extra, clientMessageId });
+        this.openRun(res, ac, runId, [], itemId);
         return { ok: true };
       } catch (err) {
         const error = this.toError(err);
-        this.setItem(itemId, { delivery: 'failed' });
-        this.update((s) => ({ ...s, status: 'idle', error }));
+        const failure = classifyAgentError(error);
+        // A9/M4 (PM Q2): the failed message stays in the transcript greyed with the banner, it does
+        // NOT pop back into the composer — except the parked-widget case, which restores.
+        this.setItem(itemId, {
+          delivery: 'failed',
+          failure: { ...failure, ...(error.pendingWidget ? { toolRan: true } : {}) },
+          attempts: 1,
+        });
+        this.update((s) => ({
+          ...s,
+          status: 'idle',
+          currentRunItemId: null,
+          error: { ...error, message: failure.friendly.title },
+        }));
+        // A21: a transient pre-start failure enters the capped automatic schedule (2 s / 5 s / 12 s).
+        this.scheduleAuto(itemId, 1);
         if (error.pendingWidget) this.onParked(error.pendingWidget);
-        return { ok: false, error };
+        // A9: parked-widget refusals restore the composer (nothing was stored); everything else
+        // lives in the thread only (inThread), the composer must not also get the text back.
+        return { ok: false, error: { ...error, inThread: !error.pendingWidget } };
       }
     })();
     this.starting = start;
@@ -334,6 +434,235 @@ export class AgentChatClient {
         this.drainPendingNotice();
       }
     }
+  }
+
+  // ---- TB-364: failed-message retry queue ----
+
+  /**
+   * Retries a failed message IN PLACE: same item id, same `clientMessageId` (A5), attempts
+   * incremented ONCE per real attempt, server-side persisted (A3/A21, cross-device). Manual Retry
+   * always proceeds — the classifier never bars it (A32). Two concurrent Retries on one message
+   * share one in-flight promise (A8); a Retry while a run is open is queued and fires once when
+   * the run ends (A31). A discarded message can never be retried (A32/A36).
+   */
+  retry(
+    itemId: string,
+    opts: { model?: { providerId: string; modelId: string }; auto?: boolean } = {},
+  ): Promise<AgentChatResult> {
+    if (this.disposed) return Promise.resolve(this.fail({ kind: 'rejected', message: 'Chat closed' }));
+    const item = this.state.items.find((it) => it.kind === 'user' && it.id === itemId);
+    if (!item || item.kind !== 'user') return Promise.resolve(this.fail({ kind: 'rejected', message: 'No such message' }));
+    // A32(e)/A35: only a FAILED (or legacy dropped) message can be retried — never a delivered
+    // (already answered) turn, never a discarded one, never a signal/notice item.
+    if (item.delivery !== 'failed' && item.delivery !== 'dropped') {
+      return Promise.resolve(this.fail({ kind: 'rejected', message: `Message is not failed (${item.delivery})` }));
+    }
+    const inflight = this.retryInFlight.get(itemId);
+    if (inflight) return inflight; // A8: concurrent Retry shares the one attempt
+    if (this.active || this.starting) {
+      // A31: queue it; drained when the open run ends (exactly one continuation).
+      this.setItem(itemId, { delivery: 'waiting', nextRetryAt: undefined });
+      this.deferredRetries.set(itemId, opts.model ?? null);
+      return Promise.resolve({ ok: true, value: { accepted: true, deferred: true } });
+    }
+    const key = item.clientMessageId ?? this.newId();
+    this.setItem(itemId, { delivery: 'retrying', nextRetryAt: undefined, clientMessageId: key });
+    const attempts = item.attempts ?? 1;
+    const attempt = (async (): Promise<AgentChatResult> => {
+      // A22: a Retry (manual or the automatic timer firing) clears this message's pending timer.
+      this.cancelAutoTimer(itemId);
+      try {
+        if (opts.auto) {
+          // S4: one structured telemetry line per automatic attempt — no message text, no key.
+          this.opts.backoff?.log?.(
+            `tb364 auto-retry attempt ${Math.min(attempts, AUTO_RETRY_CAP)} of ${AUTO_RETRY_CAP} category=${item.failure?.category ?? 'unknown'}`,
+          );
+        }
+        const { res, ac, runId } = await this.post('run', item.text, {
+          clientMessageId: key,
+          ...(opts.model ? { modelOverride: opts.model } : {}),
+        });
+        this.openRun(res, ac, runId, [], itemId);
+        return { ok: true };
+      } catch (err) {
+        const error = this.toError(err);
+        const failure = classifyAgentError(error);
+        this.setItem(itemId, {
+          delivery: 'failed',
+          failure,
+          attempts: attempts + 1,
+        });
+        this.update((s) => ({ ...s, error: { ...error, message: failure.friendly.title } }));
+        // A21/A18: a failed AUTOMATIC attempt schedules the NEXT automatic attempt (cap 3). A failed
+        // MANUAL retry stays manual (PM Q3: the user chose; do not surprise them with timers).
+        if (opts.auto) this.scheduleAuto(itemId, attempts + 1);
+        return { ok: false, error: { ...error, inThread: true } };
+      } finally {
+        this.retryInFlight.delete(itemId);
+      }
+    })();
+    this.retryInFlight.set(itemId, attempt);
+    return attempt;
+  }
+
+  /**
+   * Discards a failed message (A14/A32/A35/PM Q3): it stays in the thread greyed "Not sent", is
+   * never retried, is excluded from the model context (it was never persisted as a turn), and
+   * unblocks the messages behind it (A36). Persisted server-side so other devices see it too.
+   */
+  async discard(itemId: string): Promise<AgentChatResult> {
+    if (this.disposed) return this.fail({ kind: 'rejected', message: 'Chat closed' });
+    const item = this.state.items.find((it) => it.kind === 'user' && it.id === itemId);
+    if (!item || item.kind !== 'user') return this.fail({ kind: 'rejected', message: 'No such message' });
+    if (item.delivery !== 'failed' && item.delivery !== 'dropped' && item.delivery !== 'retrying') {
+      return this.fail({ kind: 'rejected', message: `Only a failed message can be discarded (${item.delivery})` });
+    }
+    this.cancelAutoTimer(itemId);
+    this.autoScheduled.add(itemId); // A14: a discarded message is never auto-retried, even on reload
+    this.autoTimers.delete(itemId);
+    // A14: discarding while RETRYING must not leave an orphan run — abort the open attempt first.
+    if (item.delivery === 'retrying' && this.active?.ownedItemId === itemId) void this.abort();
+    this.setItem(itemId, { delivery: 'discarded', nextRetryAt: undefined });
+    this.maybeFlushQueue();
+    // Best-effort server-side persist of the discarded marker keyed by clientMessageId (A35
+    // cross-device). Local state is authoritative here; a reload re-reads it from the stored marker.
+    // A message that failed before start was never stored — the 404 is expected and ignored.
+    if (item.clientMessageId) {
+      try {
+        await this.fetchImpl(
+          `/api/assistant/agents/${encodeURIComponent(this.opts.agentId)}/threads/${encodeURIComponent(
+            this.opts.threadId,
+          )}/messages/discard`,
+          {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ clientMessageId: item.clientMessageId }),
+          },
+        );
+      } catch {
+        /* local state stands; the stored marker converges on the next reload */
+      }
+    }
+    return { ok: true, value: { accepted: true } };
+  }
+
+  /** A14 (test seam): whether a message would be auto-retried (never once discarded). */
+  queueRetryable(itemId: string): boolean {
+    const item = this.state.items.find((it) => it.kind === 'user' && it.id === itemId);
+    if (!item || item.kind !== 'user') return false;
+    if (item.delivery !== 'failed' || !item.failure) return false;
+    return this.autoRetryEligible(item, item.attempts ?? 1);
+  }
+
+  /** A11 (test seam): a follow-up must never be `dropped` by a FAILED run — only by a user stop. */
+  followUpDroppedByFailedRun(): boolean {
+    return (
+      this.state.lastOutcome === 'error' &&
+      this.state.items.some((it) => it.kind === 'user' && it.delivery === 'dropped')
+    );
+  }
+
+  /** When the failed head resolves (Retry success or Discard), the first waiting message goes next. */
+  private maybeFlushQueue(): void {
+    if (this.active || this.starting || this.disposed) return;
+    const blocked = this.state.items.some((it) => it.kind === 'user' && (it.delivery === 'failed' || it.delivery === 'retrying'));
+    if (blocked) return;
+    const next = this.state.items.find((it) => it.kind === 'user' && it.delivery === 'waiting');
+    if (!next || next.kind !== 'user') return;
+    void this.retry(next.id);
+  }
+
+  /** Drain deferred Retries one at a time (A31: exactly one continuation when the run ends). */
+  private drainDeferredRetries(): void {
+    if (this.disposed || this.active || this.starting) return;
+    const first = this.deferredRetries.entries().next();
+    if (first.done) return;
+    const [itemId, model] = first.value;
+    this.deferredRetries.delete(itemId);
+    void this.retry(itemId, model ? { model } : {});
+  }
+
+  /**
+   * A21 (PM Q3): schedule the next automatic attempt for a failed message — ONLY for transient
+   * classes (429/5xx/network/timeout), only for the head of the queue (A12/A22), only below the
+   * cap, never after side effects (partial/tool, PM Q7), never for discarded. A `Retry-After`
+   * raises the delay but is never shortened; above 60 s nothing is scheduled (the copy states it).
+   * `usedAttempts` counts attempts already made (1 after the original send).
+   */
+  private scheduleAuto(itemId: string, usedAttempts: number): void {
+    if (this.disposed) return;
+    if (!this.autoRetryEligibleById(itemId, usedAttempts)) return;
+    if (this.autoScheduled.has(itemId) || this.autoTimers.has(itemId)) return;
+    const item = this.state.items.find((it) => it.kind === 'user' && it.id === itemId);
+    if (!item || item.kind !== 'user' || !item.failure) return;
+    const delays = this.opts.backoff?.delaysMs ?? DEFAULT_BACKOFF_DELAYS_MS;
+    const base = delays[Math.min(usedAttempts, delays.length) - 1] ?? delays[delays.length - 1] ?? 2000;
+    let delay = base;
+    const ra = item.failure.retryAfterMs;
+    if (typeof ra === 'number' && ra > 0) {
+      if (ra > MAX_AUTO_RETRY_AFTER_MS) {
+        // A21/A23: state the wait in the copy instead of scheduling it.
+        this.setItem(itemId, { nextRetryAt: undefined });
+        return;
+      }
+      delay = Math.max(delay, ra); // A22: never shortened below Retry-After
+    }
+    // S1: additive jitter ≤ 20 %, injectable and deterministic under `random`.
+    const rand = this.opts.backoff?.random ?? Math.random;
+    delay = Math.round(delay * (1 + Math.min(1, Math.max(0, rand())) * DEFAULT_JITTER_FRACTION));
+    this.autoScheduled.add(itemId);
+    this.setItem(itemId, { nextRetryAt: Date.now() + delay });
+    const schedule =
+      this.opts.backoff?.schedule ??
+      ((fn, ms) => {
+        const t = setTimeout(fn, ms);
+        (t as unknown as { unref?: () => void }).unref?.();
+        return () => clearTimeout(t);
+      });
+    this.autoTimers.set(
+      itemId,
+      schedule(() => {
+        this.autoTimers.delete(itemId);
+        if (this.disposed) return;
+        // S2: a hidden tab never starts an attempt storm — defer while hidden, retry the check later.
+        if (typeof document !== 'undefined' && document.hidden) {
+          this.autoScheduled.delete(itemId);
+          this.scheduleAuto(itemId, usedAttempts);
+          return;
+        }
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+          // S2: offline pauses attempts; the next 'online' event (or user Retry) resumes.
+          this.autoScheduled.delete(itemId);
+          return;
+        }
+        void this.retry(itemId, { auto: true });
+      }, delay),
+    );
+  }
+
+  private cancelAutoTimer(itemId: string): void {
+    const cancel = this.autoTimers.get(itemId);
+    if (cancel) cancel();
+    this.autoTimers.delete(itemId);
+    this.autoScheduled.delete(itemId);
+    this.setItem(itemId, { nextRetryAt: undefined });
+  }
+
+  autoRetryEligibleById(itemId: string, usedAttempts: number): boolean {
+    const item = this.state.items.find((it) => it.kind === 'user' && it.id === itemId);
+    if (!item || item.kind !== 'user') return false;
+    return this.autoRetryEligible(item, usedAttempts);
+  }
+
+  private autoRetryEligible(item: Extract<AgentChatItem, { kind: 'user' }>, usedAttempts: number): boolean {
+    if (item.delivery !== 'failed' || !item.failure) return false;
+    if (!item.failure.retryable) return false; // A18/A37: permanent classes never enter the schedule
+    if (item.failure.partial || item.failure.toolRan) return false; // A20 (PM Q7): side effects bar auto
+    if (usedAttempts > AUTO_RETRY_CAP) return false; // A21/A23: cap 3 automatic attempts
+    if (this.state.items.some((it) => it.kind === 'user' && (it.delivery === 'failed' || it.delivery === 'retrying') && it.id !== item.id)) {
+      return false; // A12/A22 (M27): only the head failed message is auto-retried
+    }
+    return true;
   }
 
   /** Redirects the open run with a new instruction; starts a run when idle. */
@@ -448,10 +777,23 @@ export class AgentChatClient {
     const history = await this.loadHistory();
     if (!this.disposed) {
       void this.attachOpenRun().then((attached) => {
-        if (!attached && !this.disposed) void this.restorePending();
+        if (!attached && !this.disposed) {
+          // TB-364 (A10/A23): a stored `retrying` item whose run cannot be re-attached settles to
+          // failed-manual (attempts preserved); no automatic attempt fires on open (PM Q3).
+          void this.settleAfterResumeIfStale();
+          void this.restorePending();
+        }
       });
     }
     return history;
+  }
+
+  /** TB-364: after a load with no attachable run, a stale `retrying`/`queued` item is settled. */
+  private async settleAfterResumeIfStale(): Promise<void> {
+    if (this.active || this.starting) return;
+    this.update((s) => settleAfterResume(s));
+    // A12/A28: waiting items behind a RESOLVED head run one at a time, in send order.
+    this.maybeFlushQueue();
   }
 
   /**
@@ -661,6 +1003,18 @@ export class AgentChatClient {
     this.reconnectTimer = undefined;
     if (this.noticeTimer) clearInterval(this.noticeTimer);
     this.noticeTimer = undefined;
+    // TB-364 (A22/M26): every backoff timer dies with the client — no request may fire after this.
+    for (const cancel of this.autoTimers.values()) {
+      try {
+        cancel();
+      } catch {
+        /* a cancel must never break dispose */
+      }
+    }
+    this.autoTimers.clear();
+    this.autoScheduled.clear();
+    this.retryInFlight.clear();
+    this.deferredRetries.clear();
     if (this.visibilityHandler && typeof document !== 'undefined') {
       document.removeEventListener('visibilitychange', this.visibilityHandler);
       this.visibilityHandler = undefined;
@@ -754,15 +1108,18 @@ export class AgentChatClient {
     }
   }
 
-  /** Sends a control action; a response that turns out to be a run is adopted as the open run. */
+  /** Sends a control action; a response that turns out to be a run is adopted as the open run.
+   * TB-364: when `existingItemId` is given the message item was already added by the caller
+   * (send-with-blocked-head) and keeps its id and clientMessageId through this control request. */
   private async control(
     action: Exclude<AguiAction, 'run'>,
     message?: string,
     extra?: Record<string, unknown>,
     resume?: AguiResumeInput[],
+    existingItemId?: string,
   ): Promise<AgentChatResult> {
-    const itemId = message !== undefined ? this.newId() : null;
-    if (itemId && message !== undefined) {
+    const itemId = existingItemId ?? (message !== undefined ? this.newId() : null);
+    if (itemId && message !== undefined && !existingItemId) {
       const mode = action === 'steer' ? 'steer' : 'followUp';
       this.update((s) => ({
         ...s,
@@ -795,10 +1152,23 @@ export class AgentChatClient {
     const value = decision.value;
     if (itemId) {
       const accepted = value.accepted === true;
+      // TB-364 (A13): the endpoint kept this message as a waiting queue entry (head-of-line).
+      if (accepted && value.waiting === true) {
+        this.setItem(itemId, { delivery: 'waiting' });
+        return { ok: true, value };
+      }
       const delivery = !accepted ? 'failed' : action === 'steer' ? 'delivered' : 'queued';
       // Already over (the open run ended before this answer arrived): a queued follow-up was dropped
       // by the endpoint and reported on that run; nothing else will report it.
-      this.setItem(itemId, { delivery: delivery === 'queued' && !this.active ? 'dropped' : delivery });
+      // TB-364 (A11): when THIS client saw the run end in error, the follow-ups wait, they are not
+      // dropped — endRun already marked them; do not re-mark here after that outcome.
+      const droppedNow =
+        delivery === 'queued' &&
+        existingItemId === undefined &&
+        !this.active &&
+        this.state.lastOutcome !== 'error' &&
+        this.state.lastOutcome !== 'disconnected';
+      this.setItem(itemId, { delivery: droppedNow ? 'dropped' : delivery });
     }
     return { ok: true, value };
   }
@@ -841,11 +1211,11 @@ export class AgentChatClient {
   }
 
   /** Run response for action `run`: read it as the open run. */
-  private openRun(res: Response, ac: AbortController, runId: string, held: AguiClientEvent[]) {
+  private openRun(res: Response, ac: AbortController, runId: string, held: AguiClientEvent[], ownedItemId?: string) {
     let push: ((e: AguiClientEvent) => void) | null = null;
     const pending: AguiClientEvent[] = [];
     const reading = readAguiEvents(res.body!, (ev) => (push ? push(ev) : pending.push(ev)));
-    push = this.adoptRun(ac, runId, reading, [...held, ...pending]);
+    push = this.adoptRun(ac, runId, reading, [...held, ...pending], false, ownedItemId);
   }
 
   /** Makes a response stream the open run; returns the per-event handler for the rest of it. */
@@ -855,6 +1225,7 @@ export class AgentChatClient {
     reading: Promise<void>,
     first: AguiClientEvent[],
     attached = false,
+    ownedItemId?: string,
   ): (e: AguiClientEvent) => void {
     const previous = this.active;
     if (previous) {
@@ -864,8 +1235,18 @@ export class AgentChatClient {
     }
     const token = ++this.tokens;
     let terminal = false;
-    const run: OpenRun = { token, ac, runId, done: Promise.resolve(), ...(attached ? { attached: true } : {}) };
+    const run: OpenRun = {
+      token,
+      ac,
+      runId,
+      done: Promise.resolve(),
+      ...(attached ? { attached: true } : {}),
+      ...(ownedItemId ? { ownedItemId } : {}),
+    };
     this.active = run;
+    // TB-364 (A1/A29): the reducer marks THIS run's item on RUN_ERROR — never "the last stored
+    // user row", which a notice row can follow.
+    this.update((s) => ({ ...s, currentRunItemId: ownedItemId ?? null }));
     const onEvent = (ev: AguiClientEvent) => {
       if (this.active !== run || terminal || run.closedLocally) return;
       if (ev.type === 'RUN_FINISHED' || ev.type === 'RUN_ERROR') {
@@ -880,8 +1261,22 @@ export class AgentChatClient {
       }
       if (terminal) {
         this.active = null;
+        if (run.ownedItemId) {
+          if (ev.type === 'RUN_ERROR') {
+            // A21: the failed attempt enters the capped automatic schedule (when eligible).
+            const owned = this.state.items.find((it) => it.kind === 'user' && it.id === run.ownedItemId);
+            this.scheduleAuto(run.ownedItemId, owned?.kind === 'user' ? owned.attempts ?? 1 : 1);
+          } else if (ev.type === 'RUN_FINISHED' && (ev as { outcome?: { type?: string } }).outcome?.type !== 'cancelled') {
+            // A3: the failed marker is cleared on a successful attempt; future failures re-schedule.
+            this.autoScheduled.delete(run.ownedItemId);
+            this.autoTimers.delete(run.ownedItemId);
+          }
+        }
         // TB-363 (A3): the run settled — deliver any notice that arrived mid-turn.
         this.drainPendingNotice();
+        // TB-364 (A31): deferred Retries continue now; (A12c) the waiting queue flushes in order.
+        this.drainDeferredRetries();
+        this.maybeFlushQueue();
       }
     };
     run.done = reading.then(
@@ -924,8 +1319,22 @@ export class AgentChatClient {
       // while reconnecting, so a left-over flag would swallow the lost-connection report.
       reconnecting: false,
     }));
+    // TB-364 (A17/A21): a lost stream on a run this client started is a network-class failure of
+    // its message — marked failed in place (attempt counted, partial/tool facts from the items)
+    // and enters the capped automatic schedule.
+    if (run.ownedItemId) {
+      const itemId = run.ownedItemId;
+      this.update((s) =>
+        markRunItemFailed(s, itemId, classifyAgentError({ kind: 'disconnected', message: 'The connection to the agent was lost' })),
+      );
+      const attempts = (this.state.items.find((it) => it.kind === 'user' && it.id === itemId) as { attempts?: number } | undefined)?.attempts ?? 1;
+      this.scheduleAuto(itemId, attempts);
+    }
     // TB-363 (A3d): the run is over by any path — deferred notices still land.
     this.drainPendingNotice();
+    // TB-364 (A31/A12c): deferred Retries and the waiting queue continue over any settle path.
+    this.drainDeferredRetries();
+    this.maybeFlushQueue();
   }
 
   /** Stops listening to the open run stream from this side (STREAM-1: the endpoint run goes on). */

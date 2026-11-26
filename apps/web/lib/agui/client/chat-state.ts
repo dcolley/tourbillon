@@ -4,6 +4,7 @@
  * see agent-chat-client.ts for the run / control state machine and components/assistant/* for the UI.
  */
 import type { AguiClientEvent } from './sse';
+import { classifySendError } from './send-error';
 
 /** CUSTOM event names sent by the endpoint (mirrors AGUI_CUSTOM in lib/agui/session-events.ts). */
 export const AGUI_CLIENT_CUSTOM = {
@@ -31,7 +32,17 @@ export type UserMessageDelivery =
   /** Queued follow-up that will not run (run aborted, failed, ended first, or the stream was lost). */
   | 'dropped'
   /** Refused or failed to send (see `error`). */
-  | 'failed';
+  | 'failed'
+  /**
+   * TB-364: a later user message that waits behind a failed message (head-of-line, PM Q1).
+   * Renders "runs after the current reply" — distinct from `queued` (a live follow-up).
+   */
+  | 'waiting'
+  /** TB-364: a Retry attempt is in flight for this message (same item, same key). */
+  | 'retrying'
+  /** TB-364 (PM Q2): the user chose not to retry; stays in the thread, greyed "Not sent",
+   * never retried, excluded from model context. */
+  | 'discarded';
 
 export type ToolCallStatus =
   | 'streaming_args'
@@ -68,10 +79,50 @@ export interface TaskNoticeItem {
   at?: string;
 }
 
+/**
+ * TB-364: the failure recorded on a user message that failed (server marker or live RUN_ERROR).
+ * Friendly copy only in the default view; `technical` is redacted + bounded (A25/A26).
+ */
+export interface MessageFailure {
+  category: string;
+  retryable: boolean;
+  retryAfterMs?: number;
+  friendly: { title: string; hint: string };
+  /** Redacted, length-bounded raw text; NOT shown unless the details toggle is opened. */
+  technical: string;
+  /** A20/A36: assistant text streamed and/or a tool ran before the failure. */
+  partial?: boolean;
+  /** A20 (PM Q7): a tool already executed — the copy must warn and auto-retry is barred. */
+  toolRan?: boolean;
+  /** A21: the friendly copy should state a >60 s wait instead of retrying now. */
+  longWaitMs?: number;
+  /** A2/A29: the server's own failure marker set this — it wins over any client-side guess. */
+  fromServer?: boolean;
+}
+
 export type AgentChatItem =
-  | { kind: 'user'; id: string; text: string; mode: 'run' | 'followUp' | 'steer'; delivery: UserMessageDelivery; at?: string }
+  | {
+      kind: 'user';
+      id: string;
+      text: string;
+      mode: 'run' | 'followUp' | 'steer';
+      delivery: UserMessageDelivery;
+      at?: string;
+      /**
+       * TB-364 (A5): the idempotency key, generated ONCE per message by the client when the
+       * item is created, reused on every attempt, retry, backoff and reload; stored with the
+       * message server-side. Never regenerated.
+       */
+      clientMessageId?: string;
+      /** TB-364 (A21/A23): failed attempts so far (server marker is the truth across reloads). */
+      attempts?: number;
+      /** TB-364 (A21): epoch ms of the next scheduled automatic attempt, when one is pending. */
+      nextRetryAt?: number;
+      /** TB-364: the classified failure behind a `failed` delivery. */
+      failure?: MessageFailure;
+    }
   | TaskNoticeItem
-  | { kind: 'assistant'; id: string; text: string; streaming: boolean; at?: string }
+  | { kind: 'assistant'; id: string; text: string; streaming: boolean; at?: string; partial?: boolean }
   | { kind: 'reasoning'; id: string; text: string; streaming: boolean; at?: string }
   | {
       kind: 'tool';
@@ -122,6 +173,11 @@ export interface AgentChatError {
   status?: number;
   /** WID-3: a send refused because this chat's session has a run parked on a card (409). */
   pendingWidget?: ParkedWidget;
+  /**
+   * TB-364 (A9): the failed message is kept in the thread (greyed, Retry offered) — the composer
+   * must not restore the text as well. Refusals where nothing was stored leave this unset/false.
+   */
+  inThread?: boolean;
 }
 
 /**
@@ -175,6 +231,13 @@ export interface AgentChatState {
   reconnecting?: boolean;
   /** CHAT-PAGE-1: the transcript pager (older stored messages not shown yet). */
   history: TranscriptHistoryState;
+  /**
+   * TB-364 (A1/A29): the user item the CURRENT client-started run is answering (set by
+   * send()/retry(), cleared when the run settles). Failure marking keys off this — never off
+   * "the last stored user row has no reply", so a notice row after it cannot cause a false
+   * failure (A29).
+   */
+  currentRunItemId?: string | null;
   /**
    * CHAT-PAGE-1 (B1): ids of the user messages shown from the store (any page, seeded or merged).
    * These are never this client's own pending sends, so `mergeHistory` does not text-match them
@@ -261,12 +324,6 @@ function restartItem(state: AgentChatState, item: AgentChatItem): AgentChatState
   return { ...state, items };
 }
 
-function closeStreaming(items: AgentChatItem[]): AgentChatItem[] {
-  return items.map((it) =>
-    (it.kind === 'assistant' || it.kind === 'reasoning') && it.streaming ? { ...it, streaming: false } : it,
-  );
-}
-
 function setDelivery(
   items: AgentChatItem[],
   pick: (it: Extract<AgentChatItem, { kind: 'user' }>) => boolean,
@@ -303,10 +360,16 @@ export function endRun(
   error: AgentChatError | null = null,
 ): AgentChatState {
   // Follow-ups still queued: on success they ran inside this run (the endpoint reports the ones that
-  // did not, before RUN_FINISHED); otherwise they will not run. Messages still 'sending' are settled
-  // by the client when their control answer arrives.
-  const queuedTo: UserMessageDelivery = outcome === 'success' || outcome === 'interrupt' ? 'delivered' : 'dropped';
-  let items = closeStreaming(state.items);
+  // did not, before RUN_FINISHED). TB-364 (A11): when the run ENDED IN ERROR, WAS LOST, or was
+  // cancelled without the user asking, they are NOT dropped — they wait (persisted, in order) and
+  // run once the failed head resolves. A user-requested Stop keeps today's `dropped` report.
+  const queuedTo: UserMessageDelivery =
+    outcome === 'success' || outcome === 'interrupt'
+      ? 'delivered'
+      : outcome === 'cancelled' && state.status === 'stopping'
+        ? 'dropped'
+        : 'waiting';
+  let items = closeStreaming(state.items, outcome);
   items = setDelivery(items, (it) => it.delivery === 'queued', queuedTo);
   // A cancelled run the user did not stop (no Stop pressed, so not 'stopping') is reported.
   const unrequestedCancel: AgentChatError | null =
@@ -315,6 +378,7 @@ export function endRun(
     ...state,
     status: 'idle',
     items,
+    currentRunItemId: null,
     pendingTools: outcome === 'interrupt' ? state.pendingTools : [],
     runtimeQueuedFollowUps: 0,
     droppedThisRun: 0,
@@ -324,6 +388,55 @@ export function endRun(
       (outcome === 'cancelled' || outcome === 'success' || outcome === 'interrupt' ? null : state.error),
     lastOutcome: outcome,
   };
+}
+
+function closeStreaming(items: AgentChatItem[], outcome: AgentRunOutcome = 'success'): AgentChatItem[] {
+  const failed = outcome === 'error' || outcome === 'disconnected';
+  return items.map((it) => {
+    if (it.kind !== 'assistant' || !it.streaming) {
+      if (it.kind === 'reasoning' && it.streaming) return { ...it, streaming: false };
+      return it;
+    }
+    // A36 (PM Q8): a run that failed leaves its partial assistant output in place, marked
+    // incomplete — it is never removed, collapsed, or replaced by the retry.
+    return failed && it.text ? { ...it, streaming: false, partial: true } : { ...it, streaming: false };
+  });
+}
+
+/**
+ * TB-364 (A1/M1): the run errored — mark the user message it was answering `failed` (in place,
+ * same item, same id), with the classified failure. Only the item the run was started for is
+ * marked (no heuristics over "last user row", A29): `ownedItemId` comes from the client's own
+ * `send()`/`retry()` bookkeeping. Partial-turn safety (A20): assistant text streamed after the
+ * item or a tool call ran sets `partial`/`toolRan`.
+ */
+export function markRunItemFailed(
+  state: AgentChatState,
+  ownedItemId: string | null | undefined,
+  failure: MessageFailure,
+): AgentChatState {
+  if (!ownedItemId) return state;
+  const at = state.items.findIndex((it) => it.kind === 'user' && it.id === ownedItemId);
+  if (at < 0) return state;
+  let partial = false;
+  let toolRan = false;
+  for (let i = at + 1; i < state.items.length; i++) {
+    const it = state.items[i];
+    if (it.kind === 'user' || it.kind === 'notice') break;
+    if (it.kind === 'assistant' && it.text.trim()) partial = true;
+    if (it.kind === 'tool' && it.status !== 'streaming_args') toolRan = true;
+  }
+  const items = state.items.slice();
+  const mine = items[at] as Extract<AgentChatItem, { kind: 'user' }>;
+  items[at] = {
+    ...mine,
+    delivery: 'failed',
+    nextRetryAt: undefined,
+    // A21/A23: each real failed attempt counts once (server marker is the truth across reloads).
+    attempts: (mine.attempts ?? 0) + 1,
+    failure: { ...failure, partial: partial || undefined, toolRan: toolRan || undefined },
+  };
+  return { ...state, items };
 }
 
 /** Applies one event of the open run stream. */
@@ -420,11 +533,22 @@ export function applyRunEvent(state: AgentChatState, event: AguiClientEvent): Ag
         outcome.type === 'cancelled' ? 'cancelled' : outcome.type === 'interrupt' ? 'interrupt' : 'success';
       return endRun(state, type);
     }
-    case 'RUN_ERROR':
-      return endRun(state, 'error', {
+    case 'RUN_ERROR': {
+      // TB-364 (A1/M1): the run's own message becomes `failed` in place with the classified
+      // failure (server-classified fields honoured, A19); the banner shows the FRIENDLY title
+      // only — the raw provider text never reaches state.error (A24).
+      const message = str(event.message) ?? 'Agent run failed';
+      const classified = classifySendError({
         kind: 'run',
-        message: str(event.message) ?? 'Agent run failed',
+        message,
+        code: str(event.code),
+        ...(typeof event.category === 'string' ? { category: event.category } : {}),
+        ...(typeof event.retryable === 'boolean' ? { retryable: event.retryable } : {}),
+        ...(typeof event.retryAfterMs === 'number' ? { retryAfterMs: event.retryAfterMs } : {}),
       });
+      const marked = markRunItemFailed(state, state.currentRunItemId, classified);
+      return endRun(marked, 'error', { kind: 'run', message: classified.friendly.title });
+    }
     default:
       // STATE_*, MESSAGES_SNAPSHOT, STEP_*, REASONING_START/END: not used by this endpoint's client yet.
       return state;
@@ -594,18 +718,50 @@ export function mergeHistory(state: AgentChatState, history: readonly AgentChatI
   const inHistory = new Set(history.map(itemKey));
   /** Persisted user messages not shown yet, by text: candidates for this client's own sends. */
   const fresh = new Map<string, number>();
+  /** TB-364 (A6): stored copies of this client's keyed sends, matched by KEY, never by text. */
+  const freshByKey = new Set<string>();
+  /** TB-364 (A29): texts of unkeyed stored user rows that have a real reply after them. */
+  const repliedStoredTexts = new Set<string>();
+  for (let i = 0; i < history.length; i++) {
+    const row = history[i];
+    if (row?.kind !== 'user' || row.clientMessageId) continue;
+    for (let j = i + 1; j < history.length; j++) {
+      const next = history[j];
+      if (!next || next.kind === 'notice') continue;
+      if (next.kind === 'assistant' || next.kind === 'tool') repliedStoredTexts.add(row.text);
+      break;
+    }
+  }
   for (const it of history) {
-    if (it.kind === 'user' && !local.has(itemKey(it))) fresh.set(it.text, (fresh.get(it.text) ?? 0) + 1);
+    if (it.kind !== 'user' || local.has(itemKey(it))) continue;
+    fresh.set(it.text, (fresh.get(it.text) ?? 0) + 1);
+    if (it.clientMessageId) freshByKey.add(it.clientMessageId);
   }
   const stored = state.storedUserIds;
   const rest: AgentChatItem[] = [];
   for (const it of state.items) {
     if (inHistory.has(itemKey(it))) continue;
-    if (it.kind === 'user' && it.delivery !== 'failed' && !stored?.has(it.id)) {
-      const n = fresh.get(it.text) ?? 0;
-      if (n > 0) {
-        fresh.set(it.text, n - 1);
-        continue;
+    if (it.kind === 'user' && !stored?.has(it.id)) {
+      if (it.clientMessageId) {
+        // A6/M8: the server kept this key (client timed out but the server stored/ran the turn):
+        // the stored copy wins — a failed local item collapses to the stored one, not a second
+        // bubble. Keyed items NEVER text-match (M9: two different messages with the same text
+        // and different keys must stay two bubbles).
+        if (freshByKey.has(it.clientMessageId)) continue;
+        // A29: a stored unkeyed copy of this text HAS a real reply and the failure was only the
+        // client's own stream-loss guess (no server marker) — the row is delivered; drop the
+        // local failure bubble.
+        if (
+          (it.delivery === 'failed' || it.delivery === 'retrying') &&
+          it.failure?.fromServer !== true &&
+          repliedStoredTexts.has(it.text)
+        ) continue;
+      } else if (it.delivery !== 'failed') {
+        const n = fresh.get(it.text) ?? 0;
+        if (n > 0) {
+          fresh.set(it.text, n - 1);
+          continue;
+        }
       }
     }
     rest.push(it);
@@ -665,11 +821,23 @@ export function mergeHistoryPage(
  */
 export function settleAfterResume(state: AgentChatState): AgentChatState {
   const lost = state.error?.kind === 'disconnected';
-  if (state.status === 'idle' && !lost && !state.items.some((it) => it.kind === 'user' && it.delivery === 'queued')) {
+  const hasOpen = state.items.some(
+    (it) => it.kind === 'user' && (it.delivery === 'queued' || it.delivery === 'retrying'),
+  );
+  if (state.status === 'idle' && !lost && !hasOpen) {
     return state;
   }
   let items = closeStreaming(state.items);
-  items = setDelivery(items, (it) => it.delivery === 'queued', 'dropped');
+  // TB-364 (A11): queued follow-ups are only dropped by a user-requested Stop; after a lost/failed
+  // run they WAIT (persisted, in order) and run when the head resolves. A retry whose server run
+  // died while the page was away returns to `failed` with its attempts preserved (A10/A23).
+  const stopRequested = state.status === 'stopping';
+  items = items.map((it) => {
+    if (it.kind !== 'user') return it;
+    if (it.delivery === 'queued') return { ...it, delivery: stopRequested ? ('dropped' as const) : ('waiting' as const) };
+    if (it.delivery === 'retrying') return { ...it, delivery: 'failed' as const, nextRetryAt: undefined };
+    return it;
+  });
   return {
     ...state,
     status: 'idle',

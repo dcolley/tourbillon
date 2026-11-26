@@ -9,7 +9,8 @@
  * Messages are Mastra v2 memory messages (`content.parts`: text, reasoning, tool-invocation, …).
  */
 import { stripDashboardContext } from '@/lib/chat/dashboard-context';
-import type { AgentChatItem } from './chat-state';
+import type { AgentChatItem, MessageFailure } from './chat-state';
+import { classifySendError } from './send-error';
 import { AguiThreadBootstrapError, isUsableAguiId } from './thread-bootstrap';
 
 export interface StoredThreadMessage {
@@ -148,6 +149,85 @@ function assistantItems(message: StoredThreadMessage): AgentChatItem[] {
 const isUserTurn = (m: StoredThreadMessage) => m.role === 'user' || m.role === 'signal';
 
 /**
+ * TB-364 (A2/A28/A35, R2): the stored failure marker on a user row — written server-side under
+ * `content.metadata` (message-level metadata, the same bag #367 reads `metadata.signal` from):
+ * { clientMessageId, tb364State: failed|discarded|waiting|running, tb364Category, tb364Attempts,
+ * tb364Detail (REDACTED — A25b), tb364RetryAfterMs, tb364Partial, tb364ToolRan }. Failure detection
+ * is BY MARKER ONLY (A29): a row without one renders delivered, no "no reply" heuristic. The
+ * classifier re-applies the redactor defensively, so a legacy raw string still renders redacted.
+ */
+interface StoredTb364Marker {
+  clientMessageId?: string;
+  state?: 'failed' | 'discarded' | 'waiting' | 'running';
+  category?: string;
+  retryable?: boolean;
+  attempts?: number;
+  technical?: string;
+  retryAfterMs?: number;
+  partial?: boolean;
+  toolRan?: boolean;
+}
+
+function tb364Marker(message: StoredThreadMessage): StoredTb364Marker | null {
+  const meta = (message.content as { metadata?: Record<string, unknown> } | null | undefined)?.metadata;
+  if (!meta) return null;
+  const bag = (meta.tb364 && typeof meta.tb364 === 'object' ? meta.tb364 : meta) as Record<string, unknown>;
+  const clientMessageId = typeof bag.clientMessageId === 'string' && bag.clientMessageId ? bag.clientMessageId : undefined;
+  const rawState = typeof bag.tb364State === 'string' ? bag.tb364State : undefined;
+  const state =
+    rawState === 'failed' || rawState === 'discarded' || rawState === 'waiting' || rawState === 'running'
+      ? rawState
+      : undefined;
+  if (!clientMessageId && !state) return null;
+  const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+  return {
+    ...(clientMessageId ? { clientMessageId } : {}),
+    ...(state ? { state } : {}),
+    ...(typeof bag.tb364Category === 'string' ? { category: bag.tb364Category } : {}),
+    ...(typeof bag.tb364Retryable === 'boolean' ? { retryable: bag.tb364Retryable } : {}),
+    ...(num(bag.tb364Attempts) !== undefined ? { attempts: num(bag.tb364Attempts) } : {}),
+    ...(typeof bag.tb364Detail === 'string' ? { technical: bag.tb364Detail } : {}),
+    ...(num(bag.tb364RetryAfterMs) !== undefined ? { retryAfterMs: num(bag.tb364RetryAfterMs) } : {}),
+    ...(bag.tb364Partial === true ? { partial: true } : {}),
+    ...(bag.tb364ToolRan === true ? { toolRan: true } : {}),
+  };
+}
+
+/** TB-364: stored user row (+ marker) → the user chat item, in its stored delivery state. */
+function tb364UserItem(message: StoredThreadMessage, id: string, text: string): AgentChatItem {
+  const marker = tb364Marker(message);
+  const base = { kind: 'user' as const, id, text, mode: 'run' as const };
+  if (!marker) return { ...base, delivery: 'delivered' };
+  const keyed = marker.clientMessageId ? { clientMessageId: marker.clientMessageId } : {};
+  switch (marker.state) {
+    case 'failed': {
+      const classified = classifySendError({
+        kind: 'run',
+        ...(marker.technical ? { message: marker.technical } : {}),
+        ...(marker.category ? { category: marker.category } : {}),
+        ...(typeof marker.retryable === 'boolean' ? { retryable: marker.retryable } : {}),
+        ...(marker.retryAfterMs !== undefined ? { retryAfterMs: marker.retryAfterMs } : {}),
+      });
+      const failure: MessageFailure = {
+        ...classified,
+        fromServer: true,
+        ...(marker.partial ? { partial: true } : {}),
+        ...(marker.toolRan ? { toolRan: true } : {}),
+      };
+      return { ...base, ...keyed, delivery: 'failed', failure, ...(marker.attempts !== undefined ? { attempts: marker.attempts } : {}) };
+    }
+    case 'discarded':
+      return { ...base, ...keyed, delivery: 'discarded' };
+    case 'waiting':
+      return { ...base, ...keyed, delivery: 'waiting' };
+    case 'running':
+      return { ...base, ...keyed, delivery: 'retrying' };
+    default:
+      return { ...base, ...keyed, delivery: 'delivered' };
+  }
+}
+
+/**
  * TB-363 (R1): a persisted task-progress signal (role 'signal') is the runner/tool fan-out's
  * notice row — Mastra stores it as a `data-signal` part (or, in raw memory rows, under
  * `content.metadata.signal`) with tagName 'task-progress' and attributes {taskId, runId,
@@ -270,7 +350,7 @@ export function chatItemsFromStoredMessages(messages: readonly StoredThreadMessa
         push(notice, message.createdAt);
       } else {
         const text = stripDashboardContext(userText(message));
-        if (text.trim()) push({ kind: 'user', id: message.id, text, mode: 'run', delivery: 'delivered' }, message.createdAt);
+        if (text.trim()) push(tb364UserItem(message, message.id, text), message.createdAt);
       }
     } else if (message.role === 'assistant') {
       for (const item of assistantItems(message)) push(item, message.createdAt);

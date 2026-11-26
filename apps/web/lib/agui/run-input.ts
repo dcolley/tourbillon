@@ -27,6 +27,21 @@ export const tourbillonPropsSchema = z
     context: chatDashboardContextSchema,
     toolCallId: z.string().min(1).max(200).optional(),
     approved: z.boolean().optional(),
+    /**
+     * TB-364 (A5/A7, wire name normative): the client-generated idempotency key, one per user
+     * message, reused on every attempt/retry/reload. Charset/length as `idSchema`; malformed or
+     * oversized is a 400 (A7(f)). Clients GENERATE keys ≥ 8 chars (A5 — the client's obligation).
+     * Strictness otherwise unchanged (§8).
+     */
+    clientMessageId: idSchema.optional(),
+    /**
+     * TB-364 (A4/A34, wire name normative): "Retry on another model" — this retry only, never
+     * persisted into the thread's choice. Tenant-checked per request (PRV-1) by the route.
+     */
+    modelOverride: z
+      .object({ providerId: idSchema, modelId: idSchema })
+      .strict()
+      .optional(),
   })
   .strict();
 
