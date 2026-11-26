@@ -223,7 +223,7 @@ export async function getOrCreateChatController(
  * TB-363 (MUST-4, PM Q1): cached chat Agent for the persist-without-wake notice path.
  * Mastra's AgentController SESSION cannot express `ifIdle.behavior: 'persist'` (its
  * queueSignal option bag drops ifIdle — agent-controller-…js:5723), but the PUBLIC
- * Agent-level `Agent.queueSignal(signal, target)` does (agent/agent.d.ts:1460). This builds
+ * Agent-level `Agent.sendSignal(signal, target)` honours `ifIdle.behavior` (agent/agent.d.ts:1474). This builds
  * the SAME Agent the chat controller gets (createChatAgentWithSkills is the controller's own
  * factory, chat-controller.ts:454) and caches it per agent id. The model wiring is irrelevant
  * on the persist path (no run starts); memory/storage are the shared chat PostgresStore, so

@@ -342,6 +342,14 @@ test('parse: the tool-sourced marker round-trips and nothing else sets it', () =
   assert.equal('source' in runner, false, 'unknown origins never set the marker (defaults to wake)');
 });
 
+test('parse: an out-of-union status rejects the event (TN gotcha: stage carries the ask, status stays succeeded|running|failed|skipped)', () => {
+  assert.equal(
+    parseTaskProgressMessage(JSON.stringify({ type: 'chat_task_progress', ...event(), stage: 'waiting_on_user', status: 'waiting_on_user' })),
+    null,
+    'status is the product-result union, never the stage name — events with status=waiting_on_user must be dropped, not delivered',
+  );
+});
+
 // ─── S2: single-consumer claim across web replicas ──────────────────────────
 
 test('claim: every replica sees the event; only the first claimer delivers', async () => {

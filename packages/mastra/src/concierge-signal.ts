@@ -69,7 +69,12 @@ export interface PersistSignalTarget {
 }
 
 export interface PersistSignalAgent {
-  queueSignal(
+  /**
+   * TB-363 CONT4: `Agent.sendSignal`, NOT `queueSignal`. `queueSignal` hard-codes
+   * `ifIdle.behavior:'wake'` on the idle path (agent-DtdQ6un6.js:43747), so it can never
+   * persist-without-wake; `sendSignal` honours `ifIdle.behavior` (agent/agent.d.ts:1474).
+   */
+  sendSignal(
     signal: { type: 'reactive'; tagName?: string; attributes?: ConciergeSignalAttributes; contents: string; id?: string },
     target: { resourceId: string; threadId: string; ifIdle?: { behavior: 'wake' | 'persist' | 'discard' } },
   ): {
@@ -97,7 +102,7 @@ export async function persistConciergeSignal(
   input: ConciergeSignalInput,
 ): Promise<{ signalId: string; action: string }> {
   const id = input.id ?? `sig-${randomId()}`;
-  const result = agent.queueSignal(
+  const result = agent.sendSignal(
     {
       type: 'reactive',
       tagName: input.tagName ?? TASK_PROGRESS_TAG_NAME,

@@ -1177,7 +1177,7 @@ test('TN-TB363-A11-NO-WAKE', { timeout: 90_000 }, async (t) => {
     await publishProgress(
       progressEvent(f, {
         stage: 'waiting_on_user',
-        status: 'waiting_on_user',
+        status: 'succeeded',
         detail: 'ask: pick a vendor',
         source: 'tool',
       }),

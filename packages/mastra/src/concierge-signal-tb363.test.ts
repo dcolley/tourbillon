@@ -38,14 +38,14 @@ test('MUST-4: persistConciergeSignal requests ifIdle.behavior=persist and resolv
   const calls: Array<{ signal: { id?: string }; target: Record<string, unknown> }> = [];
   const neverSettled = new Promise<void>(() => {});
   const agent = {
-    queueSignal(signal: { id?: string }, target: Record<string, unknown>) {
+    sendSignal(signal: { id?: string }, target: Record<string, unknown>) {
       calls.push({ signal, target });
       return { signal: { id: signal.id }, accepted: Promise.resolve({ action: 'persist' }), persisted: neverSettled };
     },
   };
   const payload = taskProgressSignalPayload({ ...base, stage: 'started', status: 'running' });
   const settled = await persistConciergeSignal(agent as never, { resourceId: 'r1', threadId: 't1' }, payload);
-  assert.equal(calls.length, 1, 'exactly one Agent-level queueSignal');
+  assert.equal(calls.length, 1, 'exactly one Agent-level sendSignal');
   const t = calls[0]!.target as { resourceId?: string; threadId?: string; ifIdle?: { behavior?: string } };
   assert.equal(t.resourceId, 'r1');
   assert.equal(t.threadId, 't1');
@@ -55,7 +55,7 @@ test('MUST-4: persistConciergeSignal requests ifIdle.behavior=persist and resolv
 
 test('MUST-4: a rejected persisted handle never rejects the persist call (no unhandled crash)', async () => {
   const agent = {
-    queueSignal(signal: { id?: string }, _target: Record<string, unknown>) {
+    sendSignal(signal: { id?: string }, _target: Record<string, unknown>) {
       return {
         signal: { id: signal.id },
         accepted: Promise.resolve({ action: 'persist' }),
