@@ -50,6 +50,13 @@ test('MUST-4: persistConciergeSignal requests ifIdle.behavior=persist and resolv
   assert.equal(t.resourceId, 'r1');
   assert.equal(t.threadId, 't1');
   assert.equal(t.ifIdle?.behavior, 'persist', 'no-wake policy rides as ifIdle.behavior=persist (Session drops it — the Agent-level call is the only seam)');
+  // MUST-6: ifActive MUST also be persist — Mastra's default 'deliver' queues the signal INTO
+  // the in-flight same-agent run (mid-turn second reply) or returns 'blocked' cross-agent.
+  assert.equal(
+    (t as { ifActive?: { behavior?: string } }).ifActive?.behavior,
+    'persist',
+    'busy-origin no-wake policy rides as ifActive.behavior=persist (default deliver would drain mid-turn / block cross-agent)',
+  );
   assert.equal(settled.action, 'persist');
 });
 

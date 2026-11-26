@@ -99,6 +99,7 @@ interface Harness {
   deps: TaskProgressBridgeDeps<TaskProgressAgentRecord>;
   delivered: Array<{ agentId: string; threadId: string; payload: TaskProgressSignalPayload; wake?: boolean }>;
   claimed: string[];
+  unclaimed: string[];
   warnings: Array<{ msg: string; data?: Record<string, unknown> }>;
 }
 
@@ -114,10 +115,12 @@ function harness(opts: {
 } = {}): Harness {
   const delivered: Harness['delivered'] = [];
   const claimed: string[] = [];
+  const unclaimed: string[] = [];
   const warnings: Harness['warnings'] = [];
   return {
     delivered,
     claimed,
+    unclaimed,
     warnings,
     deps: {
       getAgent: async () =>
@@ -139,6 +142,11 @@ function harness(opts: {
         if (opts.claimStore.has(key)) return false;
         opts.claimStore.add(key);
         return true;
+      },
+      unclaim: async (event) => {
+        const key = taskProgressClaimKey(event);
+        unclaimed.push(key);
+        opts.claimStore?.delete(key);
       },
       log: { warn: (msg, data) => warnings.push({ msg, data }) },
     },
@@ -384,6 +392,46 @@ test('claim: the key pins (companyId, chatTaskId, runId, stage) — stable acros
     taskProgressClaimKey(event({ stage: 'done', status: 'succeeded' })),
     taskProgressClaimKey(event()),
   );
+});
+
+// TB-363 MUST-7 (PM N-3): the runner's substantive go-between reply must not collapse into
+// the concierge tool's status-line notice claim; status-only settles must still collapse.
+test('claim: a runner-origin substantive detail gets its own :reply segment; tool and status-only keep the bare identity', () => {
+  const bare = 'concierge-signal:seen:company-1:task-1:run-1:waiting_on_user';
+  const ask = 'ask: pick vendor A or B';
+  assert.equal(
+    taskProgressClaimKey(event({ stage: 'waiting_on_user', status: 'succeeded', detail: ask, source: 'tool' as never })),
+    bare,
+    'a tool status line claims the BARE identity (collapse target)',
+  );
+  assert.equal(
+    taskProgressClaimKey(event({ stage: 'waiting_on_user', status: 'succeeded' })),
+    bare,
+    'a status-only runner settle collapses with the tool notice (A11b)',
+  );
+  const runnerReply = taskProgressClaimKey(event({ stage: 'waiting_on_user', status: 'succeeded', detail: ask }));
+  assert.match(runnerReply, /:reply:ask: pick vendor A or B$/, 'a substantive runner reply claims its OWN key (survives collapse => wake fires)');
+  assert.notEqual(runnerReply, bare, 'M22: drop-reply-unconditionally (substantive treated as status-only) makes this equal and is caught here');
+  assert.equal(runnerReply, taskProgressClaimKey(event({ stage: 'waiting_on_user', status: 'succeeded', detail: `  ${ask}  ` })), 'stable, trimmed');
+});
+
+// TB-363 MUST-6: a persist-path delivery that landed nothing must release the claim; the
+// wake path keeps its claim-consumed semantics.
+test('MUST-6: a failed persist-path deliver releases the claim for retry; a wake-path failure does not', async () => {
+  const storeA = new Set<string>();
+  const hA = harness({ deliverOk: false, claimStore: storeA });
+  const toolEvent = event({ stage: 'waiting_on_user', status: 'succeeded', detail: 'ask: which branch?', source: 'tool' as never });
+  assert.equal(await handleTaskProgressEvent(hA.deps, toolEvent), 'skipped:no-session');
+  assert.deepEqual(hA.unclaimed, [taskProgressClaimKey(toolEvent)], 'claim released so a redelivery can retry');
+  assert.equal(storeA.size, 0, 'store empty again — the SAME event can be claimed and delivered on redelivery');
+  assert.ok(hA.warnings.some((w) => String(w.msg).includes('claim released')), 'the release is logged');
+
+  const storeB = new Set<string>();
+  const hB = harness({ deliverOk: false, claimStore: storeB });
+  const wakeEvent = event({ stage: 'waiting_on_user', status: 'succeeded' });
+  assert.equal(await handleTaskProgressEvent(hB.deps, wakeEvent), 'skipped:no-session');
+  assert.deepEqual(hB.unclaimed, [], 'wake-path semantics unchanged: claim stays consumed');
+  assert.equal(storeB.size, 1);
 });
 
 test('claim: claimed before any db work (getAgent untouched on duplicate)', async () => {

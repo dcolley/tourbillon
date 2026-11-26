@@ -109,7 +109,17 @@ export function parseTaskProgressMessage(raw: string): TaskProgressEvent | null 
  * (companyId, chatTaskId, runId, stage) identifies exactly one notification.
  */
 export function taskProgressClaimKey(event: TaskProgressEvent): string {
-  return `concierge-signal:seen:${event.companyId}:${event.chatTaskId}:${event.runId}:${event.stage}`;
+  // TB-363 MUST-7 (PM N-3): a runner-origin settle that carries SUBSTANTIVE detail (a real
+  // ask, an error reason, a result summary) is the runner's go-between REPLY content, not a
+  // status echo. It must survive collapse against the concierge tool's status-line notice, so
+  // the wake (and its content item) still fires — the ONE notice stays deduped by stage.
+  // Status-only settles keep the bare identity and still collapse with the tool emit (A11b).
+  const substantive =
+    event.source !== 'tool' && typeof event.detail === 'string' && event.detail.trim().length > 0;
+  return (
+    `concierge-signal:seen:${event.companyId}:${event.chatTaskId}:${event.runId}:${event.stage}` +
+    (substantive ? `:reply:${event.detail!.trim().slice(0, 120)}` : '')
+  );
 }
 
 /** The agent-row slice the bridge needs (kept minimal for tests). */
@@ -154,6 +164,11 @@ export interface TaskProgressBridgeDeps<A extends TaskProgressAgentRecord> {
    * another replica already claimed this transition, skip. Called before any db work.
    */
   claimEvent(event: TaskProgressEvent): Promise<boolean>;
+  /**
+   * TB-363 MUST-6: release a claim when a persist-path delivery landed nothing, so a
+   * redelivery can retry instead of being swallowed as 'skipped:duplicate'.
+   */
+  unclaim?(event: TaskProgressEvent): Promise<void>;
   /**
    * TB-363 (R2): called after a SUCCESSFUL delivery ('queued') with the resolved origin
    * threadId — the bridge publishes a `chat_task_notice` poke on `sse:{companyId}` so an open
@@ -238,7 +253,21 @@ export async function handleTaskProgressEvent<A extends TaskProgressAgentRecord>
   // LINE only; runner-origin reactive stages keep the wake (the #339 go-between turn).
   const wake = event.source !== 'tool' && event.stage !== 'started';
   const delivered = await deps.deliver(agent, origin.threadId, payload, wake);
-  if (!delivered) return 'skipped:no-session';
+  if (!delivered) {
+    // TB-363 MUST-6: on the persist (no-wake) path a false deliver means NOTHING landed
+    // (no chat agent, or Mastra refused with 'blocked'/'discard'). Release the claim so a
+    // redelivery can retry — the claim must not be consumed for a notice that never landed.
+    // The wake path keeps its historical claim-consumed semantics.
+    if (!wake) {
+      await deps.unclaim?.(event);
+      deps.log?.warn('[concierge-signal] task progress persist failed — claim released', {
+        agentId: event.agentId,
+        chatTaskId: event.chatTaskId,
+        claimConsumed: false,
+      });
+    }
+    return 'skipped:no-session';
+  }
   // TB-363 (R2): poke the open page AFTER the queue entry is in (never on a skip). A notify
   // error is surfaced (S3) but never turns a delivered notice into a failure.
   try {

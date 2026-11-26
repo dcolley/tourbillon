@@ -76,7 +76,12 @@ export interface PersistSignalAgent {
    */
   sendSignal(
     signal: { type: 'reactive'; tagName?: string; attributes?: ConciergeSignalAttributes; contents: string; id?: string },
-    target: { resourceId: string; threadId: string; ifIdle?: { behavior: 'wake' | 'persist' | 'discard' } },
+    target: {
+      resourceId: string;
+      threadId: string;
+      ifIdle?: { behavior: 'wake' | 'persist' | 'discard' };
+      ifActive?: { behavior: 'wake' | 'persist' | 'discard' };
+    },
   ): {
     accepted: Promise<{ action: string; runId?: string }>;
     signal?: { id?: string };
@@ -102,6 +107,13 @@ export async function persistConciergeSignal(
   input: ConciergeSignalInput,
 ): Promise<{ signalId: string; action: string }> {
   const id = input.id ?? `sig-${randomId()}`;
+  // TB-363 MUST-6: ifActive must be 'persist' too. Mastra's sendSignal defaults ifActive to
+  // 'deliver' (agent-DtdQ6un6.js, #sendSignal: `activeBehavior = target.ifActive?.behavior ?? "deliver"`),
+  // which routes a same-agent busy thread through #queueForActiveRun — the notice would drain
+  // INTO the in-flight turn (a second reply mid-turn), and a cross-agent busy run returns
+  // accepted.action 'blocked' (thread-blocked) with nothing persisted. Tool moves always land
+  // while the origin thread is busy, so 'persist' on both sides of the idle policy is the
+  // no-wake path: the row lands, zero runs start.
   const result = agent.sendSignal(
     {
       type: 'reactive',
@@ -110,7 +122,7 @@ export async function persistConciergeSignal(
       contents: clampContents(input.contents),
       id,
     },
-    { ...target, ifIdle: { behavior: 'persist' } },
+    { ...target, ifIdle: { behavior: 'persist' }, ifActive: { behavior: 'persist' } },
   );
   const decision = await result.accepted;
   // TB-363 CONT3 root cause: never await `result.persisted` — see docstring. Swallow its

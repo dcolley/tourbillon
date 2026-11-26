@@ -294,10 +294,13 @@ export function createDeliver(deps: DeliverDeps) {
   ): Promise<boolean> {
     const resourceId = await deps.resourceId(agent);
     if (!wake) {
-      // TB-363 (MUST-4, PM Q1): status LINE only — Agent-level queueSignal with
-      // ifIdle.behavior:'persist': idle thread => the row lands in memory, ZERO runs; busy
-      // origin => Mastra's default ifActive 'deliver' (queued behind that run). Never here:
-      // a model wake. No agent instance available => fail loud, never wake instead.
+      // TB-363 (MUST-4, PM Q1; MUST-6): status LINE only — Agent-level sendSignal with BOTH
+      // ifIdle.behavior:'persist' AND ifActive.behavior:'persist'. Idle thread => the row
+      // lands, ZERO runs. Busy origin (the main tool path) => persisted the same way; with
+      // Mastra's default ifActive 'deliver' the signal would instead be queued into the
+      // in-flight turn (a second reply) or come back 'blocked' on a cross-agent run.
+      // A non-persist decision ('blocked'/'discard') means NOTHING landed: return false so
+      // the claim is released and a redelivery can retry — never silently true.
       const chatAgent = await deps.getChatAgent?.(agent);
       if (!chatAgent) {
         console.warn('[concierge-signal] task progress notice persist skipped (no chat agent)', {
@@ -306,7 +309,15 @@ export function createDeliver(deps: DeliverDeps) {
         });
         return false;
       }
-      await persistConciergeSignal(chatAgent, { resourceId, threadId }, payload);
+      const { action } = await persistConciergeSignal(chatAgent, { resourceId, threadId }, payload);
+      if (action !== 'persist' && action !== 'accepted' && action !== 'queued') {
+        console.warn('[concierge-signal] task progress notice persist refused — claim released for retry', {
+          agentId: agent.id,
+          threadId,
+          action,
+        });
+        return false;
+      }
       return true;
     }
     const scope = aguiSessionScope(agent);
@@ -401,11 +412,14 @@ export const realDeliver = createDeliver({
 export interface ClaimClient {
   /** true = first claimer (deliver); false = already claimed by another replica (skip). */
   claim(key: string, ttlSeconds: number): Promise<boolean>;
+  /** TB-363 MUST-6: release a claim (a persist-path delivery landed nothing). */
+  unclaim?(key: string): Promise<void>;
 }
 
 /** The ioredis slice the claim client drives (softs S11: fake-IORedis in tests). */
 export interface RedisClaimCommands {
   set(key: string, value: string, mode: 'EX', ttlSeconds: number, nx: 'NX'): Promise<string | null>;
+  del?(key: string): Promise<number> | number;
 }
 
 export function redisClaimClient(client: RedisClaimCommands = new IORedis(process.env.REDIS_URL ?? 'redis://localhost:6379', {
@@ -424,6 +438,17 @@ export function redisClaimClient(client: RedisClaimCommands = new IORedis(proces
           error: err instanceof Error ? err.message : String(err),
         });
         return true;
+      }
+    },
+    async unclaim(key) {
+      try {
+        await client.del?.(key);
+      } catch (err) {
+        // Best-effort: the TTL still bounds the leaked claim; log, never throw.
+        console.warn('[concierge-signal] claim release failed (TTL will bound it)', {
+          key,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     },
   };
@@ -446,6 +471,7 @@ export function createOwnedRedisClaimClient(
   const claimClient = redisClaimClient(client);
   return {
     claim: (key, ttlSeconds) => claimClient.claim(key, ttlSeconds),
+    unclaim: claimClient.unclaim ? (key) => claimClient.unclaim!(key) : undefined,
     quit: async () => {
       await client.quit();
     },
@@ -489,6 +515,11 @@ export function buildTaskProgressBridgeDeps(wiring: TaskProgressBridgeWiring = {
     deliver: wiring.deliver ?? realDeliver,
     notify: wiring.notify ?? ((event, threadId) => publishTaskProgressNoticeOnSse(event, threadId)),
     claimEvent: (event) => claimClient.claim(taskProgressClaimKey(event), TASK_PROGRESS_CLAIM_TTL_SECONDS),
+    unclaim: claimClient.unclaim
+      ? async (event) => {
+          await claimClient.unclaim!(taskProgressClaimKey(event));
+        }
+      : undefined,
     log: wiring.log ?? { warn: (msg, data) => console.warn(msg, data ?? '') },
   };
 }
