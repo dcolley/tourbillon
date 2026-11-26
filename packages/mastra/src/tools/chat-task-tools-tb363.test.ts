@@ -167,6 +167,44 @@ describe('TB-363 A11a — tool-driven transitions publish exactly one progress e
       'the silent-loss path is surfaced via console.warn (S3 / M16)',
     );
   });
+
+  const chatContext = { requestId: 'tb363-req-2', agentId: AG, companyId: CO, runId: `chat-${AG}` };
+
+  it('S-1: two real waiting_on_user moves in one chat session (constant runId) get DISTINCT per-transition ids', async () => {
+    await seedTask('in_progress');
+    await updateMyTaskTool.execute!(
+      { id: 'tb363-task', status: 'waiting_on_user', ask: 'Pick vendor A or B' },
+      { requestContext: chatContext } as never,
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    await updateMyTaskTool.execute!(
+      { id: 'tb363-task', status: 'in_progress' },
+      { requestContext: chatContext } as never,
+    );
+    await updateMyTaskTool.execute!(
+      { id: 'tb363-task', status: 'waiting_on_user', ask: 'Confirm the PO number' },
+      { requestContext: chatContext } as never,
+    );
+    const asks = published.filter((e) => e.stage === 'waiting_on_user');
+    assert.equal(asks.length, 2, 'both asks published');
+    assert.ok(asks.every((e) => e.runId.startsWith('tool:')), 'live-chat transitions carry per-transition ids, not the constant session runId');
+    assert.notEqual(asks[0]!.runId, asks[1]!.runId, 'S-1: the second ask does NOT collapse into the first claim (900 s TTL)');
+    assert.ok(!asks.some((e) => e.runId === `chat-${AG}`), 'the constant chat runId never rides as the transition identity');
+  });
+
+  it('S-1 control: a Run Task wake context keeps the EXACT runner runId so tool emit + runner settle collapse (A11b)', async () => {
+    await seedTask('in_progress');
+    await completeMyTaskTool.execute!({ id: 'tb363-task' }, { requestContext: context } as never);
+    assert.equal(published.length, 1);
+    assert.equal(published[0]!.runId, 'run-7', 'runner-origin identity stays exact');
+  });
+
+  it('MUST-4: every tool-published transition carries source:tool (the bridge persists it without a wake)', async () => {
+    await seedTask('in_progress');
+    await completeMyTaskTool.execute!({ id: 'tb363-task' }, { requestContext: chatContext } as never);
+    assert.equal(published.length, 1);
+    assert.equal(published[0]!.source, 'tool', 'the bridge keys its no-wake policy on this marker');
+  });
 });
 
 describe('TB-363 A11 — the publish seam itself', () => {

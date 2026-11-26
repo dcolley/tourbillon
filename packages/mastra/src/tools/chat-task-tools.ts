@@ -172,7 +172,17 @@ function publishToolTransition(
   requestContext: unknown,
 ): void {
   if (task.status !== 'done' && task.status !== 'waiting_on_user') return;
-  const runId = extractToolRuntimeContext(requestContext).runId ?? 'tool';
+  const run = extractToolRuntimeContext(requestContext).runId ?? null;
+  // S-1 (#363 fix round): a live-chat turn carries the CONSTANT session runId
+  // `chat-<agentId>` (registry.ts:294), so under the bare identity two real moves of the same
+  // task (e.g. a second waiting_on_user within the 900 s claim TTL) collapse to one claim and
+  // the second notice is swallowed. A Run Task wake carries the RUNNER's runId — there the
+  // identity must stay EXACT so the tool emit collapses with the runner settle (A11b). So the
+  // per-transition id rides only on the live-chat path, keyed on the row's updatedAt (stable
+  // under tool retry, distinct across transitions).
+  const runnerRun = run != null && !run.startsWith('chat-') ? run : null;
+  const transitionId = task.updatedAt instanceof Date ? String(task.updatedAt.getTime()) : String(task.updatedAt ?? '');
+  const runId = runnerRun ?? (transitionId ? `tool:${transitionId}` : 'tool');
   publishChatTaskProgress({
     companyId: scope.companyId,
     agentId: scope.agentId,
@@ -181,6 +191,8 @@ function publishToolTransition(
     stage: task.status === 'done' ? 'done' : 'waiting_on_user',
     status: 'succeeded',
     title: task.title,
+    // MUST-4 (PM Q1): tool-sourced notices persist as a status line, never a model wake.
+    source: 'tool',
     ...(task.status === 'waiting_on_user'
       ? { detail: extractChatTaskNoteLine(task.notes, CHAT_TASK_ASK_PREFIX) ?? undefined }
       : {}),
