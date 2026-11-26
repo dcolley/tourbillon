@@ -276,7 +276,23 @@ export function chatItemsFromStoredMessages(messages: readonly StoredThreadMessa
       for (const item of assistantItems(message)) push(item, message.createdAt);
     }
   }
-  return items;
+  // TB-363 (S1 / contract M17): a needs-input ask stops being the CURRENT ask once the human
+  // answered and the task RESUMED — a later `started` (pending→running) notice for the same
+  // taskId. The superseded waiting_on_user notice is not presented. A done/failed without an
+  // intervening resume does NOT resolve the ask (the contract scopes resolution to the resume).
+  const progressedAt = new Map<string, number>();
+  items.forEach((it, i) => {
+    const n = it as { kind?: string; noticeKind?: string; stage?: string; taskId?: string };
+    if (n.kind === 'notice' && n.noticeKind === 'task-progress' && n.taskId && n.stage === 'started') {
+      progressedAt.set(n.taskId, i);
+    }
+  });
+  const resolved = items.filter((it, i) => {
+    const n = it as { kind?: string; noticeKind?: string; stage?: string; taskId?: string };
+    return !(n.kind === 'notice' && n.noticeKind === 'task-progress' && n.stage === 'waiting_on_user'
+      && n.taskId && (progressedAt.get(n.taskId) ?? -1) > i);
+  });
+  return resolved;
 }
 
 export interface ThreadHistoryPage {

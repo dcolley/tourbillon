@@ -244,4 +244,38 @@ describe('TB-363 task-progress notices in stored transcript', () => {
     assert.equal(n[0]!.stage, 'waiting_on_user');
     assert.equal(items.filter((i) => i.kind === 'user').length, 0);
   });
+
+  it('S1: a waiting_on_user notice is superseded once the same task moves on (later started/done), while a lone ask stays', () => {
+    // ask -> human answered -> task progressed: the ask is no longer the current ask.
+    const resolved = notices(chatItemsFromStoredMessages([
+      signalRow('sig-s1-ask', 'waiting_on_user', { contents: 'Background task "T" is waiting on the human: which branch? reply here' }),
+      signalRow('sig-s1-start', 'started', { title: 'T' }),
+      signalRow('sig-s1-done', 'done', { title: 'T' }),
+    ]));
+    assert.deepEqual(resolved.map((n) => n.stage), ['started', 'done'], 'superseded ask is not presented as current');
+
+    // Re-ask pattern: the ask AFTER the progress is still current and must survive.
+    const reask = notices(chatItemsFromStoredMessages([
+      signalRow('sig-s1-a1', 'waiting_on_user', { contents: 'Background task "T" is waiting on the human: first?' }),
+      signalRow('sig-s1-b', 'started', { title: 'T' }),
+      signalRow('sig-s1-a2', 'waiting_on_user', { contents: 'Background task "T" is waiting on the human: second?' }),
+    ]));
+    assert.deepEqual(reask.map((n) => n.stage), ['started', 'waiting_on_user'], 'the live ask after progress stays visible');
+    assert.match(reask[1]!.text, /second\?/, 'the current ask is the LATEST one');
+
+    // Control: a task that never progressed keeps its ask (M17 mutant that resolves
+    // unconditionally, or never resolves, fails one of these three cases).
+    const lone = notices(chatItemsFromStoredMessages([
+      signalRow('sig-s1-lone', 'waiting_on_user', { contents: 'Background task "T" is waiting on the human: still here?' }),
+    ]));
+    assert.equal(lone.length, 1);
+    assert.equal(lone[0]!.stage, 'waiting_on_user');
+
+    // Different taskIds never supersede each other.
+    const other = notices(chatItemsFromStoredMessages([
+      signalRow('sig-s1-x', 'waiting_on_user', { taskId: 'task-x', contents: 'Background task "X" is waiting on the human: a? reply here' }),
+      signalRow('sig-s1-y', 'done', { taskId: 'task-y', title: 'Y' }),
+    ]));
+    assert.deepEqual(other.map((n) => n.stage), ['waiting_on_user', 'done'], 'supersede is per-task');
+  });
 });
