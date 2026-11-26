@@ -436,6 +436,15 @@ export function markRunItemFailed(
     attempts: (mine.attempts ?? 0) + 1,
     failure: { ...failure, partial: partial || undefined, toolRan: toolRan || undefined },
   };
+  // A36 (PM Q8): the incomplete attempt STAYS and is marked — every assistant item of the failed
+  // turn gets partial: true (rendered data-partial="true", accessible name "incomplete").
+  if (partial) {
+    for (let i = at + 1; i < items.length; i++) {
+      const it = items[i];
+      if (it.kind === 'user' || it.kind === 'notice') break;
+      if (it.kind === 'assistant' && !it.partial) items[i] = { ...it, partial: true };
+    }
+  }
   return { ...state, items };
 }
 

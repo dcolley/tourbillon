@@ -166,6 +166,13 @@ export function useAgentChat({ agentId, threadId, tools, onRunEvent, onThreadOpe
 
   const send = useCallback((text: string, opts?: AgentChatSendOptions) => client?.send(text, opts), [client]);
   const steer = useCallback((text: string, opts?: AgentChatSendOptions) => client?.steer(text, opts), [client]);
+  // TB-364: failed-message actions (Retry / Retry on another model / Discard).
+  const retry = useCallback(
+    (itemId: string, model?: { providerId: string; modelId: string }) =>
+      client?.retry(itemId, model ? { model } : {}),
+    [client],
+  );
+  const discard = useCallback((itemId: string) => client?.discard(itemId), [client]);
   const abort = useCallback(() => client?.abort(), [client]);
   const respondToTool = useCallback(
     (toolCallId: string, approved: boolean) => client?.respondToTool(toolCallId, approved),
@@ -187,6 +194,8 @@ export function useAgentChat({ agentId, threadId, tools, onRunEvent, onThreadOpe
     state,
     send,
     steer,
+    retry,
+    discard,
     abort,
     respondToTool,
     answerWidget,

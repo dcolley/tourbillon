@@ -123,10 +123,26 @@ export function classifyRunFailure(input: {
   streamedText?: boolean;
   toolStarted?: boolean;
 }): Tb364RunFailure {
+  // A19: engine text often carries the status in words or digits; derive one when the caller did
+  // not pass it, so 5xx/429 become retryable instead of falling into permanent `unknown`.
+  const text = input.engineText ?? '';
+  let status = input.status;
+  if (status === undefined) {
+    const numeric = /\b(?:status(?:\s+code)?|HTTP)\s*[:=]?\s*([1-5]\d\d)\b|(?:upstream|server|gateway)\s+([45]\d\d)\b/i.exec(text);
+    const digit = numeric?.[1] ?? numeric?.[2];
+    if (digit !== undefined) status = Number(digit);
+    else if (/too many requests|rate.?limit/i.test(text)) status = 429;
+    else if (/internal server error/i.test(text)) status = 500;
+    else if (/bad gateway/i.test(text)) status = 502;
+    else if (/service unavailable/i.test(text)) status = 503;
+    else if (/gateway time(?:d)? ?out/i.test(text)) status = 504;
+  }
   const classified: ClassifiedSendError = classifySendError({
-    kind: 'run',
-    message: input.engineText ?? 'Agent run failed',
-    ...(input.status !== undefined ? { status: input.status } : {}),
+    // The seed pins classifySendError's table: status decides only for kind http/conflict.
+    // Server-side, a derived/known status IS an HTTP-level fact — pass it as such.
+    kind: status !== undefined ? 'http' : 'run',
+    message: text || 'Agent run failed',
+    ...(status !== undefined ? { status } : {}),
     ...(input.retryAfterMs !== undefined ? { retryAfterMs: input.retryAfterMs } : {}),
   });
   // A20 (PM Q7): after side effects the AUTOMATIC schedule is barred regardless of class.

@@ -77,7 +77,125 @@ const DELIVERY_LABEL: Partial<Record<UserMessageDelivery, string>> = {
   queued: 'Queued — runs after the current reply',
   dropped: 'Not sent — the run ended first',
   failed: 'Not sent',
+  // TB-364 (A12/A14/A35): distinct labels — waiting is NOT queued ("runs after the current reply")
+  // and discarded stays visible, greyed, "Not sent", never retried.
+  waiting: 'Waiting — runs once the failed message above is resolved',
+  retrying: 'Retrying…',
+  discarded: 'Not sent',
 };
+
+/** TB-364 (A25/A26): technical details are bounded; a visible marker says text was cut. */
+const TECHNICAL_RENDER_MAX = 2000;
+
+/**
+ * TB-364 (A24/A25/A20/A21, S3): the failure block under a failed user message. Friendly copy only
+ * by default; Retry / Retry on another model / Discard; the technical toggle inserts
+ * [data-error-details] into the DOM only when open (NEVER a native <details>) with aria-expanded
+ * and aria-controls. The raw text is rendered as React TEXT (escaped) and bounded (A25/A26).
+ * `detailsOpen` is the static-markup test seam.
+ */
+export function FailureBlock(props: {
+  itemId: string;
+  failure: NonNullable<Extract<AgentChatItem, { kind: 'user' }>['failure']>;
+  attempts?: number;
+  nextRetryAt?: number;
+  retrying?: boolean;
+  detailsOpen?: boolean;
+  modelChoices?: { providerId: string; modelId: string; label?: string }[];
+  onRetry?: (itemId: string) => void;
+  onDiscard?: (itemId: string) => void;
+  onRetryOtherModel?: (itemId: string, model: { providerId: string; modelId: string }) => void;
+}) {
+  const { itemId, failure, attempts, nextRetryAt, retrying } = props;
+  const [open, setOpen] = React.useState(props.detailsOpen === true);
+  const [menu, setMenu] = React.useState(false);
+  const detailsId = `tb364-details-${itemId}`;
+  const technical = failure.technical ?? '';
+  const shown = technical.length > TECHNICAL_RENDER_MAX ? `${technical.slice(0, TECHNICAL_RENDER_MAX)}… [truncated]` : technical;
+  const autoCopy =
+    failure.longWaitMs !== undefined
+      ? 'Waiting for the service to recover — this can take a while.'
+      : retrying && nextRetryAt !== undefined
+        ? `Retrying in ${Math.max(0, Math.ceil((nextRetryAt - Date.now()) / 1000))} s${attempts !== undefined ? ` (${Math.min(attempts, 3)} of 3)` : ''}`
+        : null;
+  return (
+    <div
+      className="w-[80%] rounded-md border border-destructive/40 bg-destructive/5 p-2 text-xs"
+      data-item="user-failure"
+      role="alert"
+      aria-live="polite"
+    >
+      <p className="font-medium">{failure.friendly.title}</p>
+      <p className="text-muted-foreground">{failure.friendly.hint}</p>
+      {failure.toolRan ? (
+        <p className="text-amber-700 dark:text-amber-400" data-warning="tool-ran">
+          A tool already ran during this attempt — retrying may repeat its effect.
+        </p>
+      ) : failure.partial ? (
+        <p className="text-muted-foreground" data-warning="partial">
+          Part of the reply arrived before the failure — the incomplete output is kept below.
+        </p>
+      ) : null}
+      {autoCopy ? <p className="text-muted-foreground">{autoCopy}</p> : null}
+      <div className="mt-1 flex flex-wrap items-center gap-1">
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          data-action="retry"
+          disabled={retrying || !props.onRetry}
+          onClick={() => props.onRetry?.(itemId)}
+        >
+          {retrying ? 'Retrying…' : 'Retry'}
+        </Button>
+        {props.onRetryOtherModel ? (
+          <Button type="button" size="sm" variant="outline" data-action="retry-other-model" disabled={retrying} onClick={() => setMenu((m) => !m)}>
+            Retry on another model
+          </Button>
+        ) : null}
+        {props.onDiscard ? (
+          <Button type="button" size="sm" variant="ghost" data-action="discard" onClick={() => props.onDiscard?.(itemId)}>
+            Discard
+          </Button>
+        ) : null}
+        <button
+          type="button"
+          data-error-details-toggle=""
+          aria-expanded={open}
+          aria-controls={detailsId}
+          className="ml-auto underline decoration-dotted text-muted-foreground"
+          onClick={() => setOpen((o) => !o)}
+        >
+          {open ? 'Hide technical details' : 'Technical details'}
+        </button>
+      </div>
+      {menu && props.onRetryOtherModel ? (
+        <div className="mt-1 flex flex-col gap-1" data-retry-model-menu="">
+          {(props.modelChoices ?? []).map((m) => (
+            <button
+              key={`${m.providerId}/${m.modelId}`}
+              type="button"
+              data-retry-model={`${m.providerId}/${m.modelId}`}
+              className="text-left underline"
+              onClick={() => {
+                setMenu(false);
+                props.onRetryOtherModel?.(itemId, { providerId: m.providerId, modelId: m.modelId });
+              }}
+            >
+              {m.label ?? m.modelId}
+            </button>
+          ))}
+          {(props.modelChoices ?? []).length === 0 ? <span className="text-muted-foreground">No other models available.</span> : null}
+        </div>
+      ) : null}
+      {open ? (
+        <pre id={detailsId} data-error-details="" className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all text-[11px] text-muted-foreground">
+          {shown}
+        </pre>
+      ) : null}
+    </div>
+  );
+}
 
 const STATUS_LABEL: Record<AgentChatState['status'], string> = {
   idle: 'Idle',
@@ -119,23 +237,73 @@ interface WidgetHandlers {
  * controls, no raw HTML). Plain tool calls render as tool-state cards (tool-state-card.tsx); tool
  * calls with a registered widget still go through the widget registry.
  */
-function ItemView({ item, widgets }: { item: AgentChatItem; widgets: WidgetHandlers }) {
+/** TB-364: the failed-message actions threaded into ItemView. */
+interface UserItemActions {
+  onRetry?: (itemId: string) => void;
+  onDiscard?: (itemId: string) => void;
+  onRetryOtherModel?: (itemId: string, model: { providerId: string; modelId: string }) => void;
+  modelChoices?: { providerId: string; modelId: string; label?: string }[];
+  detailsOpenByDefault?: boolean;
+}
+
+function ItemView({
+  item,
+  widgets,
+  userActions,
+}: {
+  item: AgentChatItem;
+  widgets: WidgetHandlers;
+  userActions?: UserItemActions;
+}) {
   switch (item.kind) {
-    case 'user':
+    case 'user': {
+      // TB-364: failed and discarded messages stay in the transcript, greyed (A9/A14/A35).
+      const grey = item.delivery === 'failed' || item.delivery === 'discarded';
       return (
-        <div className="flex flex-col items-end gap-1" data-item="user" data-delivery={item.delivery} data-mode={item.mode}>
-          <div className="max-w-[80%] whitespace-pre-wrap rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground">
+        <div
+          className={`flex flex-col items-end gap-1 ${grey ? 'opacity-60 grayscale' : ''}`}
+          data-item="user"
+          data-delivery={item.delivery}
+          data-mode={item.mode}
+        >
+          <div
+            className={`max-w-[80%] whitespace-pre-wrap rounded-lg px-3 py-2 text-sm ${
+              grey ? 'bg-muted text-muted-foreground' : 'bg-primary text-primary-foreground'
+            }`}
+          >
             {item.text}
           </div>
           {item.mode === 'steer' && <span className="text-xs text-muted-foreground">Steer</span>}
           {DELIVERY_LABEL[item.delivery] && (
             <span className="text-xs text-muted-foreground">{DELIVERY_LABEL[item.delivery]}</span>
           )}
+          {(item.delivery === 'failed' || item.delivery === 'retrying') && item.failure ? (
+            <FailureBlock
+              itemId={item.id}
+              failure={item.failure}
+              attempts={item.attempts}
+              retrying={item.delivery === 'retrying'}
+              nextRetryAt={item.nextRetryAt}
+              detailsOpen={userActions?.detailsOpenByDefault}
+              modelChoices={userActions?.modelChoices}
+              onRetry={userActions?.onRetry}
+              onDiscard={userActions?.onDiscard}
+              onRetryOtherModel={userActions?.onRetryOtherModel}
+            />
+          ) : null}
         </div>
       );
+    }
     case 'assistant':
+      // A36 (PM Q8): an incomplete attempt stays and is marked (data-partial + accessible name).
       return (
-        <div className="text-sm" data-item="assistant" data-streaming={item.streaming ? 'true' : 'false'}>
+        <div
+          className="text-sm"
+          data-item="assistant"
+          data-streaming={item.streaming ? 'true' : 'false'}
+          data-partial={item.partial ? 'true' : undefined}
+          aria-label={item.partial ? 'Assistant reply (incomplete)' : undefined}
+        >
           <ChatMarkdown text={item.text} />
         </div>
       );
@@ -214,6 +382,14 @@ export interface AgentChatViewProps {
   onStop: () => void;
   onToolDecision: (toolCallId: string, approved: boolean) => void;
   onDismissError: () => void;
+  /** TB-364: failed-message actions (read-only display without them). */
+  onRetryUser?: (itemId: string) => void;
+  onDiscardUser?: (itemId: string) => void;
+  onRetryUserOnModel?: (itemId: string, model: { providerId: string; modelId: string }) => void;
+  /** TB-364 (A34): models offered by "Retry on another model" (enabled for the company). */
+  retryModelChoices?: { providerId: string; modelId: string; label?: string }[];
+  /** TB-364 (A25 test seam): render failure technical details open in static markup. */
+  detailsOpenByDefault?: boolean;
   /** OBS-2: footer under each finished assistant message (reactions), by Mastra message id. */
   assistantFooter?: (messageId: string) => React.ReactNode;
   /** CHAT-5: the thread's model picker, shown in the composer footer. */
@@ -470,6 +646,14 @@ export function AgentChatView(props: AgentChatViewProps) {
       ? dmTranscriptChips(props.dms, { threadStartedAt: props.dmThreadStartedAt })
       : [];
   const rows = mergeDmTranscriptTimeline(state.items, chips);
+  // TB-364: failed-message actions threaded to ItemView (read-only when none are provided).
+  const userActions: UserItemActions = {
+    onRetry: props.onRetryUser,
+    onDiscard: props.onDiscardUser,
+    onRetryOtherModel: props.onRetryUserOnModel,
+    modelChoices: props.retryModelChoices,
+    detailsOpenByDefault: props.detailsOpenByDefault,
+  };
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-agent-chat data-status={state.status}>
       {props.dmActivity || props.chatMenu || props.avatar ? (
@@ -511,7 +695,7 @@ export function AgentChatView(props: AgentChatViewProps) {
           const footerFor = footers?.get(row.item.id);
           return (
             <React.Fragment key={row.key}>
-              <ItemView item={row.item} widgets={widgets} />
+              <ItemView item={row.item} widgets={widgets} userActions={userActions} />
               {footerFor && props.assistantFooter?.(footerFor)}
             </React.Fragment>
           );
@@ -759,6 +943,40 @@ export function AgentChat({
   const openDm = (peerId?: string, messageId?: string) => {
     setDmModal((s) => ({ open: true, seq: s.seq + 1, ...(peerId ? { peerId } : {}), ...(messageId ? { messageId } : {}) }));
   };
+  // TB-364 (A34): models offered by "Retry on another model" — the current provider's enabled
+  // models, fetched lazily while a failed message is on screen (server refuses disabled providers).
+  const [retryModelChoices, setRetryModelChoices] = React.useState<
+    { providerId: string; modelId: string; label?: string }[]
+  >([]);
+  const hasFailedUser = chat.state.items.some((it) => it.kind === 'user' && it.delivery === 'failed');
+  const retryChoicesThreadId = chat.thread?.threadId;
+  React.useEffect(() => {
+    if (!hasFailedUser || !retryChoicesThreadId) return;
+    let live = true;
+    void (async () => {
+      try {
+        const cur = (await fetch(
+          `/api/assistant/agents/${encodeURIComponent(agentId)}/threads/${encodeURIComponent(retryChoicesThreadId)}/model`,
+        ).then((r) => (r.ok ? r.json() : null))) as { model?: { providerId?: string } } | null;
+        const providerId = cur?.model?.providerId;
+        if (!providerId) return;
+        const body = (await fetch(`/api/models?providerId=${encodeURIComponent(providerId)}`).then((r) =>
+          r.ok ? r.json() : null,
+        )) as { models?: { id?: string; name?: string }[] } | null;
+        const models = Array.isArray(body?.models) ? body!.models!.filter((m) => typeof m.id === 'string') : [];
+        if (live) {
+          setRetryModelChoices(
+            models.slice(0, 12).map((m) => ({ providerId, modelId: m.id as string, label: m.name ?? m.id })),
+          );
+        }
+      } catch {
+        /* the menu shows "No other models available." */
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [hasFailedUser, retryChoicesThreadId, agentId]);
   return (
     <>
       <AgentChatView
@@ -774,6 +992,10 @@ export function AgentChat({
       onWidgetAnswer={(id, answer) => void chat.answerWidget(id, answer)}
       onWidgetDismiss={(id) => void chat.dismissWidget(id)}
       onDismissError={chat.clearError}
+      onRetryUser={(id) => void chat.retry(id)}
+      onDiscardUser={(id) => void chat.discard(id)}
+      onRetryUserOnModel={(id, model) => void chat.retry(id, model)}
+      retryModelChoices={retryModelChoices}
       sendKeyMode={sendKeyMode}
       avatar={avatar}
       agentName={agentName}

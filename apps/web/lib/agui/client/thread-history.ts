@@ -417,6 +417,17 @@ export function chatItemsFromStoredMessages(messages: readonly StoredThreadMessa
       items.length = 0;
       items.push(...collapsed);
     }
+    // A36 (reload): an assistant row stored under a failed-with-partial marker is the incomplete
+    // attempt — mark it so it renders data-partial="true" and is never removed or overwritten.
+    for (let i = 0; i < items.length; i++) {
+      const u = items[i];
+      if (u.kind !== 'user' || u.delivery !== 'failed' || !u.failure?.partial) continue;
+      for (let j = i + 1; j < items.length; j++) {
+        const it = items[j];
+        if (it.kind === 'user' || it.kind === 'notice') break;
+        if (it.kind === 'assistant' && !it.partial) items[j] = { ...it, partial: true };
+      }
+    }
   }
   // TB-363 (S1 / contract M17): a needs-input ask stops being the CURRENT ask once the human
   // answered and the task RESUMED — a later `started` (pending→running) notice for the same
