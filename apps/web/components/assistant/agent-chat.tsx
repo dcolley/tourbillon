@@ -21,6 +21,9 @@ import * as React from 'react';
 import { X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ChatMarkdown } from '@/components/assistant/message-markdown';
+// TB-HOTFIX-REDACT: defensive re-redaction on the render path + the shared #364 toggle.
+import { redactErrorText, stripNoticeDirectives } from '@/lib/agui/redact-error';
+import { ErrorDetailsToggle } from '@/components/assistant/error-details-toggle';
 import { ToolStateCard } from '@/components/assistant/tool-state-card';
 import { WidgetToolCall } from '@/components/assistant/widgets/widget-tool-call';
 import { assistantWidgetRegistry, type WidgetRegistry } from '@/components/assistant/widgets/registry';
@@ -146,10 +149,17 @@ function ItemView({ item, widgets }: { item: AgentChatItem; widgets: WidgetHandl
           <div className="whitespace-pre-wrap">{item.text}</div>
         </details>
       );
-    case 'notice':
+    case 'notice': {
       // TB-363 (A12): a task-progress notice is drawn from the item itself — never inside a tool
       // or reasoning card, never dependent on the model replying. The stage label, the full text
       // (ask for waiting_on_user, reason for failed) and the "reply here" line must be visible.
+      // TB-HOTFIX-REDACT (MUST-3/MUST-4/M5): still ONE code path for every stage; the visible
+      // line is defensively re-redacted and directive-stripped (legacy rows included), and the
+      // failed stage's redacted technical text shows ONLY behind the #364 toggle
+      // ([data-error-details-toggle] / [data-error-details], never a native <details>).
+      const noticeText = stripNoticeDirectives(redactErrorText(item.text));
+      const failedTechnical =
+        item.stage === 'failed' && item.technical ? redactErrorText(item.technical) : undefined;
       return (
         <div
           className="rounded-md border border-border/70 bg-muted/40 px-3 py-2 text-sm text-muted-foreground"
@@ -157,9 +167,13 @@ function ItemView({ item, widgets }: { item: AgentChatItem; widgets: WidgetHandl
           data-notice-kind={item.noticeKind}
           data-stage={item.stage}
         >
-          {item.text}
+          {noticeText}
+          {failedTechnical ? (
+            <ErrorDetailsToggle technical={failedTechnical} initiallyOpen={item.detailsOpen} />
+          ) : null}
         </div>
       );
+    }
     case 'tool': {
       const outcome = widgetOutcome(item);
       const send = item.widgetSend;

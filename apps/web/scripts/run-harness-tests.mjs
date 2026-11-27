@@ -55,6 +55,8 @@ export const HARNESS_TEST_FILES = [
   'lib/assistant/task-progress-bridge.test.ts',
   // TB-363 (verdict 5c93eddd soft N-1): the persist-path agent-pool eviction killer.
   'lib/chat/registry-chat-session-id-332-s1.test.ts',
+  // TB-HOTFIX-REDACT: the SSR notice render seed (M3/M5/M6/M7/M8/M9/M13/M15 kills, MUST-SSR canary).
+  'components/assistant/agent-chat-notice-redact-render.test.ts',
 ];
 
 const HARNESS_DIR = 'lib/harness';

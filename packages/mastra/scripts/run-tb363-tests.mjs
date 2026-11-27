@@ -28,6 +28,8 @@ export const MASTRA_ROOT = fileURLToPath(new URL('..', import.meta.url));
 export const TB363_TEST_FILES = [
   'src/concierge-signal-tb363.test.ts', // A2 payload (ask + reply-here), 300-char clamp, publisher once
   'src/tools/chat-task-tools-tb363.test.ts', // A11a tool-path emit + exactly-once, S2 silent publisher, S3 warn, A10-R3
+  // TB-HOTFIX-REDACT: notice payload redaction + directive hiding (M1-M4, M9, M11, M14 kills).
+  'src/concierge-signal-tbhotfix-redact.test.ts',
 ];
 
 /** Fail loud on drift: every pinned file must exist (the content of the list itself is pinned in scheduler ci-coverage). */
