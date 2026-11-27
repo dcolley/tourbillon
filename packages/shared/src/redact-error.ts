@@ -43,6 +43,9 @@ const SECRET_RULES: ReadonlyArray<RegExp> = [
   /\bBearer\s+[A-Za-z0-9._~+\/=-]{8,}/g,
   // F8: URL userinfo password (scheme://user:PASSWORD@host — the hostname may stay).
   /([A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s/@:]*:)[^\s@]+@/g,
+  // F8 (truncation-safe): a clamped/truncated credential right after the user: colon
+  // (no closing '@' in view) must not survive either.
+  /([A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s/@:]*:)[^\s,;"'`@)\]}]+/g,
   // F9: ENV key=value lines whose key names a credential (underscores allowed).
   /\b([A-Z][A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*)=(\S+)/g,
   // SHOULD-4: Slack tokens.
@@ -89,7 +92,9 @@ export function redactErrorText(text: string): string {
     out = out.replace(rule, (match, ...groups) => {
       // F8 keeps its scheme://user: prefix; every other rule replaces whole.
       if (typeof groups[0] === 'string' && groups[0].endsWith(':') && /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(groups[0])) {
-        return `${groups[0]}***@`;
+        // Keep the '@' only when the match actually consumed one (the truncation-safe
+        // variant of the rule ends at whitespace without it).
+        return match.endsWith('@') ? `${groups[0]}***@` : `${groups[0]}***`;
       }
       // F9 keeps the ENV key name.
       if (typeof groups[0] === 'string' && /^[A-Z][A-Z0-9_]*$/.test(groups[0])) {
