@@ -171,6 +171,8 @@ describe('S328-S4: CI runs the service-free shared + scheduler + harness unit te
         'lib/assistant/task-progress-bridge.test.ts',
         // TB-363 (verdict 5c93eddd soft N-1): persist-path agent-pool eviction killer.
         'lib/chat/registry-chat-session-id-332-s1.test.ts',
+        // TB-HOTFIX-REDACT: SSR notice render seed — CI must actually run it (MUST-CI).
+        'components/assistant/agent-chat-notice-redact-render.test.ts',
       ]].sort(),
       'web harness suite is exactly these files — add/remove deliberately, in both places',
     );
@@ -194,7 +196,12 @@ describe('S328-S4: CI runs the service-free shared + scheduler + harness unit te
     )) as { TB363_TEST_FILES: string[]; listTb363TestFiles: () => string[] };
     assert.deepEqual(
       [...mastraRunner.TB363_TEST_FILES].sort(),
-      ['src/concierge-signal-tb363.test.ts', 'src/tools/chat-task-tools-tb363.test.ts'],
+      [
+        'src/concierge-signal-tb363.test.ts',
+        // TB-HOTFIX-REDACT: notice payload redaction seed — CI must actually run it (MUST-CI).
+        'src/concierge-signal-tbhotfix-redact.test.ts',
+        'src/tools/chat-task-tools-tb363.test.ts',
+      ],
       'mastra tb363 suite is exactly these files — add/remove deliberately, in both places',
     );
     assert.deepEqual(mastraRunner.listTb363TestFiles().sort(), [...mastraRunner.TB363_TEST_FILES].sort());

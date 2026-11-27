@@ -63,6 +63,14 @@ export interface TaskNoticeItem {
   noticeKind: 'task-progress';
   stage: string;
   text: string;
+  /**
+   * TB-HOTFIX-REDACT (§2/MUST-3): redacted technical text for the FAILED notice, rendered
+   * only inside the [data-error-details] toggle body (React text, escaped). Persisted
+   * (payload `technical` / attribute bag) so it survives reload.
+   */
+  technical?: string;
+  /** TB-HOTFIX-REDACT §2 test seam (same name as #364 FailureBlock): render the open state. */
+  detailsOpen?: boolean;
   taskId?: string;
   runId?: string;
   at?: string;

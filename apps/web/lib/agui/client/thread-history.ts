@@ -9,6 +9,8 @@
  * Messages are Mastra v2 memory messages (`content.parts`: text, reasoning, tool-invocation, …).
  */
 import { stripDashboardContext } from '@/lib/chat/dashboard-context';
+// TB-HOTFIX-REDACT (MUST-4): the web notice path re-applies the ONE redactor defensively.
+import { redactErrorText, stripNoticeDirectives } from '@/lib/agui/redact-error';
 import type { AgentChatItem } from './chat-state';
 import { AguiThreadBootstrapError, isUsableAguiId } from './thread-bootstrap';
 
@@ -221,7 +223,24 @@ function taskProgressNoticeItem(message: StoredThreadMessage): AgentChatItem | n
             : stage === 'needs_review'
               ? 'Needs another look'
               : stage;
-  const text = rawContents.trim() || `Task ${label}${title ? `: "${title}"` : ''}.`;
+  // TB-HOTFIX-REDACT (MUST-4 / M13): DEFENSIVE redaction + directive strip on the RELOAD
+  // path — a legacy stored row whose contents were written before the hotfix (raw engine
+  // text + model directives) must still render clean. The redacted technical text for the
+  // failed toggle comes from the persisted `technical` field (or the attributes bag), and
+  // falls back to the redacted raw contents so old rows have an honest toggle body.
+  const text =
+    stripNoticeDirectives(redactErrorText(rawContents)).trim() ||
+    `Task ${label}${title ? `: "${title}"` : ''}.`;
+  const bagTechnical =
+    typeof bag.technical === 'string'
+      ? bag.technical
+      : typeof attrs.technical === 'string'
+        ? attrs.technical
+        : undefined;
+  // Directives never belong in the toggle body either (M13: a legacy row's raw contents
+  // is the fallback body — the model-directed sentences must be stripped there too).
+  const technical =
+    stage === 'failed' ? redactErrorText(stripNoticeDirectives(bagTechnical ?? rawContents)) : undefined;
   const taskId = typeof attrs.taskId === 'string' ? attrs.taskId : undefined;
   const runId = typeof attrs.runId === 'string' ? attrs.runId : undefined;
   return {
@@ -230,6 +249,7 @@ function taskProgressNoticeItem(message: StoredThreadMessage): AgentChatItem | n
     noticeKind: 'task-progress',
     stage,
     text,
+    ...(technical ? { technical } : {}),
     ...(taskId ? { taskId } : {}),
     ...(runId ? { runId } : {}),
   };

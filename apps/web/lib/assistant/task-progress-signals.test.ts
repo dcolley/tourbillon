@@ -181,12 +181,25 @@ test('handle: status→contents — done, failed (another look), skipped (decisi
     [{ stage: 'needs_review', status: 'skipped' }, /needs a decision/],
     // #339: the fan-out words — relay the STATED ask; report the failure as a failure.
     [{ stage: 'waiting_on_user', status: 'succeeded', detail: 'Pick vendor A or B' }, /is waiting on the human: Pick vendor A or B/],
-    [{ stage: 'failed', status: 'failed', detail: 'worker died' }, /FAILED: worker died/],
+    // TB-HOTFIX-REDACT (MUST-3, written reason for the changed assertion): the failed
+    // contents is a SHORT friendly FAILURE line — the raw reason is no longer in the
+    // visible line (no stack behind the toggle boundary). It moved to the redacted
+    // payload `technical` field (asserted below), which the [data-error-details] toggle
+    // shows. Same honesty (#340: FAILED, not a question), different placement.
+    [{ stage: 'failed', status: 'failed', detail: 'worker died' }, /FAILED/],
   ];
   for (const [over, pattern] of cases) {
     const h = harness();
     assert.equal(await handleTaskProgressEvent(h.deps, event(over)), 'queued');
     assert.match(h.delivered[0]!.payload.contents, pattern);
+  }
+  // TB-HOTFIX-REDACT: the failure reason still reaches the human — via the redacted
+  // technical channel (toggle body), persisted in payload + attribute bag.
+  {
+    const h = harness();
+    assert.equal(await handleTaskProgressEvent(h.deps, event({ stage: 'failed', status: 'failed', detail: 'worker died (exit 137)' })), 'queued');
+    assert.match(h.delivered[0]!.payload.technical ?? '', /worker died \(exit 137\)/, 'reason survives in the redacted technical field');
+    assert.match(String(h.delivered[0]!.payload.attributes.technical ?? ''), /worker died/, 'technical bag copy too');
   }
 });
 

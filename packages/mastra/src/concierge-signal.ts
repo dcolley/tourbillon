@@ -17,6 +17,10 @@
 // S307-S2 (#304 softs): type-only subpath import (no runtime barrel side effects) - the
 // shared union keeps publisher (scheduler) and parser (web) on one status contract.
 import type { TaskProgressStage, TaskProgressStatus } from '@tourbillon/shared/types';
+// TB-HOTFIX-REDACT (MUST-1/MUST-2): the ONE redactor + directive stripper, applied at
+// FORMAT time so no secret and no model-directed instruction ever reaches contents,
+// attributes, or the persisted technical text for ANY stage.
+import { redactErrorText } from '@tourbillon/shared/redact-error';
 
 /** Tag name the free-chat concierge sees on Run Task progress signals. */
 export const TASK_PROGRESS_TAG_NAME = 'task-progress';
@@ -136,9 +140,12 @@ export async function persistConciergeSignal(
 function printableAttribute(value: unknown): string | number | boolean | null | undefined {
   if (value === null || value === undefined) return undefined;
   if (typeof value === 'string') {
-    return value.length > CONCIERGE_ATTRIBUTE_VALUE_LIMIT
-      ? `${value.slice(0, CONCIERGE_ATTRIBUTE_VALUE_LIMIT - 1)}…`
-      : value;
+    // TB-HOTFIX-REDACT (MUST-1 / M14): REDACT FIRST, then clamp — a secret past the bag
+    // limit must never survive as a clamped prefix.
+    const redacted = redactErrorText(value);
+    return redacted.length > CONCIERGE_ATTRIBUTE_VALUE_LIMIT
+      ? `${redacted.slice(0, CONCIERGE_ATTRIBUTE_VALUE_LIMIT - 1)}…`
+      : redacted;
   }
   if (typeof value === 'number' || typeof value === 'boolean') return value;
   return undefined; // objects/arrays never belong in the attribute bag
@@ -158,7 +165,9 @@ export function sanitizeSignalAttributes(
 }
 
 function clampContents(contents: string): string {
-  const trimmed = contents.trim();
+  // TB-HOTFIX-REDACT (M14): redact BEFORE clamp — the visible prefix of a clamped
+  // notice must never be a secret fragment.
+  const trimmed = redactErrorText(contents).trim();
   if (trimmed.length <= CONCIERGE_CONTENTS_LIMIT) return trimmed;
   return `${trimmed.slice(0, CONCIERGE_CONTENTS_LIMIT - 1)}…`;
 }
@@ -241,6 +250,13 @@ export interface TaskProgressSignalPayload {
   attributes: ConciergeSignalAttributes;
   contents: string;
   /**
+   * TB-HOTFIX-REDACT (§2): redacted technical text for the failed notice's
+   * [data-error-details] toggle body. Survives reload (persisted alongside the row),
+   * is already passed through redactErrorText (cap TECHNICAL_MAX_CHARS), and is NEVER
+   * stuffed unredacted into the 120-char attribute bag.
+   */
+  technical?: string;
+  /**
    * TB-363 MUST-7 (PM N-3): delivery-only signal — the runner's go-between reply rides on it,
    * but Mastra must NOT store a second notice row (`#persistSignal` skips transient signals).
    */
@@ -254,8 +270,14 @@ export interface TaskProgressSignalPayload {
  * needs another look (it retries), a skipped one is parked and needs a human decision.
  */
 export function taskProgressSignalPayload(event: TaskProgressEventShape): TaskProgressSignalPayload {
-  const title = event.title.trim() || 'untitled task';
+  // TB-HOTFIX-REDACT (MUST-1): title and detail arrive from the scheduler/runner and may
+  // echo provider error strings (API keys, tokens, URL userinfo passwords, JWTs). REDACT
+  // them BEFORE they are interpolated into contents or the attribute bag, for EVERY stage
+  // (failed, waiting_on_user AND done — a secret can ride the title too).
+  const title = redactErrorText(event.title.trim()) || 'untitled task';
+  const detail = event.detail ? redactErrorText(event.detail) : undefined;
   let contents: string;
+  let technical: string | undefined;
   switch (event.stage) {
     case 'started':
       // Neutral system voice (soft-pack S6): the signal is tagged context, not the agent's
@@ -275,15 +297,20 @@ export function taskProgressSignalPayload(event: TaskProgressEventShape): TaskPr
       // #339: the go-between wake — relay the STATED ask (#340 contract), never invent one.
       // TB-363 A2: the stored notice text is what the human sees, so it must also say HOW to
       // answer — a reply in this thread resumes the task (status pending, #340 contract).
+      // TB-HOTFIX-REDACT (MUST-2): the model-directed instruction ("Ask them for exactly
+      // that; … resume the task …") is GONE from the human-visible line — the resume path is
+      // driven by the reply, not by this text. The exact ask and "reply here" stay (A2).
       contents = `Background task "${title}" is waiting on the human${
-        event.detail ? `: ${event.detail}` : ''
-      }. Ask them for exactly that; they can reply here; resume the task (status pending) when they answer.`;
+        detail ? `: ${detail}` : ''
+      }. They can reply here; the task resumes (status pending) when they answer.`;
       break;
     case 'failed':
       // #340 honesty: a runner failure is a FAILURE, not a question for the human.
-      contents = `Background task "${title}" FAILED${
-        event.detail ? `: ${event.detail}` : ''
-      }. Tell the human it failed and offer a retry (resume re-queues it) — do NOT present it as waiting on their input.`;
+      // TB-HOTFIX-REDACT (MUST-2 / MUST-3): the visible line is a short friendly FAILURE
+      // line — no stack, no directives, no secrets. The redacted technical text rides on the
+      // payload's `technical` field and renders only behind the [data-error-details] toggle.
+      contents = `Background task "${title}" FAILED. The failure reason is available in the notice's error details.`;
+      technical = detail;
       break;
     default:
       contents = `Background task update for "${title}".`;
@@ -295,8 +322,12 @@ export function taskProgressSignalPayload(event: TaskProgressEventShape): TaskPr
       runId: event.runId,
       stage: event.stage,
       status: event.status,
+      // §2: a redacted (then 120-char clamped) copy in the bag so the toggle body survives
+      // reload even for readers that only see attributes.
+      ...(technical ? { technical } : {}),
     }),
     contents,
+    ...(technical ? { technical } : {}),
   };
 }
 

@@ -1134,7 +1134,16 @@ test('TN-TB363-A5-FAIL-VISIBLE', { timeout: 90_000 }, async (t) => {
     const n = tb363Notices(await tb363Items(f.t1));
     assert.equal(n.length, 1);
     assert.equal(n[0]!.stage, 'failed', 'distinct from needs-input (M9)');
-    assert.match(n[0]!.text!, /worker died \(exit 137\)/, 'the reason is in the visible notice');
+    // TB-HOTFIX-REDACT (MUST-3, written reason for the changed assertion): the visible
+    // failed line is now a short friendly FAILURE line — the reason moved to the redacted
+    // `technical` field shown behind the [data-error-details] toggle. Same honesty
+    // (#340: a failure is a failure), different placement.
+    assert.match(n[0]!.text!, /fail/i, 'the visible line says it failed');
+    assert.match(
+      (n[0] as { technical?: string }).technical ?? '',
+      /worker died \(exit 137\)/,
+      'the reason is in the redacted technical text (toggle body)',
+    );
   });
 });
 
@@ -1354,6 +1363,62 @@ test('TN-TB363-R2-NOTICE-POKE', { timeout: 90_000 }, async (t) => {
   } finally {
     await f.cleanup();
   }
+});
+
+test('TN-TBHOTFIX-FAILED-NOTICE-REDACT', { timeout: 90_000 }, async (t) => {
+  if (await skipIfIncompatible(t, 'TN-TBHOTFIX-FAILED-NOTICE-REDACT')) return;
+  await tb363Cell('TN-TBHOTFIX-FAILED-NOTICE-REDACT', async (f) => {
+    // TB-HOTFIX-REDACT §7: a runner failure whose error text carries synthetic secrets
+    // (sk- key + URL userinfo password). Exactly one failed notice; friendly visible line;
+    // NO fixture secret in the visible line OR the stored row JSON; no model directives;
+    // toggle closed by default (detailsOpen seam); redacted technical body is honest.
+    // Fixtures are synthetic only. The postgres URL is assembled from fragments so the
+    // literal never appears verbatim in this source file.
+    const sk = 'sk-test-' + 'ABCDEFGHIJKLMNOPQRSTUVW';
+    const pass = 'S3cretPass-' + 'Fixture';
+    const url = 'postgres://' + 'alice:' + pass + '@db.example.test:5432/app';
+    const detail = `provider error: connect ${url} Authorization: Bearer ${sk} ECONNREFUSED exit 137`;
+    await publishProgress(progressEvent(f, { stage: 'failed', status: 'failed', detail }));
+    await waitFor('failed row', async () => countNoticeMessages(await tnFreshMessages(f.t1), f.taskId, 'failed') >= 1);
+    await waitFor('failed item', async () => tb363Notices(await tb363Items(f.t1)).length >= 1);
+    await new Promise((r) => setTimeout(r, 1200));
+    const n = tb363Notices(await tb363Items(f.t1));
+    assert.equal(n.length, 1, 'exactly one failed notice');
+    const storedJson = JSON.stringify(await tnFreshMessages(f.t1));
+    assert.ok(!storedJson.includes(sk), 'stored signal row JSON: no sk- fixture');
+    assert.ok(!storedJson.includes(pass), 'stored signal row JSON: no userinfo-password fixture');
+    const vis = n[0]!.text ?? '';
+    assert.match(vis, /fail/i, 'friendly failure line');
+    assert.ok(!vis.includes(sk) && !vis.includes(pass), 'visible line has no fixture secret');
+    assert.ok(!/Tell the human/.test(vis), 'no model directives in the visible line');
+    const item = n[0] as { detailsOpen?: boolean; technical?: string };
+    assert.notEqual(item.detailsOpen, true, 'toggle closed by default (detailsOpen seam)');
+    const tech = item.technical ?? '';
+    assert.ok(
+      tech.includes('ECONNREFUSED') || tech.includes('exit 137'),
+      'redacted technical text is honest (survives for the toggle body)',
+    );
+    assert.ok(!tech.includes(sk) && !tech.includes(pass), 'technical body carries no fixture secret');
+  });
+});
+
+test('TN-TBHOTFIX-CANCEL-SILENT', { timeout: 90_000 }, async (t) => {
+  if (await skipIfIncompatible(t, 'TN-TBHOTFIX-CANCEL-SILENT')) return;
+  await tb363Cell('TN-TBHOTFIX-CANCEL-SILENT', async (f) => {
+    // TB-363 S2 (PIN, TB-HOTFIX-REDACT §7): a cancelled task stays silent. The runner's
+    // claim guard never lets a cancelled transition reach emitProgress, and even a
+    // cancel-shaped event on the channel is rejected by the shared accept set (S304-S2).
+    // Observable boundary property: 0 notice rows, 0 woken turns.
+    await publishProgress(progressEvent(f, { stage: 'cancelled', status: 'cancelled' }));
+    await new Promise((r) => setTimeout(r, 2000));
+    assert.equal(tb363Notices(await tb363Items(f.t1)).length, 0, 'cancel produces ZERO notice rows');
+    assert.equal(f.models.a.callLog.filter((c) => c.notice).length, 0, 'cancel wakes ZERO model turns');
+    assert.equal(
+      (await tb363Items(f.t1)).filter((i) => (i as { kind?: string }).kind === 'assistant').length,
+      0,
+      'cancel leaves ZERO assistant items',
+    );
+  });
 });
 
 test('TN-TEARDOWN'
